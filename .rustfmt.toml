@@ -1,0 +1,16 @@
+# Rust code formatting configuration (stable channel only)
+# Run with: cargo fmt --all
+
+edition = "2021"
+
+# Line length
+max_width = 100
+
+# Formatting
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Auto"
+
+# Imports
+reorder_imports = true
+reorder_modules = true

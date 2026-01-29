@@ -1,0 +1,20 @@
+# Cargo configuration for the workspace
+
+[build]
+# Enable all warnings by default
+rustflags = ["-D", "warnings"]
+
+[net]
+# Use git CLI for better error messages and SSH support
+git-fetch-with-cli = true
+
+[alias]
+# Useful aliases for common tasks
+# Run: cargo lint
+lint = "clippy --workspace --all-targets -- -D warnings"
+
+# Run: cargo fmt-check
+fmt-check = "fmt --all -- --check"
+
+# Run: cargo verify
+verify = "fmt --all --check && clippy --workspace --all-targets -- -D warnings && test --workspace"
