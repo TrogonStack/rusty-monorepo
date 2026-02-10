@@ -3,14 +3,31 @@ updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: weekly
+    open-pull-requests-limit: 5
 
   - package-ecosystem: cargo
     directory: "/"
     schedule:
       interval: daily
+    open-pull-requests-limit: 10
     groups:
+      security:
+        patterns:
+          - "*security*"
+          - "*audit*"
+        update-types:
+          - "minor"
+          - "patch"
       prod:
         dependency-type: production
       dev:
         dependency-type: development
+    allow:
+      - dependency-type: "direct"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
