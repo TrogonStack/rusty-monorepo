@@ -1,0 +1,9 @@
+[build]
+rustflags = ["-D", "warnings"]
+
+[net]
+git-fetch-with-cli = true
+
+[alias]
+lint = "clippy --workspace --all-targets -- -D warnings"
+fmt-check = "fmt --all -- --check"
