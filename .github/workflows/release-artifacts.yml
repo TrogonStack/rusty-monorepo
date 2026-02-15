@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 jobs:
   build:
@@ -85,6 +87,11 @@ jobs:
           cp LICENSE README.md "$staging/"
           7z a "$staging.zip" "$staging"
           echo "ASSET=$staging.zip" >> "$GITHUB_ENV"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ASSET }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
