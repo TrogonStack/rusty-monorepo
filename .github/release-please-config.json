@@ -12,7 +12,9 @@
       "hidden": false
     }
   ],
-  "packages": {},
+  "packages": {
+    "crates/trg": {}
+  },
   "plugins": [
     {
       "type": "sentence-case"
