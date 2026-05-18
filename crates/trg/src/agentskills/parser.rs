@@ -129,7 +129,46 @@ mod tests {
         let (props, _) = read_properties(&fs, Path::new("/skill")).unwrap();
         assert_eq!(props.license, Some("MIT".to_string()));
         assert_eq!(props.compatibility, Some("v1.0".to_string()));
-        assert_eq!(props.allowed_tools, Some("bash python".to_string()));
+        assert_eq!(
+            props.allowed_tools,
+            Some(vec!["bash".to_string(), "python".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_read_properties_allowed_tools_yaml_list() {
+        let fs = MemFS::new();
+        let content = "---\nname: test-skill\ndescription: Test\nallowed-tools:\n  - bash\n  - python\n  - ruby\n---";
+        fs.insert(Path::new("/skill/SKILL.md"), content);
+
+        let (props, _) = read_properties(&fs, Path::new("/skill")).unwrap();
+        assert_eq!(
+            props.allowed_tools,
+            Some(vec!["bash".to_string(), "python".to_string(), "ruby".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_read_properties_allowed_tools_inline_list() {
+        let fs = MemFS::new();
+        let content = "---\nname: test-skill\ndescription: Test\nallowed-tools: [bash, python]\n---";
+        fs.insert(Path::new("/skill/SKILL.md"), content);
+
+        let (props, _) = read_properties(&fs, Path::new("/skill")).unwrap();
+        assert_eq!(
+            props.allowed_tools,
+            Some(vec!["bash".to_string(), "python".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_read_properties_allowed_tools_empty_string() {
+        let fs = MemFS::new();
+        let content = "---\nname: test-skill\ndescription: Test\nallowed-tools: \"\"\n---";
+        fs.insert(Path::new("/skill/SKILL.md"), content);
+
+        let (props, _) = read_properties(&fs, Path::new("/skill")).unwrap();
+        assert_eq!(props.allowed_tools, None);
     }
 
     #[test]
