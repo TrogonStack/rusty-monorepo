@@ -177,7 +177,7 @@ Test Description
             description: "Test Description".to_string(),
             compatibility: Some("v1.0".to_string()),
             license: Some("MIT".to_string()),
-            allowed_tools: Some("bash python".to_string()),
+            allowed_tools: Some(vec!["bash".to_string(), "python".to_string()]),
             metadata: None,
         };
 
