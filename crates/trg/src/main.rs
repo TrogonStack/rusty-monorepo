@@ -11,7 +11,8 @@ struct Cli {
     command: Commands,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
     let fs = trg::fs::RealFS;
 
@@ -19,6 +20,7 @@ fn main() {
         Commands::Ai { command } => match command {
             AiCommands::Skills { command } => command.handle(&fs),
         },
+        Commands::Mcp { command } => command.handle().await,
     };
 
     std::process::exit(exit_code);
