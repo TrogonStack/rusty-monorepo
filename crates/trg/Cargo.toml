@@ -11,6 +11,19 @@ serde_json = { workspace = true }
 gray_matter = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+secrecy = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true }
+rmcp = { version = "1.7.0", features = [
+    "client",
+    "transport-async-rw",
+    "transport-io",
+    "transport-worker",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
