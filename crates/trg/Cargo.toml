@@ -17,6 +17,7 @@ secrecy = { workspace = true }
 http = { workspace = true }
 reqwest = { workspace = true }
 rmcp = { version = "1.7.0", features = [
+    "auth",
     "client",
     "transport-async-rw",
     "transport-io",
@@ -24,6 +25,12 @@ rmcp = { version = "1.7.0", features = [
     "transport-streamable-http-client",
     "transport-streamable-http-client-reqwest",
 ] }
+async-trait = "0.1"
+oauth2 = { version = "5.0", default-features = false }
+tiny_http = "0.12"
+open = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -15,6 +15,6 @@ tempfile = "3.27"
 assert_cmd = "2.2"
 toml = "0.8"
 secrecy = { version = "0.10", features = ["serde"] }
-tokio = { version = "1.42", features = ["io-std", "macros", "rt-multi-thread"] }
+tokio = { version = "1.42", features = ["io-std", "macros", "process", "rt-multi-thread"] }
 http = "1.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

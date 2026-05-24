@@ -5,15 +5,22 @@ use rmcp::{
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         async_rw::AsyncRwTransport,
+        auth::AuthClient,
         stdio,
-        streamable_http_client::{StreamableHttpClientTransport, StreamableHttpClientTransportConfig},
+        streamable_http_client::{
+            StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+        },
         Transport,
     },
     RoleClient, RoleServer,
 };
 use secrecy::ExposeSecret;
+use tracing::{debug, error, info, warn};
 
-use crate::config::{self, ResolvedMcpServer};
+use crate::{
+    config::{self, ResolvedMcpServer},
+    oauth::{ensure_credentials_for, EnsureError, EnsureOutcome},
+};
 
 use super::cli::ProxyArgs;
 
@@ -36,51 +43,100 @@ pub enum ProxyError {
 
     #[error("local stdio MCP transport closed: {0}")]
     LocalClosed(String),
+
+    #[error("{0}")]
+    Ensure(#[from] EnsureError),
 }
 
 pub async fn run_mcp_daemon(args: &ProxyArgs) -> Result<(), ProxyError> {
-    let resolved = config::load_mcp_server(args.server.trim())?;
+    let server_name = args.server.trim();
+    info!(server = server_name, pid = std::process::id(), "startup");
 
-    bridge_stdio_to_remote(resolved).await
+    let resolved = match config::load_mcp_server(server_name) {
+        Ok(r) => r,
+        Err(e) => {
+            error!(server = server_name, error = %e, "config load failed");
+            return Err(e.into());
+        }
+    };
+    info!(
+        server = server_name,
+        headers = resolved.http_headers.len(),
+        "config loaded"
+    );
+
+    let http_conf = streamable_http_config(&resolved)?;
+
+    let outcome = match ensure_credentials_for(&resolved, server_name).await {
+        Ok(o) => o,
+        Err(e) => {
+            error!(server = server_name, error = %e, "ensure_credentials failed");
+            return Err(e.into());
+        }
+    };
+
+    let result = match outcome {
+        EnsureOutcome::NoAuthRequired => {
+            info!(server = server_name, "auth: none required, using plain client");
+            let remote = StreamableHttpClientTransport::<reqwest::Client>::from_config(http_conf);
+            bridge_stdio_to_remote(remote).await
+        }
+        EnsureOutcome::AlreadyAuthorized(manager) | EnsureOutcome::Authorized(manager) => {
+            info!(server = server_name, "auth: using AuthClient with stored credentials");
+            let auth_client = AuthClient::new(reqwest::Client::new(), manager);
+            let remote = StreamableHttpClientTransport::with_client(auth_client, http_conf);
+            bridge_stdio_to_remote(remote).await
+        }
+    };
+
+    match &result {
+        Ok(()) => info!(server = server_name, "bridge exited cleanly"),
+        Err(e) => warn!(server = server_name, error = %e, "bridge exited with error"),
+    }
+    result
 }
 
-type RemoteTransport = StreamableHttpClientTransport<reqwest::Client>;
-
-async fn bridge_stdio_to_remote(profile: ResolvedMcpServer) -> Result<(), ProxyError> {
-    let http_conf = streamable_http_config(&profile)?;
-
-    let mut remote: RemoteTransport = RemoteTransport::from_config(http_conf);
+async fn bridge_stdio_to_remote<C>(mut remote: StreamableHttpClientTransport<C>) -> Result<(), ProxyError>
+where
+    C: StreamableHttpClient + Send + Sync + 'static,
+{
     let (stdin, stdout) = stdio();
-
     let mut local = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
+    debug!("bridge: entering loop");
 
     loop {
         tokio::select! {
             host_msg = local.receive() => {
                 let Some(msg) = host_msg else {
+                    debug!("bridge: host stdin closed (EOF)");
                     let _ = remote.close().await;
                     let _ = local.close().await;
                     return Ok(());
                 };
 
+                debug!("bridge: host -> remote");
                 let forward: TxJsonRpcMessage<RoleClient> = host_receive_to_remote_send(msg);
 
-                remote
-                    .send(forward)
-                    .await
-                    .map_err(|e| ProxyError::RemoteClosed(e.to_string()))?;
+                if let Err(e) = remote.send(forward).await {
+                    warn!(error = %e, "bridge: remote send failed");
+                    return Err(ProxyError::RemoteClosed(e.to_string()));
+                }
             }
 
             srv_msg = remote.receive() => {
-                let msg: RxJsonRpcMessage<RoleClient> =
-                    srv_msg.ok_or_else(|| ProxyError::RemoteClosed("remote disconnected".into()))?;
+                let Some(msg) = srv_msg else {
+                    warn!("bridge: remote disconnected");
+                    return Err(ProxyError::RemoteClosed("remote disconnected".into()));
+                };
+                let msg: RxJsonRpcMessage<RoleClient> = msg;
 
+                debug!("bridge: remote -> host");
                 let back: TxJsonRpcMessage<RoleServer> = remote_receive_to_host_send(msg);
 
-                local
-                    .send(back)
-                    .await
-                    .map_err(|e| ProxyError::LocalClosed(e.to_string()))?;
+                if let Err(e) = local.send(back).await {
+                    warn!(error = %e, "bridge: local send failed");
+                    return Err(ProxyError::LocalClosed(e.to_string()));
+                }
             }
         }
     }

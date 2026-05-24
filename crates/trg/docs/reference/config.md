@@ -158,6 +158,69 @@ reference it by name. This keeps env reads in one place per server.
 - Secrets stay in environment variables and are pulled in through `vars`.
   They never need to live in the config file.
 
+## OAuth (macOS only in this milestone)
+
+`trg mcp proxy` engages OAuth 2.1 (Authorization Code + PKCE) automatically
+when the remote endpoint advertises it via RFC 9728 / RFC 8414 discovery and
+no `Authorization` header was supplied in the server's `headers`. No config
+field opts in — discovery is the trigger.
+
+If you provide `Authorization` in `headers` (e.g. a long-lived PAT), OAuth
+is skipped entirely and the static header is used as-is.
+
+### Credential storage
+
+Tokens are persisted in the macOS Keychain:
+
+- Service name: `trg MCP Credentials`
+- Account: the `<name>` from `[mcp.servers.<name>]`
+
+The full `rmcp::StoredCredentials` payload (client id, token response,
+granted scopes, issued-at timestamp) is JSON-serialised and stored as the
+Keychain secret. There is **no** on-disk fallback in this milestone — if
+Keychain access fails for any reason other than "entry not found", the
+command aborts with the underlying error.
+
+### First-run vs subsequent runs
+
+- First invocation against a new OAuth server opens the system browser at
+  the provider's authorization URL and waits up to 5 minutes for the
+  callback on `http://127.0.0.1:<random-port>/oauth/callback`. The
+  authorization URL is also echoed on stderr so it can be pasted manually
+  if `open(1)` cannot launch a browser.
+- Subsequent invocations read the token from the Keychain; the browser is
+  not opened. Expired access tokens refresh transparently via the refresh
+  token.
+
+### Clearing credentials
+
+Either:
+
+```sh
+trg mcp auth logout --server <name>
+```
+
+or directly via `security(1)`:
+
+```sh
+security delete-generic-password -s "trg MCP Credentials" -a <name>
+```
+
+`trg mcp auth logout` is idempotent when no entry exists. The raw
+`security delete-generic-password` command typically exits with a non-zero
+status if there is no matching item; scripts should account for that.
+
+### Limitations
+
+- **Platform**: macOS only. Linux / Windows credential backends are tracked
+  for a follow-up milestone.
+- **Interactive only**: a TTY on stdin and stderr is required for the
+  browser handshake. Headless environments fail with
+  `stdin/stderr is not a TTY; OAuth requires an interactive browser session`.
+- **No multi-instance coordination**: if two `trg mcp proxy` children for
+  the same server start at the same instant with an empty Keychain entry,
+  two browser tabs may open. Subsequent invocations are silent.
+
 ## Examples
 
 ### Minimal — literal endpoint, no auth, no vars
