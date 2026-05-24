@@ -100,9 +100,7 @@ fn err(msg: impl Into<String>) -> AuthError {
 }
 
 fn unsupported_platform() -> AuthError {
-    AuthError::InternalError(
-        "OAuth credential storage is supported only on macOS in this milestone".to_string(),
-    )
+    AuthError::InternalError("OAuth credential storage is supported only on macOS in this milestone".to_string())
 }
 
 #[async_trait]
