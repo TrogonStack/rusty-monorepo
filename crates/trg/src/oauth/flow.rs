@@ -94,6 +94,9 @@ pub async fn run_authorization(
             }
             return Err(FlowError::CallbackTimeout(config.callback_timeout));
         }
+        CallbackWait::StateMismatch { expected, got } => {
+            return Err(FlowError::StateMismatch { expected, got });
+        }
         CallbackWait::Provider { error, description } => {
             return Err(FlowError::Provider { error, description });
         }
@@ -197,6 +200,7 @@ fn parse_oauth_callback_url(url_input: &str) -> Result<ParsedOAuthCallback, Call
 
 enum CallbackWait {
     Success { code: String, state: String },
+    StateMismatch { expected: String, got: String },
     Provider { error: String, description: Option<String> },
     Timeout,
 }
@@ -233,9 +237,9 @@ fn wait_for_callback(server: Arc<Server>, overall_timeout: Duration, expected_st
             }
             Ok(ParsedOAuthCallback::Success { state, .. }) => {
                 let _ = request.respond(bad_request_response());
-                return CallbackWait::Provider {
-                    error: "invalid_state".to_string(),
-                    description: Some(format!("unexpected state `{state}`")),
+                return CallbackWait::StateMismatch {
+                    expected: expected_state.clone(),
+                    got: state,
                 };
             }
             Ok(ParsedOAuthCallback::Provider { error, description }) => {
