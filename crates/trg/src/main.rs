@@ -13,6 +13,8 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    trg::telemetry::init();
+
     let cli = Cli::parse();
     let fs = trg::fs::RealFS;
 
