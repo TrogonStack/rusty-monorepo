@@ -121,6 +121,9 @@ pub fn prepare_workspace(request: &EvalRunRequest) -> Result<PreparedPrompt, Run
     Ok(PreparedPrompt { prompt })
 }
 
+/// Dot-prefixed so the skill is hidden from default `ls`/glob and won't collide with
+/// staged fixture paths or with a `skill/` directory the agent might create itself —
+/// the workspace is the agent's task space; the skill is sidecar reference material.
 #[cfg(unix)]
 fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path) -> std::io::Result<()> {
     let link = workspace_dir.join(".skill");
