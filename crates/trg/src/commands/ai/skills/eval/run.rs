@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crate::agentskills::evals::{EvalCase, EvalCheckOptions, EvalSuite};
 use crate::agentskills::report::{
-    build_report_bundle, write_report_bundle, BuildReportOptions, ReportBundle, ScenarioKind,
+    build_report_bundle, write_report_bundle, BuildReportOptions, ReportBundle, ScenarioKind, SkillIntegrityReport,
 };
-use crate::agentskills::runner::{EvalRunOutcome, EvalRunRequest, Runner};
+use crate::agentskills::runner::{compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner};
 use crate::fs::FileSystem;
 use clap::Args;
 
@@ -159,8 +159,8 @@ fn execute_runs(
             }
         };
 
-        let outputs_dir = report_dir.join(&run.paths.outputs);
-        let run_dir = outputs_dir.parent().unwrap_or(report_dir).to_path_buf();
+        let workspace_dir = report_dir.join(&run.paths.workspace);
+        let run_dir = workspace_dir.parent().unwrap_or(report_dir).to_path_buf();
         let transcript_path = run_dir.join("transcript.jsonl");
 
         let request = EvalRunRequest {
@@ -168,9 +168,17 @@ fn execute_runs(
             scenario,
             skill_md: &skill_md,
             skill_path,
-            workspace_dir: &outputs_dir,
+            workspace_dir: &workspace_dir,
             transcript_path: &transcript_path,
             runner_model: Some(runner_model),
+        };
+
+        let digest_before = match compute_skill_digest(skill_path) {
+            Ok(digest) => Some(digest),
+            Err(e) => {
+                eprintln!("Run {}: failed to hash skill before invoke: {}", run.id, e);
+                None
+            }
         };
 
         match runner.invoke(&request) {
@@ -178,6 +186,21 @@ fn execute_runs(
             Err(e) => {
                 eprintln!("Run {} failed: {}", run.id, e);
                 run.status = "failed".to_string();
+            }
+        }
+
+        if let Some(before) = digest_before {
+            match compute_skill_digest(skill_path) {
+                Ok(after) => {
+                    let tampered_files = detect_tampering(&before, &after);
+                    run.skill_integrity = Some(SkillIntegrityReport {
+                        tampered: !tampered_files.is_empty(),
+                        tampered_files,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("Run {}: failed to hash skill after invoke: {}", run.id, e);
+                }
             }
         }
     }
@@ -338,8 +361,8 @@ mod tests {
             .starts_with("sha256:"));
         assert_eq!(report.get("runs").and_then(|value| value.as_array()).unwrap().len(), 4);
 
-        let outputs_dir = report_dir.join("runs/run-001/outputs");
-        assert!(outputs_dir.is_dir());
-        assert_eq!(std::fs::read_dir(outputs_dir).unwrap().count(), 0);
+        let workspace_dir = report_dir.join("runs/run-001/workspace");
+        assert!(workspace_dir.is_dir());
+        assert_eq!(std::fs::read_dir(workspace_dir).unwrap().count(), 0);
     }
 }

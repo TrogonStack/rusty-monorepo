@@ -42,7 +42,7 @@ pub struct ReportBundle {
     pub report_id: String,
     pub skill_name: String,
     pub document: ReportDocument,
-    pub output_dirs: Vec<String>,
+    pub workspace_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,11 +157,19 @@ pub struct RunRecord {
     pub artifacts: Vec<serde_json::Value>,
     pub metrics: RunMetrics,
     pub cache: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_integrity: Option<SkillIntegrityReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillIntegrityReport {
+    pub tampered: bool,
+    pub tampered_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunPaths {
-    pub outputs: String,
+    pub workspace: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,7 +223,7 @@ pub fn build_report_bundle(
     let evals_path_str = format!("{user_skill_path_str}/evals/evals.json");
 
     let dimensions = build_dimensions(&suite, &skill_hash, model_config_label, scenarios);
-    let (runs, output_dirs) = build_runs(&suite, scenarios, model_config_label);
+    let (runs, workspace_dirs) = build_runs(&suite, scenarios, model_config_label);
     let summaries = build_summaries(scenarios, suite.evals.len());
 
     let report_id = options.report_id.unwrap_or_else(generate_report_id);
@@ -252,7 +260,7 @@ pub fn build_report_bundle(
         report_id,
         skill_name: skill_name.to_string(),
         document,
-        output_dirs,
+        workspace_dirs,
     })
 }
 
@@ -261,8 +269,8 @@ pub fn write_report_bundle(out_root: &Path, bundle: &ReportBundle) -> Result<Pat
 
     std::fs::create_dir_all(&report_dir)?;
 
-    for relative_output_dir in &bundle.output_dirs {
-        std::fs::create_dir_all(report_dir.join(relative_output_dir))?;
+    for relative_workspace_dir in &bundle.workspace_dirs {
+        std::fs::create_dir_all(report_dir.join(relative_workspace_dir))?;
     }
 
     let report_json = serde_json::to_string_pretty(&bundle.document)?;
@@ -333,14 +341,14 @@ fn build_runs(
     model_config_label: &str,
 ) -> (Vec<RunRecord>, Vec<String>) {
     let mut runs = Vec::new();
-    let mut output_dirs = Vec::new();
+    let mut workspace_dirs = Vec::new();
     let mut run_number = 1usize;
 
     for eval_case in &suite.evals {
         for scenario in scenarios {
             let run_id = format!("run-{run_number:03}");
-            let outputs_path = format!("runs/{run_id}/outputs");
-            output_dirs.push(outputs_path.clone());
+            let workspace_path = format!("runs/{run_id}/workspace");
+            workspace_dirs.push(workspace_path.clone());
             runs.push(RunRecord {
                 id: run_id,
                 eval_case_id: eval_case.id.to_string(),
@@ -349,7 +357,9 @@ fn build_runs(
                 skill_revision_id: "current".to_string(),
                 attempt: 1,
                 status: "skipped".to_string(),
-                paths: RunPaths { outputs: outputs_path },
+                paths: RunPaths {
+                    workspace: workspace_path,
+                },
                 artifacts: Vec::new(),
                 metrics: RunMetrics {
                     duration_ms: None,
@@ -359,12 +369,13 @@ fn build_runs(
                     cost_usd: None,
                 },
                 cache: None,
+                skill_integrity: None,
             });
             run_number += 1;
         }
     }
 
-    (runs, output_dirs)
+    (runs, workspace_dirs)
 }
 
 fn build_summaries(scenarios: &[ScenarioKind], eval_count: usize) -> SummariesSection {
@@ -481,7 +492,7 @@ mod tests {
     fn build_runs_orders_by_eval_case_then_scenario() {
         let suite = sample_suite();
         let scenarios = [ScenarioKind::WithSkill, ScenarioKind::WithoutSkill];
-        let (runs, output_dirs) = build_runs(&suite, &scenarios, "ci-default");
+        let (runs, workspace_dirs) = build_runs(&suite, &scenarios, "ci-default");
 
         assert_eq!(runs.len(), 4);
         assert_eq!(runs[0].id, "run-001");
@@ -497,12 +508,12 @@ mod tests {
         assert_eq!(runs[3].eval_case_id, "case-b");
         assert_eq!(runs[3].scenario_id, "without_skill");
         assert_eq!(
-            output_dirs,
+            workspace_dirs,
             vec![
-                "runs/run-001/outputs",
-                "runs/run-002/outputs",
-                "runs/run-003/outputs",
-                "runs/run-004/outputs",
+                "runs/run-001/workspace",
+                "runs/run-002/workspace",
+                "runs/run-003/workspace",
+                "runs/run-004/workspace",
             ]
         );
         assert!(runs.iter().all(|run| run.status == "skipped"));
@@ -564,11 +575,11 @@ mod tests {
         assert!(bundle.document.suite.evals_hash.starts_with("sha256:"));
         assert_eq!(bundle.document.suite.skill_path, "demo-skill");
         assert_eq!(bundle.document.runs.len(), 1);
-        assert_eq!(bundle.output_dirs, vec!["runs/run-001/outputs"]);
+        assert_eq!(bundle.workspace_dirs, vec!["runs/run-001/workspace"]);
     }
 
     #[test]
-    fn write_report_bundle_creates_report_and_empty_outputs() {
+    fn write_report_bundle_creates_report_and_empty_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let bundle = ReportBundle {
             report_id: "report-123".to_string(),
@@ -606,14 +617,14 @@ mod tests {
                 },
                 comparisons: Vec::new(),
             },
-            output_dirs: vec!["runs/run-001/outputs".to_string()],
+            workspace_dirs: vec!["runs/run-001/workspace".to_string()],
         };
 
         let report_dir = write_report_bundle(temp.path(), &bundle).unwrap();
         assert!(report_dir.join("report.json").is_file());
-        let outputs_dir = report_dir.join("runs/run-001/outputs");
-        assert!(outputs_dir.is_dir());
-        assert_eq!(std::fs::read_dir(&outputs_dir).unwrap().count(), 0);
+        let workspace_dir = report_dir.join("runs/run-001/workspace");
+        assert!(workspace_dir.is_dir());
+        assert_eq!(std::fs::read_dir(&workspace_dir).unwrap().count(), 0);
 
         let parsed: std::collections::HashMap<String, serde_json::Value> =
             serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();

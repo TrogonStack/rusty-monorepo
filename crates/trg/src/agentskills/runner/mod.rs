@@ -2,8 +2,10 @@ pub mod claude_code;
 pub mod codex;
 pub mod cursor_agent;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::evals::EvalCase;
@@ -95,8 +97,7 @@ pub fn prepare_workspace(request: &EvalRunRequest) -> Result<PreparedPrompt, Run
 
     let prompt = match request.scenario {
         ScenarioKind::WithSkill => {
-            let skill_dest = request.workspace_dir.join(".skill");
-            copy_dir_recursive(request.skill_path, &skill_dest)?;
+            symlink_skill_into_workspace(request.skill_path, request.workspace_dir)?;
             for relative in &request.eval.files {
                 stage_eval_file(request.skill_path, request.workspace_dir, relative)?;
             }
@@ -118,6 +119,22 @@ pub fn prepare_workspace(request: &EvalRunRequest) -> Result<PreparedPrompt, Run
     };
 
     Ok(PreparedPrompt { prompt })
+}
+
+#[cfg(unix)]
+fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path) -> std::io::Result<()> {
+    let link = workspace_dir.join(".skill");
+    if link.exists() || link.symlink_metadata().is_ok() {
+        std::fs::remove_file(&link).ok();
+    }
+    let absolute = std::fs::canonicalize(skill_path)?;
+    std::os::unix::fs::symlink(absolute, link)
+}
+
+#[cfg(not(unix))]
+fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path) -> std::io::Result<()> {
+    let dest = workspace_dir.join(".skill");
+    copy_dir_recursive(skill_path, &dest)
 }
 
 fn stage_eval_file(skill_path: &Path, workspace_dir: &Path, relative: &str) -> std::io::Result<()> {
@@ -173,6 +190,51 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
     std::fs::write(timing_path, serde_json::to_string_pretty(&body).unwrap())
 }
 
+pub type SkillDigest = BTreeMap<String, String>;
+
+pub fn compute_skill_digest(skill_path: &Path) -> std::io::Result<SkillDigest> {
+    let mut digest = BTreeMap::new();
+    walk_and_hash(skill_path, skill_path, &mut digest)?;
+    Ok(digest)
+}
+
+fn walk_and_hash(root: &Path, dir: &Path, digest: &mut SkillDigest) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            walk_and_hash(root, &path, digest)?;
+        } else if file_type.is_file() {
+            let bytes = std::fs::read(&path)?;
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+            digest.insert(relative, format!("sha256:{:x}", hasher.finalize()));
+        }
+    }
+    Ok(())
+}
+
+pub fn detect_tampering(before: &SkillDigest, after: &SkillDigest) -> Vec<String> {
+    let mut changed: Vec<String> = Vec::new();
+    for (path, hash_before) in before {
+        match after.get(path) {
+            Some(hash_after) if hash_after == hash_before => {}
+            Some(_) => changed.push(path.clone()),
+            None => changed.push(path.clone()),
+        }
+    }
+    for path in after.keys() {
+        if !before.contains_key(path) {
+            changed.push(path.clone());
+        }
+    }
+    changed.sort();
+    changed.dedup();
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_with_skill_copies_skill_and_prefixes_prompt() {
+    fn prepare_with_skill_symlinks_skill_and_prefixes_prompt() {
         let temp = tempdir().unwrap();
         let skill_path = temp.path().join("skill");
         std::fs::create_dir_all(skill_path.join("evals/files")).unwrap();
@@ -214,7 +276,11 @@ mod tests {
         let prepared = prepare_workspace(&request).unwrap();
         assert!(prepared.prompt.contains("Use the skill at .skill/SKILL.md"));
         assert!(prepared.prompt.contains("do the thing"));
-        assert!(workspace.join(".skill/SKILL.md").is_file());
+
+        let link = workspace.join(".skill");
+        #[cfg(unix)]
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(link.join("SKILL.md").is_file());
         assert!(workspace.join("evals/files/input.txt").is_file());
     }
 
@@ -262,5 +328,36 @@ mod tests {
 
         let err = prepare_workspace(&request).unwrap_err();
         assert!(matches!(err, RunnerError::UnsupportedScenario(_)));
+    }
+
+    #[test]
+    fn detect_tampering_flags_changes_additions_and_removals() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "original").unwrap();
+        std::fs::write(skill.join("notes.md"), "keep").unwrap();
+
+        let before = compute_skill_digest(&skill).unwrap();
+        assert_eq!(before.len(), 2);
+
+        std::fs::write(skill.join("SKILL.md"), "tampered").unwrap();
+        std::fs::write(skill.join("added.md"), "new").unwrap();
+        std::fs::remove_file(skill.join("notes.md")).unwrap();
+
+        let after = compute_skill_digest(&skill).unwrap();
+        let changed = detect_tampering(&before, &after);
+        assert_eq!(changed, vec!["SKILL.md", "added.md", "notes.md"]);
+    }
+
+    #[test]
+    fn detect_tampering_returns_empty_when_unchanged() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "stable").unwrap();
+        let before = compute_skill_digest(&skill).unwrap();
+        let after = compute_skill_digest(&skill).unwrap();
+        assert!(detect_tampering(&before, &after).is_empty());
     }
 }
