@@ -13,8 +13,8 @@ thiserror = "2.0"
 unicode-normalization = "0.1"
 tempfile = "3.27"
 assert_cmd = "2.2"
-toml = "0.8"
+toml = "1.1"
 secrecy = { version = "0.10", features = ["serde"] }
 tokio = { version = "1.42", features = ["io-std", "macros", "process", "rt-multi-thread"] }
-http = "1.2"
+http = "1.4"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
