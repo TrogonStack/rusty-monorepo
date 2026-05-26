@@ -92,10 +92,87 @@ impl<'de> Deserialize<'de> for EvalCaseId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct NonEmptyString(String);
+
+impl NonEmptyString {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for NonEmptyString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for NonEmptyString {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.trim().is_empty() {
+            return Err(de::Error::custom("must be a non-empty string"));
+        }
+        Ok(NonEmptyString(value))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct RelativeSkillPath(String);
+
+impl RelativeSkillPath {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn as_path(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl fmt::Display for RelativeSkillPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RelativeSkillPath {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.trim().is_empty() {
+            return Err(de::Error::custom("path must not be empty"));
+        }
+        let path = Path::new(&value);
+        if path.is_absolute() {
+            return Err(de::Error::custom(format!(
+                "path '{}' must be relative to the skill directory",
+                value
+            )));
+        }
+        if !path
+            .components()
+            .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
+        {
+            return Err(de::Error::custom(format!(
+                "path '{}' must stay inside the skill directory",
+                value
+            )));
+        }
+        Ok(RelativeSkillPath(value))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvalSuite {
-    pub skill_name: String,
+    pub skill_name: NonEmptyString,
+    #[serde(deserialize_with = "deserialize_evals")]
     pub evals: Vec<EvalCase>,
 }
 
@@ -103,12 +180,29 @@ pub struct EvalSuite {
 #[serde(deny_unknown_fields)]
 pub struct EvalCase {
     pub id: EvalCaseId,
-    pub prompt: String,
-    pub expected_output: String,
+    pub prompt: NonEmptyString,
+    pub expected_output: NonEmptyString,
     #[serde(default)]
-    pub files: Vec<String>,
+    pub files: Vec<RelativeSkillPath>,
     #[serde(default)]
-    pub assertions: Vec<String>,
+    pub assertions: Vec<NonEmptyString>,
+}
+
+fn deserialize_evals<'de, D>(deserializer: D) -> std::result::Result<Vec<EvalCase>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let evals: Vec<EvalCase> = Vec::deserialize(deserializer)?;
+    if evals.is_empty() {
+        return Err(de::Error::custom("evals must contain at least one test case"));
+    }
+    let mut seen = HashSet::new();
+    for eval in &evals {
+        if !seen.insert(eval.id.as_str()) {
+            return Err(de::Error::custom(format!("evals contains duplicate id '{}'", eval.id)));
+        }
+    }
+    Ok(evals)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -184,13 +278,10 @@ pub fn check_eval_suite(
     let suite: EvalSuite = serde_json::from_str(&content)?;
 
     let mut errors = ValidationErrors::new();
-    let mut ids = HashSet::new();
     let mut file_count = 0;
     let mut assertion_count = 0;
 
-    if suite.skill_name.trim().is_empty() {
-        errors.push(ValidationError::for_field("skill_name", "must be a non-empty string"));
-    } else if suite.skill_name != expected_skill_name {
+    if suite.skill_name.as_str() != expected_skill_name {
         errors.push(ValidationError::for_field(
             "skill_name",
             format!(
@@ -200,26 +291,8 @@ pub fn check_eval_suite(
         ));
     }
 
-    if suite.evals.is_empty() {
-        errors.push(ValidationError::for_field(
-            "evals",
-            "must contain at least one test case",
-        ));
-    }
-
-    for (index, eval) in suite.evals.iter().enumerate() {
-        let label = format!("evals[{}] id '{}'", index, eval.id);
-
-        if !ids.insert(eval.id.as_str().to_string()) {
-            errors.push(ValidationError::for_field(label.clone(), "is duplicated"));
-        }
-
-        validate_non_empty(&eval.prompt, &format!("{}.prompt", label), &mut errors);
-        validate_non_empty(
-            &eval.expected_output,
-            &format!("{}.expected_output", label),
-            &mut errors,
-        );
+    for eval in &suite.evals {
+        let label = format!("evals id '{}'", eval.id);
 
         if options.require_assertions && eval.assertions.is_empty() {
             errors.push(ValidationError::for_field(
@@ -228,17 +301,15 @@ pub fn check_eval_suite(
             ));
         }
 
-        for (assertion_index, assertion) in eval.assertions.iter().enumerate() {
-            validate_non_empty(
-                assertion,
-                &format!("{}.assertions[{}]", label, assertion_index),
-                &mut errors,
-            );
-        }
-
         for file in &eval.files {
             file_count += 1;
-            validate_eval_file(skill_path, file, fs, &label, &mut errors);
+            let full_path = skill_path.join(file.as_path());
+            if !fs.exists(&full_path) {
+                errors.push(ValidationError::for_field(
+                    format!("{}.files", label),
+                    format!("path '{}' does not exist", full_path.display()),
+                ));
+            }
         }
 
         assertion_count += eval.assertions.len();
@@ -249,7 +320,7 @@ pub fn check_eval_suite(
     }
 
     Ok(EvalCheckReport {
-        skill_name: suite.skill_name,
+        skill_name: suite.skill_name.as_str().to_string(),
         eval_count: suite.evals.len(),
         file_count,
         assertion_count,
@@ -334,41 +405,6 @@ fn validate_non_empty(value: &str, field: &str, errors: &mut ValidationErrors) {
     if value.trim().is_empty() {
         errors.push(ValidationError::for_field(field, "must be a non-empty string"));
     }
-}
-
-fn validate_eval_file(skill_path: &Path, file: &str, fs: &impl FileSystem, label: &str, errors: &mut ValidationErrors) {
-    let field = format!("{}.files", label);
-
-    if file.trim().is_empty() {
-        errors.push(ValidationError::for_field(field, "contains an empty path"));
-        return;
-    }
-
-    let path = Path::new(file);
-    if !is_safe_relative_path(path) {
-        errors.push(ValidationError::for_field(
-            field,
-            format!("path '{}' must stay inside the skill directory", file),
-        ));
-        return;
-    }
-
-    let full_path = skill_path.join(path);
-    if !fs.exists(&full_path) {
-        errors.push(ValidationError::for_field(
-            field,
-            format!("path '{}' does not exist", full_path.display()),
-        ));
-    }
-}
-
-fn is_safe_relative_path(path: &Path) -> bool {
-    if path.is_absolute() {
-        return false;
-    }
-
-    path.components()
-        .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
 }
 
 fn collect_named_files(root: &Path, file_name: &str, matches: &mut Vec<PathBuf>) -> std::io::Result<()> {

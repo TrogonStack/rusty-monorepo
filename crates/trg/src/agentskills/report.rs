@@ -316,15 +316,15 @@ fn build_dimensions(
             assertions.push(AssertionDimension {
                 id: assertion_id,
                 eval_case_id: eval_case.id.to_string(),
-                text: assertion.clone(),
+                text: assertion.as_str().to_string(),
             });
         }
 
         eval_cases.push(EvalCaseDimension {
             id: eval_case.id.to_string(),
-            prompt: eval_case.prompt.clone(),
-            expected_output: eval_case.expected_output.clone(),
-            files: eval_case.files.clone(),
+            prompt: eval_case.prompt.as_str().to_string(),
+            expected_output: eval_case.expected_output.as_str().to_string(),
+            files: eval_case.files.iter().map(|file| file.as_str().to_string()).collect(),
             assertion_ids,
         });
     }

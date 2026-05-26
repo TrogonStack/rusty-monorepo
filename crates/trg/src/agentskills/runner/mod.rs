@@ -99,7 +99,7 @@ pub fn prepare_workspace(request: &EvalRunRequest) -> Result<PreparedPrompt, Run
         ScenarioKind::WithSkill => {
             symlink_skill_into_workspace(request.skill_path, request.workspace_dir)?;
             for relative in &request.eval.files {
-                stage_eval_file(request.skill_path, request.workspace_dir, relative)?;
+                stage_eval_file(request.skill_path, request.workspace_dir, relative.as_str())?;
             }
             format!(
                 "Use the skill at .skill/SKILL.md to handle the request below. The skill contents are:\n\n{skill_md}\n\n---\n\nRequest:\n{prompt}",
@@ -109,9 +109,9 @@ pub fn prepare_workspace(request: &EvalRunRequest) -> Result<PreparedPrompt, Run
         }
         ScenarioKind::WithoutSkill => {
             for relative in &request.eval.files {
-                stage_eval_file(request.skill_path, request.workspace_dir, relative)?;
+                stage_eval_file(request.skill_path, request.workspace_dir, relative.as_str())?;
             }
-            request.eval.prompt.clone()
+            request.eval.prompt.as_str().to_string()
         }
         ScenarioKind::OldSkill => {
             return Err(RunnerError::UnsupportedScenario(request.scenario.as_str().to_string()));
