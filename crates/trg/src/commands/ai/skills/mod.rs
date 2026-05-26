@@ -1,3 +1,4 @@
+mod eval;
 mod read_properties;
 mod to_prompt;
 mod validate;
@@ -7,6 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::fs::FileSystem;
 use clap::Subcommand;
 
+pub use eval::EvalArgs;
 pub use read_properties::ReadPropertiesArgs;
 pub use to_prompt::ToPromptArgs;
 pub use validate::ValidateArgs;
@@ -15,6 +17,8 @@ pub use validate::ValidateArgs;
 pub enum SkillsCommands {
     /// Validate a skill directory
     Validate(ValidateArgs),
+    /// Run and verify skill evals
+    Eval(EvalArgs),
     /// Read and print skill properties as JSON
     ReadProperties(ReadPropertiesArgs),
     /// Generate <available_skills> XML for agent prompts
@@ -25,6 +29,7 @@ impl SkillsCommands {
     pub fn handle(self, fs: &impl FileSystem) -> i32 {
         match self {
             Self::Validate(args) => args.handle(fs),
+            Self::Eval(args) => args.handle(fs),
             Self::ReadProperties(args) => args.handle(fs),
             Self::ToPrompt(args) => args.handle(fs),
         }
