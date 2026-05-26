@@ -265,8 +265,27 @@ pub fn build_report_bundle(
     })
 }
 
-pub fn write_report_bundle(out_root: &Path, bundle: &ReportBundle) -> Result<PathBuf> {
+#[derive(Debug, Clone, Default)]
+pub struct WriteReportOptions {
+    pub force: bool,
+}
+
+pub fn write_report_bundle(out_root: &Path, bundle: &ReportBundle, options: WriteReportOptions) -> Result<PathBuf> {
     let report_dir = out_root.join(&bundle.skill_name).join(&bundle.report_id);
+
+    if report_dir.try_exists()? {
+        if options.force {
+            std::fs::remove_dir_all(&report_dir)?;
+        } else {
+            return Err(EvalError::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "report directory already exists: {} (pass --force to overwrite)",
+                    report_dir.display()
+                ),
+            )));
+        }
+    }
 
     std::fs::create_dir_all(&report_dir)?;
 
@@ -621,7 +640,7 @@ mod tests {
             workspace_dirs: vec!["runs/run-001/workspace".to_string()],
         };
 
-        let report_dir = write_report_bundle(temp.path(), &bundle).unwrap();
+        let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
         assert!(report_dir.join("report.json").is_file());
         let workspace_dir = report_dir.join("runs/run-001/workspace");
         assert!(workspace_dir.is_dir());

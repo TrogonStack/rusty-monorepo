@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::agentskills::evals::{EvalCase, EvalCheckOptions, EvalSuite};
 use crate::agentskills::report::{
     build_report_bundle, write_report_bundle, BuildReportOptions, ReportBundle, ScenarioKind, SkillIntegrityReport,
+    WriteReportOptions,
 };
 use crate::agentskills::runner::{compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner};
 use crate::fs::FileSystem;
@@ -48,6 +49,9 @@ pub struct RunArgs {
         help = "Optional model identifier forwarded to the runner CLI (--model/-m). When unset, the runner CLI picks its own default; CLI-specific string."
     )]
     pub runner_model: Option<String>,
+
+    #[arg(long, help = "Overwrite an existing report directory if it already exists")]
+    pub force: bool,
 }
 
 impl RunArgs {
@@ -83,7 +87,7 @@ impl RunArgs {
             }
         };
 
-        let report_dir = match write_report_bundle(&self.out_dir, &bundle) {
+        let report_dir = match write_report_bundle(&self.out_dir, &bundle, WriteReportOptions { force: self.force }) {
             Ok(dir) => dir,
             Err(e) => {
                 eprintln!("Failed to write eval report bundle: {}", e);
@@ -308,6 +312,7 @@ mod tests {
             scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
             runner: None,
             runner_model: None,
+            force: false,
         }
         .handle(&crate::fs::RealFS);
 
