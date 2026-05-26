@@ -25,23 +25,16 @@ pub struct RunArgs {
 
     #[arg(
         long,
+        value_enum,
         value_name = "KIND",
-        default_values = ["with_skill"],
+        default_values_t = [ScenarioKind::WithSkill],
         help = "Scenario kind to include (repeatable)"
     )]
-    pub scenario: Vec<String>,
+    pub scenario: Vec<ScenarioKind>,
 }
 
 impl RunArgs {
     pub fn handle(self, fs: &impl FileSystem) -> i32 {
-        let scenarios = match parse_scenarios(&self.scenario) {
-            Ok(scenarios) => scenarios,
-            Err(message) => {
-                eprintln!("{message}");
-                return 1;
-            }
-        };
-
         let skill_path = resolve_skill_path(&self.path);
         let props = match crate::agentskills::validator::validate_skill(fs, &skill_path) {
             Ok(props) => props,
@@ -64,7 +57,7 @@ impl RunArgs {
             &self.path,
             &props.name,
             &self.model_config,
-            &scenarios,
+            &self.scenario,
             BuildReportOptions::default(),
         ) {
             Ok(bundle) => bundle,
@@ -85,14 +78,6 @@ impl RunArgs {
             }
         }
     }
-}
-
-fn parse_scenarios(values: &[String]) -> Result<Vec<ScenarioKind>, String> {
-    let mut scenarios = Vec::with_capacity(values.len());
-    for value in values {
-        scenarios.push(ScenarioKind::parse(value)?);
-    }
-    Ok(scenarios)
 }
 
 #[cfg(test)]
@@ -143,10 +128,7 @@ mod tests {
             path: skill_dir.clone(),
             out: out_dir.clone(),
             model_config: "ci-default".to_string(),
-            scenario: vec![
-                ScenarioKind::WithSkill.as_str().to_string(),
-                ScenarioKind::WithoutSkill.as_str().to_string(),
-            ],
+            scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
         }
         .handle(&crate::fs::RealFS);
 
@@ -183,11 +165,5 @@ mod tests {
         let outputs_dir = report_dir.join("runs/run-001/outputs");
         assert!(outputs_dir.is_dir());
         assert_eq!(std::fs::read_dir(outputs_dir).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn parse_scenarios_rejects_unknown_kind() {
-        let error = parse_scenarios(&["with_skill".to_string(), "bogus".to_string()]).unwrap_err();
-        assert!(error.contains("bogus"));
     }
 }

@@ -11,10 +11,13 @@ use super::validation::ValidationError;
 
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.report.v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 pub enum ScenarioKind {
+    #[value(name = "with_skill")]
     WithSkill,
+    #[value(name = "without_skill")]
     WithoutSkill,
+    #[value(name = "old_skill")]
     OldSkill,
 }
 
@@ -24,17 +27,6 @@ impl ScenarioKind {
             Self::WithSkill => "with_skill",
             Self::WithoutSkill => "without_skill",
             Self::OldSkill => "old_skill",
-        }
-    }
-
-    pub fn parse(value: &str) -> std::result::Result<Self, String> {
-        match value {
-            "with_skill" => Ok(Self::WithSkill),
-            "without_skill" => Ok(Self::WithoutSkill),
-            "old_skill" => Ok(Self::OldSkill),
-            _ => Err(format!(
-                "invalid scenario '{value}', expected with_skill, without_skill, or old_skill"
-            )),
         }
     }
 }
