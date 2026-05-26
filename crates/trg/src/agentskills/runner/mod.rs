@@ -35,7 +35,7 @@ pub struct EvalRunRequest<'a> {
     pub skill_path: &'a Path,
     pub workspace_dir: &'a Path,
     pub transcript_path: &'a Path,
-    pub model: Option<&'a str>,
+    pub runner_model: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -208,7 +208,7 @@ mod tests {
             skill_path: &skill_path,
             workspace_dir: &workspace,
             transcript_path: &workspace.join("transcript.jsonl"),
-            model: None,
+            runner_model: None,
         };
 
         let prepared = prepare_workspace(&request).unwrap();
@@ -234,7 +234,7 @@ mod tests {
             skill_path: &skill_path,
             workspace_dir: &workspace,
             transcript_path: &workspace.join("transcript.jsonl"),
-            model: None,
+            runner_model: None,
         };
 
         let prepared = prepare_workspace(&request).unwrap();
@@ -257,7 +257,7 @@ mod tests {
             skill_path: &skill_path,
             workspace_dir: &workspace,
             transcript_path: &workspace.join("transcript.jsonl"),
-            model: None,
+            runner_model: None,
         };
 
         let err = prepare_workspace(&request).unwrap_err();

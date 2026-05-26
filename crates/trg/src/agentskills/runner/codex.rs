@@ -23,7 +23,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         .arg("-o")
         .arg(&final_text_path);
 
-    if let Some(model) = request.model {
+    if let Some(model) = request.runner_model {
         command.arg("-m").arg(model);
     }
 

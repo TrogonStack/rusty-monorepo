@@ -19,7 +19,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         .arg("--workspace")
         .arg(request.workspace_dir);
 
-    if let Some(model) = request.model {
+    if let Some(model) = request.runner_model {
         command.arg("--model").arg(model);
     }
 

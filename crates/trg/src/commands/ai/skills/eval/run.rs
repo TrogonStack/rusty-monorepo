@@ -40,6 +40,7 @@ pub struct RunArgs {
         long,
         value_enum,
         value_name = "RUNNER",
+        requires = "runner_model",
         help = "Agent CLI to execute each (eval × scenario). When unset, runs are scaffolded with status: skipped."
     )]
     pub runner: Option<Runner>,
@@ -47,9 +48,9 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "MODEL",
-        help = "Model identifier passed to the runner CLI (forwarded as --model/-m)"
+        help = "Model identifier forwarded to the runner CLI (--model/-m). Required when --runner is set; the string is CLI-specific."
     )]
-    pub model: Option<String>,
+    pub runner_model: Option<String>,
 }
 
 impl RunArgs {
@@ -95,7 +96,14 @@ impl RunArgs {
         };
 
         if let Some(runner) = self.runner {
-            if let Err(code) = execute_runs(runner, self.model.as_deref(), &skill_path, &report_dir, bundle) {
+            let runner_model = match self.runner_model.as_deref() {
+                Some(m) => m,
+                None => {
+                    eprintln!("--runner-model is required when --runner is set");
+                    return 1;
+                }
+            };
+            if let Err(code) = execute_runs(runner, runner_model, &skill_path, &report_dir, bundle) {
                 return code;
             }
         }
@@ -107,7 +115,7 @@ impl RunArgs {
 
 fn execute_runs(
     runner: Runner,
-    model: Option<&str>,
+    runner_model: &str,
     skill_path: &Path,
     report_dir: &Path,
     mut bundle: ReportBundle,
@@ -162,7 +170,7 @@ fn execute_runs(
             skill_path,
             workspace_dir: &outputs_dir,
             transcript_path: &transcript_path,
-            model,
+            runner_model: Some(runner_model),
         };
 
         match runner.invoke(&request) {
@@ -296,7 +304,7 @@ mod tests {
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
             runner: None,
-            model: None,
+            runner_model: None,
         }
         .handle(&crate::fs::RealFS);
 
