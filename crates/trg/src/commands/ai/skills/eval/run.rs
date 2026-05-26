@@ -146,13 +146,7 @@ fn execute_runs(
             }
         };
 
-        let scenario = match parse_scenario(&run.scenario_id) {
-            Some(s) => s,
-            None => {
-                eprintln!("Skipping run {}: unknown scenario {}", run.id, run.scenario_id);
-                continue;
-            }
-        };
+        let scenario = run.scenario_id;
 
         let workspace_dir = report_dir.join(&run.paths.workspace);
         let run_dir = workspace_dir.parent().unwrap_or(report_dir).to_path_buf();
@@ -217,15 +211,6 @@ fn execute_runs(
     Ok(())
 }
 
-fn parse_scenario(id: &str) -> Option<ScenarioKind> {
-    match id {
-        "with_skill" => Some(ScenarioKind::WithSkill),
-        "without_skill" => Some(ScenarioKind::WithoutSkill),
-        "old_skill" => Some(ScenarioKind::OldSkill),
-        _ => None,
-    }
-}
-
 fn apply_outcome(
     run: &mut crate::agentskills::report::RunRecord,
     outcome: &EvalRunOutcome,
@@ -251,9 +236,9 @@ fn apply_outcome(
 }
 
 fn rebuild_summaries(bundle: &mut ReportBundle) {
-    let mut counts: HashMap<String, (usize, usize, usize, usize)> = HashMap::new();
+    let mut counts: HashMap<ScenarioKind, (usize, usize, usize, usize)> = HashMap::new();
     for run in &bundle.document.runs {
-        let entry = counts.entry(run.scenario_id.clone()).or_insert((0, 0, 0, 0));
+        let entry = counts.entry(run.scenario_id).or_insert((0, 0, 0, 0));
         entry.0 += 1;
         match run.status.as_str() {
             "completed" => entry.1 += 1,

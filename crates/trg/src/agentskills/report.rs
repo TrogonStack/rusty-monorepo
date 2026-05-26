@@ -11,7 +11,8 @@ use super::validation::ValidationError;
 
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.report.v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScenarioKind {
     #[value(name = "with_skill")]
     WithSkill,
@@ -140,15 +141,15 @@ pub struct ModelConfigDimension {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScenarioDimension {
-    pub id: String,
-    pub kind: String,
+    pub id: ScenarioKind,
+    pub kind: ScenarioKind,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RunRecord {
     pub id: String,
     pub eval_case_id: String,
-    pub scenario_id: String,
+    pub scenario_id: ScenarioKind,
     pub model_config_id: String,
     pub skill_revision_id: String,
     pub attempt: u32,
@@ -188,7 +189,7 @@ pub struct SummariesSection {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScenarioSummary {
-    pub scenario_id: String,
+    pub scenario_id: ScenarioKind,
     pub total_runs: usize,
     pub passed_runs: usize,
     pub skipped_runs: usize,
@@ -327,8 +328,8 @@ fn build_dimensions(
         scenarios: scenarios
             .iter()
             .map(|scenario| ScenarioDimension {
-                id: scenario.as_str().to_string(),
-                kind: scenario.as_str().to_string(),
+                id: *scenario,
+                kind: *scenario,
             })
             .collect(),
         graders: Vec::new(),
@@ -352,7 +353,7 @@ fn build_runs(
             runs.push(RunRecord {
                 id: run_id,
                 eval_case_id: eval_case.id.to_string(),
-                scenario_id: scenario.as_str().to_string(),
+                scenario_id: *scenario,
                 model_config_id: model_config_label.to_string(),
                 skill_revision_id: "current".to_string(),
                 attempt: 1,
@@ -383,7 +384,7 @@ fn build_summaries(scenarios: &[ScenarioKind], eval_count: usize) -> SummariesSe
         by_scenario: scenarios
             .iter()
             .map(|scenario| ScenarioSummary {
-                scenario_id: scenario.as_str().to_string(),
+                scenario_id: *scenario,
                 total_runs: eval_count,
                 passed_runs: 0,
                 skipped_runs: eval_count,
@@ -497,16 +498,16 @@ mod tests {
         assert_eq!(runs.len(), 4);
         assert_eq!(runs[0].id, "run-001");
         assert_eq!(runs[0].eval_case_id, "case-a");
-        assert_eq!(runs[0].scenario_id, "with_skill");
+        assert_eq!(runs[0].scenario_id, ScenarioKind::WithSkill);
         assert_eq!(runs[1].id, "run-002");
         assert_eq!(runs[1].eval_case_id, "case-a");
-        assert_eq!(runs[1].scenario_id, "without_skill");
+        assert_eq!(runs[1].scenario_id, ScenarioKind::WithoutSkill);
         assert_eq!(runs[2].id, "run-003");
         assert_eq!(runs[2].eval_case_id, "case-b");
-        assert_eq!(runs[2].scenario_id, "with_skill");
+        assert_eq!(runs[2].scenario_id, ScenarioKind::WithSkill);
         assert_eq!(runs[3].id, "run-004");
         assert_eq!(runs[3].eval_case_id, "case-b");
-        assert_eq!(runs[3].scenario_id, "without_skill");
+        assert_eq!(runs[3].scenario_id, ScenarioKind::WithoutSkill);
         assert_eq!(
             workspace_dirs,
             vec![
@@ -524,11 +525,11 @@ mod tests {
         let summaries = build_summaries(&[ScenarioKind::WithSkill, ScenarioKind::OldSkill], 2);
 
         assert_eq!(summaries.by_scenario.len(), 2);
-        assert_eq!(summaries.by_scenario[0].scenario_id, "with_skill");
+        assert_eq!(summaries.by_scenario[0].scenario_id, ScenarioKind::WithSkill);
         assert_eq!(summaries.by_scenario[0].total_runs, 2);
         assert_eq!(summaries.by_scenario[0].skipped_runs, 2);
         assert_eq!(summaries.by_scenario[0].passed_runs, 0);
-        assert_eq!(summaries.by_scenario[1].scenario_id, "old_skill");
+        assert_eq!(summaries.by_scenario[1].scenario_id, ScenarioKind::OldSkill);
         assert_eq!(summaries.by_scenario[1].failed_runs, 0);
     }
 
