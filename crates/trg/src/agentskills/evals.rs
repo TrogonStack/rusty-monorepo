@@ -372,19 +372,24 @@ fn is_safe_relative_path(path: &Path) -> bool {
 }
 
 fn collect_named_files(root: &Path, file_name: &str, matches: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    walk_named_files(root, file_name, matches)?;
+    matches.sort();
+    Ok(())
+}
+
+fn walk_named_files(root: &Path, file_name: &str, matches: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();
         let file_type = entry.file_type()?;
 
         if file_type.is_dir() {
-            collect_named_files(&path, file_name, matches)?;
+            walk_named_files(&path, file_name, matches)?;
         } else if file_type.is_file() && path.file_name().and_then(|name| name.to_str()) == Some(file_name) {
             matches.push(path);
         }
     }
 
-    matches.sort();
     Ok(())
 }
 
