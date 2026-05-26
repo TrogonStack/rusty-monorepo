@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
@@ -209,6 +210,15 @@ pub fn build_report_bundle(
         return Err(EvalError::Validation(
             ValidationError::for_field("scenarios", "at least one scenario is required").into(),
         ));
+    }
+
+    let mut seen = HashSet::new();
+    for scenario in scenarios {
+        if !seen.insert(*scenario) {
+            return Err(EvalError::Validation(
+                ValidationError::for_field("scenarios", format!("duplicate scenario '{}'", scenario.as_str())).into(),
+            ));
+        }
     }
 
     let skill_md_path = skill_path.join("SKILL.md");
