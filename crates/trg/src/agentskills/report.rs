@@ -422,7 +422,7 @@ fn random_hex_8() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     let mixed = (seed as u64) ^ ((seed >> 64) as u64) ^ (std::process::id() as u64);
-    format!("{mixed:08x}")
+    format!("{:08x}", mixed as u32)
 }
 
 #[cfg(test)]
