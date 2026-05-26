@@ -40,7 +40,6 @@ pub struct RunArgs {
         long,
         value_enum,
         value_name = "RUNNER",
-        requires = "runner_model",
         help = "Agent CLI to execute each (eval × scenario). When unset, runs are scaffolded with status: skipped."
     )]
     pub runner: Option<Runner>,
@@ -48,7 +47,7 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "MODEL",
-        help = "Model identifier forwarded to the runner CLI (--model/-m). Required when --runner is set; the string is CLI-specific."
+        help = "Optional model identifier forwarded to the runner CLI (--model/-m). When unset, the runner CLI picks its own default; CLI-specific string."
     )]
     pub runner_model: Option<String>,
 }
@@ -96,14 +95,7 @@ impl RunArgs {
         };
 
         if let Some(runner) = self.runner {
-            let runner_model = match self.runner_model.as_deref() {
-                Some(m) => m,
-                None => {
-                    eprintln!("--runner-model is required when --runner is set");
-                    return 1;
-                }
-            };
-            if let Err(code) = execute_runs(runner, runner_model, &skill_path, &report_dir, bundle) {
+            if let Err(code) = execute_runs(runner, self.runner_model.as_deref(), &skill_path, &report_dir, bundle) {
                 return code;
             }
         }
@@ -115,7 +107,7 @@ impl RunArgs {
 
 fn execute_runs(
     runner: Runner,
-    runner_model: &str,
+    runner_model: Option<&str>,
     skill_path: &Path,
     report_dir: &Path,
     mut bundle: ReportBundle,
@@ -170,7 +162,7 @@ fn execute_runs(
             skill_path,
             workspace_dir: &workspace_dir,
             transcript_path: &transcript_path,
-            runner_model: Some(runner_model),
+            runner_model,
         };
 
         let digest_before = match compute_skill_digest(skill_path) {
