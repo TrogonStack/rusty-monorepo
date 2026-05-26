@@ -231,7 +231,6 @@ pub fn detect_tampering(before: &SkillDigest, after: &SkillDigest) -> Vec<String
         }
     }
     changed.sort();
-    changed.dedup();
     changed
 }
 
