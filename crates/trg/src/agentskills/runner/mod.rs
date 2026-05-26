@@ -185,11 +185,11 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
     if let Some(parent) = timing_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let total = outcome.total_tokens.unwrap_or(0);
-    let body = serde_json::json!({
-        "total_tokens": total,
-        "duration_ms": outcome.duration_ms,
-    });
+    let mut body = serde_json::Map::new();
+    body.insert("duration_ms".to_string(), serde_json::json!(outcome.duration_ms));
+    if let Some(total) = outcome.total_tokens {
+        body.insert("total_tokens".to_string(), serde_json::json!(total));
+    }
     std::fs::write(timing_path, serde_json::to_string_pretty(&body).unwrap())
 }
 

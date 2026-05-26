@@ -263,7 +263,8 @@ struct GradingSummary {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TimingFile {
-    total_tokens: u64,
+    #[serde(default)]
+    total_tokens: Option<u64>,
     duration_ms: u64,
 }
 
@@ -527,10 +528,10 @@ fn validate_grading_file(
 fn validate_timing_file(path: &Path, timing: &TimingFile, errors: &mut ValidationErrors) {
     let file_label = path.display().to_string();
 
-    if timing.total_tokens == 0 {
+    if matches!(timing.total_tokens, Some(0)) {
         errors.push(ValidationError::for_field(
             format!("{} total_tokens", file_label),
-            "must be greater than zero",
+            "must be greater than zero when present",
         ));
     }
 
