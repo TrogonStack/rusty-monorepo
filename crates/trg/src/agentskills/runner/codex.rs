@@ -77,12 +77,6 @@ fn parse_outcome(
         }
     }
 
-    if terminal.is_none() && !exit_ok {
-        return Err(RunnerError::MissingResult {
-            program: PROGRAM.to_string(),
-        });
-    }
-
     let terminal = terminal.ok_or_else(|| RunnerError::MissingResult {
         program: PROGRAM.to_string(),
     })?;
