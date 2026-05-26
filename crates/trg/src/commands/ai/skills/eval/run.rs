@@ -12,10 +12,10 @@ use clap::Args;
 #[derive(Args)]
 pub struct RunArgs {
     #[arg(long, value_name = "DIR", help = "Path to a skill directory containing SKILL.md")]
-    pub skill_path: PathBuf,
+    pub skill_dir: PathBuf,
 
     #[arg(long, value_name = "DIR", help = "Root directory for the generated artifact bundle")]
-    pub out_path: PathBuf,
+    pub out_dir: PathBuf,
 
     #[arg(
         long,
@@ -52,7 +52,7 @@ pub struct RunArgs {
 
 impl RunArgs {
     pub fn handle(self, fs: &impl FileSystem) -> i32 {
-        let props = match crate::agentskills::validator::validate_skill(fs, &self.skill_path) {
+        let props = match crate::agentskills::validator::validate_skill(fs, &self.skill_dir) {
             Ok(props) => props,
             Err(e) => {
                 eprintln!("Skill validation failed: {}", e);
@@ -61,7 +61,7 @@ impl RunArgs {
         };
 
         if let Err(e) =
-            crate::agentskills::evals::check_eval_suite(fs, &self.skill_path, &props.name, EvalCheckOptions::default())
+            crate::agentskills::evals::check_eval_suite(fs, &self.skill_dir, &props.name, EvalCheckOptions::default())
         {
             eprintln!("Skill eval validation failed: {}", e);
             return 1;
@@ -69,8 +69,8 @@ impl RunArgs {
 
         let bundle = match build_report_bundle(
             fs,
-            &self.skill_path,
-            &self.skill_path,
+            &self.skill_dir,
+            &self.skill_dir,
             &props.name,
             &self.model_config,
             &self.scenario,
@@ -83,7 +83,7 @@ impl RunArgs {
             }
         };
 
-        let report_dir = match write_report_bundle(&self.out_path, &bundle) {
+        let report_dir = match write_report_bundle(&self.out_dir, &bundle) {
             Ok(dir) => dir,
             Err(e) => {
                 eprintln!("Failed to write eval report bundle: {}", e);
@@ -95,7 +95,7 @@ impl RunArgs {
             if let Err(code) = execute_runs(
                 runner,
                 self.runner_model.as_deref(),
-                &self.skill_path,
+                &self.skill_dir,
                 &report_dir,
                 bundle,
             ) {
@@ -317,8 +317,8 @@ mod tests {
         let out_dir = temp.path().join("artifacts");
 
         let status = RunArgs {
-            skill_path: skill_dir.clone(),
-            out_path: out_dir.clone(),
+            skill_dir: skill_dir.clone(),
+            out_dir: out_dir.clone(),
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
             runner: None,
