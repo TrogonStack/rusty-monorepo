@@ -1,3 +1,4 @@
+use super::validation::{ValidationError, ValidationErrors};
 use crate::fs::FileSystem;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -14,12 +15,8 @@ pub enum EvalError {
     #[error("JSON parsing error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("Validation failed: {}", format_errors(.0))]
-    Validation(Vec<String>),
-}
-
-fn format_errors(errors: &[String]) -> String {
-    errors.join("; ")
+    #[error("Validation failed: {0}")]
+    Validation(ValidationErrors),
 }
 
 pub type Result<T> = std::result::Result<T, EvalError>;
@@ -186,29 +183,35 @@ pub fn check_eval_suite(
     let content = fs.read_to_string(&suite_path)?;
     let suite: EvalSuite = serde_json::from_str(&content)?;
 
-    let mut errors = Vec::new();
+    let mut errors = ValidationErrors::new();
     let mut ids = HashSet::new();
     let mut file_count = 0;
     let mut assertion_count = 0;
 
     if suite.skill_name.trim().is_empty() {
-        errors.push("skill_name must be a non-empty string".to_string());
+        errors.push(ValidationError::for_field("skill_name", "must be a non-empty string"));
     } else if suite.skill_name != expected_skill_name {
-        errors.push(format!(
-            "skill_name '{}' must match skill frontmatter name '{}'",
-            suite.skill_name, expected_skill_name
+        errors.push(ValidationError::for_field(
+            "skill_name",
+            format!(
+                "'{}' must match skill frontmatter name '{}'",
+                suite.skill_name, expected_skill_name
+            ),
         ));
     }
 
     if suite.evals.is_empty() {
-        errors.push("evals must contain at least one test case".to_string());
+        errors.push(ValidationError::for_field(
+            "evals",
+            "must contain at least one test case",
+        ));
     }
 
     for (index, eval) in suite.evals.iter().enumerate() {
         let label = format!("evals[{}] id '{}'", index, eval.id);
 
         if !ids.insert(eval.id.as_str().to_string()) {
-            errors.push(format!("{} is duplicated", label));
+            errors.push(ValidationError::for_field(label.clone(), "is duplicated"));
         }
 
         validate_non_empty(&eval.prompt, &format!("{}.prompt", label), &mut errors);
@@ -219,7 +222,10 @@ pub fn check_eval_suite(
         );
 
         if options.require_assertions && eval.assertions.is_empty() {
-            errors.push(format!("{} must define at least one assertion", label));
+            errors.push(ValidationError::for_field(
+                label.clone(),
+                "must define at least one assertion",
+            ));
         }
 
         for (assertion_index, assertion) in eval.assertions.iter().enumerate() {
@@ -253,17 +259,19 @@ pub fn check_eval_suite(
 
 pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) -> Result<WorkspaceCheckReport> {
     if !workspace_path.exists() {
-        return Err(EvalError::Validation(vec![format!(
-            "workspace '{}' does not exist",
-            workspace_path.display()
-        )]));
+        return Err(EvalError::Validation(
+            ValidationError::for_field(format!("workspace '{}'", workspace_path.display()), "does not exist").into(),
+        ));
     }
 
     if !workspace_path.is_dir() {
-        return Err(EvalError::Validation(vec![format!(
-            "workspace '{}' must be a directory",
-            workspace_path.display()
-        )]));
+        return Err(EvalError::Validation(
+            ValidationError::for_field(
+                format!("workspace '{}'", workspace_path.display()),
+                "must be a directory",
+            )
+            .into(),
+        ));
     }
 
     let mut grading_files = Vec::new();
@@ -271,15 +279,15 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
     collect_named_files(workspace_path, "grading.json", &mut grading_files)?;
     collect_named_files(workspace_path, "timing.json", &mut timing_files)?;
 
-    let mut errors = Vec::new();
+    let mut errors = ValidationErrors::new();
     let mut assertion_results = 0;
     let mut passed_assertions = 0;
     let mut failed_assertions = 0;
 
     if options.require_grading && grading_files.is_empty() {
-        errors.push(format!(
-            "workspace '{}' must contain at least one grading.json",
-            workspace_path.display()
+        errors.push(ValidationError::for_field(
+            format!("workspace '{}'", workspace_path.display()),
+            "must contain at least one grading.json",
         ));
     }
 
@@ -322,30 +330,35 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
     })
 }
 
-fn validate_non_empty(value: &str, field: &str, errors: &mut Vec<String>) {
+fn validate_non_empty(value: &str, field: &str, errors: &mut ValidationErrors) {
     if value.trim().is_empty() {
-        errors.push(format!("{} must be a non-empty string", field));
+        errors.push(ValidationError::for_field(field, "must be a non-empty string"));
     }
 }
 
-fn validate_eval_file(skill_path: &Path, file: &str, fs: &impl FileSystem, label: &str, errors: &mut Vec<String>) {
+fn validate_eval_file(skill_path: &Path, file: &str, fs: &impl FileSystem, label: &str, errors: &mut ValidationErrors) {
+    let field = format!("{}.files", label);
+
     if file.trim().is_empty() {
-        errors.push(format!("{}.files contains an empty path", label));
+        errors.push(ValidationError::for_field(field, "contains an empty path"));
         return;
     }
 
     let path = Path::new(file);
     if !is_safe_relative_path(path) {
-        errors.push(format!(
-            "{}.files path '{}' must stay inside the skill directory",
-            label, file
+        errors.push(ValidationError::for_field(
+            field,
+            format!("path '{}' must stay inside the skill directory", file),
         ));
         return;
     }
 
     let full_path = skill_path.join(path);
     if !fs.exists(&full_path) {
-        errors.push(format!("{}.files path '{}' does not exist", label, full_path.display()));
+        errors.push(ValidationError::for_field(
+            field,
+            format!("path '{}' does not exist", full_path.display()),
+        ));
     }
 }
 
@@ -385,11 +398,18 @@ fn read_timing_file(path: &Path) -> Result<TimingFile> {
     Ok(serde_json::from_str(&content)?)
 }
 
-fn validate_grading_file(path: &Path, grading: &GradingFile, options: WorkspaceCheckOptions, errors: &mut Vec<String>) {
+fn validate_grading_file(
+    path: &Path,
+    grading: &GradingFile,
+    options: WorkspaceCheckOptions,
+    errors: &mut ValidationErrors,
+) {
+    let file_label = path.display().to_string();
+
     if grading.assertion_results.is_empty() {
-        errors.push(format!(
-            "{} assertion_results must contain at least one result",
-            path.display()
+        errors.push(ValidationError::for_field(
+            format!("{} assertion_results", file_label),
+            "must contain at least one result",
         ));
     }
 
@@ -399,40 +419,44 @@ fn validate_grading_file(path: &Path, grading: &GradingFile, options: WorkspaceC
     for (index, result) in grading.assertion_results.iter().enumerate() {
         validate_non_empty(
             &result.text,
-            &format!("{} assertion_results[{}].text", path.display(), index),
+            &format!("{} assertion_results[{}].text", file_label, index),
             errors,
         );
         validate_non_empty(
             &result.evidence,
-            &format!("{} assertion_results[{}].evidence", path.display(), index),
+            &format!("{} assertion_results[{}].evidence", file_label, index),
             errors,
         );
     }
 
     if grading.summary.passed != passed {
-        errors.push(format!(
-            "{} summary.passed {} does not match {} passed assertion results",
-            path.display(),
-            grading.summary.passed,
-            passed
+        errors.push(ValidationError::for_field(
+            format!("{} summary.passed", file_label),
+            format!(
+                "{} does not match {} passed assertion results",
+                grading.summary.passed, passed
+            ),
         ));
     }
 
     if grading.summary.failed != failed {
-        errors.push(format!(
-            "{} summary.failed {} does not match {} failed assertion results",
-            path.display(),
-            grading.summary.failed,
-            failed
+        errors.push(ValidationError::for_field(
+            format!("{} summary.failed", file_label),
+            format!(
+                "{} does not match {} failed assertion results",
+                grading.summary.failed, failed
+            ),
         ));
     }
 
     if grading.summary.total != grading.assertion_results.len() {
-        errors.push(format!(
-            "{} summary.total {} does not match {} assertion results",
-            path.display(),
-            grading.summary.total,
-            grading.assertion_results.len()
+        errors.push(ValidationError::for_field(
+            format!("{} summary.total", file_label),
+            format!(
+                "{} does not match {} assertion results",
+                grading.summary.total,
+                grading.assertion_results.len()
+            ),
         ));
     }
 
@@ -442,26 +466,38 @@ fn validate_grading_file(path: &Path, grading: &GradingFile, options: WorkspaceC
         passed as f64 / grading.summary.total as f64
     };
     if (grading.summary.pass_rate - expected_rate).abs() > 0.0001 {
-        errors.push(format!(
-            "{} summary.pass_rate {} does not match computed pass rate {}",
-            path.display(),
-            grading.summary.pass_rate,
-            expected_rate
+        errors.push(ValidationError::for_field(
+            format!("{} summary.pass_rate", file_label),
+            format!(
+                "{} does not match computed pass rate {}",
+                grading.summary.pass_rate, expected_rate
+            ),
         ));
     }
 
     if options.fail_on_failed_assertions && failed > 0 {
-        errors.push(format!("{} has {} failed assertion result(s)", path.display(), failed));
+        errors.push(ValidationError::for_field(
+            file_label,
+            format!("has {} failed assertion result(s)", failed),
+        ));
     }
 }
 
-fn validate_timing_file(path: &Path, timing: &TimingFile, errors: &mut Vec<String>) {
+fn validate_timing_file(path: &Path, timing: &TimingFile, errors: &mut ValidationErrors) {
+    let file_label = path.display().to_string();
+
     if timing.total_tokens == 0 {
-        errors.push(format!("{} total_tokens must be greater than zero", path.display()));
+        errors.push(ValidationError::for_field(
+            format!("{} total_tokens", file_label),
+            "must be greater than zero",
+        ));
     }
 
     if timing.duration_ms == 0 {
-        errors.push(format!("{} duration_ms must be greater than zero", path.display()));
+        errors.push(ValidationError::for_field(
+            format!("{} duration_ms", file_label),
+            "must be greater than zero",
+        ));
     }
 }
 

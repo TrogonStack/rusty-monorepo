@@ -1,6 +1,7 @@
 use super::errors::{Result, SkillError};
 use super::models::SkillProperties;
 use super::parser;
+use super::validation::{ValidationError, ValidationErrors};
 use crate::fs::FileSystem;
 use std::path::Path;
 use unicode_normalization::UnicodeNormalization;
@@ -18,11 +19,11 @@ const ALLOWED_FRONTMATTER_FIELDS: &[&str] = &[
     "compatibility",
 ];
 
-fn collect_validation_errors(result: Result<()>, errors: &mut Vec<String>) -> Result<()> {
+fn collect_validation_errors(result: Result<()>, errors: &mut ValidationErrors) -> Result<()> {
     match result {
         Ok(()) => Ok(()),
-        Err(SkillError::Validation(mut msgs)) => {
-            errors.append(&mut msgs);
+        Err(SkillError::Validation(other)) => {
+            errors.merge(other);
             Ok(())
         }
         Err(e) => Err(e),
@@ -41,17 +42,23 @@ fn validate_allowed_fields(keys: &[String]) -> Result<()> {
     }
 
     extra_fields.sort();
-    Err(SkillError::Validation(vec![format!(
-        "Unexpected fields in frontmatter: {}. Only {} are allowed.",
-        extra_fields.join(", "),
-        ALLOWED_FRONTMATTER_FIELDS.join(", ")
-    )]))
+    Err(SkillError::Validation(
+        ValidationError::for_field(
+            "frontmatter",
+            format!(
+                "Unexpected fields: {}. Only {} are allowed.",
+                extra_fields.join(", "),
+                ALLOWED_FRONTMATTER_FIELDS.join(", ")
+            ),
+        )
+        .into(),
+    ))
 }
 
 pub fn validate_skill(fs: &impl FileSystem, skill_path: &Path) -> Result<SkillProperties> {
     let (props, keys) = parser::read_properties(fs, skill_path)?;
 
-    let mut errors = Vec::new();
+    let mut errors = ValidationErrors::new();
 
     collect_validation_errors(validate_allowed_fields(&keys), &mut errors)?;
     collect_validation_errors(validate_name(&props.name, skill_path), &mut errors)?;
@@ -69,43 +76,48 @@ pub fn validate_skill(fs: &impl FileSystem, skill_path: &Path) -> Result<SkillPr
 }
 
 fn validate_name(name: &str, skill_path: &Path) -> Result<()> {
-    let mut errors = Vec::new();
+    let mut errors = ValidationErrors::new();
 
     if name.trim().is_empty() {
-        errors.push("name must be a non-empty string".to_string());
+        errors.push(ValidationError::for_field("name", "must be a non-empty string"));
         return Err(SkillError::Validation(errors));
     }
 
     let normalized: String = name.trim().nfkc().collect();
 
     if normalized.chars().count() > MAX_NAME_LEN {
-        errors.push(format!("name exceeds {} character limit", MAX_NAME_LEN));
+        errors.push(ValidationError::for_field(
+            "name",
+            format!("exceeds {} character limit", MAX_NAME_LEN),
+        ));
     }
 
     if normalized != normalized.to_lowercase() {
-        errors.push("name must be lowercase".to_string());
+        errors.push(ValidationError::for_field("name", "must be lowercase"));
     }
 
     if normalized.starts_with('-') || normalized.ends_with('-') {
-        errors.push("name cannot start or end with a hyphen".to_string());
+        errors.push(ValidationError::for_field("name", "cannot start or end with a hyphen"));
     }
 
     if normalized.contains("--") {
-        errors.push("name cannot contain consecutive hyphens".to_string());
+        errors.push(ValidationError::for_field("name", "cannot contain consecutive hyphens"));
     }
 
     if !normalized.chars().all(|c| c.is_alphanumeric() || c == '-') {
-        errors.push("name contains invalid characters; only letters, digits, and hyphens are allowed".to_string());
+        errors.push(ValidationError::for_field(
+            "name",
+            "contains invalid characters; only letters, digits, and hyphens are allowed",
+        ));
     }
 
     let dir_name = skill_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let normalized_dir: String = dir_name.nfkc().collect();
 
     if normalized_dir != normalized {
-        errors.push(format!(
-            "name '{}' must match directory name '{}'",
-            name.trim(),
-            dir_name
+        errors.push(ValidationError::for_field(
+            "name",
+            format!("'{}' must match directory name '{}'", name.trim(), dir_name),
         ));
     }
 
@@ -117,15 +129,18 @@ fn validate_name(name: &str, skill_path: &Path) -> Result<()> {
 }
 
 fn validate_description(desc: &str) -> Result<()> {
-    let mut errors = Vec::new();
+    let mut errors = ValidationErrors::new();
 
     if desc.trim().is_empty() {
-        errors.push("description must be a non-empty string".to_string());
+        errors.push(ValidationError::for_field("description", "must be a non-empty string"));
         return Err(SkillError::Validation(errors));
     }
 
     if desc.chars().count() > MAX_DESC_LEN {
-        errors.push(format!("description exceeds {} character limit", MAX_DESC_LEN));
+        errors.push(ValidationError::for_field(
+            "description",
+            format!("exceeds {} character limit", MAX_DESC_LEN),
+        ));
     }
 
     if !errors.is_empty() {
@@ -136,10 +151,13 @@ fn validate_description(desc: &str) -> Result<()> {
 }
 
 fn validate_compatibility(compat: &str) -> Result<()> {
-    let mut errors = Vec::new();
+    let mut errors = ValidationErrors::new();
 
     if compat.chars().count() > MAX_COMPAT_LEN {
-        errors.push(format!("compatibility exceeds {} character limit", MAX_COMPAT_LEN));
+        errors.push(ValidationError::for_field(
+            "compatibility",
+            format!("exceeds {} character limit", MAX_COMPAT_LEN),
+        ));
     }
 
     if !errors.is_empty() {

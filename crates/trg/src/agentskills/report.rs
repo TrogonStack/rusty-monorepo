@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::fs::FileSystem;
 
 use super::evals::{EvalError, EvalSuite, Result};
+use super::validation::ValidationError;
 
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.report.v1";
 
@@ -204,9 +205,9 @@ pub fn build_report_bundle(
     options: BuildReportOptions,
 ) -> Result<ReportBundle> {
     if scenarios.is_empty() {
-        return Err(EvalError::Validation(vec![
-            "at least one scenario is required".to_string()
-        ]));
+        return Err(EvalError::Validation(
+            ValidationError::for_field("scenarios", "at least one scenario is required").into(),
+        ));
     }
 
     let skill_md_path = skill_path.join("SKILL.md");

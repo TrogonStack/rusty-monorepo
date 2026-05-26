@@ -1,3 +1,4 @@
+use super::validation::ValidationErrors;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -8,8 +9,8 @@ pub enum SkillError {
     #[error("YAML parsing error: {0}")]
     Yaml(#[from] gray_matter::Error),
 
-    #[error("Validation failed: {}", format_errors(.0))]
-    Validation(Vec<String>),
+    #[error("Validation failed: {0}")]
+    Validation(ValidationErrors),
 
     #[error("No SKILL.md or skill.md found")]
     SkillFileNotFound,
@@ -19,10 +20,6 @@ pub enum SkillError {
 
     #[error("Required field is empty: {0}")]
     EmptyField(&'static str),
-}
-
-fn format_errors(errors: &[String]) -> String {
-    errors.join("; ")
 }
 
 pub type Result<T> = std::result::Result<T, SkillError>;
