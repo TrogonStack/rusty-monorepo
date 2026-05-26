@@ -9,15 +9,13 @@ use crate::agentskills::runner::{compute_skill_digest, detect_tampering, EvalRun
 use crate::fs::FileSystem;
 use clap::Args;
 
-use crate::commands::ai::skills::resolve_skill_path;
-
 #[derive(Args)]
 pub struct RunArgs {
-    #[arg(help = "Path to skill directory or SKILL.md file")]
-    pub path: PathBuf,
+    #[arg(long, value_name = "DIR", help = "Path to a skill directory containing SKILL.md")]
+    pub skill_path: PathBuf,
 
     #[arg(long, value_name = "DIR", help = "Root directory for the generated artifact bundle")]
-    pub out: PathBuf,
+    pub out_path: PathBuf,
 
     #[arg(
         long,
@@ -54,8 +52,7 @@ pub struct RunArgs {
 
 impl RunArgs {
     pub fn handle(self, fs: &impl FileSystem) -> i32 {
-        let skill_path = resolve_skill_path(&self.path);
-        let props = match crate::agentskills::validator::validate_skill(fs, &skill_path) {
+        let props = match crate::agentskills::validator::validate_skill(fs, &self.skill_path) {
             Ok(props) => props,
             Err(e) => {
                 eprintln!("Skill validation failed: {}", e);
@@ -64,7 +61,7 @@ impl RunArgs {
         };
 
         if let Err(e) =
-            crate::agentskills::evals::check_eval_suite(fs, &skill_path, &props.name, EvalCheckOptions::default())
+            crate::agentskills::evals::check_eval_suite(fs, &self.skill_path, &props.name, EvalCheckOptions::default())
         {
             eprintln!("Skill eval validation failed: {}", e);
             return 1;
@@ -72,8 +69,8 @@ impl RunArgs {
 
         let bundle = match build_report_bundle(
             fs,
-            &skill_path,
-            &self.path,
+            &self.skill_path,
+            &self.skill_path,
             &props.name,
             &self.model_config,
             &self.scenario,
@@ -86,7 +83,7 @@ impl RunArgs {
             }
         };
 
-        let report_dir = match write_report_bundle(&self.out, &bundle) {
+        let report_dir = match write_report_bundle(&self.out_path, &bundle) {
             Ok(dir) => dir,
             Err(e) => {
                 eprintln!("Failed to write eval report bundle: {}", e);
@@ -95,7 +92,13 @@ impl RunArgs {
         };
 
         if let Some(runner) = self.runner {
-            if let Err(code) = execute_runs(runner, self.runner_model.as_deref(), &skill_path, &report_dir, bundle) {
+            if let Err(code) = execute_runs(
+                runner,
+                self.runner_model.as_deref(),
+                &self.skill_path,
+                &report_dir,
+                bundle,
+            ) {
                 return code;
             }
         }
@@ -314,8 +317,8 @@ mod tests {
         let out_dir = temp.path().join("artifacts");
 
         let status = RunArgs {
-            path: skill_dir.clone(),
-            out: out_dir.clone(),
+            skill_path: skill_dir.clone(),
+            out_path: out_dir.clone(),
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
             runner: None,
