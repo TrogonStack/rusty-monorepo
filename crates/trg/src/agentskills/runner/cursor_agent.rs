@@ -71,7 +71,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool) -> Result<EvalRunOu
         program: PROGRAM.to_string(),
     })?;
 
-    let is_error = result.get("is_error").and_then(|v| v.as_bool()).unwrap_or(!exit_ok);
+    let is_error = !exit_ok || result.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
     let final_text = result
         .get("result")
         .and_then(|v| v.as_str())
@@ -127,6 +127,14 @@ mod tests {
         let stdout = br#"{"type":"result","is_error":true,"duration_ms":10,"result":"boom"}
 "#;
         let outcome = parse_outcome(stdout, 0, true).unwrap();
+        assert!(matches!(outcome.status, RunStatus::Failed));
+    }
+
+    #[test]
+    fn non_zero_exit_overrides_payload_success() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":10,"result":"ok"}
+"#;
+        let outcome = parse_outcome(stdout, 0, false).unwrap();
         assert!(matches!(outcome.status, RunStatus::Failed));
     }
 
