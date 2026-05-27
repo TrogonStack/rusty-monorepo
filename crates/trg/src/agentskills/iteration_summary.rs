@@ -675,16 +675,21 @@ pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> 
     let skill_root = report_dir.parent()?;
 
     let entries = std::fs::read_dir(skill_root).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path();
-        if !candidate.is_dir() || candidate == report_dir {
-            continue;
-        }
-        if candidate.join("report.json").is_file() {
-            if let Ok(report) = load_report(&candidate) {
-                if report.report.iteration == target_iteration {
-                    return Some(candidate);
-                }
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|candidate| {
+            candidate.is_dir()
+                && candidate != report_dir
+                && candidate.join("report.json").is_file()
+        })
+        .collect();
+    candidates.sort();
+
+    for candidate in candidates {
+        if let Ok(report) = load_report(&candidate) {
+            if report.report.iteration == target_iteration {
+                return Some(candidate);
             }
         }
     }
