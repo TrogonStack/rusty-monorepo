@@ -133,16 +133,16 @@
         "scenario",
         "attempt",
         "total_tokens",
-        "mean_ms",
-        "stddev_ms"
+        "mean_tokens",
+        "stddev_tokens"
       ],
       "properties": {
         "eval_id": { "type": "string" },
         "scenario": { "type": "string" },
         "attempt": { "type": "integer", "minimum": 1 },
         "total_tokens": { "type": "integer", "minimum": 0 },
-        "mean_ms": { "type": "number", "minimum": 0 },
-        "stddev_ms": { "type": "number", "minimum": 0 }
+        "mean_tokens": { "type": "number", "minimum": 0 },
+        "stddev_tokens": { "type": "number", "minimum": 0 }
       },
       "additionalProperties": true
     },

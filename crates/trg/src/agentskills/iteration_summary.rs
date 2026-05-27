@@ -93,8 +93,8 @@ pub struct TokenOutlierRecord {
     pub scenario: String,
     pub attempt: u32,
     pub total_tokens: u64,
-    pub mean_ms: f64,
-    pub stddev_ms: f64,
+    pub mean_tokens: f64,
+    pub stddev_tokens: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -308,8 +308,8 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
                 record.scenario,
                 record.attempt,
                 record.total_tokens,
-                record.mean_ms,
-                record.stddev_ms
+                record.mean_tokens,
+                record.stddev_tokens
             )
         }),
     );
@@ -783,8 +783,8 @@ fn detect_token_outliers(
             scenario: scenario.as_str().to_string(),
             attempt: sample.attempt,
             total_tokens: sample.value,
-            mean_ms: mean,
-            stddev_ms: sigma,
+            mean_tokens: mean,
+            stddev_tokens: sigma,
         })
         .collect()
 }
