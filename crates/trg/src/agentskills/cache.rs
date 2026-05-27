@@ -265,7 +265,11 @@ pub fn apply_cache_hit(
 
     run.status = source_run.status;
     run.metrics = source_run.metrics;
-    run.artifacts = source_run.artifacts;
+    run.artifacts = source_run
+        .artifacts
+        .into_iter()
+        .map(|artifact| rewrite_artifact_run_id(artifact, &pointer.run_id, &run.id))
+        .collect();
     run.skill_integrity = source_run.skill_integrity;
     run.cache = Some(RunCacheInfo {
         hit: true,
@@ -284,6 +288,25 @@ fn load_source_run(source_report: &Path, run_id: &str) -> io::Result<RunRecord> 
         .into_iter()
         .find(|run| run.id == run_id)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("run {run_id} not found")))
+}
+
+fn rewrite_artifact_run_id(
+    mut artifact: serde_json::Value,
+    source_run_id: &str,
+    dest_run_id: &str,
+) -> serde_json::Value {
+    let from = format!("runs/{source_run_id}/");
+    let to = format!("runs/{dest_run_id}/");
+    if let Some(object) = artifact.as_object_mut() {
+        for (_, value) in object.iter_mut() {
+            if let Some(text) = value.as_str() {
+                if text.starts_with(&from) {
+                    *value = serde_json::Value::String(text.replacen(&from, &to, 1));
+                }
+            }
+        }
+    }
+    artifact
 }
 
 fn copy_run_artifacts(source_report: &Path, source_run_id: &str, dest_report: &Path, dest_run_id: &str) -> io::Result<()> {

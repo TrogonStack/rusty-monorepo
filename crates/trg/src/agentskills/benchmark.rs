@@ -439,7 +439,7 @@ enum RunDisposition {
 fn classify_run(run: &RunForBenchmark, mode: FailedRunsMode) -> RunDisposition {
     match run.status.as_str() {
         "skipped" => RunDisposition::Skipped,
-        "failed" => match mode {
+        "failed" | "timeout" => match mode {
             FailedRunsMode::Exclude => RunDisposition::Excluded,
             FailedRunsMode::Zero | FailedRunsMode::Bucket => RunDisposition::Failed,
         },
@@ -972,8 +972,9 @@ fn build_iteration_summary(
     by_eval_scenario: &[EvalScenarioAttemptRow],
     mode: FailedRunsMode,
 ) -> IterationSummary {
-    let mut assertion_outcomes: BTreeMap<String, (usize, usize)> = BTreeMap::new();
-    let mut scenario_assertion_rates: BTreeMap<(ScenarioKind, String), (usize, usize)> = BTreeMap::new();
+    let mut assertion_outcomes: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
+    let mut scenario_assertion_rates: BTreeMap<(ScenarioKind, String, String), (usize, usize)> =
+        BTreeMap::new();
 
     for run in runs {
         if !matches!(classify_run(run, mode), RunDisposition::Completed) {
@@ -984,10 +985,11 @@ fn build_iteration_summary(
             continue;
         };
         for result in &grading.assertion_results {
-            let key = normalize_assertion_key(&result.assertion);
-            if key.is_empty() {
+            let assertion_key = normalize_assertion_key(&result.assertion);
+            if assertion_key.is_empty() {
                 continue;
             }
+            let key = (run.eval_case_id.clone(), assertion_key);
             let entry = assertion_outcomes.entry(key.clone()).or_insert((0, 0));
             if result.passed {
                 entry.0 += 1;
@@ -995,7 +997,7 @@ fn build_iteration_summary(
                 entry.1 += 1;
             }
             let scenario_entry = scenario_assertion_rates
-                .entry((run.scenario_id, key))
+                .entry((run.scenario_id, key.0, key.1))
                 .or_insert((0, 0));
             if result.passed {
                 scenario_entry.0 += 1;
@@ -1008,29 +1010,37 @@ fn build_iteration_summary(
     let always_pass = assertion_outcomes
         .iter()
         .filter(|(_, (passed, failed))| *passed > 0 && *failed == 0)
-        .map(|(assertion, _)| assertion.clone())
+        .map(|((eval_case_id, assertion), _)| format!("{eval_case_id}: {assertion}"))
         .collect();
 
     let always_fail = assertion_outcomes
         .iter()
         .filter(|(_, (passed, failed))| *failed > 0 && *passed == 0)
-        .map(|(assertion, _)| assertion.clone())
+        .map(|((eval_case_id, assertion), _)| format!("{eval_case_id}: {assertion}"))
         .collect();
 
-    let assertions: Vec<String> = scenario_assertion_rates
+    let assertion_pairs: Vec<(String, String)> = scenario_assertion_rates
         .keys()
-        .map(|(_, assertion)| assertion.clone())
+        .map(|(_, eval_case_id, assertion)| (eval_case_id.clone(), assertion.clone()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let helped_by_skill: Vec<String> = assertions
+    let helped_by_skill: Vec<String> = assertion_pairs
         .into_iter()
-        .filter(|assertion| {
-            let with_rates =
-                scenario_pass_rate(&scenario_assertion_rates, ScenarioKind::WithSkill, assertion);
-            let without_rates =
-                scenario_pass_rate(&scenario_assertion_rates, ScenarioKind::WithoutSkill, assertion);
-            with_rates > without_rates
+        .filter_map(|(eval_case_id, assertion)| {
+            let with_rates = scenario_pass_rate(
+                &scenario_assertion_rates,
+                ScenarioKind::WithSkill,
+                &eval_case_id,
+                &assertion,
+            )?;
+            let without_rates = scenario_pass_rate(
+                &scenario_assertion_rates,
+                ScenarioKind::WithoutSkill,
+                &eval_case_id,
+                &assertion,
+            )?;
+            (with_rates > without_rates).then(|| format!("{eval_case_id}: {assertion}"))
         })
         .collect();
 
@@ -1059,18 +1069,17 @@ fn build_iteration_summary(
 }
 
 fn scenario_pass_rate(
-    rates: &BTreeMap<(ScenarioKind, String), (usize, usize)>,
+    rates: &BTreeMap<(ScenarioKind, String, String), (usize, usize)>,
     scenario: ScenarioKind,
+    eval_case_id: &str,
     assertion: &str,
-) -> f64 {
-    let Some((passed, failed)) = rates.get(&(scenario, assertion.to_string())) else {
-        return 0.0;
-    };
+) -> Option<f64> {
+    let (passed, failed) = rates.get(&(scenario, eval_case_id.to_string(), assertion.to_string()))?;
     let total = passed + failed;
     if total == 0 {
-        0.0
+        None
     } else {
-        *passed as f64 / total as f64
+        Some(*passed as f64 / total as f64)
     }
 }
 

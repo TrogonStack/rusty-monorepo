@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::mpsc;
+use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::Runner;
 
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const VERSION_PROBE_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerProbe {
@@ -91,18 +91,35 @@ pub fn eprint_runner_unavailable(err: &RunnerUnavailable) {
 }
 
 fn capture_version(binary: &Path) -> Option<String> {
-    let binary = binary.to_path_buf();
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let result = Command::new(&binary).arg("--version").output();
-        let _ = tx.send(result);
-    });
+    let mut child = Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
 
-    let output = match rx.recv_timeout(VERSION_PROBE_TIMEOUT) {
-        Ok(Ok(output)) => output,
-        _ => return None,
-    };
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(VERSION_PROBE_POLL);
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 
+    let output = child.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -133,7 +150,7 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;

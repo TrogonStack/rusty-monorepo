@@ -712,7 +712,7 @@ enum RunDisposition {
 fn classify_run(run: &RunForSummary, mode: FailedRunsMode) -> RunDisposition {
     match run.status.as_str() {
         "skipped" => RunDisposition::Skipped,
-        "failed" => match mode {
+        "failed" | "timeout" => match mode {
             FailedRunsMode::Exclude => RunDisposition::Excluded,
             FailedRunsMode::Zero | FailedRunsMode::Bucket => RunDisposition::Failed,
         },

@@ -418,7 +418,7 @@ pub fn collect_failed_assertions_in_workspace(
                 workspace: workspace_label.clone(),
                 file: grading_path.display().to_string(),
                 line: index as u32 + 1,
-                text: result.text.clone(),
+                text: result.assertion.clone(),
             });
         }
     }
@@ -511,7 +511,8 @@ struct GradingForAnnotations {
 
 #[derive(Debug, serde::Deserialize)]
 struct AssertionForAnnotations {
-    text: String,
+    #[serde(alias = "text")]
+    assertion: String,
     passed: bool,
 }
 

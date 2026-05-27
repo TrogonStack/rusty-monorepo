@@ -36,8 +36,8 @@
     }
   ],
   "iteration_summary": {
-    "always_pass": ["c"],
-    "helped_by_skill": ["b", "c"]
+    "always_pass": ["case-a: c"],
+    "helped_by_skill": ["case-a: b"]
   },
   "scenarios": {
     "old_skill": {
