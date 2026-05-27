@@ -7,8 +7,8 @@
   "properties": {
     "duration_ms": {
       "type": "integer",
-      "minimum": 0,
-      "description": "Wall-clock duration of the runner execution in milliseconds"
+      "exclusiveMinimum": 0,
+      "description": "Wall-clock duration of the runner execution in milliseconds (must be > 0)"
     },
     "total_tokens": {
       "type": "integer",
