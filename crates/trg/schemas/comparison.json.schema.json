@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trogonstack.dev/schemas/trg/comparison.json.schema.json",
+  "title": "trg skills eval comparison",
+  "type": "object",
+  "required": ["eval_case_id", "pair", "mapping", "winner", "evidence", "rubric", "judge"],
+  "properties": {
+    "eval_case_id": { "type": "string" },
+    "pair": { "$ref": "#/$defs/scenario_pair" },
+    "mapping": { "$ref": "#/$defs/blind_mapping" },
+    "winner": {
+      "enum": ["a", "b", "tie"]
+    },
+    "winner_scenario": { "$ref": "#/$defs/scenario_kind" },
+    "evidence": { "type": "string" },
+    "rubric": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "judge": { "$ref": "#/$defs/judge_metadata" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "scenario_kind": {
+      "enum": ["with_skill", "without_skill", "old_skill"]
+    },
+    "scenario_pair": {
+      "type": "object",
+      "required": ["a", "b"],
+      "properties": {
+        "a": { "$ref": "#/$defs/scenario_kind" },
+        "b": { "$ref": "#/$defs/scenario_kind" }
+      },
+      "additionalProperties": true
+    },
+    "blind_mapping": {
+      "type": "object",
+      "required": ["A", "B"],
+      "properties": {
+        "A": { "$ref": "#/$defs/scenario_kind" },
+        "B": { "$ref": "#/$defs/scenario_kind" }
+      },
+      "additionalProperties": true
+    },
+    "judge_metadata": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": ["none", "llm", "script"]
+        },
+        "model": { "type": "string" },
+        "command": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trogonstack.dev/schemas/trg/benchmark.json.schema.json",
+  "title": "trg skills eval benchmark",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "report_id",
+    "generated_at",
+    "failed_runs_mode",
+    "scenarios",
+    "deltas"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "trg.skills-eval.benchmark.v1"
+    },
+    "report_id": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "failed_runs_mode": {
+      "enum": ["bucket", "exclude", "zero"]
+    },
+    "scenarios": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/scenario" }
+    },
+    "deltas": { "$ref": "#/$defs/deltas" },
+    "iteration_comparison": { "$ref": "#/$defs/iteration_comparison" }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "pass_fail_summary": {
+      "type": "object",
+      "required": ["passed", "failed", "total", "pass_rate"],
+      "properties": {
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "pass_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "duration_stats": {
+      "type": "object",
+      "required": ["mean", "p50", "p95", "total"],
+      "properties": {
+        "mean": { "type": "number", "minimum": 0 },
+        "p50": { "type": "integer", "minimum": 0 },
+        "p95": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "stddev": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "token_stats": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 },
+        "cost_usd": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "completed_bucket": {
+      "type": "object",
+      "required": [
+        "run_count",
+        "assertions",
+        "runs",
+        "duration_ms",
+        "tokens",
+        "missing_grading",
+        "missing_timing"
+      ],
+      "properties": {
+        "run_count": { "type": "integer", "minimum": 0 },
+        "assertions": { "$ref": "#/$defs/pass_fail_summary" },
+        "runs": { "$ref": "#/$defs/pass_fail_summary" },
+        "duration_ms": { "$ref": "#/$defs/duration_stats" },
+        "tokens": { "$ref": "#/$defs/token_stats" },
+        "missing_grading": { "type": "integer", "minimum": 0 },
+        "missing_timing": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "failed_bucket": {
+      "type": "object",
+      "required": ["run_count", "duration_ms", "tokens", "missing_timing"],
+      "properties": {
+        "run_count": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "$ref": "#/$defs/duration_stats" },
+        "tokens": { "$ref": "#/$defs/token_stats" },
+        "missing_timing": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["completed", "skipped"],
+      "properties": {
+        "completed": { "$ref": "#/$defs/completed_bucket" },
+        "failed": { "$ref": "#/$defs/failed_bucket" },
+        "skipped": {
+          "type": "object",
+          "required": ["run_count"],
+          "properties": {
+            "run_count": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "scenario_delta": {
+      "type": "object",
+      "required": ["assertion_pass_rate", "run_pass_rate", "duration_ms_mean"],
+      "properties": {
+        "assertion_pass_rate": { "type": "number" },
+        "run_pass_rate": { "type": "number" },
+        "duration_ms_mean": { "type": "number" },
+        "tokens_total": { "type": "integer" },
+        "cost_usd": { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "deltas": {
+      "type": "object",
+      "properties": {
+        "with_skill_vs_without_skill": { "$ref": "#/$defs/scenario_delta" },
+        "with_skill_vs_old_skill": { "$ref": "#/$defs/scenario_delta" }
+      },
+      "additionalProperties": true
+    },
+    "iteration_comparison": {
+      "type": "object",
+      "required": ["current_iteration_id", "previous_iteration_id", "by_scenario"],
+      "properties": {
+        "current_iteration_id": { "type": "string" },
+        "previous_iteration_id": { "type": "string" },
+        "by_scenario": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/scenario_delta" }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

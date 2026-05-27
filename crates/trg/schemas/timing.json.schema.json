@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trogonstack.dev/schemas/trg/timing.json.schema.json",
+  "title": "trg skills eval timing",
+  "type": "object",
+  "required": ["duration_ms"],
+  "properties": {
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock duration of the runner execution in milliseconds"
+    },
+    "total_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total tokens consumed when reported by the runner"
+    },
+    "input_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Input tokens when reported separately"
+    },
+    "output_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Output tokens when reported separately"
+    },
+    "cost_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Estimated cost in USD when available"
+    }
+  },
+  "additionalProperties": true
+}

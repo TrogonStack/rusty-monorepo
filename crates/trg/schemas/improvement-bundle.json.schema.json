@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trogonstack.dev/schemas/trg/improvement-bundle.json.schema.json",
+  "title": "trg skills eval improvement bundle",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "source_report_dir",
+    "output_dir",
+    "summary",
+    "eval_suite_drift",
+    "failed_assertions",
+    "human_feedback",
+    "human_feedback_summary",
+    "transcript_excerpts",
+    "suggested_focus"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "trg.skills-eval.improvement-bundle.v1"
+    },
+    "generated_at": { "type": "string" },
+    "source_report_dir": { "type": "string" },
+    "output_dir": { "type": "string" },
+    "summary": { "$ref": "#/$defs/bundle_summary" },
+    "eval_suite_drift": { "$ref": "#/$defs/eval_suite_drift" },
+    "failed_assertions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/failed_assertion_group" }
+    },
+    "human_feedback": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/human_feedback_group" }
+    },
+    "human_feedback_summary": { "$ref": "#/$defs/human_feedback_summary" },
+    "transcript_excerpts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transcript_excerpt" }
+    },
+    "suggested_focus": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "scenario_kind": {
+      "enum": ["with_skill", "without_skill"]
+    },
+    "feedback_note": {
+      "type": "object",
+      "required": ["severity", "category", "text"],
+      "properties": {
+        "severity": {
+          "enum": ["info", "warning", "blocker"]
+        },
+        "category": {
+          "enum": ["correctness", "style", "completeness", "other"]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "human_feedback_attachment": {
+      "type": "object",
+      "required": ["source_path", "reviewer", "reviewed_at", "notes"],
+      "properties": {
+        "source_path": { "type": "string" },
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewed_at": { "type": "string" },
+        "notes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/feedback_note" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "human_feedback_summary": {
+      "type": "object",
+      "required": ["reviewed_no_issues_runs"],
+      "properties": {
+        "reviewed_no_issues_runs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "human_feedback_group": {
+      "type": "object",
+      "required": [
+        "eval_case_id",
+        "eval_slug",
+        "scenario_id",
+        "run_id",
+        "feedback"
+      ],
+      "properties": {
+        "eval_case_id": { "type": "string" },
+        "eval_slug": { "type": "string" },
+        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
+        "run_id": { "type": "string" },
+        "feedback": { "$ref": "#/$defs/human_feedback_attachment" }
+      },
+      "additionalProperties": true
+    },
+    "failed_assertion_entry": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "scenario_id",
+        "attempt",
+        "assertion",
+        "evidence"
+      ],
+      "properties": {
+        "run_id": { "type": "string" },
+        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "assertion": { "type": "string" },
+        "evidence": { "type": "string" },
+        "human_feedback": { "$ref": "#/$defs/human_feedback_attachment" }
+      },
+      "additionalProperties": true
+    },
+    "failed_assertion_group": {
+      "type": "object",
+      "required": ["eval_case_id", "eval_slug", "failures"],
+      "properties": {
+        "eval_case_id": { "type": "string" },
+        "eval_slug": { "type": "string" },
+        "failures": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/failed_assertion_entry" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "bundle_summary": {
+      "type": "object",
+      "required": [
+        "iteration",
+        "report_id",
+        "skill_name",
+        "skill_hash",
+        "evals_hash",
+        "total_runs",
+        "passed_assertions",
+        "failed_assertions",
+        "completed_runs",
+        "failed_runs",
+        "skipped_runs"
+      ],
+      "properties": {
+        "iteration": { "type": "integer", "minimum": 1 },
+        "report_id": { "type": "string" },
+        "skill_name": { "type": "string" },
+        "skill_hash": { "type": "string" },
+        "evals_hash": { "type": "string" },
+        "total_runs": { "type": "integer", "minimum": 0 },
+        "passed_assertions": { "type": "integer", "minimum": 0 },
+        "failed_assertions": { "type": "integer", "minimum": 0 },
+        "completed_runs": { "type": "integer", "minimum": 0 },
+        "failed_runs": { "type": "integer", "minimum": 0 },
+        "skipped_runs": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "eval_suite_drift": {
+      "type": "object",
+      "required": ["detected", "previous_hash"],
+      "properties": {
+        "detected": { "type": "boolean" },
+        "previous_hash": { "type": "string" },
+        "current_hash": { "type": "string" },
+        "current_evals_path": { "type": "string" },
+        "warning": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "transcript_excerpt": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "eval_case_id",
+        "eval_slug",
+        "scenario_id",
+        "path",
+        "total_lines",
+        "truncated",
+        "head",
+        "tail"
+      ],
+      "properties": {
+        "run_id": { "type": "string" },
+        "eval_case_id": { "type": "string" },
+        "eval_slug": { "type": "string" },
+        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
+        "path": { "type": "string" },
+        "total_lines": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "head": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tail": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

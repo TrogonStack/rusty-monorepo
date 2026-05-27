@@ -1,11 +1,20 @@
+use super::grading::{self, GradingFile};
+use super::outputs::guess_mime_type;
 use super::validation::{ValidationError, ValidationErrors};
 use crate::fs::FileSystem;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
+
+pub const SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const DEFAULT_MAX_FIXTURE_BYTES: u64 = 5 * 1024 * 1024;
+const FIXTURE_BINARY_SAMPLE_BYTES: usize = 8 * 1024;
+
+const SUITE_V1_FIELDS: &[&str] = &["schema_version", "skill_name", "evals"];
+const CASE_V1_FIELDS: &[&str] = &["id", "prompt", "expected_output", "files", "assertions"];
 
 #[derive(Error, Debug)]
 pub enum EvalError {
@@ -168,16 +177,29 @@ impl<'de> Deserialize<'de> for RelativeSkillPath {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+fn default_schema_version() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalPriority {
+    Low,
+    Normal,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EvalSuite {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub skill_name: NonEmptyString,
     #[serde(deserialize_with = "deserialize_evals")]
     pub evals: Vec<EvalCase>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EvalCase {
     pub id: EvalCaseId,
     pub prompt: NonEmptyString,
@@ -186,6 +208,80 @@ pub struct EvalCase {
     pub files: Vec<RelativeSkillPath>,
     #[serde(default)]
     pub assertions: Vec<NonEmptyString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<EvalPriority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_output_files: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grader_hints: Option<HashMap<String, serde_json::Value>>,
+}
+
+pub fn parse_eval_suite(content: &str) -> Result<EvalSuite> {
+    let value: serde_json::Value = serde_json::from_str(content)?;
+    validate_eval_manifest_version(&value)?;
+    serde_json::from_value(value).map_err(EvalError::from)
+}
+
+fn validate_eval_manifest_version(value: &serde_json::Value) -> Result<()> {
+    let schema_version = value
+        .get("schema_version")
+        .and_then(|version| version.as_u64())
+        .unwrap_or(1) as u32;
+
+    if schema_version > SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION {
+        return Err(EvalError::Validation(
+            ValidationError::for_field(
+                "schema_version",
+                format!(
+                    "manifest schema_version {schema_version} is newer than this trg build supports (max {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}); upgrade trg or set schema_version to {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}"
+                ),
+            )
+            .into(),
+        ));
+    }
+
+    if schema_version == 1 {
+        reject_unknown_fields(value, "manifest", SUITE_V1_FIELDS)?;
+        if let Some(evals) = value.get("evals").and_then(|evals| evals.as_array()) {
+            for (index, eval) in evals.iter().enumerate() {
+                reject_unknown_fields(eval, &format!("evals[{index}]"), CASE_V1_FIELDS)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn reject_unknown_fields(value: &serde_json::Value, label: &str, allowed: &[&str]) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(EvalError::Validation(
+                ValidationError::for_field(
+                    label,
+                    format!(
+                        "unknown field '{key}' is not allowed in schema_version 1 manifests; omit it or set schema_version to 2"
+                    ),
+                )
+                .into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn effective_timeout_secs(case: &EvalCase, global_timeout_secs: Option<u64>) -> Option<u64> {
+    case.timeout_secs
+        .map(u64::from)
+        .or(global_timeout_secs)
 }
 
 fn deserialize_evals<'de, D>(deserializer: D) -> std::result::Result<Vec<EvalCase>, D::Error>
@@ -208,6 +304,19 @@ where
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EvalCheckOptions {
     pub require_assertions: bool,
+    pub max_fixture_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EvalLintOptions {
+    pub allow_empty_assertions: bool,
+    pub max_fixture_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalLintWarning {
+    pub eval_id: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,7 +335,7 @@ pub struct WorkspaceCheckOptions {
     pub fail_on_failed_assertions: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WorkspaceCheckReport {
     pub grading_files: usize,
     pub timing_files: usize,
@@ -238,34 +347,230 @@ pub struct WorkspaceCheckReport {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GradingFile {
-    assertion_results: Vec<AssertionResult>,
-    summary: GradingSummary,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AssertionResult {
-    text: String,
-    passed: bool,
-    evidence: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GradingSummary {
-    passed: usize,
-    failed: usize,
-    total: usize,
-    pass_rate: f64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct TimingFile {
     #[serde(default)]
     total_tokens: Option<u64>,
     duration_ms: u64,
+}
+
+pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSuite> {
+    let suite_path = skill_path.join("evals").join("evals.json");
+    let content = fs.read_to_string(&suite_path)?;
+    parse_eval_suite(&content)
+}
+
+pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
+    format!(
+        r#"{{
+  "schema_version": 2,
+  "skill_name": "{skill_name}",
+  "evals": [
+    {{
+      "id": "example",
+      "prompt": "Complete the example task using the skill guidance.",
+      "expected_output": "A concise response that demonstrates the skill.",
+      "files": [],
+      "assertions": [
+        "The response follows the skill instructions"
+      ]
+    }},
+    {{
+      "id": "metadata-example",
+      "prompt": "Optional metadata fields (schema_version >= 2) — delete this case or merge fields into your evals.",
+      "expected_output": "Demonstrates optional eval-level metadata.",
+      "files": [],
+      "assertions": [
+        "Optional metadata example only"
+      ],
+      "tags": ["smoke", "docs"],
+      "priority": "high",
+      "timeout_secs": 120,
+      "expected_output_files": ["summary.md"],
+      "grader_hints": {{
+        "strict_json": true
+      }}
+    }}
+  ]
+}}"#
+    )
+}
+
+pub fn scaffold_eval_suite(skill_name: &str) -> EvalSuite {
+    parse_eval_suite(&eval_manifest_scaffold_json(skill_name)).expect("scaffold manifest must parse")
+}
+
+pub fn write_eval_suite(fs: &impl FileSystem, skill_path: &Path, suite: &EvalSuite) -> Result<()> {
+    let suite_path = skill_path.join("evals").join("evals.json");
+    let json = serde_json::to_string_pretty(suite)?;
+    fs.write(&suite_path, &json)?;
+    Ok(())
+}
+
+pub fn write_eval_manifest_scaffold(fs: &impl FileSystem, skill_path: &Path, skill_name: &str) -> Result<()> {
+    let suite_path = skill_path.join("evals").join("evals.json");
+    fs.write(&suite_path, &eval_manifest_scaffold_json(skill_name))?;
+    Ok(())
+}
+
+pub fn lint_eval_suite(suite: &EvalSuite, options: EvalLintOptions) -> Vec<EvalLintWarning> {
+    let mut warnings = Vec::new();
+
+    for eval in &suite.evals {
+        let eval_id = eval.id.as_str().to_string();
+
+        if eval.prompt.as_str().len() < 20 {
+            warnings.push(EvalLintWarning {
+                eval_id: eval_id.clone(),
+                message: "prompt is too vague (shorter than 20 characters)".to_string(),
+            });
+        }
+
+        if eval.expected_output.as_str().len() < 10 {
+            warnings.push(EvalLintWarning {
+                eval_id: eval_id.clone(),
+                message: "expected_output is too generic (shorter than 10 characters)".to_string(),
+            });
+        }
+
+        if !eval.files.is_empty() && !eval.prompt.as_str().contains('/') {
+            warnings.push(EvalLintWarning {
+                eval_id: eval_id.clone(),
+                message: "fixture files are present but the prompt does not reference a file path"
+                    .to_string(),
+            });
+        }
+
+        let mut seen_files = HashSet::new();
+        for file in &eval.files {
+            if !seen_files.insert(file.as_str()) {
+                warnings.push(EvalLintWarning {
+                    eval_id: eval_id.clone(),
+                    message: format!("duplicate fixture path '{}'", file),
+                });
+            }
+        }
+
+        if !options.allow_empty_assertions && eval.assertions.is_empty() {
+            warnings.push(EvalLintWarning {
+                eval_id,
+                message: "assertions are empty".to_string(),
+            });
+        }
+    }
+
+    warnings
+}
+
+pub fn lint_eval_suite_fixtures(
+    fs: &impl FileSystem,
+    skill_path: &Path,
+    suite: &EvalSuite,
+    options: EvalLintOptions,
+) -> Vec<EvalLintWarning> {
+    let mut warnings = lint_eval_suite(suite, options);
+
+    for eval in &suite.evals {
+        let eval_id = eval.id.as_str().to_string();
+        warnings.extend(lint_fixture_files(
+            fs,
+            skill_path,
+            &eval_id,
+            &eval.files,
+            options.max_fixture_bytes,
+        ));
+    }
+
+    warnings
+}
+
+fn lint_fixture_files(
+    fs: &impl FileSystem,
+    skill_path: &Path,
+    eval_id: &str,
+    files: &[RelativeSkillPath],
+    max_fixture_bytes: Option<u64>,
+) -> Vec<EvalLintWarning> {
+    let limit = max_fixture_bytes.unwrap_or(DEFAULT_MAX_FIXTURE_BYTES);
+    let mut warnings = Vec::new();
+
+    for file in files {
+        let full_path = skill_path.join(file.as_path());
+        if !fs.exists(&full_path) {
+            continue;
+        }
+
+        let Ok(bytes) = std::fs::read(&full_path) else {
+            continue;
+        };
+        if !full_path.is_file() {
+            continue;
+        }
+
+        if bytes.len() as u64 > limit {
+            warnings.push(EvalLintWarning {
+                eval_id: eval_id.to_string(),
+                message: format!(
+                    "fixture '{}' is {} bytes (exceeds {} byte limit)",
+                    file,
+                    bytes.len(),
+                    limit
+                ),
+            });
+        }
+
+        if is_probably_binary_fixture(&full_path, &bytes) {
+            warnings.push(EvalLintWarning {
+                eval_id: eval_id.to_string(),
+                message: format!(
+                    "fixture '{}' appears to be binary; runners and graders may not handle it well",
+                    file
+                ),
+            });
+        }
+    }
+
+    warnings
+}
+
+pub fn is_probably_binary_fixture(path: &Path, bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(FIXTURE_BINARY_SAMPLE_BYTES)];
+    if sample.contains(&0) {
+        return true;
+    }
+
+    if let Some(mime) = guess_mime_type(path) {
+        return !(mime.starts_with("text/")
+            || matches!(
+                mime.as_str(),
+                "application/json"
+                    | "application/xml"
+                    | "application/yaml"
+                    | "application/x-ndjson"
+            ));
+    }
+
+    std::str::from_utf8(sample).is_err()
+}
+
+pub fn missing_expected_output_warnings(eval: &EvalCase, outputs_dir: &Path) -> Vec<String> {
+    let Some(expected_files) = eval.expected_output_files.as_ref() else {
+        return Vec::new();
+    };
+
+    expected_files
+        .iter()
+        .filter(|relative| !outputs_dir.join(relative).is_file())
+        .map(|relative| format!("expected output file '{}' is missing under outputs/", relative))
+        .collect()
+}
+
+pub fn print_eval_lint_warnings(warnings: &[EvalLintWarning]) {
+    for warning in warnings {
+        eprintln!(
+            "eval lint warning ({}): {}",
+            warning.eval_id, warning.message
+        );
+    }
 }
 
 pub fn check_eval_suite(
@@ -276,7 +581,7 @@ pub fn check_eval_suite(
 ) -> Result<EvalCheckReport> {
     let suite_path = skill_path.join("evals").join("evals.json");
     let content = fs.read_to_string(&suite_path)?;
-    let suite: EvalSuite = serde_json::from_str(&content)?;
+    let suite = parse_eval_suite(&content)?;
 
     let mut errors = ValidationErrors::new();
     let mut file_count = 0;
@@ -367,7 +672,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         let grading = read_grading_file(grading_path)?;
         validate_grading_file(grading_path, &grading, options, &mut errors);
 
-        for result in grading.assertion_results {
+        for result in &grading.assertion_results {
             assertion_results += 1;
             if result.passed {
                 passed_assertions += 1;
@@ -408,7 +713,7 @@ fn validate_non_empty(value: &str, field: &str, errors: &mut ValidationErrors) {
     }
 }
 
-fn collect_named_files(root: &Path, file_name: &str, matches: &mut Vec<PathBuf>) -> std::io::Result<()> {
+pub fn collect_named_files(root: &Path, file_name: &str, matches: &mut Vec<PathBuf>) -> std::io::Result<()> {
     walk_named_files(root, file_name, matches)?;
     matches.sort();
     Ok(())
@@ -460,15 +765,21 @@ fn validate_grading_file(
 
     for (index, result) in grading.assertion_results.iter().enumerate() {
         validate_non_empty(
-            &result.text,
-            &format!("{} assertion_results[{}].text", file_label, index),
+            &result.assertion,
+            &format!("{} assertion_results[{index}].assertion", file_label),
             errors,
         );
         validate_non_empty(
             &result.evidence,
-            &format!("{} assertion_results[{}].evidence", file_label, index),
+            &format!("{} assertion_results[{index}].evidence", file_label),
             errors,
         );
+        if result.passed && grading::evidence_is_trivial(&result.assertion, &result.evidence) {
+            errors.push(ValidationError::for_field(
+                format!("{} assertion_results[{index}].evidence", file_label),
+                "passed assertions must include non-trivial evidence",
+            ));
+        }
     }
 
     if grading.summary.passed != passed {
@@ -579,6 +890,7 @@ mod tests {
             "csv-analyzer",
             EvalCheckOptions {
                 require_assertions: true,
+                ..EvalCheckOptions::default()
             },
         )
         .unwrap();
@@ -670,6 +982,7 @@ mod tests {
             "csv-analyzer",
             EvalCheckOptions {
                 require_assertions: true,
+                ..EvalCheckOptions::default()
             },
         )
         .unwrap_err();
@@ -685,9 +998,20 @@ mod tests {
         fs::write(
             run.join("grading.json"),
             r#"{
+  "schema_version": "trg.skills-eval.grading.v1",
   "assertion_results": [
-    { "text": "Includes a summary", "passed": true, "evidence": "summary.md exists" },
-    { "text": "Includes a chart", "passed": false, "evidence": "no chart file found" }
+    {
+      "assertion": "Includes a summary",
+      "passed": true,
+      "evidence": "summary.md exists in outputs",
+      "grader": { "kind": "mechanical" }
+    },
+    {
+      "assertion": "Includes a chart",
+      "passed": false,
+      "evidence": "no chart file found in outputs",
+      "grader": { "kind": "mechanical" }
+    }
   ],
   "summary": { "passed": 1, "failed": 1, "total": 2, "pass_rate": 0.5 }
 }"#,
@@ -717,8 +1041,14 @@ mod tests {
         fs::write(
             run.join("grading.json"),
             r#"{
+  "schema_version": "trg.skills-eval.grading.v1",
   "assertion_results": [
-    { "text": "Includes a summary", "passed": false, "evidence": "summary.md missing" }
+    {
+      "assertion": "Includes a summary",
+      "passed": false,
+      "evidence": "summary.md missing from outputs",
+      "grader": { "kind": "mechanical" }
+    }
   ],
   "summary": { "passed": 0, "failed": 1, "total": 1, "pass_rate": 0.0 }
 }"#,
@@ -735,5 +1065,353 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("failed assertion"));
+    }
+
+    fn sample_suite_with_eval(eval: EvalCase) -> EvalSuite {
+        EvalSuite {
+            schema_version: 1,
+            skill_name: NonEmptyString("demo-skill".to_string()),
+            evals: vec![eval],
+        }
+    }
+
+    fn sample_eval_case(id: &str, prompt: &str, expected_output: &str) -> EvalCase {
+        EvalCase {
+            id: EvalCaseId(id.to_string()),
+            prompt: NonEmptyString(prompt.to_string()),
+            expected_output: NonEmptyString(expected_output.to_string()),
+            files: vec![],
+            assertions: vec![NonEmptyString("checks something".to_string())],
+            tags: None,
+            priority: None,
+            timeout_secs: None,
+            expected_output_files: None,
+            grader_hints: None,
+        }
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_on_vague_prompt() {
+        let suite = sample_suite_with_eval(sample_eval_case(
+            "one",
+            "too short",
+            "long enough output",
+        ));
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings.iter().any(|warning| warning.message.contains("too vague")));
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_on_generic_expected_output() {
+        let suite = sample_suite_with_eval(sample_eval_case(
+            "one",
+            "A sufficiently long prompt here",
+            "short",
+        ));
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings.iter().any(|warning| warning.message.contains("too generic")));
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_when_fixtures_are_not_referenced() {
+        let mut eval = sample_eval_case(
+            "one",
+            "Analyze the attached data without paths",
+            "A detailed analysis output",
+        );
+        eval.files = vec![RelativeSkillPath("evals/files/input.csv".to_string())];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("does not reference a file path")));
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_on_duplicate_fixture_paths() {
+        let mut eval = sample_eval_case(
+            "one",
+            "Analyze evals/files/input.csv twice",
+            "A detailed analysis output",
+        );
+        eval.files = vec![
+            RelativeSkillPath("evals/files/input.csv".to_string()),
+            RelativeSkillPath("evals/files/input.csv".to_string()),
+        ];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings.iter().any(|warning| warning.message.contains("duplicate fixture path")));
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_on_empty_assertions_by_default() {
+        let mut eval = sample_eval_case(
+            "one",
+            "A sufficiently long prompt here",
+            "A detailed analysis output",
+        );
+        eval.assertions = vec![];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings.iter().any(|warning| warning.message.contains("assertions are empty")));
+    }
+
+    #[test]
+    fn lint_eval_suite_allows_empty_assertions_when_requested() {
+        let mut eval = sample_eval_case(
+            "one",
+            "A sufficiently long prompt here",
+            "A detailed analysis output",
+        );
+        eval.assertions = vec![];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(
+            &suite,
+            EvalLintOptions {
+                allow_empty_assertions: true,
+                ..EvalLintOptions::default()
+            },
+        );
+        assert!(!warnings.iter().any(|warning| warning.message.contains("assertions are empty")));
+    }
+
+    #[test]
+    fn scaffold_eval_suite_round_trips_through_serde_json() {
+        let suite = scaffold_eval_suite("demo-skill");
+        let json = serde_json::to_string_pretty(&suite).unwrap();
+        let parsed = parse_eval_suite(&json).unwrap();
+        assert_eq!(parsed.schema_version, 2);
+        assert_eq!(parsed.skill_name.as_str(), "demo-skill");
+        assert_eq!(parsed.evals.len(), 2);
+        assert_eq!(parsed.evals[0].id.as_str(), "example");
+        assert!(!parsed.evals[0].assertions.is_empty());
+        assert_eq!(parsed.evals[1].priority, Some(EvalPriority::High));
+    }
+
+    #[test]
+    fn scaffold_eval_suite_passes_strict_check() {
+        let fs = MemFS::new();
+        fs.insert(
+            Path::new("/demo-skill/SKILL.md"),
+            "---\nname: demo-skill\ndescription: demo\n---\n",
+        );
+        write_eval_suite(&fs, Path::new("/demo-skill"), &scaffold_eval_suite("demo-skill")).unwrap();
+
+        check_eval_suite(
+            &fs,
+            Path::new("/demo-skill"),
+            "demo-skill",
+            EvalCheckOptions {
+                require_assertions: true,
+                ..EvalCheckOptions::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn parse_v2_manifest_with_all_metadata_fields_round_trips() {
+        let json = r#"{
+  "schema_version": 2,
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "full",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "files": ["evals/files/input.csv"],
+      "assertions": ["checks output"],
+      "tags": ["smoke", "regression"],
+      "priority": "critical",
+      "timeout_secs": 90,
+      "expected_output_files": ["report.md", "summary.md"],
+      "grader_hints": { "strict_json": true, "threshold": 0.8 }
+    }
+  ]
+}"#;
+
+        let suite = parse_eval_suite(json).unwrap();
+        let round_trip = serde_json::to_string(&suite).unwrap();
+        let reparsed = parse_eval_suite(&round_trip).unwrap();
+        let eval = &reparsed.evals[0];
+        assert_eq!(reparsed.schema_version, 2);
+        assert_eq!(
+            eval.tags.as_deref(),
+            Some(["smoke".to_string(), "regression".to_string()].as_slice())
+        );
+        assert_eq!(eval.priority, Some(EvalPriority::Critical));
+        assert_eq!(eval.timeout_secs, Some(90));
+        assert_eq!(
+            eval.expected_output_files.as_deref(),
+            Some(["report.md".to_string(), "summary.md".to_string()].as_slice())
+        );
+        assert_eq!(
+            eval.grader_hints
+                .as_ref()
+                .and_then(|hints| hints.get("strict_json"))
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn parse_v1_manifest_rejects_unknown_fields() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "tags": ["smoke"]
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field 'tags'"));
+    }
+
+    #[test]
+    fn parse_v2_manifest_allows_unknown_fields() {
+        let json = r#"{
+  "schema_version": 2,
+  "skill_name": "demo-skill",
+  "future_suite_field": true,
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "future_case_field": "ok"
+    }
+  ]
+}"#;
+
+        parse_eval_suite(json).unwrap();
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_schema_version() {
+        let json = r#"{
+  "schema_version": 99,
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err();
+        assert!(err.to_string().contains("schema_version 99"));
+    }
+
+    #[test]
+    fn effective_timeout_secs_prefers_per_eval_override() {
+        let mut eval = sample_eval_case("one", "prompt long enough here", "output long");
+        eval.timeout_secs = Some(42);
+        assert_eq!(effective_timeout_secs(&eval, Some(99)), Some(42));
+        eval.timeout_secs = None;
+        assert_eq!(effective_timeout_secs(&eval, Some(99)), Some(99));
+        assert_eq!(effective_timeout_secs(&eval, None), None);
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_on_large_fixture() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        let fixture_path = skill_path.join("evals/files/large.csv");
+        std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+        std::fs::write(&fixture_path, vec![b'a'; DEFAULT_MAX_FIXTURE_BYTES as usize + 1]).unwrap();
+
+        let mut eval = sample_eval_case(
+            "one",
+            "Analyze evals/files/large.csv carefully",
+            "A detailed analysis output",
+        );
+        eval.files = vec![RelativeSkillPath("evals/files/large.csv".to_string())];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite_fixtures(
+            &crate::fs::RealFS,
+            &skill_path,
+            &suite,
+            EvalLintOptions::default(),
+        );
+        assert!(warnings.iter().any(|warning| warning.message.contains("exceeds")));
+    }
+
+    #[test]
+    fn lint_eval_suite_does_not_warn_on_small_fixture() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        let fixture_path = skill_path.join("evals/files/small.csv");
+        std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+        std::fs::write(&fixture_path, "month,revenue\nMay,10").unwrap();
+
+        let mut eval = sample_eval_case(
+            "one",
+            "Analyze evals/files/small.csv carefully",
+            "A detailed analysis output",
+        );
+        eval.files = vec![RelativeSkillPath("evals/files/small.csv".to_string())];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite_fixtures(
+            &crate::fs::RealFS,
+            &skill_path,
+            &suite,
+            EvalLintOptions::default(),
+        );
+        assert!(!warnings.iter().any(|warning| warning.message.contains("exceeds")));
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_on_binary_fixture() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        let fixture_path = skill_path.join("evals/files/binary.bin");
+        std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+        std::fs::write(&fixture_path, b"text\0binary").unwrap();
+
+        let mut eval = sample_eval_case(
+            "one",
+            "Analyze evals/files/binary.bin carefully",
+            "A detailed analysis output",
+        );
+        eval.files = vec![RelativeSkillPath("evals/files/binary.bin".to_string())];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite_fixtures(
+            &crate::fs::RealFS,
+            &skill_path,
+            &suite,
+            EvalLintOptions::default(),
+        );
+        assert!(warnings.iter().any(|warning| warning.message.contains("binary")));
+    }
+
+    #[test]
+    fn missing_expected_output_warnings_lists_missing_files() {
+        let temp = tempdir().unwrap();
+        let outputs = temp.path().join("outputs");
+        std::fs::create_dir_all(&outputs).unwrap();
+        std::fs::write(outputs.join("present.md"), "ok").unwrap();
+
+        let mut eval = sample_eval_case("one", "prompt long enough here", "output long");
+        eval.expected_output_files = Some(vec!["present.md".to_string(), "missing.md".to_string()]);
+
+        let warnings = missing_expected_output_warnings(&eval, &outputs);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("missing.md"));
     }
 }

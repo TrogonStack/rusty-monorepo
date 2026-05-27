@@ -1,0 +1,246 @@
+{
+  "schema_version": "trg.skills-eval.report.v1",
+  "report": {
+    "id": "20260526T120000Z-deadbeef",
+    "generated_at": "2026-05-26T12:00:00Z",
+    "iteration": 2,
+    "producer": {
+      "name": "trg",
+      "version": "0.3.0"
+    },
+    "ci": {
+      "provider": "github-actions",
+      "run_id": "12345678",
+      "run_attempt": "1",
+      "workflow": "skill-eval",
+      "job": "eval",
+      "commit": "abc123def456",
+      "git_ref": "refs/pull/42/merge"
+    }
+  },
+  "suite": {
+    "skill_name": "csv-analyzer",
+    "skill_path": "./skills/csv-analyzer",
+    "skill_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "evals_path": "./skills/csv-analyzer/evals/evals.json",
+    "evals_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "old_skill_path": "./skills/csv-analyzer-v1",
+    "old_skill_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "dimensions": {
+    "eval_cases": [
+      {
+        "id": "analyze-sales",
+        "slug": "analyze-sales",
+        "prompt": "Analyze the attached sales CSV and write a summary.",
+        "expected_output": "A markdown summary with total revenue.",
+        "files": ["fixtures/sales.csv"],
+        "assertion_ids": ["analyze-sales:a0", "analyze-sales:a1"]
+      }
+    ],
+    "assertions": [
+      {
+        "id": "analyze-sales:a0",
+        "eval_case_id": "analyze-sales",
+        "text": "outputs/summary.md exists"
+      },
+      {
+        "id": "analyze-sales:a1",
+        "eval_case_id": "analyze-sales",
+        "text": "summary mentions total revenue"
+      }
+    ],
+    "skill_revisions": [
+      {
+        "id": "current",
+        "skill_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "id": "old",
+        "skill_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    ],
+    "model_configs": [
+      {
+        "id": "ci-sonnet-4",
+        "capture_status": "partial",
+        "label": "ci-sonnet-4",
+        "parameters": {},
+        "parameter_sources": {},
+        "extra": {}
+      }
+    ],
+    "scenarios": [
+      { "id": "with_skill", "kind": "with_skill" },
+      { "id": "without_skill", "kind": "without_skill" },
+      { "id": "old_skill", "kind": "old_skill" }
+    ],
+    "graders": [
+      {
+        "kind": "mechanical",
+        "invoked_by": "eval grade"
+      }
+    ]
+  },
+  "runs": [
+    {
+      "id": "run-001",
+      "eval_case_id": "analyze-sales",
+      "eval_slug": "analyze-sales",
+      "scenario_id": "with_skill",
+      "iteration": 2,
+      "model_config_id": "ci-sonnet-4",
+      "skill_revision_id": "current",
+      "attempt": 1,
+      "status": "completed",
+      "runner_invocations": 1,
+      "failure_kind": null,
+      "paths": {
+        "workspace": "runs/run-001/workspace",
+        "outputs": "runs/run-001/workspace/outputs"
+      },
+      "mirror_path": "iteration-2/eval-analyze-sales/with_skill/",
+      "artifacts": [
+        {
+          "kind": "transcript",
+          "path": "runs/run-001/transcript.jsonl"
+        },
+        {
+          "kind": "output",
+          "path": "runs/run-001/workspace/outputs/summary.md",
+          "size_bytes": 142,
+          "sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "mime_type": "text/markdown"
+        }
+      ],
+      "metrics": {
+        "duration_ms": 3200,
+        "exit_code": 0,
+        "total_tokens": 4100,
+        "input_tokens": 2800,
+        "output_tokens": 1300,
+        "cost_usd": 0.0123
+      },
+      "cache": {
+        "hit": false,
+        "source_run_id": "run-001",
+        "key": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "skill_integrity": {
+        "tampered": false,
+        "tampered_files": []
+      }
+    },
+    {
+      "id": "run-002",
+      "eval_case_id": "analyze-sales",
+      "eval_slug": "analyze-sales",
+      "scenario_id": "without_skill",
+      "iteration": 2,
+      "model_config_id": "ci-sonnet-4",
+      "skill_revision_id": "current",
+      "attempt": 1,
+      "status": "failed",
+      "runner_invocations": 2,
+      "failure_kind": "runner",
+      "paths": {
+        "workspace": "runs/run-002/workspace",
+        "outputs": "runs/run-002/workspace/outputs"
+      },
+      "mirror_path": "iteration-2/eval-analyze-sales/without_skill/",
+      "artifacts": [
+        {
+          "kind": "transcript",
+          "path": "runs/run-002/transcript.jsonl"
+        },
+        {
+          "kind": "stderr",
+          "path": "runs/run-002/stderr.log"
+        }
+      ],
+      "metrics": {
+        "duration_ms": 900,
+        "exit_code": 1,
+        "total_tokens": null,
+        "input_tokens": null,
+        "output_tokens": null,
+        "cost_usd": null
+      },
+      "cache": null,
+      "skill_integrity": null
+    }
+  ],
+  "assertion_results": [
+    {
+      "assertion_id": "analyze-sales:a0",
+      "passed": true,
+      "evidence": "outputs/summary.md exists",
+      "run_id": "run-001"
+    }
+  ],
+  "summaries": {
+    "by_scenario": [
+      {
+        "scenario_id": "with_skill",
+        "total_runs": 1,
+        "passed_runs": 1,
+        "skipped_runs": 0,
+        "failed_runs": 0
+      },
+      {
+        "scenario_id": "without_skill",
+        "total_runs": 1,
+        "passed_runs": 0,
+        "skipped_runs": 0,
+        "failed_runs": 1
+      }
+    ],
+    "human_feedback": {
+      "total_runs": 2,
+      "reviewed_runs": 1,
+      "pending_runs": 1,
+      "by_severity": {
+        "info": 0,
+        "warning": 1,
+        "blocker": 0
+      },
+      "by_category": {
+        "correctness": 0,
+        "style": 0,
+        "completeness": 1,
+        "other": 0
+      }
+    }
+  },
+  "improvement_feedback": [
+    {
+      "run_id": "run-001",
+      "eval_case_id": "analyze-sales",
+      "scenario_id": "with_skill",
+      "reviewer": "reviewer@example.com",
+      "reviewed_at": "2026-05-26T12:30:00Z",
+      "notes": [
+        {
+          "severity": "warning",
+          "category": "completeness",
+          "text": "Add an example output path in the skill instructions."
+        }
+      ]
+    }
+  ],
+  "comparisons": [
+    {
+      "eval_case_id": "analyze-sales",
+      "winner": "with_skill",
+      "evidence": "With-skill output included revenue totals."
+    }
+  ],
+  "iteration_summary": {
+    "always_pass": ["analyze-sales:a0"],
+    "always_fail": [],
+    "helped_by_skill": ["analyze-sales:a1"],
+    "flaky_assertions": [],
+    "timing_outliers": [],
+    "token_outliers": []
+  }
+}

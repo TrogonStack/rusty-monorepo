@@ -18,3 +18,4 @@ secrecy = { version = "0.10", features = ["serde"] }
 tokio = { version = "1.42", features = ["io-std", "macros", "process", "rt-multi-thread"] }
 http = "1.4"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+regex = "1.11"

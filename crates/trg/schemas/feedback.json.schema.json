@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trogonstack.dev/schemas/trg/feedback.json.schema.json",
+  "title": "trg skills eval feedback",
+  "type": "object",
+  "required": ["reviewer", "reviewed_at", "notes"],
+  "properties": {
+    "reviewer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reviewer identity, typically git user.email"
+    },
+    "reviewed_at": {
+      "type": "string",
+      "description": "RFC 3339 timestamp when feedback was recorded"
+    },
+    "notes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/note" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "note": {
+      "type": "object",
+      "required": ["severity", "category", "text"],
+      "properties": {
+        "severity": {
+          "enum": ["info", "warning", "blocker"]
+        },
+        "category": {
+          "enum": ["correctness", "style", "completeness", "other"]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

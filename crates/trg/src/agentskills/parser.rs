@@ -42,6 +42,19 @@ pub fn read_properties(fs: &impl FileSystem, skill_path: &Path) -> Result<(Skill
     Ok((props, keys))
 }
 
+/// Frontmatter fields embedded in eval runner prompts (full body lives in the symlinked skill).
+pub fn skill_summary_from_content(content: &str) -> Result<(String, String)> {
+    let data = parse_frontmatter(content)?;
+    let props: SkillProperties = data.deserialize()?;
+    if props.name.is_empty() {
+        return Err(SkillError::EmptyField("name"));
+    }
+    if props.description.is_empty() {
+        return Err(SkillError::EmptyField("description"));
+    }
+    Ok((props.name, props.description))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
