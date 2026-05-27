@@ -360,10 +360,12 @@ pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSu
 }
 
 pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
+    let skill_name_json = serde_json::to_string(skill_name)
+        .expect("string serialization to JSON is infallible");
     format!(
         r#"{{
   "schema_version": 2,
-  "skill_name": "{skill_name}",
+  "skill_name": {skill_name_json},
   "evals": [
     {{
       "id": "example",
