@@ -7,11 +7,9 @@ use super::validation::ValidationError;
 pub const REPORT_SCHEMA: &str = include_str!("../../schemas/report.json.schema.json");
 pub const GRADING_SCHEMA: &str = include_str!("../../schemas/grading.json.schema.json");
 pub const BENCHMARK_SCHEMA: &str = include_str!("../../schemas/benchmark.json.schema.json");
-pub const ITERATION_SUMMARY_SCHEMA: &str =
-    include_str!("../../schemas/iteration-summary.json.schema.json");
+pub const ITERATION_SUMMARY_SCHEMA: &str = include_str!("../../schemas/iteration-summary.json.schema.json");
 pub const FEEDBACK_SCHEMA: &str = include_str!("../../schemas/feedback.json.schema.json");
-pub const IMPROVEMENT_BUNDLE_SCHEMA: &str =
-    include_str!("../../schemas/improvement-bundle.json.schema.json");
+pub const IMPROVEMENT_BUNDLE_SCHEMA: &str = include_str!("../../schemas/improvement-bundle.json.schema.json");
 pub const COMPARISON_SCHEMA: &str = include_str!("../../schemas/comparison.json.schema.json");
 pub const TIMING_SCHEMA: &str = include_str!("../../schemas/timing.json.schema.json");
 pub const EVALS_SCHEMA: &str = include_str!("../../schemas/evals.json.schema.json");
@@ -20,16 +18,10 @@ pub fn validate_artifact(schema: &str, json: &serde_json::Value) -> Result<()> {
     #[cfg(any(feature = "schema-validation", test))]
     {
         let schema_value: serde_json::Value = serde_json::from_str(schema)?;
-        let validator = jsonschema::validator_for(&schema_value).map_err(|error| {
-            EvalError::Validation(
-                ValidationError::for_field("schema", error.to_string()).into(),
-            )
-        })?;
+        let validator = jsonschema::validator_for(&schema_value)
+            .map_err(|error| EvalError::Validation(ValidationError::for_field("schema", error.to_string()).into()))?;
 
-        let errors: Vec<String> = validator
-            .iter_errors(json)
-            .map(|error| error.to_string())
-            .collect();
+        let errors: Vec<String> = validator.iter_errors(json).map(|error| error.to_string()).collect();
 
         if errors.is_empty() {
             return Ok(());
@@ -84,8 +76,7 @@ fn validate_benchmark_artifacts(report_dir: &Path) -> Result<()> {
         if value.get("schema_version").is_none() {
             continue;
         }
-        validate_artifact(BENCHMARK_SCHEMA, &value)
-            .map_err(|error| schema_error_for_path(&path, error))?;
+        validate_artifact(BENCHMARK_SCHEMA, &value).map_err(|error| schema_error_for_path(&path, error))?;
     }
 
     Ok(())
@@ -100,8 +91,7 @@ fn validate_iteration_summary_artifacts(report_dir: &Path) -> Result<()> {
         if value.get("schema_version").is_none() {
             continue;
         }
-        validate_artifact(ITERATION_SUMMARY_SCHEMA, &value)
-            .map_err(|error| schema_error_for_path(&path, error))?;
+        validate_artifact(ITERATION_SUMMARY_SCHEMA, &value).map_err(|error| schema_error_for_path(&path, error))?;
     }
 
     Ok(())
@@ -119,9 +109,9 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
 
 fn schema_error_for_path(path: &Path, error: EvalError) -> EvalError {
     match error {
-        EvalError::Validation(errors) => EvalError::Validation(
-            ValidationError::for_field(path.display().to_string(), errors.to_string()).into(),
-        ),
+        EvalError::Validation(errors) => {
+            EvalError::Validation(ValidationError::for_field(path.display().to_string(), errors.to_string()).into())
+        }
         other => other,
     }
 }
@@ -130,25 +120,18 @@ fn schema_error_for_path(path: &Path, error: EvalError) -> EvalError {
 mod tests {
     use super::*;
     use crate::agentskills::benchmark::{build_benchmark, BenchmarkOptions};
-    use crate::agentskills::iteration_summary::{
-        build_iteration_summary_document, IterationSummaryOptions,
-    };
-    use crate::agentskills::compare::{
-        run_comparisons, CompareOptions, JudgeKind, ScenarioPair,
-    };
+    use crate::agentskills::compare::{run_comparisons, CompareOptions, JudgeKind, ScenarioPair};
+    use crate::agentskills::evals::{parse_eval_suite, scaffold_eval_suite};
     use crate::agentskills::feedback::{
         init_feedback, FeedbackCategory, FeedbackDocument, FeedbackNote, FeedbackSeverity,
     };
-    use crate::agentskills::grading::{
-        build_grading_file, AssertionGradeResult, GraderInfo, GraderKind,
-    };
-    use crate::agentskills::evals::{parse_eval_suite, scaffold_eval_suite};
+    use crate::agentskills::grading::{build_grading_file, AssertionGradeResult, GraderInfo, GraderKind};
     use crate::agentskills::improvement_bundle::{
         build_improvement_bundle, testutil::sample_prior_iteration_fixture, NextIterationOptions,
     };
+    use crate::agentskills::iteration_summary::{build_iteration_summary_document, IterationSummaryOptions};
     use crate::agentskills::report::{
-        build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind,
-        WriteReportOptions,
+        build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
     };
     use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus};
     use crate::fs::testutil::MemFS;
@@ -268,8 +251,7 @@ mod tests {
         )
         .unwrap();
 
-        let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(timing_path).unwrap()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(timing_path).unwrap()).unwrap();
         validate_artifact(TIMING_SCHEMA, &json).unwrap();
     }
 
@@ -367,9 +349,7 @@ mod tests {
         let temp = tempdir().unwrap();
         write_benchmark_fixture_report(temp.path());
 
-        let mut summary =
-            build_iteration_summary_document(temp.path(), IterationSummaryOptions::default())
-                .unwrap();
+        let mut summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
         summary.generated_at = "2026-05-26T12:00:00Z".to_string();
         let json = serde_json::to_value(&summary).unwrap();
         validate_artifact(ITERATION_SUMMARY_SCHEMA, &json).unwrap();
@@ -401,19 +381,12 @@ mod tests {
             BuildReportOptions::default(),
         )
         .unwrap();
-        let report_dir =
-            write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
+        let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
 
         for run in &bundle.document.runs {
-            let output_path = report_dir
-                .join(&run.paths.workspace)
-                .join("output.md");
+            let output_path = report_dir.join(&run.paths.workspace).join("output.md");
             std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
-            std::fs::write(
-                output_path,
-                format!("{}-output", run.scenario_id.as_str()),
-            )
-            .unwrap();
+            std::fs::write(output_path, format!("{}-output", run.scenario_id.as_str())).unwrap();
         }
 
         std::fs::create_dir_all(report_dir.join("iteration-1").join("case-a")).unwrap();
@@ -443,12 +416,8 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
         )
         .unwrap();
 
-        let comparison_path = report_dir
-            .join("iteration-1")
-            .join("case-a")
-            .join("comparison.json");
-        let json: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(comparison_path).unwrap()).unwrap();
+        let comparison_path = report_dir.join("iteration-1").join("case-a").join("comparison.json");
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(comparison_path).unwrap()).unwrap();
         validate_artifact(COMPARISON_SCHEMA, &json).unwrap();
     }
 
@@ -467,8 +436,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
             BuildReportOptions::default(),
         )
         .unwrap();
-        let report_dir =
-            write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
+        let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
 
         validate_report_bundle_schemas(&report_dir).unwrap();
     }
@@ -488,8 +456,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
             BuildReportOptions::default(),
         )
         .unwrap();
-        let report_dir =
-            write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
+        let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
 
         init_feedback(&report_dir, Some("reviewer@example.com")).unwrap();
         validate_report_bundle_schemas(&report_dir).unwrap();

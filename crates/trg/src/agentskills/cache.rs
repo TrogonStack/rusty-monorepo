@@ -185,7 +185,9 @@ pub fn lookup_exact(out_dir: &Path, key: &CacheKey, current: &CacheKeyInput) -> 
 }
 
 pub fn lookup_reuse(out_dir: &Path, eval_case_id: &str, current: &ReuseKeyInput) -> Option<CachePointer> {
-    let path = cache_root(out_dir).join(REUSE_DIR).join(sanitize_dir_name(eval_case_id));
+    let path = cache_root(out_dir)
+        .join(REUSE_DIR)
+        .join(sanitize_dir_name(eval_case_id));
     read_reuse_pointer_if_fresh(&path, current)
 }
 
@@ -242,7 +244,9 @@ pub fn record_completion(
     };
     write_pointer(&cache_root(out_dir).join(key.as_str()), &pointer)?;
     write_pointer(
-        &cache_root(out_dir).join(REUSE_DIR).join(sanitize_dir_name(eval_case_id)),
+        &cache_root(out_dir)
+            .join(REUSE_DIR)
+            .join(sanitize_dir_name(eval_case_id)),
         &pointer,
     )
 }
@@ -281,8 +285,8 @@ pub fn apply_cache_hit(
 
 fn load_source_run(source_report: &Path, run_id: &str) -> io::Result<RunRecord> {
     let content = fs::read_to_string(source_report.join("report.json"))?;
-    let document: super::report::ReportDocument = serde_json::from_str(&content)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let document: super::report::ReportDocument =
+        serde_json::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     document
         .runs
         .into_iter()
@@ -309,7 +313,12 @@ fn rewrite_artifact_run_id(
     artifact
 }
 
-fn copy_run_artifacts(source_report: &Path, source_run_id: &str, dest_report: &Path, dest_run_id: &str) -> io::Result<()> {
+fn copy_run_artifacts(
+    source_report: &Path,
+    source_run_id: &str,
+    dest_report: &Path,
+    dest_run_id: &str,
+) -> io::Result<()> {
     let source_run_dir = source_report.join("runs").join(source_run_id);
     let dest_run_dir = dest_report.join("runs").join(dest_run_id);
     fs::create_dir_all(&dest_run_dir)?;
@@ -445,7 +454,11 @@ mod tests {
             "summaries": {"by_scenario":[]},
             "comparisons": []
         });
-        fs::write(report_dir.join("report.json"), serde_json::to_string_pretty(&document).unwrap()).unwrap();
+        fs::write(
+            report_dir.join("report.json"),
+            serde_json::to_string_pretty(&document).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -587,7 +600,11 @@ mod tests {
         let key = CacheKey::from_input(&stored);
         record_completion(&out_dir, &key, &stored, "one", &report_a, "run-001").unwrap();
 
-        let without_skill = sample_key_input(ScenarioKind::WithoutSkill, "sha256:skill", FixtureHash::empty().as_str());
+        let without_skill = sample_key_input(
+            ScenarioKind::WithoutSkill,
+            "sha256:skill",
+            FixtureHash::empty().as_str(),
+        );
         assert!(lookup_exact(&out_dir, &CacheKey::from_input(&without_skill), &without_skill).is_none());
 
         let reuse_current = ReuseKeyInput {

@@ -5,11 +5,9 @@ use std::sync::LazyLock;
 
 const REDACTED: &str = "<redacted>";
 
-static BEARER_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._\-]{16,}").unwrap());
+static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._\-]{16,}").unwrap());
 static AWS_ACCESS_KEY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"AKIA[0-9A-Z]{16}").unwrap());
-static GITHUB_TOKEN_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"ghp_[A-Za-z0-9]{36}").unwrap());
+static GITHUB_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"ghp_[A-Za-z0-9]{36}").unwrap());
 static JWT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}").unwrap());
 
@@ -54,9 +52,7 @@ pub fn is_secret_env_key(key: &str) -> bool {
 }
 
 pub fn redact_env() -> BTreeMap<String, String> {
-    std::env::vars()
-        .filter(|(key, _)| !is_secret_env_key(key))
-        .collect()
+    std::env::vars().filter(|(key, _)| !is_secret_env_key(key)).collect()
 }
 
 fn is_sensitive_flag(flag: &str) -> bool {
@@ -167,10 +163,7 @@ mod tests {
         env.insert("MY_PASSWORD".to_string(), "pw".to_string());
         env.insert("SAFE".to_string(), "ok".to_string());
 
-        let filtered: BTreeMap<_, _> = env
-            .into_iter()
-            .filter(|(key, _)| !is_secret_env_key(key))
-            .collect();
+        let filtered: BTreeMap<_, _> = env.into_iter().filter(|(key, _)| !is_secret_env_key(key)).collect();
 
         assert!(filtered.contains_key("PATH"));
         assert!(filtered.contains_key("SAFE"));

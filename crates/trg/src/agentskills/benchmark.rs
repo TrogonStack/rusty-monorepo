@@ -206,7 +206,9 @@ where
 {
     let value = serde_json::Value::deserialize(deserializer)?;
     if value.is_object() {
-        IterationMeta::deserialize(value).map(Some).map_err(serde::de::Error::custom)
+        IterationMeta::deserialize(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom)
     } else {
         Ok(None)
     }
@@ -334,8 +336,7 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
     let previous_report_dir = options.previous_report_dir.clone();
     let iteration_comparison = build_iteration_comparison(report_dir, &report, failed_runs);
     let by_eval_scenario = build_by_eval_scenario(report_dir, &report.runs, failed_runs);
-    let iteration_summary =
-        build_iteration_summary(report_dir, &report.runs, &by_eval_scenario, failed_runs);
+    let iteration_summary = build_iteration_summary(report_dir, &report.runs, &by_eval_scenario, failed_runs);
     let warnings = collect_eval_suite_drift_warnings(
         report_dir,
         BenchmarkOptions {
@@ -391,8 +392,9 @@ pub fn write_benchmark(report_dir: &Path, document: &BenchmarkDocument) -> Resul
     std::fs::write(&output_path, &json)?;
 
     if let Ok(iteration) = read_report_iteration(report_dir) {
-        let iteration_benchmark =
-            report_dir.join(super::layout::iteration_dir_name(iteration)).join("benchmark.json");
+        let iteration_benchmark = report_dir
+            .join(super::layout::iteration_dir_name(iteration))
+            .join("benchmark.json");
         if let Some(parent) = iteration_benchmark.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -417,10 +419,7 @@ fn read_report_iteration(report_dir: &Path) -> std::result::Result<u32, EvalErro
         })
 }
 
-pub fn sync_iteration_summary_to_report(
-    report_dir: &Path,
-    summary: &IterationSummary,
-) -> Result<()> {
+pub fn sync_iteration_summary_to_report(report_dir: &Path, summary: &IterationSummary) -> Result<()> {
     let report_path = report_dir.join("report.json");
     let content = std::fs::read_to_string(&report_path)?;
     let mut document: serde_json::Value = serde_json::from_str(&content)?;
@@ -461,12 +460,8 @@ fn load_run_sample(report_dir: &Path, workspace_rel: &str) -> RunSample {
         .into_iter()
         .find(|path| path.is_file());
 
-    let grading = grading_path
-        .as_ref()
-        .and_then(|path| read_json_file(path).ok());
-    let timing = timing_path
-        .as_ref()
-        .and_then(|path| read_json_file(path).ok());
+    let grading = grading_path.as_ref().and_then(|path| read_json_file(path).ok());
+    let timing = timing_path.as_ref().and_then(|path| read_json_file(path).ok());
 
     RunSample {
         grading,
@@ -596,11 +591,7 @@ fn grading_summary(grading: &GradingFileInput) -> PassFailSummary {
 
 fn pass_fail_summary(passed: usize, failed: usize) -> PassFailSummary {
     let total = passed + failed;
-    let pass_rate = if total == 0 {
-        0.0
-    } else {
-        passed as f64 / total as f64
-    };
+    let pass_rate = if total == 0 { 0.0 } else { passed as f64 / total as f64 };
     PassFailSummary {
         passed,
         failed,
@@ -654,12 +645,7 @@ pub fn stddev(values: &[u64], mean: f64) -> f64 {
     variance.sqrt()
 }
 
-fn token_stats(
-    totals: &[u64],
-    inputs: &[u64],
-    outputs: &[u64],
-    costs: &[f64],
-) -> TokenStats {
+fn token_stats(totals: &[u64], inputs: &[u64], outputs: &[u64], costs: &[f64]) -> TokenStats {
     TokenStats {
         total: sum_optional(totals),
         input: sum_optional(inputs),
@@ -753,21 +739,11 @@ fn build_iteration_comparison(
 ) -> Option<IterationComparison> {
     if let Some(iteration) = &report.report.iteration {
         if let Some(previous_id) = &iteration.previous_id {
-            return compare_iteration_ids(
-                report_dir,
-                &report.runs,
-                &iteration.id,
-                previous_id,
-                failed_runs,
-            );
+            return compare_iteration_ids(report_dir, &report.runs, &iteration.id, previous_id, failed_runs);
         }
     }
 
-    let mut iteration_ids: Vec<String> = report
-        .runs
-        .iter()
-        .filter_map(|run| run.iteration_id.clone())
-        .collect();
+    let mut iteration_ids: Vec<String> = report.runs.iter().filter_map(|run| run.iteration_id.clone()).collect();
     iteration_ids.sort();
     iteration_ids.dedup();
 
@@ -799,8 +775,7 @@ fn compare_iteration_ids(
         .filter_map(|scenario| {
             let current_bench = current.get(scenario)?;
             let previous_bench = previous.get(scenario)?;
-            delta_between(Some(current_bench), Some(previous_bench))
-                .map(|delta| (scenario.as_str().to_string(), delta))
+            delta_between(Some(current_bench), Some(previous_bench)).map(|delta| (scenario.as_str().to_string(), delta))
         })
         .collect();
 
@@ -973,8 +948,7 @@ fn build_iteration_summary(
     mode: FailedRunsMode,
 ) -> IterationSummary {
     let mut assertion_outcomes: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
-    let mut scenario_assertion_rates: BTreeMap<(ScenarioKind, String, String), (usize, usize)> =
-        BTreeMap::new();
+    let mut scenario_assertion_rates: BTreeMap<(ScenarioKind, String, String), (usize, usize)> = BTreeMap::new();
 
     for run in runs {
         if !matches!(classify_run(run, mode), RunDisposition::Completed) {
@@ -1196,12 +1170,7 @@ mod tests {
         .unwrap();
     }
 
-    fn write_run_artifacts(
-        report_dir: &Path,
-        run_id: &str,
-        grading: Option<&str>,
-        timing: Option<&str>,
-    ) {
+    fn write_run_artifacts(report_dir: &Path, run_id: &str, grading: Option<&str>, timing: Option<&str>) {
         let run_dir = report_dir.join(format!("runs/{run_id}"));
         let workspace = run_dir.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -1324,12 +1293,7 @@ mod tests {
             ),
             Some(r#"{ "duration_ms": 1000 }"#),
         );
-        write_run_artifacts(
-            temp.path(),
-            "run-002",
-            None,
-            Some(r#"{ "duration_ms": 500 }"#),
-        );
+        write_run_artifacts(temp.path(), "run-002", None, Some(r#"{ "duration_ms": 500 }"#));
 
         let bucket = build_benchmark(
             temp.path(),
@@ -1526,9 +1490,24 @@ mod tests {
             ]),
             None,
         );
-        write_run_artifacts(temp.path(), "run-001", None, Some(r#"{ "duration_ms": 1000, "total_tokens": 100 }"#));
-        write_run_artifacts(temp.path(), "run-002", None, Some(r#"{ "duration_ms": 1200, "total_tokens": 120 }"#));
-        write_run_artifacts(temp.path(), "run-003", None, Some(r#"{ "duration_ms": 3000, "total_tokens": 400 }"#));
+        write_run_artifacts(
+            temp.path(),
+            "run-001",
+            None,
+            Some(r#"{ "duration_ms": 1000, "total_tokens": 100 }"#),
+        );
+        write_run_artifacts(
+            temp.path(),
+            "run-002",
+            None,
+            Some(r#"{ "duration_ms": 1200, "total_tokens": 120 }"#),
+        );
+        write_run_artifacts(
+            temp.path(),
+            "run-003",
+            None,
+            Some(r#"{ "duration_ms": 3000, "total_tokens": 400 }"#),
+        );
 
         let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
         assert_eq!(benchmark.iteration_summary.timing_outliers.len(), 1);
@@ -1605,7 +1584,9 @@ mod tests {
             serde_json::from_str(include_str!("../../tests/fixtures/benchmark.schema.json")).unwrap();
         assert_eq!(
             actual.get("schema_version").and_then(|value| value.as_str()),
-            schema.pointer("/properties/schema_version/const").and_then(|value| value.as_str())
+            schema
+                .pointer("/properties/schema_version/const")
+                .and_then(|value| value.as_str())
         );
     }
 }

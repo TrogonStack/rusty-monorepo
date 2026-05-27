@@ -44,15 +44,17 @@ impl Runner {
     }
 
     pub fn check_available(self) -> Result<(), EvalError> {
-        availability::check_runner_available(self).map(|_| ()).map_err(|unavailable| {
-            let message = format!(
-                "Runner '{}' not found on PATH (looked for binary '{}'); {}",
-                unavailable.runner.display_name(),
-                unavailable.binary_name,
-                unavailable.install_hint()
-            );
-            EvalError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, message))
-        })
+        availability::check_runner_available(self)
+            .map(|_| ())
+            .map_err(|unavailable| {
+                let message = format!(
+                    "Runner '{}' not found on PATH (looked for binary '{}'); {}",
+                    unavailable.runner.display_name(),
+                    unavailable.binary_name,
+                    unavailable.install_hint()
+                );
+                EvalError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, message))
+            })
     }
 
     pub fn program_name(self) -> &'static str {
@@ -217,11 +219,7 @@ pub fn timeout_duration(timeout_secs: Option<u64>) -> Option<Duration> {
     timeout_secs.map(Duration::from_secs)
 }
 
-pub fn runner_failure_outcome(
-    duration_ms: u64,
-    exit_code: Option<i32>,
-    final_text: String,
-) -> EvalRunOutcome {
+pub fn runner_failure_outcome(duration_ms: u64, exit_code: Option<i32>, final_text: String) -> EvalRunOutcome {
     EvalRunOutcome {
         status: RunStatus::Failed,
         failure_kind: Some(FAILURE_KIND_RUNNER),
@@ -271,17 +269,17 @@ pub fn completed_outcome(
     }
 }
 
-pub fn persist_runner_io(
-    request: &EvalRunRequest,
-    captured: &CapturedProcess,
-) -> Result<(), RunnerError> {
+pub fn persist_runner_io(request: &EvalRunRequest, captured: &CapturedProcess) -> Result<(), RunnerError> {
     write_transcript(request.transcript_path, &captured.stdout)?;
     write_stderr(request.stderr_path, &captured.stderr)?;
     Ok(())
 }
 
 pub fn check_runner_version(program: &str, install_hint: &str) -> Result<(), EvalError> {
-    let output = Command::new(program).arg("--version").output().map_err(EvalError::from)?;
+    let output = Command::new(program)
+        .arg("--version")
+        .output()
+        .map_err(EvalError::from)?;
     if output.status.success() {
         return Ok(());
     }
@@ -292,13 +290,9 @@ fn runner_unavailable_error(program: &str, install_hint: &str, output: &std::pro
     let detail = String::from_utf8_lossy(&output.stderr);
     let detail = detail.trim();
     let message = if detail.is_empty() {
-        format!(
-            "runner '{program}' is not available or failed its version check; {install_hint}"
-        )
+        format!("runner '{program}' is not available or failed its version check; {install_hint}")
     } else {
-        format!(
-            "runner '{program}' is not available or failed its version check ({detail}); {install_hint}"
-        )
+        format!("runner '{program}' is not available or failed its version check ({detail}); {install_hint}")
     };
     EvalError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, message))
 }
@@ -405,22 +399,14 @@ fn remove_staged_skill(path: &Path) -> std::io::Result<()> {
 /// staged fixture paths or with a `skill/` directory the agent might create itself —
 /// the workspace is the agent's task space; the skill is sidecar reference material.
 #[cfg(unix)]
-fn symlink_skill_into_workspace(
-    skill_path: &Path,
-    workspace_dir: &Path,
-    link_name: &str,
-) -> std::io::Result<()> {
+fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_name: &str) -> std::io::Result<()> {
     let link = workspace_dir.join(link_name.trim_end_matches('/'));
     let absolute = std::fs::canonicalize(skill_path)?;
     std::os::unix::fs::symlink(absolute, link)
 }
 
 #[cfg(not(unix))]
-fn symlink_skill_into_workspace(
-    skill_path: &Path,
-    workspace_dir: &Path,
-    link_name: &str,
-) -> std::io::Result<()> {
+fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_name: &str) -> std::io::Result<()> {
     let dest = workspace_dir.join(link_name.trim_end_matches('/'));
     copy_skill_tree(skill_path, &dest)
 }
@@ -790,10 +776,7 @@ mod workspace_tests {
 
         std::fs::write(old_skill.join("SKILL.md"), "old-tampered").unwrap();
         let old_after_old_tampered = compute_skill_digest(&old_skill).unwrap();
-        assert_eq!(
-            detect_tampering(&old_before, &old_after_old_tampered),
-            vec!["SKILL.md"]
-        );
+        assert_eq!(detect_tampering(&old_before, &old_after_old_tampered), vec!["SKILL.md"]);
     }
 
     #[test]
@@ -859,9 +842,8 @@ mod workspace_tests {
         let path = temp.path().join("transcript.jsonl");
         let github = "ghp_123456789012345678901234567890123456";
         let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
-        let raw = format!(
-            "Authorization: Bearer abcdefghijklmnop\nkeys AKIAIOSFODNN7EXAMPLE and {github}\ntoken={jwt}\n"
-        );
+        let raw =
+            format!("Authorization: Bearer abcdefghijklmnop\nkeys AKIAIOSFODNN7EXAMPLE and {github}\ntoken={jwt}\n");
         write_transcript(&path, raw.as_bytes()).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("Bearer abcdefghijklmnop"));
@@ -906,7 +888,9 @@ mod workspace_tests {
             serde_json::from_str(&std::fs::read_to_string(run_dir.join("env.json")).unwrap()).unwrap();
         assert!(env.contains_key("TRG_REDACT_TEST_SAFE"));
         assert!(!env.contains_key(secret_key));
-        assert!(!env.keys().any(|key| is_secret_env_key(key) && key.starts_with("TRG_REDACT_TEST_")));
+        assert!(!env
+            .keys()
+            .any(|key| is_secret_env_key(key) && key.starts_with("TRG_REDACT_TEST_")));
 
         std::env::remove_var(secret_key);
         std::env::remove_var("TRG_REDACT_TEST_SAFE");

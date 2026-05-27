@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use crate::agentskills::evals::{
-    check_eval_suite, write_eval_manifest_scaffold, EvalCheckOptions,
-};
+use crate::agentskills::evals::{check_eval_suite, write_eval_manifest_scaffold, EvalCheckOptions};
 use crate::fs::FileSystem;
 use clap::Args;
 

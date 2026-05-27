@@ -48,11 +48,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     }
     cmd_args.push(&prepared.prompt);
     if let Some(run_dir) = request.transcript_path.parent() {
-        write_runner_invocation_metadata(
-            run_dir,
-            redact_command_args(PROGRAM, &cmd_args),
-            redact_env(),
-        )?;
+        write_runner_invocation_metadata(run_dir, redact_command_args(PROGRAM, &cmd_args), redact_env())?;
     }
 
     let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;

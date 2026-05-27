@@ -184,7 +184,9 @@ mod tests {
 
     #[test]
     fn capture_version_reads_first_stdout_line() {
-        let version = capture_version(Path::new("/bin/sh")).expect("sh should expose --version quickly");
-        assert!(!version.is_empty());
+        let temp = tempfile::tempdir().unwrap();
+        write_stub_runner(temp.path(), "stub-runner", "stub-runner 1.2.3");
+        let version = capture_version(&temp.path().join("stub-runner")).expect("stub --version should succeed");
+        assert_eq!(version, "stub-runner 1.2.3");
     }
 }

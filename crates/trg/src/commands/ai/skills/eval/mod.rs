@@ -1,10 +1,10 @@
 mod benchmark;
 mod ci_args;
 mod compare;
-mod iteration_summary;
 mod feedback;
 mod grade;
 mod init;
+mod iteration_summary;
 mod next_iteration;
 mod output;
 mod run;
@@ -24,10 +24,10 @@ use clap::{Args, Subcommand};
 
 pub use benchmark::BenchmarkArgs;
 pub use compare::CompareArgs;
-pub use iteration_summary::IterationSummaryArgs;
 pub use feedback::FeedbackArgs;
 pub use grade::GradeArgs;
 pub use init::InitArgs;
+pub use iteration_summary::IterationSummaryArgs;
 pub use next_iteration::NextIterationArgs;
 pub use run::RunArgs;
 pub use verify::VerifyArgs;
@@ -93,13 +93,7 @@ pub(crate) fn finish_eval_output(
 
     let failed_assertions = collect_failed_assertions(report_dir).unwrap_or_default();
     let missing_grading = collect_missing_grading_workspaces(report_dir).unwrap_or_default();
-    let check = run_ci_checks(
-        &metrics,
-        policy,
-        thresholds,
-        &failed_assertions,
-        &missing_grading,
-    );
+    let check = run_ci_checks(&metrics, policy, thresholds, &failed_assertions, &missing_grading);
     emit_github_annotations(&check.violations);
 
     let exit_code = if check.passed { 0 } else { 1 };
@@ -168,10 +162,7 @@ mod help_tests {
 
     #[test]
     fn eval_iteration_summary_help_includes_examples() {
-        let help = long_help::<IterationSummaryArgs>(
-            "iteration-summary",
-            "Summarize assertion stability and outliers",
-        );
+        let help = long_help::<IterationSummaryArgs>("iteration-summary", "Summarize assertion stability and outliers");
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
         assert!(help.contains("--previous"));
         assert!(help.contains("--json"));
@@ -209,7 +200,10 @@ mod help_tests {
     fn eval_init_help_mentions_optional_metadata_fields() {
         let help = long_help::<InitArgs>("init", "Scaffold evals/evals.json for a skill directory");
         assert!(help.contains("timeout_secs"), "missing timeout_secs:\n{help}");
-        assert!(help.contains("expected_output_files"), "missing expected_output_files:\n{help}");
+        assert!(
+            help.contains("expected_output_files"),
+            "missing expected_output_files:\n{help}"
+        );
         assert!(help.contains("grader_hints"), "missing grader_hints:\n{help}");
     }
 

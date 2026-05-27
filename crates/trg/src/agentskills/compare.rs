@@ -48,11 +48,8 @@ impl ScenarioPair {
         let b = parse_scenario_kind(right.trim(), "pair")?;
         if a == b {
             return Err(EvalError::Validation(
-                super::validation::ValidationError::for_field(
-                    "pair",
-                    format!("scenarios must differ, got '{raw}'"),
-                )
-                .into(),
+                super::validation::ValidationError::for_field("pair", format!("scenarios must differ, got '{raw}'"))
+                    .into(),
             ));
         }
 
@@ -68,9 +65,7 @@ fn parse_scenario_kind(raw: &str, field: &str) -> Result<ScenarioKind, EvalError
         _ => Err(EvalError::Validation(
             super::validation::ValidationError::for_field(
                 field,
-                format!(
-                    "unknown scenario '{raw}' (expected with_skill, without_skill, or old_skill)"
-                ),
+                format!("unknown scenario '{raw}' (expected with_skill, without_skill, or old_skill)"),
             )
             .into(),
         )),
@@ -199,31 +194,20 @@ struct LlmJudgeResponse {
     evidence: String,
 }
 
-pub fn run_comparisons(
-    report_dir: &Path,
-    options: CompareOptions,
-) -> Result<Vec<ComparisonRecord>, EvalError> {
+pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec<ComparisonRecord>, EvalError> {
     if options.pairs.is_empty() || options.judge == JudgeKind::None {
         return Ok(Vec::new());
     }
 
     if options.judge == JudgeKind::Script && options.judge_command.as_deref().unwrap_or("").is_empty() {
         return Err(EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "judge_command",
-                "is required when --judge script",
-            )
-            .into(),
+            super::validation::ValidationError::for_field("judge_command", "is required when --judge script").into(),
         ));
     }
 
     if options.judge == JudgeKind::Llm && options.judge_model.as_deref().unwrap_or("").is_empty() {
         return Err(EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "judge_model",
-                "is required when --judge llm",
-            )
-            .into(),
+            super::validation::ValidationError::for_field("judge_model", "is required when --judge llm").into(),
         ));
     }
 
@@ -242,8 +226,7 @@ pub fn run_comparisons(
             let left_output = load_scenario_output(report_dir, &report.runs, &eval_case.id, pair.a)?;
             let right_output = load_scenario_output(report_dir, &report.runs, &eval_case.id, pair.b)?;
 
-            let (mapping, blind_outputs) =
-                build_blind_pair(&eval_case.id, pair.a, pair.b, left_output, right_output);
+            let (mapping, blind_outputs) = build_blind_pair(&eval_case.id, pair.a, pair.b, left_output, right_output);
 
             let verdict = match options.judge {
                 JudgeKind::Script => {
@@ -277,10 +260,7 @@ pub fn run_comparisons(
 
             let record = ComparisonRecord {
                 eval_case_id: eval_case.id.clone(),
-                pair: ScenarioPairRecord {
-                    a: pair.a,
-                    b: pair.b,
-                },
+                pair: ScenarioPairRecord { a: pair.a, b: pair.b },
                 mapping,
                 winner: verdict.winner,
                 winner_scenario,
@@ -317,9 +297,10 @@ fn merge_comparisons_into_report(
     comparisons: &[serde_json::Value],
 ) -> Result<(), EvalError> {
     let mut root: serde_json::Value = serde_json::from_str(original_content)?;
-    root.as_object_mut()
-        .expect("report.json root object")
-        .insert("comparisons".to_string(), serde_json::Value::Array(comparisons.to_vec()));
+    root.as_object_mut().expect("report.json root object").insert(
+        "comparisons".to_string(),
+        serde_json::Value::Array(comparisons.to_vec()),
+    );
     std::fs::write(report_path, serde_json::to_string_pretty(&root)?)?;
     Ok(())
 }
@@ -350,15 +331,9 @@ pub fn build_blind_pair(
     };
 
     let blind_outputs = if swap {
-        HashMap::from([
-            ("A".to_string(), output_b),
-            ("B".to_string(), output_a),
-        ])
+        HashMap::from([("A".to_string(), output_b), ("B".to_string(), output_a)])
     } else {
-        HashMap::from([
-            ("A".to_string(), output_a),
-            ("B".to_string(), output_b),
-        ])
+        HashMap::from([("A".to_string(), output_a), ("B".to_string(), output_b)])
     };
 
     (mapping, blind_outputs)
@@ -438,11 +413,7 @@ fn collect_workspace_output(workspace: &Path) -> Result<String, EvalError> {
     ))
 }
 
-fn collect_text_files(
-    root: &Path,
-    dir: &Path,
-    matches: &mut Vec<(String, String)>,
-) -> Result<(), EvalError> {
+fn collect_text_files(root: &Path, dir: &Path, matches: &mut Vec<(String, String)>) -> Result<(), EvalError> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -467,11 +438,7 @@ fn collect_text_files(
             Some("md") | Some("txt") | Some("json")
         ) || name == "grading.json"
         {
-            let relative = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
+            let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
             let content = std::fs::read_to_string(&path)?;
             if !content.trim().is_empty() {
                 matches.push((relative, content));
@@ -516,11 +483,8 @@ fn run_script_judge(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "judge_command",
-                format!("judge script failed: {stderr}"),
-            )
-            .into(),
+            super::validation::ValidationError::for_field("judge_command", format!("judge script failed: {stderr}"))
+                .into(),
         ));
     }
 
@@ -549,11 +513,8 @@ fn run_llm_judge(
 ) -> Result<Verdict, EvalError> {
     let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
         EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "judge_model",
-                "OPENAI_API_KEY must be set for llm judging",
-            )
-            .into(),
+            super::validation::ValidationError::for_field("judge_model", "OPENAI_API_KEY must be set for llm judging")
+                .into(),
         )
     })?;
 
@@ -588,38 +549,28 @@ fn run_llm_judge(
         .send()
         .map_err(|source| {
             EvalError::Validation(
-                super::validation::ValidationError::for_field("judge_model", source.to_string())
-                    .into(),
+                super::validation::ValidationError::for_field("judge_model", source.to_string()).into(),
             )
         })?;
 
     if !response.status().is_success() {
         let detail = response.text().unwrap_or_default();
         return Err(EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "judge_model",
-                format!("llm judge request failed: {detail}"),
-            )
-            .into(),
+            super::validation::ValidationError::for_field("judge_model", format!("llm judge request failed: {detail}"))
+                .into(),
         ));
     }
 
     let payload: serde_json::Value = response.json().map_err(|source| {
-        EvalError::Validation(
-            super::validation::ValidationError::for_field("judge_model", source.to_string())
-                .into(),
-        )
+        EvalError::Validation(super::validation::ValidationError::for_field("judge_model", source.to_string()).into())
     })?;
     let content = payload
         .pointer("/choices/0/message/content")
         .and_then(|value| value.as_str())
         .ok_or_else(|| {
             EvalError::Validation(
-                super::validation::ValidationError::for_field(
-                    "judge_model",
-                    "llm judge returned no message content",
-                )
-                .into(),
+                super::validation::ValidationError::for_field("judge_model", "llm judge returned no message content")
+                    .into(),
             )
         })?;
 
@@ -645,11 +596,8 @@ fn parse_winner(raw: &str) -> Result<ComparisonWinner, EvalError> {
         "b" => Ok(ComparisonWinner::B),
         "tie" => Ok(ComparisonWinner::Tie),
         _ => Err(EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "winner",
-                format!("expected A, B, or tie, got '{raw}'"),
-            )
-            .into(),
+            super::validation::ValidationError::for_field("winner", format!("expected A, B, or tie, got '{raw}'"))
+                .into(),
         )),
     }
 }
@@ -687,7 +635,9 @@ fn find_iteration_eval_dir(report_dir: &Path, eval_case_id: &str) -> Option<Path
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agentskills::report::{build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions};
+    use crate::agentskills::report::{
+        build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
+    };
     use crate::fs::testutil::MemFS;
     use std::path::Path;
 
@@ -826,14 +776,11 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
         assert_eq!(records[0].evidence, "A is clearer");
 
         let report: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap())
-                .unwrap();
+            serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
         assert_eq!(report.get("comparisons").and_then(|v| v.as_array()).unwrap().len(), 2);
 
-        let comparison_json: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(iteration_dir.join("comparison.json")).unwrap(),
-        )
-        .unwrap();
+        let comparison_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(iteration_dir.join("comparison.json")).unwrap()).unwrap();
         assert_eq!(
             comparison_json.get("eval_case_id").and_then(|v| v.as_str()),
             Some("case-a")
@@ -874,8 +821,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
 
         assert!(records.is_empty());
         let report: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap())
-                .unwrap();
+            serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
         assert_eq!(report.get("comparisons").and_then(|v| v.as_array()).unwrap().len(), 0);
     }
 }

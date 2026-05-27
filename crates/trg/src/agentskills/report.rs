@@ -416,11 +416,7 @@ pub struct WriteReportOptions {
     pub iteration: u32,
 }
 
-pub fn write_report_bundle(
-    out_root: &Path,
-    bundle: &ReportBundle,
-    options: WriteReportOptions,
-) -> Result<PathBuf> {
+pub fn write_report_bundle(out_root: &Path, bundle: &ReportBundle, options: WriteReportOptions) -> Result<PathBuf> {
     let report_dir = out_root.join(&bundle.skill_name).join(&bundle.report_id);
 
     ensure_iteration_available(
@@ -614,13 +610,8 @@ fn build_runs(
                 let run_id = format!("run-{run_number:03}");
                 let workspace_path = format!("runs/{run_id}/workspace");
                 let outputs_path = format!("{workspace_path}/{OUTPUTS_DIR}");
-                let mirror_path = super::layout::scenario_mirror_path(
-                    iteration,
-                    &eval_slug,
-                    scenario.as_str(),
-                    attempt,
-                    attempts,
-                );
+                let mirror_path =
+                    super::layout::scenario_mirror_path(iteration, &eval_slug, scenario.as_str(), attempt, attempts);
                 workspace_dirs.push(workspace_path.clone());
                 runs.push(RunRecord {
                     id: run_id,
@@ -803,7 +794,15 @@ mod tests {
     fn build_runs_single_attempt_keeps_legacy_mirror_path() {
         let suite = sample_suite();
         let slugs = crate::agentskills::layout::assign_eval_slugs(&suite.evals);
-        let (runs, _) = build_runs(&suite, &[ScenarioKind::WithSkill], "ci-default", 1, 1, &slugs, SkillStaging::Symlink);
+        let (runs, _) = build_runs(
+            &suite,
+            &[ScenarioKind::WithSkill],
+            "ci-default",
+            1,
+            1,
+            &slugs,
+            SkillStaging::Symlink,
+        );
         assert_eq!(runs[0].mirror_path, "iteration-1/eval-case-a/with_skill/");
         assert_eq!(runs[0].attempt, 1);
     }
@@ -880,7 +879,15 @@ mod tests {
     fn build_runs_assigns_old_revision_for_old_skill_scenario() {
         let suite = sample_suite();
         let eval_slugs = slugs_for_suite(&suite);
-        let (runs, _) = build_runs(&suite, &[ScenarioKind::OldSkill], "ci-default", 1, 1, &eval_slugs, SkillStaging::Symlink);
+        let (runs, _) = build_runs(
+            &suite,
+            &[ScenarioKind::OldSkill],
+            "ci-default",
+            1,
+            1,
+            &eval_slugs,
+            SkillStaging::Symlink,
+        );
 
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().all(|run| run.skill_revision_id == "old"));
@@ -932,7 +939,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bundle.document.suite.old_skill_path.as_deref(), Some("path/to/old-skill"));
+        assert_eq!(
+            bundle.document.suite.old_skill_path.as_deref(),
+            Some("path/to/old-skill")
+        );
         assert!(bundle
             .document
             .suite
@@ -1088,11 +1098,7 @@ mod tests {
             }
         }
 
-        fn assert_round_trip_preserves_fields(
-            original: &serde_json::Value,
-            roundtrip: &serde_json::Value,
-            path: &str,
-        ) {
+        fn assert_round_trip_preserves_fields(original: &serde_json::Value, roundtrip: &serde_json::Value, path: &str) {
             if is_omitted_on_reserialize(original) {
                 return;
             }
@@ -1117,17 +1123,9 @@ mod tests {
                     }
                 }
                 (serde_json::Value::Array(orig_items), serde_json::Value::Array(rt_items)) => {
-                    assert_eq!(
-                        orig_items.len(),
-                        rt_items.len(),
-                        "array length mismatch at {path}"
-                    );
+                    assert_eq!(orig_items.len(), rt_items.len(), "array length mismatch at {path}");
                     for (index, orig_item) in orig_items.iter().enumerate() {
-                        assert_round_trip_preserves_fields(
-                            orig_item,
-                            &rt_items[index],
-                            &format!("{path}[{index}]"),
-                        );
+                        assert_round_trip_preserves_fields(orig_item, &rt_items[index], &format!("{path}[{index}]"));
                     }
                 }
                 (orig, rt) => {
@@ -1139,8 +1137,8 @@ mod tests {
         #[test]
         fn report_v1_fixture_deserializes_and_round_trips() {
             let original = load_fixture_json("v1.json", FIXTURE_V1);
-            let document: ReportDocument = serde_json::from_value(original.clone())
-                .expect("v1 fixture deserializes into ReportDocument");
+            let document: ReportDocument =
+                serde_json::from_value(original.clone()).expect("v1 fixture deserializes into ReportDocument");
             assert_eq!(document.schema_version, SCHEMA_VERSION);
 
             let roundtrip = serde_json::to_value(&document).expect("ReportDocument serializes");
@@ -1150,9 +1148,8 @@ mod tests {
         #[test]
         fn report_v1_minimal_fixture_deserializes() {
             let original = load_fixture_json("v1-minimal.json", FIXTURE_V1_MINIMAL);
-            let document: ReportDocument = serde_json::from_value(original).expect(
-                "v1-minimal fixture deserializes (required fields must stay optional or defaulted)",
-            );
+            let document: ReportDocument = serde_json::from_value(original)
+                .expect("v1-minimal fixture deserializes (required fields must stay optional or defaulted)");
             assert_eq!(document.runs.len(), 0);
             assert_eq!(document.report.iteration, 1);
         }

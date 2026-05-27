@@ -59,7 +59,12 @@ fn find_report_bundle(out_dir: &Path, skill_name: &str) -> PathBuf {
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.is_dir())
         .collect();
-    assert_eq!(bundles.len(), 1, "expected one report bundle under {}", skill_out.display());
+    assert_eq!(
+        bundles.len(),
+        1,
+        "expected one report bundle under {}",
+        skill_out.display()
+    );
     bundles.pop().unwrap()
 }
 
@@ -99,11 +104,7 @@ fn run_accepts_relative_skill_dir_from_temp_cwd() {
     let out_dir = layout.join("artifacts");
     fs::create_dir_all(&out_dir).unwrap();
 
-    run_eval(
-        Path::new("skills/fixture-skill"),
-        Path::new("artifacts"),
-        Some(&layout),
-    );
+    run_eval(Path::new("skills/fixture-skill"), Path::new("artifacts"), Some(&layout));
 
     let report_dir = find_report_bundle(&out_dir, "fixture-skill");
     assert!(report_dir.join("report.json").is_file());

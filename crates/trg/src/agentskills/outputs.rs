@@ -124,12 +124,10 @@ pub fn path_within_base(base: &Path, path: &Path) -> Result<PathBuf> {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         let canonical_parent = canonicalize_existing(parent)?;
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| OutputError::PathEscape {
-                path: path.display().to_string(),
-                base: base.display().to_string(),
-            })?;
+        let file_name = path.file_name().ok_or_else(|| OutputError::PathEscape {
+            path: path.display().to_string(),
+            base: base.display().to_string(),
+        })?;
         canonical_parent.join(file_name)
     };
 

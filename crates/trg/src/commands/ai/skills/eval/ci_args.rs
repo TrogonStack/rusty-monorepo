@@ -41,7 +41,11 @@ pub struct EvalCiArgs {
     #[arg(long, value_name = "N", help = "Maximum allowed output tokens across all runs")]
     pub max_output_tokens: Option<u64>,
 
-    #[arg(long, value_name = "MS", help = "Maximum allowed duration in milliseconds for any run")]
+    #[arg(
+        long,
+        value_name = "MS",
+        help = "Maximum allowed duration in milliseconds for any run"
+    )]
     pub max_duration_ms: Option<u64>,
 
     #[arg(

@@ -49,13 +49,7 @@ pub fn eval_dir_name(slug: &str) -> String {
 ///
 /// When `attempts` is 1, layout matches agentskills.io: `iteration-N/eval-X/scenario/`.
 /// With multiple attempts, each attempt is nested under `attempt-K/`.
-pub fn scenario_mirror_path(
-    iteration: u32,
-    eval_slug: &str,
-    scenario: &str,
-    attempt: u32,
-    attempts: u32,
-) -> String {
+pub fn scenario_mirror_path(iteration: u32, eval_slug: &str, scenario: &str, attempt: u32, attempts: u32) -> String {
     let base = format!(
         "{}/{}/{}/",
         iteration_dir_name(iteration),
@@ -110,11 +104,7 @@ pub fn assign_eval_slugs(evals: &[EvalCase]) -> HashMap<String, String> {
         let base = eval_slug(eval_case.id.as_str());
         let usage = slug_usage.entry(base.clone()).or_insert(0);
         *usage += 1;
-        let slug = if *usage == 1 {
-            base
-        } else {
-            format!("{base}-{usage}")
-        };
+        let slug = if *usage == 1 { base } else { format!("{base}-{usage}") };
         slugs.insert(eval_case.id.to_string(), slug);
     }
 
@@ -292,13 +282,7 @@ pub fn write_docs_mirror_layout(
         std::fs::write(&benchmark_path, "{}\n")?;
     }
 
-    let attempts = bundle
-        .document
-        .runs
-        .iter()
-        .map(|run| run.attempt)
-        .max()
-        .unwrap_or(1);
+    let attempts = bundle.document.runs.iter().map(|run| run.attempt).max().unwrap_or(1);
 
     let alias_index = build_alias_index(bundle, slugs, attempts);
     write_alias_index(report_dir, iteration, &alias_index)?;
@@ -523,10 +507,8 @@ mod tests {
         .unwrap();
 
         let slugs = slugs_for_suite(
-            &serde_json::from_str::<EvalSuite>(
-                &fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap(),
-            )
-            .unwrap(),
+            &serde_json::from_str::<EvalSuite>(&fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap())
+                .unwrap(),
         );
 
         let report_dir = temp.path().join("demo-skill/alias-report");
@@ -599,10 +581,8 @@ mod tests {
         .unwrap();
 
         let slugs = slugs_for_suite(
-            &serde_json::from_str::<EvalSuite>(
-                &fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap(),
-            )
-            .unwrap(),
+            &serde_json::from_str::<EvalSuite>(&fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap())
+                .unwrap(),
         );
 
         let report_dir = temp.path().join("demo-skill/attempts-report");
@@ -629,7 +609,14 @@ mod tests {
         let index: AliasIndex =
             serde_json::from_str(&std::fs::read_to_string(report_dir.join("iteration-1/alias-index.json")).unwrap())
                 .unwrap();
-        match index.evals.get("eval-one").unwrap().scenarios.get("with_skill").unwrap() {
+        match index
+            .evals
+            .get("eval-one")
+            .unwrap()
+            .scenarios
+            .get("with_skill")
+            .unwrap()
+        {
             ScenarioAlias::Multi(map) => {
                 assert_eq!(map.get("attempt-1").map(String::as_str), Some("runs/run-001"));
                 assert_eq!(map.get("attempt-2").map(String::as_str), Some("runs/run-002"));
@@ -678,10 +665,8 @@ mod tests {
         .unwrap();
 
         let slugs = slugs_for_suite(
-            &serde_json::from_str::<EvalSuite>(
-                &fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap(),
-            )
-            .unwrap(),
+            &serde_json::from_str::<EvalSuite>(&fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap())
+                .unwrap(),
         );
 
         let report_dir = temp.path().join("demo-skill/snapshot-report");

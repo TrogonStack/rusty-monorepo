@@ -165,9 +165,7 @@ pub fn resolve_reviewer(override_reviewer: Option<&str>) -> Result<String> {
     }
 
     git_user_email().ok_or_else(|| {
-        FeedbackError::Message(
-            "could not resolve reviewer: set git user.email or pass --reviewer".to_string(),
-        )
+        FeedbackError::Message("could not resolve reviewer: set git user.email or pass --reviewer".to_string())
     })
 }
 
@@ -335,7 +333,9 @@ fn read_and_validate_feedback_file(path: &Path) -> std::result::Result<(), Strin
 
 fn validate_feedback_document(document: &FeedbackDocument) -> Result<()> {
     if document.reviewer.trim().is_empty() {
-        return Err(FeedbackError::Message("reviewer must be a non-empty string".to_string()));
+        return Err(FeedbackError::Message(
+            "reviewer must be a non-empty string".to_string(),
+        ));
     }
 
     DateTime::parse_from_rfc3339(&document.reviewed_at).map_err(|_| {

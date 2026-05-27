@@ -3,11 +3,10 @@ use std::path::{Path, PathBuf};
 
 use crate::agentskills::cache::{
     apply_cache_hit, compute_fixture_hash, record_completion, runner_kind_label, try_resolve_cache, CacheKey,
-    CacheKeyInput, CacheOptions, PROMPT_CONTRACT_VERSION, ReuseKeyInput,
+    CacheKeyInput, CacheOptions, ReuseKeyInput, PROMPT_CONTRACT_VERSION,
 };
 use crate::agentskills::evals::{
-    effective_timeout_secs, missing_expected_output_warnings, parse_eval_suite, EvalCase, EvalCheckOptions,
-    EvalSuite,
+    effective_timeout_secs, missing_expected_output_warnings, parse_eval_suite, EvalCase, EvalCheckOptions, EvalSuite,
 };
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::outputs::index_output_artifacts;
@@ -218,7 +217,9 @@ impl RunArgs {
             }
         }
 
-        let iteration = self.iteration.unwrap_or_else(|| detect_next_iteration(&self.out_dir, &props.name));
+        let iteration = self
+            .iteration
+            .unwrap_or_else(|| detect_next_iteration(&self.out_dir, &props.name));
 
         if self.scenario.contains(&ScenarioKind::OldSkill) && self.old_skill_dir.is_none() {
             eprintln!("--old-skill-dir is required when --scenario old_skill is included");
@@ -348,8 +349,7 @@ impl RunArgs {
         }
 
         if self.benchmark {
-            let (code, benchmark_doc) =
-                benchmark_report_dir_with_document(&report_dir, BenchmarkOptions::default());
+            let (code, benchmark_doc) = benchmark_report_dir_with_document(&report_dir, BenchmarkOptions::default());
             if self.json {
                 if let Some(document) = benchmark_doc {
                     emit_chained_benchmark_json(&report_dir, code, &document);
@@ -358,13 +358,7 @@ impl RunArgs {
             return code;
         }
 
-        finish_eval_output(
-            &report_dir,
-            self.json,
-            self.ci.policy(),
-            &self.ci.thresholds(),
-            None,
-        )
+        finish_eval_output(&report_dir, self.json, self.ci.policy(), &self.ci.thresholds(), None)
     }
 }
 
@@ -621,14 +615,7 @@ fn execute_runs(
         }
 
         if cache_options.enabled && run.status == "completed" {
-            if let Err(e) = record_completion(
-                out_dir,
-                &cache_key,
-                &key_input,
-                &run.eval_case_id,
-                report_dir,
-                &run.id,
-            ) {
+            if let Err(e) = record_completion(out_dir, &cache_key, &key_input, &run.eval_case_id, report_dir, &run.id) {
                 eprintln!("Run {}: failed to record cache entry: {}", run.id, e);
             }
         }
@@ -711,11 +698,7 @@ mod fake_runner {
         if std::fs::create_dir_all(&outputs_dir).is_ok() {
             let _ = std::fs::write(outputs_dir.join("out.json"), r#"{"ok":true}"#);
         }
-        std::fs::write(
-            request.transcript_path,
-            format!(r#"{{"invocation":{count}}}"#),
-        )
-        .expect("transcript");
+        std::fs::write(request.transcript_path, format!(r#"{{"invocation":{count}}}"#)).expect("transcript");
 
         EvalRunOutcome {
             status: RunStatus::Completed,
@@ -762,10 +745,7 @@ fn apply_outcome(
             .get("kind")
             .and_then(|value| value.as_str())
             .is_none_or(|kind| {
-                kind != "transcript"
-                    && kind != "stderr"
-                    && kind != "runner_command"
-                    && kind != "runner_env"
+                kind != "transcript" && kind != "stderr" && kind != "runner_command" && kind != "runner_env"
             })
     });
 
@@ -819,7 +799,8 @@ fn apply_outcome(
 
     if outcome.status == crate::agentskills::runner::RunStatus::Completed {
         let outputs_dir = workspace_dir.join(crate::agentskills::outputs::OUTPUTS_DIR);
-        run.warnings.extend(missing_expected_output_warnings(eval, &outputs_dir));
+        run.warnings
+            .extend(missing_expected_output_warnings(eval, &outputs_dir));
     }
 }
 
@@ -1579,8 +1560,12 @@ mod tests {
         assert_eq!(report["runs"][0]["status"], "completed");
         let warnings = report["runs"][0]["warnings"].as_array().unwrap();
         assert_eq!(warnings.len(), 2);
-        assert!(warnings.iter().any(|warning| warning.as_str().unwrap().contains("report.md")));
-        assert!(warnings.iter().any(|warning| warning.as_str().unwrap().contains("missing.md")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("report.md")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("missing.md")));
     }
 
     fn write_gradable_skill(root: &Path) -> PathBuf {
@@ -1702,8 +1687,7 @@ mod tests {
                 .expect("report dir")
         };
 
-        let report_before =
-            std::fs::read_to_string(report_dir.join("report.json")).expect("report.json");
+        let report_before = std::fs::read_to_string(report_dir.join("report.json")).expect("report.json");
 
         let status = crate::commands::ai::skills::eval::grade::grade_report_dir(
             &report_dir,

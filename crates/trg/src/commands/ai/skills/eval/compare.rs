@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use serde::Serialize;
 
-use crate::agentskills::compare::{
-    run_comparisons, CompareOptions, ComparisonRecord, JudgeKind, ScenarioPair,
-};
+use crate::agentskills::compare::{run_comparisons, CompareOptions, ComparisonRecord, JudgeKind, ScenarioPair};
 use crate::agentskills::eval_suite_drift::{
     detect_eval_suite_drift_snapshots, load_report_drift_snapshot, maybe_emit_eval_suite_drift_warning,
     EvalSuiteDriftWarning,
@@ -81,10 +79,7 @@ pub struct CompareArgs {
     )]
     pub judge_command: Option<String>,
 
-    #[arg(
-        long,
-        help = "Write comparison.json under iteration layout directories when present"
-    )]
+    #[arg(long, help = "Write comparison.json under iteration layout directories when present")]
     pub emit_comparison_json: bool,
 
     #[arg(

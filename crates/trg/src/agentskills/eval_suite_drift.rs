@@ -109,10 +109,7 @@ pub fn eval_case_ids(report: &ReportDocument) -> BTreeSet<String> {
         .collect()
 }
 
-pub fn detect_eval_suite_drift(
-    current: &ReportDocument,
-    previous: &ReportDocument,
-) -> Option<EvalSuiteDriftReport> {
+pub fn detect_eval_suite_drift(current: &ReportDocument, previous: &ReportDocument) -> Option<EvalSuiteDriftReport> {
     detect_eval_suite_drift_snapshots(
         &ReportDriftSnapshot {
             iteration: current.report.iteration,
@@ -135,8 +132,7 @@ pub fn detect_eval_suite_drift_snapshots(
         return None;
     }
 
-    let (added_eval_ids, removed_eval_ids) =
-        diff_eval_case_ids(&current.eval_case_ids, &previous.eval_case_ids);
+    let (added_eval_ids, removed_eval_ids) = diff_eval_case_ids(&current.eval_case_ids, &previous.eval_case_ids);
 
     Some(EvalSuiteDriftReport {
         current_hash: current.evals_hash.clone(),
@@ -164,11 +160,7 @@ pub fn detect_eval_suite_drift_vs_skill(
     }
 
     let suite = parse_eval_suite(&current_content)?;
-    let current_ids: BTreeSet<String> = suite
-        .evals
-        .iter()
-        .map(|eval| eval.id.to_string())
-        .collect();
+    let current_ids: BTreeSet<String> = suite.evals.iter().map(|eval| eval.id.to_string()).collect();
     let previous_ids = eval_case_ids(report);
     let (added_eval_ids, removed_eval_ids) = diff_eval_case_ids(&current_ids, &previous_ids);
 
@@ -201,10 +193,7 @@ pub fn maybe_emit_eval_suite_drift_warning(drift: Option<&EvalSuiteDriftReport>,
     }
 }
 
-fn diff_eval_case_ids(
-    current_ids: &BTreeSet<String>,
-    previous_ids: &BTreeSet<String>,
-) -> (Vec<String>, Vec<String>) {
+fn diff_eval_case_ids(current_ids: &BTreeSet<String>, previous_ids: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
     let added_eval_ids: Vec<String> = current_ids.difference(previous_ids).cloned().collect();
     let removed_eval_ids: Vec<String> = previous_ids.difference(current_ids).cloned().collect();
     (added_eval_ids, removed_eval_ids)

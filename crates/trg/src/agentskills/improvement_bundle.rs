@@ -185,8 +185,7 @@ pub fn build_improvement_bundle(
     let human_feedback = collect_human_feedback_groups(&report, &feedback_by_run);
     let failed_run_ids = failed_run_ids(from_report_dir, &report, &failed_assertions);
     let excerpt_lines = options.excerpt_lines.max(1);
-    let transcript_excerpts =
-        collect_transcript_excerpts(from_report_dir, &report, &failed_run_ids, excerpt_lines);
+    let transcript_excerpts = collect_transcript_excerpts(from_report_dir, &report, &failed_run_ids, excerpt_lines);
     let suggested_focus = derive_suggested_focus(from_report_dir, &report, &failed_assertions);
     let summary = build_summary(&report, from_report_dir)?;
 
@@ -236,11 +235,7 @@ fn eval_suite_drift_from_report(
     let previous_hash = report.suite.evals_hash.clone();
     let detected = drift_report.is_some();
     let (current_hash, added_eval_ids, removed_eval_ids) = if let Some(drift) = drift_report {
-        (
-            Some(drift.current_hash),
-            drift.added_eval_ids,
-            drift.removed_eval_ids,
-        )
+        (Some(drift.current_hash), drift.added_eval_ids, drift.removed_eval_ids)
     } else {
         (None, Vec::new(), Vec::new())
     };
@@ -314,10 +309,7 @@ fn build_summary(report: &ReportDocument, report_dir: &Path) -> Result<BundleSum
     })
 }
 
-fn collect_failed_assertion_groups(
-    report_dir: &Path,
-    report: &ReportDocument,
-) -> Result<Vec<FailedAssertionGroup>> {
+fn collect_failed_assertion_groups(report_dir: &Path, report: &ReportDocument) -> Result<Vec<FailedAssertionGroup>> {
     let slug_by_case: HashMap<&str, &str> = report
         .dimensions
         .eval_cases
@@ -335,14 +327,16 @@ fn collect_failed_assertion_groups(
 
         let grading: GradingFile = serde_json::from_str(&std::fs::read_to_string(&grading_path)?)?;
         for result in grading.assertion_results.iter().filter(|result| !result.passed) {
-            let group = groups.entry(run.eval_case_id.clone()).or_insert_with(|| FailedAssertionGroup {
-                eval_case_id: run.eval_case_id.clone(),
-                eval_slug: slug_by_case
-                    .get(run.eval_case_id.as_str())
-                    .map(|slug| (*slug).to_string())
-                    .unwrap_or_else(|| run.eval_slug.clone()),
-                failures: Vec::new(),
-            });
+            let group = groups
+                .entry(run.eval_case_id.clone())
+                .or_insert_with(|| FailedAssertionGroup {
+                    eval_case_id: run.eval_case_id.clone(),
+                    eval_slug: slug_by_case
+                        .get(run.eval_case_id.as_str())
+                        .map(|slug| (*slug).to_string())
+                        .unwrap_or_else(|| run.eval_slug.clone()),
+                    failures: Vec::new(),
+                });
             group.failures.push(FailedAssertionEntry {
                 run_id: run.id.clone(),
                 scenario_id: run.scenario_id,
@@ -437,11 +431,7 @@ fn collect_human_feedback_groups(
     groups.into_values().collect()
 }
 
-fn failed_run_ids(
-    report_dir: &Path,
-    report: &ReportDocument,
-    groups: &[FailedAssertionGroup],
-) -> HashSet<String> {
+fn failed_run_ids(report_dir: &Path, report: &ReportDocument, groups: &[FailedAssertionGroup]) -> HashSet<String> {
     let mut ids: HashSet<String> = groups
         .iter()
         .flat_map(|group| group.failures.iter().map(|failure| failure.run_id.clone()))
@@ -527,11 +517,7 @@ fn excerpt_lines_from_lines(lines: &[String], max_lines: usize) -> (Vec<String>,
     (head, tail, true)
 }
 
-fn derive_suggested_focus(
-    report_dir: &Path,
-    report: &ReportDocument,
-    groups: &[FailedAssertionGroup],
-) -> Vec<String> {
+fn derive_suggested_focus(report_dir: &Path, report: &ReportDocument, groups: &[FailedAssertionGroup]) -> Vec<String> {
     let mut focus = Vec::new();
 
     let mut assertion_run_counts: HashMap<String, HashSet<String>> = HashMap::new();
@@ -546,10 +532,7 @@ fn derive_suggested_focus(
 
     for (assertion, run_ids) in assertion_run_counts {
         if run_ids.len() > 1 {
-            focus.push(format!(
-                "Assertion failing across {} runs: {assertion}",
-                run_ids.len()
-            ));
+            focus.push(format!("Assertion failing across {} runs: {assertion}", run_ids.len()));
         }
     }
 
@@ -591,8 +574,7 @@ fn underperforming_with_skill_focus(report_dir: &Path, report: &ReportDocument) 
 
     for eval_case_id in eval_cases {
         let with_rates = pass_rate(by_case_scenario.get(&(eval_case_id.clone(), ScenarioKind::WithSkill)));
-        let without_rates =
-            pass_rate(by_case_scenario.get(&(eval_case_id.clone(), ScenarioKind::WithoutSkill)));
+        let without_rates = pass_rate(by_case_scenario.get(&(eval_case_id.clone(), ScenarioKind::WithoutSkill)));
 
         if without_rates > with_rates {
             focus.push(format!(
@@ -646,7 +628,10 @@ pub fn render_improvement_bundle_markdown(document: &ImprovementBundleDocument) 
     md.push_str("## Summary\n\n");
     md.push_str(&format!("- Iteration: {}\n", document.summary.iteration));
     md.push_str(&format!("- Report ID: {}\n", document.summary.report_id));
-    md.push_str(&format!("- Skill: {} ({})\n", document.summary.skill_name, document.summary.skill_hash));
+    md.push_str(&format!(
+        "- Skill: {} ({})\n",
+        document.summary.skill_name, document.summary.skill_hash
+    ));
     md.push_str(&format!("- Eval suite hash: {}\n", document.summary.evals_hash));
     md.push_str(&format!("- Total runs: {}\n", document.summary.total_runs));
     md.push_str(&format!(
@@ -712,10 +697,7 @@ pub fn render_improvement_bundle_markdown(document: &ImprovementBundleDocument) 
                 entry.feedback.reviewer, entry.feedback.reviewed_at
             ));
             for note in &entry.feedback.notes {
-                md.push_str(&format!(
-                    "- [{:?}/{:?}] {}\n",
-                    note.severity, note.category, note.text
-                ));
+                md.push_str(&format!("- [{:?}/{:?}] {}\n", note.severity, note.category, note.text));
             }
             md.push('\n');
         }
@@ -779,7 +761,9 @@ pub(crate) mod testutil {
     use crate::agentskills::feedback::{
         FeedbackCategory, FeedbackDocument, FeedbackNote, FeedbackSeverity, FEEDBACK_FILE_NAME,
     };
-    use crate::agentskills::grading::{AssertionGradeResult, GraderInfo, GraderKind, GradingSummary, GRADING_SCHEMA_VERSION};
+    use crate::agentskills::grading::{
+        AssertionGradeResult, GraderInfo, GraderKind, GradingSummary, GRADING_SCHEMA_VERSION,
+    };
     use crate::agentskills::report::{
         build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
     };
@@ -947,8 +931,8 @@ pub(crate) mod testutil {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::testutil::{sample_prior_iteration_fixture, write_empty_feedback};
+    use super::*;
     use crate::agentskills::report::ScenarioKind;
 
     #[test]
@@ -968,10 +952,7 @@ mod tests {
 
         assert!(output.markdown_path.is_file());
         assert!(output.json_path.is_file());
-        assert_eq!(
-            output.output_dir,
-            report_dir.parent().unwrap().join(NEXT_ITERATION_DIR)
-        );
+        assert_eq!(output.output_dir, report_dir.parent().unwrap().join(NEXT_ITERATION_DIR));
 
         let markdown = std::fs::read_to_string(output.markdown_path).unwrap();
         for section in [
@@ -1162,10 +1143,7 @@ mod tests {
 
         assert_eq!(document.human_feedback.len(), 1);
         assert!(
-            document
-                .human_feedback
-                .iter()
-                .all(|entry| entry.run_id != "run-002"),
+            document.human_feedback.iter().all(|entry| entry.run_id != "run-002"),
             "empty feedback must not create a bundle entry"
         );
         assert_eq!(document.human_feedback_summary.reviewed_no_issues_runs, 1);

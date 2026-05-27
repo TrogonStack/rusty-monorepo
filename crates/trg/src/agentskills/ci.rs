@@ -235,10 +235,7 @@ pub fn run_ci_checks(
         if metrics.assertion_results > 0 && metrics.pass_rate + f64::EPSILON < minimum {
             violations.push(CiViolation {
                 kind: CiViolationKind::PassRateBelowMinimum,
-                message: format!(
-                    "pass rate {:.4} is below minimum {:.4}",
-                    metrics.pass_rate, minimum
-                ),
+                message: format!("pass rate {:.4} is below minimum {:.4}", metrics.pass_rate, minimum),
                 run_id: None,
                 workspace: None,
                 file: None,
@@ -251,10 +248,7 @@ pub fn run_ci_checks(
         if metrics.total_tokens > maximum {
             violations.push(CiViolation {
                 kind: CiViolationKind::TokenBudgetExceeded,
-                message: format!(
-                    "total tokens {} exceeds maximum {}",
-                    metrics.total_tokens, maximum
-                ),
+                message: format!("total tokens {} exceeds maximum {}", metrics.total_tokens, maximum),
                 run_id: None,
                 workspace: None,
                 file: None,
@@ -267,10 +261,7 @@ pub fn run_ci_checks(
         if metrics.input_tokens > maximum {
             violations.push(CiViolation {
                 kind: CiViolationKind::InputTokenBudgetExceeded,
-                message: format!(
-                    "input tokens {} exceeds maximum {}",
-                    metrics.input_tokens, maximum
-                ),
+                message: format!("input tokens {} exceeds maximum {}", metrics.input_tokens, maximum),
                 run_id: None,
                 workspace: None,
                 file: None,
@@ -283,10 +274,7 @@ pub fn run_ci_checks(
         if metrics.output_tokens > maximum {
             violations.push(CiViolation {
                 kind: CiViolationKind::OutputTokenBudgetExceeded,
-                message: format!(
-                    "output tokens {} exceeds maximum {}",
-                    metrics.output_tokens, maximum
-                ),
+                message: format!("output tokens {} exceeds maximum {}", metrics.output_tokens, maximum),
                 run_id: None,
                 workspace: None,
                 file: None,
@@ -520,8 +508,8 @@ struct AssertionForAnnotations {
 mod tests {
     use super::*;
     use crate::agentskills::report::{
-        ReportDocument, ReportSection, ProducerSection, RunMetrics, RunPaths, RunRecord, SCHEMA_VERSION,
-        ScenarioKind, SuiteSection, SummariesSection,
+        ProducerSection, ReportDocument, ReportSection, RunMetrics, RunPaths, RunRecord, ScenarioKind, SuiteSection,
+        SummariesSection, SCHEMA_VERSION,
     };
     use std::fs;
     use std::path::Path;
@@ -645,7 +633,10 @@ mod tests {
         metrics.failed_runs = 1;
         let result = run_ci_checks(&metrics, CiPolicy::strict_ci(), &ThresholdConfig::default(), &[], &[]);
         assert!(!result.passed);
-        assert!(result.violations.iter().any(|v| v.kind == CiViolationKind::RunnerFailure));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.kind == CiViolationKind::RunnerFailure));
     }
 
     #[test]
@@ -712,8 +703,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "::error file=runs/run-001/workspace/grading.json,line=2::assertion failed: missing chart"
-                    .to_string()
+                "::error file=runs/run-001/workspace/grading.json,line=2::assertion failed: missing chart".to_string()
             ]
         );
     }
@@ -771,75 +761,75 @@ mod tests {
         .unwrap();
 
         let document = ReportDocument {
-                schema_version: SCHEMA_VERSION.to_string(),
-                report: ReportSection {
-                    id: "report-test".to_string(),
-                    generated_at: "2026-05-26T00:00:00Z".to_string(),
-                    producer: ProducerSection {
-                        name: "trg".to_string(),
-                        version: "0.0.0".to_string(),
-                    },
-                    runner: None,
-                    runner_binary: None,
-                    runner_version: None,
-                    ci: None,
-                    iteration: 1,
+            schema_version: SCHEMA_VERSION.to_string(),
+            report: ReportSection {
+                id: "report-test".to_string(),
+                generated_at: "2026-05-26T00:00:00Z".to_string(),
+                producer: ProducerSection {
+                    name: "trg".to_string(),
+                    version: "0.0.0".to_string(),
                 },
-                suite: SuiteSection {
-                    skill_name: "demo".to_string(),
-                    skill_path: "demo".to_string(),
-                    skill_hash: "sha256:abc".to_string(),
-                    evals_path: "demo/evals/evals.json".to_string(),
-                    evals_hash: "sha256:def".to_string(),
-                    old_skill_path: None,
-                    old_skill_hash: None,
+                runner: None,
+                runner_binary: None,
+                runner_version: None,
+                ci: None,
+                iteration: 1,
+            },
+            suite: SuiteSection {
+                skill_name: "demo".to_string(),
+                skill_path: "demo".to_string(),
+                skill_hash: "sha256:abc".to_string(),
+                evals_path: "demo/evals/evals.json".to_string(),
+                evals_hash: "sha256:def".to_string(),
+                old_skill_path: None,
+                old_skill_hash: None,
+            },
+            dimensions: crate::agentskills::report::DimensionsSection {
+                eval_cases: Vec::new(),
+                assertions: Vec::new(),
+                skill_revisions: Vec::new(),
+                model_configs: Vec::new(),
+                scenarios: Vec::new(),
+                graders: Vec::new(),
+            },
+            runs: vec![RunRecord {
+                id: "run-001".to_string(),
+                eval_case_id: "case-a".to_string(),
+                eval_slug: "case-a".to_string(),
+                iteration: 1,
+                mirror_path: "iteration-1/eval-case-a/with_skill/".to_string(),
+                scenario_id: ScenarioKind::WithSkill,
+                model_config_id: "ci-default".to_string(),
+                skill_revision_id: "current".to_string(),
+                attempt: 1,
+                status: "completed".to_string(),
+                runner_invocations: 1,
+                failure_kind: None,
+                paths: RunPaths {
+                    workspace: "runs/run-001/workspace".to_string(),
+                    outputs: "runs/run-001/workspace/outputs".to_string(),
                 },
-                dimensions: crate::agentskills::report::DimensionsSection {
-                    eval_cases: Vec::new(),
-                    assertions: Vec::new(),
-                    skill_revisions: Vec::new(),
-                    model_configs: Vec::new(),
-                    scenarios: Vec::new(),
-                    graders: Vec::new(),
+                artifacts: Vec::new(),
+                metrics: RunMetrics {
+                    duration_ms: Some(metrics.max_duration_ms),
+                    exit_code: None,
+                    total_tokens: Some(metrics.total_tokens),
+                    input_tokens: Some(metrics.input_tokens),
+                    output_tokens: Some(metrics.output_tokens),
+                    cost_usd: None,
                 },
-                runs: vec![RunRecord {
-                    id: "run-001".to_string(),
-                    eval_case_id: "case-a".to_string(),
-                    eval_slug: "case-a".to_string(),
-                    iteration: 1,
-                    mirror_path: "iteration-1/eval-case-a/with_skill/".to_string(),
-                    scenario_id: ScenarioKind::WithSkill,
-                    model_config_id: "ci-default".to_string(),
-                    skill_revision_id: "current".to_string(),
-                    attempt: 1,
-                    status: "completed".to_string(),
-                    runner_invocations: 1,
-                    failure_kind: None,
-                    paths: RunPaths {
-                        workspace: "runs/run-001/workspace".to_string(),
-                        outputs: "runs/run-001/workspace/outputs".to_string(),
-                    },
-                    artifacts: Vec::new(),
-                    metrics: RunMetrics {
-                        duration_ms: Some(metrics.max_duration_ms),
-                        exit_code: None,
-                        total_tokens: Some(metrics.total_tokens),
-                        input_tokens: Some(metrics.input_tokens),
-                        output_tokens: Some(metrics.output_tokens),
-                        cost_usd: None,
-                    },
-                    cache: None,
-                    skill_integrity: None,
-                    warnings: Vec::new(),
-                }],
-                assertion_results: Vec::new(),
-                summaries: SummariesSection {
-                    by_scenario: Vec::new(),
-                    human_feedback: Default::default(),
-                },
-                comparisons: Vec::new(),
-                improvement_feedback: Default::default(),
-                iteration_summary: None,
+                cache: None,
+                skill_integrity: None,
+                warnings: Vec::new(),
+            }],
+            assertion_results: Vec::new(),
+            summaries: SummariesSection {
+                by_scenario: Vec::new(),
+                human_feedback: Default::default(),
+            },
+            comparisons: Vec::new(),
+            improvement_feedback: Default::default(),
+            iteration_summary: None,
         };
         let report_json = serde_json::to_string_pretty(&document).unwrap();
         fs::write(dir.join("report.json"), report_json).unwrap();

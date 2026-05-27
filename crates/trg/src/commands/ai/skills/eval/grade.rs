@@ -62,10 +62,7 @@ pub(crate) fn grade_report_dir_with_report(
         Ok(report) => {
             print_report_dir(report_dir);
             println!("Graded {} run(s)", report.runs_graded);
-            println!(
-                "  assertions: {}/{} passed",
-                report.passed, report.assertions_graded
-            );
+            println!("  assertions: {}/{} passed", report.passed, report.assertions_graded);
             if report.needs_llm > 0 {
                 println!("  needs LLM: {}", report.needs_llm);
             }

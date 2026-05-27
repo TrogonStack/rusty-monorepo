@@ -59,11 +59,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     }
     cmd_args.push(&prepared.prompt);
     if let Some(run_dir) = request.transcript_path.parent() {
-        write_runner_invocation_metadata(
-            run_dir,
-            redact_command_args(PROGRAM, &cmd_args),
-            redact_env(),
-        )?;
+        write_runner_invocation_metadata(run_dir, redact_command_args(PROGRAM, &cmd_args), redact_env())?;
     }
 
     let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
@@ -78,7 +74,13 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
 
     let final_text = std::fs::read_to_string(&final_text_path).unwrap_or_default();
     let exit_ok = captured.exit_code == Some(0);
-    let outcome = parse_outcome(&captured.stdout, captured.duration_ms, exit_ok, captured.exit_code, final_text);
+    let outcome = parse_outcome(
+        &captured.stdout,
+        captured.duration_ms,
+        exit_ok,
+        captured.exit_code,
+        final_text,
+    );
     cleanup_runner_temp_files(request.workspace_dir)?;
     write_timing(request, &outcome)?;
     Ok(outcome)
@@ -157,8 +159,8 @@ fn parse_outcome(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::RunStatus;
+    use super::*;
 
     #[test]
     fn parses_turn_completed_event() {

@@ -57,7 +57,10 @@ fn bash_runner_records_exit_code_and_stderr() {
     assert!(matches!(outcome.status, RunStatus::Failed));
     assert_eq!(outcome.failure_kind, Some(FAILURE_KIND_RUNNER));
     assert_eq!(outcome.exit_code, Some(3));
-    assert_eq!(std::fs::read_to_string(workspace.join("stderr.log")).unwrap(), "err-msg\n");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("stderr.log")).unwrap(),
+        "err-msg\n"
+    );
 }
 
 #[test]

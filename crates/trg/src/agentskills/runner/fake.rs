@@ -22,7 +22,11 @@ pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome
     let exit_ok = captured.exit_code == Some(0);
     let stdout = String::from_utf8_lossy(&captured.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&captured.stderr).into_owned();
-    let final_text = if stdout.is_empty() { stderr.clone() } else { stdout.clone() };
+    let final_text = if stdout.is_empty() {
+        stderr.clone()
+    } else {
+        stdout.clone()
+    };
 
     let has_result = stdout.lines().any(|line| {
         serde_json::from_str::<serde_json::Value>(line.trim())

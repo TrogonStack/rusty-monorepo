@@ -279,9 +279,7 @@ fn reject_unknown_fields(value: &serde_json::Value, label: &str, allowed: &[&str
 }
 
 pub fn effective_timeout_secs(case: &EvalCase, global_timeout_secs: Option<u64>) -> Option<u64> {
-    case.timeout_secs
-        .map(u64::from)
-        .or(global_timeout_secs)
+    case.timeout_secs.map(u64::from).or(global_timeout_secs)
 }
 
 fn deserialize_evals<'de, D>(deserializer: D) -> std::result::Result<Vec<EvalCase>, D::Error>
@@ -360,8 +358,7 @@ pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSu
 }
 
 pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
-    let skill_name_json = serde_json::to_string(skill_name)
-        .expect("string serialization to JSON is infallible");
+    let skill_name_json = serde_json::to_string(skill_name).expect("string serialization to JSON is infallible");
     format!(
         r#"{{
   "schema_version": 2,
@@ -437,8 +434,7 @@ pub fn lint_eval_suite(suite: &EvalSuite, options: EvalLintOptions) -> Vec<EvalL
         if !eval.files.is_empty() && !eval.prompt.as_str().contains('/') {
             warnings.push(EvalLintWarning {
                 eval_id: eval_id.clone(),
-                message: "fixture files are present but the prompt does not reference a file path"
-                    .to_string(),
+                message: "fixture files are present but the prompt does not reference a file path".to_string(),
             });
         }
 
@@ -544,10 +540,7 @@ pub fn is_probably_binary_fixture(path: &Path, bytes: &[u8]) -> bool {
         return !(mime.starts_with("text/")
             || matches!(
                 mime.as_str(),
-                "application/json"
-                    | "application/xml"
-                    | "application/yaml"
-                    | "application/x-ndjson"
+                "application/json" | "application/xml" | "application/yaml" | "application/x-ndjson"
             ));
     }
 
@@ -568,10 +561,7 @@ pub fn missing_expected_output_warnings(eval: &EvalCase, outputs_dir: &Path) -> 
 
 pub fn print_eval_lint_warnings(warnings: &[EvalLintWarning]) {
     for warning in warnings {
-        eprintln!(
-            "eval lint warning ({}): {}",
-            warning.eval_id, warning.message
-        );
+        eprintln!("eval lint warning ({}): {}", warning.eval_id, warning.message);
     }
 }
 
@@ -1094,11 +1084,7 @@ mod tests {
 
     #[test]
     fn lint_eval_suite_warns_on_vague_prompt() {
-        let suite = sample_suite_with_eval(sample_eval_case(
-            "one",
-            "too short",
-            "long enough output",
-        ));
+        let suite = sample_suite_with_eval(sample_eval_case("one", "too short", "long enough output"));
 
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
         assert!(warnings.iter().any(|warning| warning.message.contains("too vague")));
@@ -1106,11 +1092,7 @@ mod tests {
 
     #[test]
     fn lint_eval_suite_warns_on_generic_expected_output() {
-        let suite = sample_suite_with_eval(sample_eval_case(
-            "one",
-            "A sufficiently long prompt here",
-            "short",
-        ));
+        let suite = sample_suite_with_eval(sample_eval_case("one", "A sufficiently long prompt here", "short"));
 
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
         assert!(warnings.iter().any(|warning| warning.message.contains("too generic")));
@@ -1146,30 +1128,26 @@ mod tests {
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
-        assert!(warnings.iter().any(|warning| warning.message.contains("duplicate fixture path")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("duplicate fixture path")));
     }
 
     #[test]
     fn lint_eval_suite_warns_on_empty_assertions_by_default() {
-        let mut eval = sample_eval_case(
-            "one",
-            "A sufficiently long prompt here",
-            "A detailed analysis output",
-        );
+        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
         eval.assertions = vec![];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
-        assert!(warnings.iter().any(|warning| warning.message.contains("assertions are empty")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("assertions are empty")));
     }
 
     #[test]
     fn lint_eval_suite_allows_empty_assertions_when_requested() {
-        let mut eval = sample_eval_case(
-            "one",
-            "A sufficiently long prompt here",
-            "A detailed analysis output",
-        );
+        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
         eval.assertions = vec![];
         let suite = sample_suite_with_eval(eval);
 
@@ -1180,7 +1158,9 @@ mod tests {
                 ..EvalLintOptions::default()
             },
         );
-        assert!(!warnings.iter().any(|warning| warning.message.contains("assertions are empty")));
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.message.contains("assertions are empty")));
     }
 
     #[test]
@@ -1343,12 +1323,7 @@ mod tests {
         eval.files = vec![RelativeSkillPath("evals/files/large.csv".to_string())];
         let suite = sample_suite_with_eval(eval);
 
-        let warnings = lint_eval_suite_fixtures(
-            &crate::fs::RealFS,
-            &skill_path,
-            &suite,
-            EvalLintOptions::default(),
-        );
+        let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());
         assert!(warnings.iter().any(|warning| warning.message.contains("exceeds")));
     }
 
@@ -1368,12 +1343,7 @@ mod tests {
         eval.files = vec![RelativeSkillPath("evals/files/small.csv".to_string())];
         let suite = sample_suite_with_eval(eval);
 
-        let warnings = lint_eval_suite_fixtures(
-            &crate::fs::RealFS,
-            &skill_path,
-            &suite,
-            EvalLintOptions::default(),
-        );
+        let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());
         assert!(!warnings.iter().any(|warning| warning.message.contains("exceeds")));
     }
 
@@ -1393,12 +1363,7 @@ mod tests {
         eval.files = vec![RelativeSkillPath("evals/files/binary.bin".to_string())];
         let suite = sample_suite_with_eval(eval);
 
-        let warnings = lint_eval_suite_fixtures(
-            &crate::fs::RealFS,
-            &skill_path,
-            &suite,
-            EvalLintOptions::default(),
-        );
+        let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());
         assert!(warnings.iter().any(|warning| warning.message.contains("binary")));
     }
 

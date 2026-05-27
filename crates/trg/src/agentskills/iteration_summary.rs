@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::benchmark::{FailedRunsMode, stddev};
+use super::benchmark::{stddev, FailedRunsMode};
 use super::evals::{EvalError, Result};
 use super::layout;
 use super::report::ScenarioKind;
@@ -199,11 +199,8 @@ pub fn build_iteration_summary_document(
         .as_ref()
         .and_then(|previous_dir| build_cross_iteration_section(previous_dir, &current, options.failed_runs));
 
-    let (always_pass, always_fail) = apply_cross_iteration_deltas(
-        &current.always_pass,
-        &current.always_fail,
-        cross_iteration.as_ref(),
-    );
+    let (always_pass, always_fail) =
+        apply_cross_iteration_deltas(&current.always_pass, &current.always_fail, cross_iteration.as_ref());
 
     Ok(IterationSummaryDocument {
         schema_version: SCHEMA_VERSION.to_string(),
@@ -290,12 +287,7 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         document.timing_outliers.iter().map(|record| {
             format!(
                 "{} | {} attempt {} | {} ms (mean {:.0}, σ {:.0})",
-                record.eval_id,
-                record.scenario,
-                record.attempt,
-                record.duration_ms,
-                record.mean_ms,
-                record.stddev_ms
+                record.eval_id, record.scenario, record.attempt, record.duration_ms, record.mean_ms, record.stddev_ms
             )
         }),
     );
@@ -322,27 +314,31 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         );
         print_section(
             "Newly always pass",
-            cross.newly_always_pass.iter().map(|record| {
-                format!("{} | {}", record.eval_id, record.assertion_text)
-            }),
+            cross
+                .newly_always_pass
+                .iter()
+                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
         );
         print_section(
             "No longer always pass",
-            cross.no_longer_always_pass.iter().map(|record| {
-                format!("{} | {}", record.eval_id, record.assertion_text)
-            }),
+            cross
+                .no_longer_always_pass
+                .iter()
+                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
         );
         print_section(
             "Newly always fail",
-            cross.newly_always_fail.iter().map(|record| {
-                format!("{} | {}", record.eval_id, record.assertion_text)
-            }),
+            cross
+                .newly_always_fail
+                .iter()
+                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
         );
         print_section(
             "No longer always fail",
-            cross.no_longer_always_fail.iter().map(|record| {
-                format!("{} | {}", record.eval_id, record.assertion_text)
-            }),
+            cross
+                .no_longer_always_fail
+                .iter()
+                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
         );
     }
 }
@@ -649,7 +645,10 @@ fn stability_key_set(records: &[AssertionStabilityRecord]) -> HashSet<AssertionK
         .collect()
 }
 
-fn diff_records(records: &[AssertionStabilityRecord], exclude: &HashSet<AssertionKey>) -> Vec<AssertionStabilityRecord> {
+fn diff_records(
+    records: &[AssertionStabilityRecord],
+    exclude: &HashSet<AssertionKey>,
+) -> Vec<AssertionStabilityRecord> {
     records
         .iter()
         .filter(|record| {
@@ -678,11 +677,7 @@ pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> 
     let mut candidates: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|candidate| {
-            candidate.is_dir()
-                && candidate != report_dir
-                && candidate.join("report.json").is_file()
-        })
+        .filter(|candidate| candidate.is_dir() && candidate != report_dir && candidate.join("report.json").is_file())
         .collect();
     candidates.sort();
 
@@ -735,12 +730,8 @@ fn load_run_sample(report_dir: &Path, workspace_rel: &str) -> RunSample {
         .find(|path| path.is_file());
 
     RunSample {
-        grading: grading_path
-            .as_ref()
-            .and_then(|path| read_json_file(path).ok()),
-        timing: timing_path
-            .as_ref()
-            .and_then(|path| read_json_file(path).ok()),
+        grading: grading_path.as_ref().and_then(|path| read_json_file(path).ok()),
+        timing: timing_path.as_ref().and_then(|path| read_json_file(path).ok()),
     }
 }
 
@@ -762,9 +753,7 @@ fn pass_rate(passed: u32, failed: u32) -> f64 {
     }
 }
 
-fn detect_timing_outliers(
-    by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>>,
-) -> Vec<TimingOutlierRecord> {
+fn detect_timing_outliers(by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>>) -> Vec<TimingOutlierRecord> {
     detect_outliers(by_scenario)
         .into_iter()
         .map(|(sample, scenario, mean, sigma)| TimingOutlierRecord {
@@ -778,9 +767,7 @@ fn detect_timing_outliers(
         .collect()
 }
 
-fn detect_token_outliers(
-    by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>>,
-) -> Vec<TokenOutlierRecord> {
+fn detect_token_outliers(by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>>) -> Vec<TokenOutlierRecord> {
     detect_outliers(by_scenario)
         .into_iter()
         .map(|(sample, scenario, mean, sigma)| TokenOutlierRecord {
@@ -827,12 +814,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn write_report(
-        report_dir: &Path,
-        runs: serde_json::Value,
-        iteration: u32,
-        report_id: &str,
-    ) {
+    fn write_report(report_dir: &Path, runs: serde_json::Value, iteration: u32, report_id: &str) {
         fs::create_dir_all(report_dir).unwrap();
         let report = serde_json::json!({
             "schema_version": "trg.skills-eval.report.v1",
@@ -869,12 +851,7 @@ mod tests {
         .unwrap();
     }
 
-    fn write_run_artifacts(
-        report_dir: &Path,
-        run_id: &str,
-        grading: Option<&str>,
-        timing: Option<&str>,
-    ) {
+    fn write_run_artifacts(report_dir: &Path, run_id: &str, grading: Option<&str>, timing: Option<&str>) {
         let run_dir = report_dir.join(format!("runs/{run_id}"));
         let workspace = run_dir.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
@@ -886,13 +863,7 @@ mod tests {
         }
     }
 
-    fn sample_run(
-        id: &str,
-        eval_case_id: &str,
-        scenario: &str,
-        attempt: u32,
-        status: &str,
-    ) -> serde_json::Value {
+    fn sample_run(id: &str, eval_case_id: &str, scenario: &str, attempt: u32, status: &str) -> serde_json::Value {
         serde_json::json!({
             "id": id,
             "eval_case_id": eval_case_id,
@@ -932,11 +903,7 @@ mod tests {
             None,
         );
 
-        let summary = build_iteration_summary_document(
-            temp.path(),
-            IterationSummaryOptions::default(),
-        )
-        .unwrap();
+        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.always_pass.len(), 1);
         assert_eq!(summary.always_pass[0].eval_id, "case-a");
@@ -969,11 +936,7 @@ mod tests {
             None,
         );
 
-        let summary = build_iteration_summary_document(
-            temp.path(),
-            IterationSummaryOptions::default(),
-        )
-        .unwrap();
+        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.always_fail.len(), 1);
         assert_eq!(summary.always_fail[0].attempts_observed, 2);
@@ -1004,11 +967,7 @@ mod tests {
             None,
         );
 
-        let summary = build_iteration_summary_document(
-            temp.path(),
-            IterationSummaryOptions::default(),
-        )
-        .unwrap();
+        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.helped_by_skill.len(), 1);
         assert_eq!(summary.helped_by_skill[0].with_skill_pass_rate, 1.0);
@@ -1041,11 +1000,7 @@ mod tests {
             None,
         );
 
-        let summary = build_iteration_summary_document(
-            temp.path(),
-            IterationSummaryOptions::default(),
-        )
-        .unwrap();
+        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.flaky_assertions.len(), 1);
         assert_eq!(summary.flaky_assertions[0].attempts, 2);
@@ -1066,11 +1021,7 @@ mod tests {
             1,
             "report-a",
         );
-        for (run_id, duration_ms, tokens) in [
-            ("run-001", 1000, 100),
-            ("run-002", 1100, 110),
-            ("run-003", 9000, 900),
-        ] {
+        for (run_id, duration_ms, tokens) in [("run-001", 1000, 100), ("run-002", 1100, 110), ("run-003", 9000, 900)] {
             write_run_artifacts(
                 temp.path(),
                 run_id,
@@ -1081,11 +1032,7 @@ mod tests {
             );
         }
 
-        let summary = build_iteration_summary_document(
-            temp.path(),
-            IterationSummaryOptions::default(),
-        )
-        .unwrap();
+        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
         assert!(summary.timing_outliers.is_empty());
         assert!(summary.token_outliers.is_empty());
 
@@ -1124,11 +1071,7 @@ mod tests {
             );
         }
 
-        let summary = build_iteration_summary_document(
-            temp.path(),
-            IterationSummaryOptions::default(),
-        )
-        .unwrap();
+        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
         assert_eq!(summary.timing_outliers.len(), 1);
         assert_eq!(summary.timing_outliers[0].attempt, 8);
         assert_eq!(summary.timing_outliers[0].duration_ms, 50000);
@@ -1185,7 +1128,10 @@ mod tests {
 
         let cross = summary.cross_iteration.as_ref().unwrap();
         assert_eq!(cross.newly_always_pass.len(), 1);
-        assert_eq!(summary.always_pass[0].cross_iteration_delta, Some(CrossIterationDelta::New));
+        assert_eq!(
+            summary.always_pass[0].cross_iteration_delta,
+            Some(CrossIterationDelta::New)
+        );
     }
 
     #[test]
@@ -1213,18 +1159,12 @@ mod tests {
             Some(r#"{ "duration_ms": 2000, "total_tokens": 200 }"#),
         );
 
-        let mut summary = build_iteration_summary_document(
-            temp.path(),
-            IterationSummaryOptions::default(),
-        )
-        .unwrap();
+        let mut summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
         summary.generated_at = "2026-05-26T12:00:00Z".to_string();
 
         let json = serde_json::to_value(&summary).unwrap();
-        let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../schemas/iteration-summary.json.schema.json"
-        ))
-        .unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/iteration-summary.json.schema.json")).unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         let errors: Vec<_> = validator.iter_errors(&json).map(|error| error.to_string()).collect();
         assert!(errors.is_empty(), "schema errors: {errors:?}");

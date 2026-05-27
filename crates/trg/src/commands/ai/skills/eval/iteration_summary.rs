@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use crate::agentskills::benchmark::FailedRunsMode;
 use crate::agentskills::iteration_summary::{
-    build_iteration_summary_document, print_human_summary, write_iteration_summary,
-    IterationSummaryOptions,
+    build_iteration_summary_document, print_human_summary, write_iteration_summary, IterationSummaryOptions,
 };
 use crate::fs::FileSystem;
 use clap::Args;
@@ -39,7 +38,10 @@ pub struct IterationSummaryArgs {
     )]
     pub failed_runs: FailedRunsMode,
 
-    #[arg(long, help = "Emit iteration-summary.json to stdout instead of a human-readable table")]
+    #[arg(
+        long,
+        help = "Emit iteration-summary.json to stdout instead of a human-readable table"
+    )]
     pub json: bool,
 }
 

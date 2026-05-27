@@ -269,7 +269,10 @@ fn grade_assertion(
                     rationale: None,
                 })
             } else if options.grader == GraderMode::None {
-                Ok(needs_llm_result(assertion, "no mechanical pattern matched and grader mode is none"))
+                Ok(needs_llm_result(
+                    assertion,
+                    "no mechanical pattern matched and grader mode is none",
+                ))
             } else {
                 Ok(needs_llm_result(
                     assertion,
@@ -301,9 +304,7 @@ fn grade_with_script(
     options: &GradeOptions,
 ) -> Result<AssertionGradeResult> {
     let command = options.grader_command.as_deref().ok_or_else(|| {
-        EvalError::Validation(
-            ValidationError::for_field("--grader-command", "is required when --grader script").into(),
-        )
+        EvalError::Validation(ValidationError::for_field("--grader-command", "is required when --grader script").into())
     })?;
 
     let mut input = serde_json::json!({
@@ -313,9 +314,8 @@ fn grade_with_script(
         "transcript": ctx.transcript_path,
     });
     if let Some(hints) = &eval_case.grader_hints {
-        input["grader_hints"] = serde_json::Value::Object(
-            hints.iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
-        );
+        input["grader_hints"] =
+            serde_json::Value::Object(hints.iter().map(|(key, value)| (key.clone(), value.clone())).collect());
     }
 
     let mut child = Command::new(command)
@@ -398,9 +398,7 @@ struct ScriptGraderResponse {
 
 fn grade_with_llm(assertion: &str, ctx: &RunContext, options: &GradeOptions) -> Result<AssertionGradeResult> {
     let model = options.grader_model.as_deref().ok_or_else(|| {
-        EvalError::Validation(
-            ValidationError::for_field("--grader-model", "is required when --grader llm").into(),
-        )
+        EvalError::Validation(ValidationError::for_field("--grader-model", "is required when --grader llm").into())
     })?;
 
     if let Some(kind) = parse_mechanical_kind(assertion) {
@@ -472,9 +470,7 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
     }
 
     if let Some(path) = extract_after(&lower, "image exists at ") {
-        return Some(MechanicalKind::ImageExists {
-            path: path.to_string(),
-        });
+        return Some(MechanicalKind::ImageExists { path: path.to_string() });
     }
     if lower.starts_with("image ") && lower.ends_with(" exists") {
         let path = lower
@@ -512,10 +508,7 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
     }
     if lower.starts_with("output includes ") {
         let needle = assertion.trim()[16..].trim().trim_matches('"').to_string();
-        return Some(MechanicalKind::ContainsString {
-            needle,
-            path: None,
-        });
+        return Some(MechanicalKind::ContainsString { needle, path: None });
     }
 
     if let Some(pattern) = extract_regex_pattern(&lower) {
@@ -528,7 +521,9 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
         return Some(MechanicalKind::RowCount { count, path });
     }
     if let Some(count) = extract_usize_before(&lower, " rows") {
-        let path = extract_before(&lower, " has ").or_else(|| extract_before(&lower, " in ")).map(str::to_string);
+        let path = extract_before(&lower, " has ")
+            .or_else(|| extract_before(&lower, " in "))
+            .map(str::to_string);
         return Some(MechanicalKind::RowCount { count, path });
     }
 
@@ -661,26 +656,26 @@ fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool,
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| find_first_file_with_extension(&ctx.outputs_dir, "csv"));
             let rows = count_csv_rows(&target)?;
-            Ok((
-                rows == *count,
-                format!("{} has {rows} data row(s)", target.display()),
-            ))
+            Ok((rows == *count, format!("{} has {rows} data row(s)", target.display())))
         }
         MechanicalKind::SchemaValidation { schema, path } => {
             let target = path
                 .as_ref()
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| ctx.outputs_dir.join("output.json"));
-            let valid = target.is_file() && serde_json::from_str::<serde_json::Value>(
-                &std::fs::read_to_string(&target).unwrap_or_default(),
-            )
-            .is_ok();
+            let valid = target.is_file()
+                && serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&target).unwrap_or_default())
+                    .is_ok();
             Ok((
                 valid,
                 format!(
                     "schema '{schema}' validation on {}: {}",
                     target.display(),
-                    if valid { "valid JSON document" } else { "invalid or missing" }
+                    if valid {
+                        "valid JSON document"
+                    } else {
+                        "invalid or missing"
+                    }
                 ),
             ))
         }
@@ -800,7 +795,10 @@ fn collect_text_files(dir: &Path, parts: &mut Vec<String>) -> Result<()> {
 
 fn is_image_file(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .as_deref(),
         Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp")
     )
 }
@@ -870,11 +868,7 @@ pub fn build_grading_file(assertion_results: Vec<AssertionGradeResult>) -> Resul
     let passed = assertion_results.iter().filter(|r| r.passed).count();
     let failed = assertion_results.len() - passed;
     let total = assertion_results.len();
-    let pass_rate = if total == 0 {
-        0.0
-    } else {
-        passed as f64 / total as f64
-    };
+    let pass_rate = if total == 0 { 0.0 } else { passed as f64 / total as f64 };
 
     Ok(GradingFile {
         schema_version: GRADING_SCHEMA_VERSION.to_string(),
@@ -1221,7 +1215,11 @@ mod tests {
         ));
         assert!(matches!(
             parse_mechanical_kind("chart.png is 800x600"),
-            Some(MechanicalKind::ImageDimensions { width: 800, height: 600, .. })
+            Some(MechanicalKind::ImageDimensions {
+                width: 800,
+                height: 600,
+                ..
+            })
         ));
     }
 
@@ -1276,10 +1274,7 @@ mod tests {
         fs::write(ctx.outputs_dir.join("a.txt"), "a").unwrap();
         fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
 
-        let kind = MechanicalKind::FileCount {
-            count: 2,
-            dir: None,
-        };
+        let kind = MechanicalKind::FileCount { count: 2, dir: None };
         let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
         assert!(passed);
     }
@@ -1329,8 +1324,8 @@ mod tests {
         let ctx = ctx_with_outputs(tmp.path());
         // Minimal 1x1 PNG
         let png: [u8; 33] = [
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00,
-            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+            0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
         ];
         fs::write(ctx.outputs_dir.join("chart.png"), png).unwrap();
 
