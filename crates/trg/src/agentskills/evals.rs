@@ -493,16 +493,13 @@ fn lint_fixture_files(
 
     for file in files {
         let full_path = skill_path.join(file.as_path());
-        if !fs.exists(&full_path) {
+        if !fs.is_file(&full_path) {
             continue;
         }
 
-        let Ok(bytes) = std::fs::read(&full_path) else {
+        let Ok(bytes) = fs.read_bytes(&full_path) else {
             continue;
         };
-        if !full_path.is_file() {
-            continue;
-        }
 
         if bytes.len() as u64 > limit {
             warnings.push(EvalLintWarning {

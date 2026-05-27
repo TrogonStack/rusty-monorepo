@@ -477,13 +477,14 @@ fn read_json_file<T: for<'de> Deserialize<'de>>(path: &Path) -> std::result::Res
 }
 
 fn finalize_scenario(accumulator: ScenarioAccumulator, mode: FailedRunsMode) -> ScenarioBenchmark {
-    let mut completed_samples = accumulator.completed;
-    if mode == FailedRunsMode::Zero {
-        completed_samples.extend(accumulator.failed.iter().cloned());
-    }
+    let zero_failed_count = if mode == FailedRunsMode::Zero {
+        accumulator.failed.len()
+    } else {
+        0
+    };
 
     ScenarioBenchmark {
-        completed: summarize_completed(&completed_samples),
+        completed: summarize_completed(&accumulator.completed, zero_failed_count),
         failed: if mode == FailedRunsMode::Bucket && !accumulator.failed.is_empty() {
             Some(summarize_failed_bucket(&accumulator.failed))
         } else {
@@ -495,7 +496,7 @@ fn finalize_scenario(accumulator: ScenarioAccumulator, mode: FailedRunsMode) -> 
     }
 }
 
-fn summarize_completed(samples: &[RunSample]) -> CompletedBucket {
+fn summarize_completed(samples: &[RunSample], zero_failed_count: usize) -> CompletedBucket {
     let mut missing_grading = 0usize;
     let mut missing_timing = 0usize;
     let mut assertion_passed = 0usize;
@@ -536,8 +537,10 @@ fn summarize_completed(samples: &[RunSample]) -> CompletedBucket {
         }
     }
 
+    run_failed += zero_failed_count;
+
     CompletedBucket {
-        run_count: samples.len(),
+        run_count: samples.len() + zero_failed_count,
         assertions: pass_fail_summary(assertion_passed, assertion_failed),
         runs: pass_fail_summary(run_passed, run_failed),
         duration_ms: duration_stats(&durations),
@@ -1327,8 +1330,8 @@ mod tests {
         .unwrap();
         assert_eq!(zero.scenarios["with_skill"].completed.run_count, 2);
         assert_eq!(zero.scenarios["with_skill"].completed.runs.passed, 1);
-        assert_eq!(zero.scenarios["with_skill"].completed.runs.failed, 0);
-        assert_eq!(zero.scenarios["with_skill"].completed.missing_grading, 1);
+        assert_eq!(zero.scenarios["with_skill"].completed.runs.failed, 1);
+        assert_eq!(zero.scenarios["with_skill"].completed.missing_grading, 0);
     }
 
     #[test]

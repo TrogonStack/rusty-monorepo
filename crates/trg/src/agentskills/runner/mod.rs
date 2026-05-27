@@ -415,13 +415,9 @@ fn copy_skill_into_workspace(skill_path: &Path, dest: &Path) -> std::io::Result<
     copy_skill_tree(skill_path, dest)
 }
 
-/// Copy a skill directory without following symlinks (external links stay as links).
+/// Copy a skill directory, dereferencing symlinks so the destination is fully self-contained.
 fn copy_skill_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
-    let metadata = src.symlink_metadata()?;
-    if metadata.file_type().is_symlink() {
-        recreate_symlink(src, dest)?;
-        return Ok(());
-    }
+    let metadata = std::fs::metadata(src)?;
     if metadata.is_dir() {
         std::fs::create_dir_all(dest)?;
         for entry in std::fs::read_dir(src)? {
@@ -437,23 +433,6 @@ fn copy_skill_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
         std::fs::copy(src, dest)?;
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn recreate_symlink(src: &Path, dest: &Path) -> std::io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let target = std::fs::read_link(src)?;
-    std::os::unix::fs::symlink(target, dest)
-}
-
-#[cfg(not(unix))]
-fn recreate_symlink(src: &Path, dest: &Path) -> std::io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(src, dest)
 }
 
 fn stage_eval_file(skill_path: &Path, workspace_dir: &Path, relative: &str) -> std::io::Result<()> {

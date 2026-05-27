@@ -348,16 +348,41 @@ fn link_to_workspace(link_path: &Path, report_dir: &Path, workspace: &Path) {
         let relative_link = relative_path_from(link_path.parent().unwrap(), report_dir, &relative);
         if let Err(error) = std::os::unix::fs::symlink(&relative_link, link_path) {
             eprintln!(
-                "docs mirror: symlink {} -> {} failed ({error}); alias-index.json still records the mapping",
+                "docs mirror: symlink {} -> {} failed ({error}); writing .workspace-ref fallback",
                 link_path.display(),
-                relative_link.display()
+                relative_link.display(),
             );
+            write_workspace_ref(link_path, &relative);
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = (link_path, relative);
+        write_workspace_ref(link_path, &relative);
+    }
+}
+
+fn write_workspace_ref(link_path: &Path, workspace_relative: &Path) {
+    if let Err(error) = std::fs::create_dir_all(link_path) {
+        eprintln!(
+            "docs mirror: failed to create scenario directory {} ({error})",
+            link_path.display()
+        );
+        return;
+    }
+    let ref_path = link_path.join(".workspace-ref");
+    let payload = serde_json::json!({
+        "workspace": workspace_relative.to_string_lossy(),
+    });
+    let serialized = match serde_json::to_string_pretty(&payload) {
+        Ok(text) => text,
+        Err(error) => {
+            eprintln!("docs mirror: failed to serialize {} ({error})", ref_path.display());
+            return;
+        }
+    };
+    if let Err(error) = std::fs::write(&ref_path, serialized) {
+        eprintln!("docs mirror: failed to write {} ({error})", ref_path.display());
     }
 }
 
