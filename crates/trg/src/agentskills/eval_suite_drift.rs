@@ -93,13 +93,17 @@ pub fn load_report_drift_snapshot(report_dir: &Path) -> Result<ReportDriftSnapsh
     })
 }
 
-fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
+pub fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
     let raw = value
         .pointer("/report/iteration")
         .and_then(|field| {
-            field
-                .as_u64()
-                .or_else(|| field.get("index").and_then(|index| index.as_u64()))
+            field.as_u64().or_else(|| {
+                field.as_object().and_then(|object| {
+                    ["index", "iteration"]
+                        .iter()
+                        .find_map(|key| object.get(*key).and_then(|value| value.as_u64()))
+                })
+            })
         })
         .unwrap_or(1);
 
@@ -307,6 +311,14 @@ mod tests {
         assert_ne!(drift.current_hash, drift.previous_hash);
         assert_eq!(drift.added_eval_ids, vec!["case-c".to_string()]);
         assert_eq!(drift.removed_eval_ids, vec!["case-b".to_string()]);
+    }
+
+    #[test]
+    fn parse_report_iteration_accepts_object_iteration_key() {
+        let value = serde_json::json!({
+            "report": { "iteration": { "id": "iter-4", "iteration": 4 } }
+        });
+        assert_eq!(parse_report_iteration(&value).unwrap(), 4);
     }
 
     #[test]

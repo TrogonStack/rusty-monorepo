@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::eval_suite_drift::{
     detect_eval_suite_drift_snapshots, load_report_drift_snapshot, maybe_emit_eval_suite_drift_warning,
-    EvalSuiteDriftWarning,
+    parse_report_iteration, EvalSuiteDriftWarning,
 };
 use super::evals::{EvalError, Result};
 use super::iteration_summary::detect_previous_report_dir;
@@ -407,29 +407,7 @@ pub fn write_benchmark(report_dir: &Path, document: &BenchmarkDocument) -> Resul
 fn read_report_iteration(report_dir: &Path) -> std::result::Result<u32, EvalError> {
     let content = std::fs::read_to_string(report_dir.join("report.json"))?;
     let value: serde_json::Value = serde_json::from_str(&content)?;
-    parse_report_iteration(&value).ok_or_else(|| {
-        EvalError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "report.json missing report.iteration",
-        ))
-    })
-}
-
-fn parse_report_iteration(value: &serde_json::Value) -> Option<u32> {
-    let iteration = value.pointer("/report/iteration")?;
-
-    if let Some(number) = iteration.as_u64() {
-        return Some(number as u32);
-    }
-
-    let object = iteration.as_object()?;
-    for key in ["index", "iteration"] {
-        if let Some(number) = object.get(key).and_then(|field| field.as_u64()) {
-            return Some(number as u32);
-        }
-    }
-
-    None
+    parse_report_iteration(&value)
 }
 
 pub fn sync_iteration_summary_to_report(report_dir: &Path, summary: &IterationSummary) -> Result<()> {
