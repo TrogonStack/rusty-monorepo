@@ -165,7 +165,14 @@ struct LoadedEvalCase {
 struct LoadedRun {
     eval_case_id: String,
     scenario_id: ScenarioKind,
+    #[serde(default = "default_loaded_run_attempt")]
+    attempt: u32,
+    status: String,
     paths: LoadedRunPaths,
+}
+
+fn default_loaded_run_attempt() -> u32 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -297,7 +304,16 @@ fn merge_comparisons_into_report(
     comparisons: &[serde_json::Value],
 ) -> Result<(), EvalError> {
     let mut root: serde_json::Value = serde_json::from_str(original_content)?;
-    root.as_object_mut().expect("report.json root object").insert(
+    let Some(object) = root.as_object_mut() else {
+        return Err(EvalError::Validation(
+            super::validation::ValidationError::for_field(
+                format!("report '{}'", report_path.display()),
+                "root must be a JSON object",
+            )
+            .into(),
+        ));
+    };
+    object.insert(
         "comparisons".to_string(),
         serde_json::Value::Array(comparisons.to_vec()),
     );
@@ -356,28 +372,37 @@ pub fn blind_judge_payload(outputs: &HashMap<String, String>) -> serde_json::Val
     })
 }
 
+fn select_latest_completed_run<'a>(
+    runs: &'a [LoadedRun],
+    eval_case_id: &str,
+    scenario: ScenarioKind,
+) -> Option<&'a LoadedRun> {
+    runs.iter()
+        .filter(|run| {
+            run.eval_case_id == eval_case_id && run.scenario_id == scenario && run.status == "completed"
+        })
+        .max_by_key(|run| run.attempt)
+}
+
 fn load_scenario_output(
     report_dir: &Path,
     runs: &[LoadedRun],
     eval_case_id: &str,
     scenario: ScenarioKind,
 ) -> Result<String, EvalError> {
-    let run = runs
-        .iter()
-        .find(|run| run.eval_case_id == eval_case_id && run.scenario_id == scenario)
-        .ok_or_else(|| {
-            EvalError::Validation(
-                super::validation::ValidationError::for_field(
-                    "runs",
-                    format!(
-                        "missing run for eval '{}' and scenario '{}'",
-                        eval_case_id,
-                        scenario.as_str()
-                    ),
-                )
-                .into(),
+    let run = select_latest_completed_run(runs, eval_case_id, scenario).ok_or_else(|| {
+        EvalError::Validation(
+            super::validation::ValidationError::for_field(
+                "runs",
+                format!(
+                    "missing completed run for eval '{}' and scenario '{}'",
+                    eval_case_id,
+                    scenario.as_str()
+                ),
             )
-        })?;
+            .into(),
+        )
+    })?;
 
     let workspace = report_dir.join(&run.paths.workspace);
     collect_workspace_output(&workspace)
@@ -615,21 +640,31 @@ fn write_comparison_json(report_dir: &Path, record: &ComparisonRecord) -> Result
 
 fn find_iteration_eval_dir(report_dir: &Path, eval_case_id: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(report_dir).ok()?;
+    let mut latest: Option<(u32, PathBuf)> = None;
+
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("iteration-") {
+        let Some(iteration) = parse_iteration_dir_number(&name) else {
+            continue;
+        };
+        let eval_dir = path.join(eval_case_id);
+        if !eval_dir.is_dir() {
             continue;
         }
-        let eval_dir = path.join(eval_case_id);
-        if eval_dir.is_dir() {
-            return Some(eval_dir);
+        if latest.as_ref().is_none_or(|(best, _)| iteration > *best) {
+            latest = Some((iteration, eval_dir));
         }
     }
-    None
+
+    latest.map(|(_, eval_dir)| eval_dir)
+}
+
+fn parse_iteration_dir_number(name: &str) -> Option<u32> {
+    name.strip_prefix("iteration-")?.parse().ok()
 }
 
 #[cfg(test)]
@@ -674,6 +709,82 @@ mod tests {
         let path = report_dir.join(workspace).join("output.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, content).unwrap();
+    }
+
+    fn mark_all_runs_completed(report_dir: &Path) {
+        let report_path = report_dir.join("report.json");
+        let mut report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+        for run in report["runs"].as_array_mut().unwrap() {
+            run["status"] = serde_json::json!("completed");
+        }
+        std::fs::write(report_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn load_scenario_output_prefers_latest_completed_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = serde_json::json!({
+            "runs": [
+                {
+                    "eval_case_id": "case-a",
+                    "scenario_id": "with_skill",
+                    "attempt": 1,
+                    "status": "failed",
+                    "paths": { "workspace": "runs/run-001/workspace" }
+                },
+                {
+                    "eval_case_id": "case-a",
+                    "scenario_id": "with_skill",
+                    "attempt": 2,
+                    "status": "completed",
+                    "paths": { "workspace": "runs/run-002/workspace" }
+                },
+                {
+                    "eval_case_id": "case-a",
+                    "scenario_id": "with_skill",
+                    "attempt": 3,
+                    "status": "skipped",
+                    "paths": { "workspace": "runs/run-003/workspace" }
+                }
+            ]
+        });
+        let runs: Vec<LoadedRun> = serde_json::from_value(report["runs"].clone()).unwrap();
+
+        write_workspace_output(temp.path(), "runs/run-001/workspace", "attempt-1");
+        write_workspace_output(temp.path(), "runs/run-002/workspace", "attempt-2");
+        write_workspace_output(temp.path(), "runs/run-003/workspace", "attempt-3");
+
+        let output = load_scenario_output(temp.path(), &runs, "case-a", ScenarioKind::WithSkill).unwrap();
+        assert_eq!(output, "attempt-2");
+    }
+
+    #[test]
+    fn find_iteration_eval_dir_prefers_latest_iteration() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("iteration-1/case-a")).unwrap();
+        std::fs::create_dir_all(temp.path().join("iteration-2/case-a")).unwrap();
+        std::fs::create_dir_all(temp.path().join("iteration-3/case-b")).unwrap();
+
+        assert_eq!(
+            find_iteration_eval_dir(temp.path(), "case-a"),
+            Some(temp.path().join("iteration-2/case-a"))
+        );
+        assert_eq!(
+            find_iteration_eval_dir(temp.path(), "case-b"),
+            Some(temp.path().join("iteration-3/case-b"))
+        );
+        assert_eq!(find_iteration_eval_dir(temp.path(), "missing"), None);
+    }
+
+    #[test]
+    fn merge_comparisons_into_report_rejects_non_object_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_path = temp.path().join("report.json");
+        std::fs::write(&report_path, "[]").unwrap();
+
+        let error = merge_comparisons_into_report(&report_path, "[]", &[]).unwrap_err();
+        assert!(error.to_string().contains("root must be a JSON object"));
     }
 
     #[test]
@@ -741,6 +852,7 @@ mod tests {
                 &format!("{}-output", run.scenario_id.as_str()),
             );
         }
+        mark_all_runs_completed(&report_dir);
 
         let iteration_dir = report_dir.join("iteration-1").join("case-a");
         std::fs::create_dir_all(&iteration_dir).unwrap();

@@ -105,7 +105,7 @@ When grading lands, each assertion will produce a `grading.json` entry:
 You can write `grading.json` manually today and verify with:
 
 ```shell
-$ trg ai skills eval verify ./runs/run-001/workspace --mode strict
+trg ai skills eval verify ./runs/run-001/workspace --mode strict
 ```
 
 ## Validation rules

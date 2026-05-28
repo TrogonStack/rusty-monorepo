@@ -37,7 +37,7 @@ $ jq '.runs[] | select(.scenario_id == "old_skill") | .status' \
 
 Keep a copy of the previous skill tree (git tag, branch, or sibling directory):
 
-```
+```text
 skills/
 ├── csv-analyzer/          # current (--skill-dir)
 └── csv-analyzer-v1/       # prior revision
@@ -77,8 +77,8 @@ Expected run matrix (2 eval cases × 3 scenarios = 6 runs):
 Until then, verify each scenario's workspace independently:
 
 ```shell
-$ trg ai skills eval verify ./artifacts/.../runs/run-001/workspace --mode strict
-$ trg ai skills eval verify ./artifacts/.../runs/run-003/workspace --mode strict
+trg ai skills eval verify ./artifacts/.../runs/run-001/workspace --mode strict
+trg ai skills eval verify ./artifacts/.../runs/run-003/workspace --mode strict
 ```
 
 ## Why old-skill matters

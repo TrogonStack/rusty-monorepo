@@ -56,7 +56,7 @@ $ trg ai skills eval run \
 
 After completion, each run directory contains:
 
-```
+```text
 runs/run-001/
 ├── workspace/          # agent output and staged fixtures
 ├── transcript.jsonl    # raw stream-json from the runner

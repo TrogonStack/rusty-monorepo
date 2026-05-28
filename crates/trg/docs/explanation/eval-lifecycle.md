@@ -18,9 +18,12 @@ flowchart LR
   E --> F[Report]
 ```
 
-On `yordis/eval-2`, phases **Validate**, **Scaffold**, and **Execute** (partial)
-are implemented. **Grade**, **Compare**, and full **Report** aggregation are
-planned.
+On `yordis/eval-2`, **Validate**, **Scaffold**, and **Execute** are
+implemented. **Grade** and **Compare** are implemented as standalone commands
+(`eval grade`, `eval compare`); `eval run` can chain grading and benchmark
+aggregation via `--grade` and `--benchmark`. **Report** aggregation is partial:
+`benchmark.json` and `iteration_summary` are written and merged into the bundle,
+but compare, feedback, and a single end-to-end report step remain separate.
 
 ## Phase 1: Validate
 
@@ -41,13 +44,13 @@ Validation is fail-fast: any error exits with code 1 before writing artifacts.
 After validation, `build_report_bundle` constructs `report.json` and creates
 the directory tree:
 
-```
+```text
 <out-dir>/<skill_name>/<report_id>/
 ├── report.json
 ├── runs/run-NNN/workspace/    (canonical; one per eval × scenario)
 └── iteration-<N>/             (docs-compatible alias layer)
     ├── alias-index.json       (eval slug → run path mapping)
-    ├── benchmark.json         (placeholder; populated by benchmark command)
+    ├── benchmark.json         (populated by `eval benchmark` or `eval run --benchmark`)
     └── eval-<slug>/<scenario>/  (symlink → runs/run-NNN/workspace on Unix)
 ```
 
@@ -113,27 +116,36 @@ After all runs, summaries are rebuilt and `report.json` is rewritten in place.
 
 ## Phase 4: Grade
 
-> **Status: planned** — not executed by the CLI on `yordis/eval-2`.
+> **Status: implemented** — `eval grade` and `eval run --grade` write
+> `grading.json` per run and merge `assertion_results` into `report.json`.
+> Default `--grader auto` applies mechanical checks; assertions with no
+> mechanical pattern are marked `needs_llm` until re-run with `--grader llm`
+> or `--grader script`.
 
-Intended flow:
+Flow:
 
 1. For each completed run, graders inspect the workspace against assertions.
-2. Mechanical graders (scripts) and LLM graders produce `grading.json`.
+2. Mechanical graders (auto mode), script graders (`--grader script`), and LLM
+   graders (`--grader llm`) produce `grading.json`.
 3. Results merge into `report.json` `assertion_results`.
-4. Optional `feedback.json` captures qualitative notes.
-
-Today you can run graders manually and validate output with `eval verify`.
+4. Optional `feedback.json` via `eval feedback init` for human review notes.
 
 ## Phase 5: Compare
 
-> **Status: planned** — `report.json` `comparisons` is an empty array.
+> **Status: implemented** — `eval compare` pairs runs that share an eval case but
+> differ by scenario, runs blind A/B judging with `--judge script` or
+> `--judge llm`, and merges records into `report.json` `comparisons`. Use
+> `--emit-comparison-json` for standalone per-case files. Requires `--pair` and
+> `--judge script` or `--judge llm`; default `--judge none` is a no-op.
 
-Intended flow:
+Flow:
 
-1. Pair runs sharing the same eval case but different scenarios.
-2. Compute assertion deltas (with_skill vs without_skill vs old_skill).
-3. Compute metric deltas (duration, tokens, cost).
-4. Write standalone `comparison.json` per eval case or merge into the report.
+1. Pair runs sharing the same eval case but different scenarios
+   (`--pair with_skill:without_skill`, etc.).
+2. Shuffle outputs into blind labels A/B per eval case.
+3. Script or LLM judge picks a winner (or tie) with evidence.
+4. Write comparison records into `report.json` (and optionally
+   `comparison.json` per eval case).
 
 ## Phase 6: Report
 
@@ -146,12 +158,16 @@ Available today:
 - Run records with metrics and transcripts
 - Per-scenario completion summaries
 - CI context (GitHub Actions)
+- `assertion_results` after `eval grade` or `eval run --grade`
+- `comparisons` after `eval compare` with a judge
+- `benchmark.json` and `iteration_summary` after `eval benchmark` or
+  `eval run --benchmark`
 
-Planned:
+Partial / separate steps:
 
-- Populated `assertion_results`
-- Populated `comparisons`
-- `benchmark.json` aggregates
+- `eval compare` and `eval iteration-summary` are not chained by `eval run`
+- `feedback.json` via `eval feedback` (init/list/validate), not auto-written
+- LLM grading for non-mechanical assertions requires `--grader llm`
 
 ---
 
@@ -159,15 +175,15 @@ Planned:
 
 Artifacts fall into three tiers:
 
-```
+```text
 report.json          ← session-level index (always written)
 ├── runs/run-NNN/
 │   ├── workspace/   ← agent outputs + staged fixtures
 │   ├── transcript.jsonl  ← runner stdout
 │   ├── timing.json       ← run metrics
-│   └── grading.json      ← grader output (planned: auto-written)
-├── benchmark.json   ← cross-run aggregates (planned)
-└── comparison.json  ← per-case scenario deltas (planned)
+│   └── grading.json      ← grader output from `eval grade`
+├── benchmark.json   ← cross-run aggregates from `eval benchmark`
+└── comparison.json  ← per-case scenario deltas (optional; `eval compare --emit-comparison-json`)
 ```
 
 | Artifact | Writer | Reader |
@@ -175,10 +191,10 @@ report.json          ← session-level index (always written)
 | `report.json` | `eval run` | Humans, CI, dashboards |
 | `transcript.jsonl` | Runner | Debugging, future LLM graders |
 | `timing.json` | Runner | Verify, benchmarks |
-| `grading.json` | Grader (planned) | `eval verify`, report merge |
-| `feedback.json` | LLM grader (planned) | Human review |
-| `benchmark.json` | Aggregator (planned) | CI trend tracking |
-| `comparison.json` | Comparator (planned) | A/B analysis |
+| `grading.json` | `eval grade` | `eval verify`, report merge |
+| `feedback.json` | `eval feedback init` | Human review |
+| `benchmark.json` | `eval benchmark` | CI trend tracking |
+| `comparison.json` | `eval compare` (optional) | A/B analysis |
 
 ---
 
@@ -190,10 +206,10 @@ Typical skill author loop:
    `evals/evals.json`.
 2. **Scaffold** — `eval run` without `--runner` to validate structure cheaply.
 3. **Execute** — `eval run --runner cursor-agent` to get agent outputs.
-4. **Grade** — run grader scripts; `eval verify --mode strict`.
+4. **Grade** — `eval grade` or `eval run --grade`; then `eval verify --mode strict`.
 5. **Iterate skill** — edit `SKILL.md`, re-run from step 2.
-6. **Compare** — include `without_skill` scenario to measure skill lift.
-7. **CI** — wire steps 2–4 into a pipeline on every PR.
+6. **Compare** — `eval compare --pair with_skill:without_skill --judge script` (or `--judge llm`).
+7. **CI** — wire run, grade, and benchmark into a pipeline on every PR.
 
 Each iteration produces a new `<report_id>` directory. Hashes in `report.json`
 let you detect when the skill or eval suite changed between runs.
@@ -211,11 +227,11 @@ index, CLI workflow, and several policy defaults.
 | ----- | -------------- | ------------------------ |
 | Report schema | Spec-defined report format | Custom `trg.skills-eval.report.v1` schema |
 | Scenario names | `with_skill`, `without_skill`, `with_old_skill` | `with_skill`, `without_skill`, `old_skill` (no `with_` prefix on old) |
-| Old skill execution | Supported | Scaffolded only; runners reject `old_skill` |
-| Grading | LLM + mechanical graders in pipeline | Verify-only; no auto-grader invocation |
-| `benchmark.json` | Defined in spec | Not emitted |
-| `feedback.json` | Defined in spec | Not emitted |
-| `comparison.json` | Standalone comparison records | Empty `comparisons` array in report only |
+| Old skill execution | Supported | Supported with `--old-skill-dir` when `--scenario old_skill` is included |
+| Grading | LLM + mechanical graders in pipeline | `eval grade` / `--grade`; mechanical + script + LLM modes |
+| `benchmark.json` | Defined in spec | Emitted by `eval benchmark` or `eval run --benchmark` |
+| `feedback.json` | Defined in spec | Scaffolded via `eval feedback init`; not auto-written |
+| `comparison.json` | Standalone comparison records | Optional via `eval compare --emit-comparison-json`; `comparisons` also merged into `report.json` |
 | Model config capture | Full parameter capture | `capture_status: "partial"`; label only |
 | Skill staging | Spec-defined layout | Symlink to `.skill/` (default) or copy with `--skill-staging copy` |
 | Docs layout aliases | Primary tree under `iteration-N/` | Canonical `runs/run-NNN/` plus symlink mirror and `alias-index.json` |
@@ -226,10 +242,9 @@ index, CLI workflow, and several policy defaults.
 | Eval ID type | String | String or non-negative integer |
 | Assertion IDs | Spec-defined | `<eval-case-id>:a<index>` pattern |
 
-These divergences are intentional staging points. As grading, comparison, and
-benchmark PRs land, `trg` will converge toward spec compatibility while
-retaining `trg`-specific extensions (integrity checks, CI context) that the
-spec does not cover.
+These divergences are intentional staging points. As the pipeline converges
+toward spec compatibility, `trg` retains extensions (integrity checks, CI
+context, iteration aliases) that the spec does not cover.
 
 ---
 

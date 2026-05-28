@@ -68,14 +68,7 @@ pub fn load_report_drift_snapshot(report_dir: &Path) -> Result<ReportDriftSnapsh
     })?;
     let value: serde_json::Value = serde_json::from_str(&content)?;
 
-    let iteration = value
-        .pointer("/report/iteration")
-        .and_then(|field| {
-            field
-                .as_u64()
-                .or_else(|| field.get("index").and_then(|index| index.as_u64()))
-        })
-        .unwrap_or(1) as u32;
+    let iteration = parse_report_iteration(&value)?;
     let evals_hash = value
         .pointer("/suite/evals_hash")
         .and_then(|field| field.as_str())
@@ -97,6 +90,27 @@ pub fn load_report_drift_snapshot(report_dir: &Path) -> Result<ReportDriftSnapsh
         iteration,
         evals_hash,
         eval_case_ids,
+    })
+}
+
+fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
+    let raw = value
+        .pointer("/report/iteration")
+        .and_then(|field| {
+            field
+                .as_u64()
+                .or_else(|| field.get("index").and_then(|index| index.as_u64()))
+        })
+        .unwrap_or(1);
+
+    raw.try_into().map_err(|_| {
+        EvalError::Validation(
+            super::validation::ValidationError::for_field(
+                "report.iteration",
+                format!("value {raw} exceeds u32::MAX"),
+            )
+            .into(),
+        )
     })
 }
 
@@ -293,6 +307,24 @@ mod tests {
         assert_ne!(drift.current_hash, drift.previous_hash);
         assert_eq!(drift.added_eval_ids, vec!["case-c".to_string()]);
         assert_eq!(drift.removed_eval_ids, vec!["case-b".to_string()]);
+    }
+
+    #[test]
+    fn load_report_drift_snapshot_rejects_iteration_overflow() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = serde_json::json!({
+            "report": { "iteration": (u32::MAX as u64) + 1 },
+            "suite": { "evals_hash": "sha256:abc" },
+            "dimensions": { "eval_cases": [] }
+        });
+        std::fs::write(
+            temp.path().join("report.json"),
+            serde_json::to_string(&report).unwrap(),
+        )
+        .unwrap();
+
+        let error = load_report_drift_snapshot(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("report.iteration"));
     }
 
     #[test]

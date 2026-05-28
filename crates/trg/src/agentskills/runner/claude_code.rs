@@ -47,6 +47,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     if captured.timed_out {
         let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
         let outcome = timeout_outcome(timeout_ms, captured.exit_code);
+        cleanup_runner_temp_files(request.workspace_dir)?;
         write_timing(request, &outcome)?;
         return Ok(outcome);
     }

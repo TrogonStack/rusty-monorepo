@@ -407,16 +407,29 @@ pub fn write_benchmark(report_dir: &Path, document: &BenchmarkDocument) -> Resul
 fn read_report_iteration(report_dir: &Path) -> std::result::Result<u32, EvalError> {
     let content = std::fs::read_to_string(report_dir.join("report.json"))?;
     let value: serde_json::Value = serde_json::from_str(&content)?;
-    value
-        .pointer("/report/iteration")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as u32)
-        .ok_or_else(|| {
-            EvalError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "report.json missing report.iteration",
-            ))
-        })
+    parse_report_iteration(&value).ok_or_else(|| {
+        EvalError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "report.json missing report.iteration",
+        ))
+    })
+}
+
+fn parse_report_iteration(value: &serde_json::Value) -> Option<u32> {
+    let iteration = value.pointer("/report/iteration")?;
+
+    if let Some(number) = iteration.as_u64() {
+        return Some(number as u32);
+    }
+
+    let object = iteration.as_object()?;
+    for key in ["index", "iteration"] {
+        if let Some(number) = object.get(key).and_then(|field| field.as_u64()) {
+            return Some(number as u32);
+        }
+    }
+
+    None
 }
 
 pub fn sync_iteration_summary_to_report(report_dir: &Path, summary: &IterationSummary) -> Result<()> {
@@ -629,8 +642,16 @@ pub fn percentile(sorted: &[u64], p: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
     }
-    let index = ((sorted.len() as f64 - 1.0) * p).round() as usize;
-    sorted[index.min(sorted.len() - 1)]
+    let position = (sorted.len() as f64 - 1.0) * p;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    if lower == upper {
+        sorted[lower.min(sorted.len() - 1)]
+    } else {
+        let weight = position - lower as f64;
+        let value = sorted[lower] as f64 * (1.0 - weight) + sorted[upper] as f64 * weight;
+        value.round() as u64
+    }
 }
 
 pub fn stddev(values: &[u64], mean: f64) -> f64 {
@@ -905,6 +926,10 @@ fn attempt_pass_rate_stats(pass_rates: &[f64]) -> AttemptPassRateStats {
 }
 
 pub fn pass_rate_variance(pass_rates: &[f64], mean: f64) -> f64 {
+    if pass_rates.is_empty() {
+        return 0.0;
+    }
+
     pass_rates
         .iter()
         .map(|rate| {
@@ -1205,6 +1230,55 @@ mod tests {
     }
 
     #[test]
+    fn read_report_iteration_accepts_numeric_and_object_forms() {
+        let temp = tempfile::tempdir().unwrap();
+
+        write_report(temp.path(), serde_json::json!([]), Some(serde_json::json!(3)));
+        assert_eq!(read_report_iteration(temp.path()).unwrap(), 3);
+
+        write_report(
+            temp.path(),
+            serde_json::json!([]),
+            Some(serde_json::json!({ "id": "iter-2", "index": 2, "previous_id": "iter-1" })),
+        );
+        assert_eq!(read_report_iteration(temp.path()).unwrap(), 2);
+
+        write_report(
+            temp.path(),
+            serde_json::json!([]),
+            Some(serde_json::json!({ "id": "iter-4", "iteration": 4 })),
+        );
+        assert_eq!(read_report_iteration(temp.path()).unwrap(), 4);
+    }
+
+    #[test]
+    fn write_benchmark_mirrors_to_iteration_dir_for_object_iteration() {
+        let temp = tempfile::tempdir().unwrap();
+        write_report(
+            temp.path(),
+            serde_json::json!([sample_run("run-001", "with_skill", "completed", None)]),
+            Some(serde_json::json!({ "id": "iter-2", "index": 2, "previous_id": "iter-1" })),
+        );
+        write_run_artifacts(
+            temp.path(),
+            "run-001",
+            Some(
+                r#"{
+  "assertion_results": [{ "assertion": "a", "passed": true, "evidence": "ok" }],
+  "summary": { "passed": 1, "failed": 0, "total": 1, "pass_rate": 1.0 }
+}"#,
+            ),
+            Some(r#"{ "duration_ms": 1000 }"#),
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        write_benchmark(temp.path(), &benchmark).unwrap();
+
+        assert!(temp.path().join("benchmark.json").is_file());
+        assert!(temp.path().join("iteration-2/benchmark.json").is_file());
+    }
+
+    #[test]
     fn duration_stats_omit_stddev_for_small_samples() {
         let two = duration_stats(&[100, 200]);
         assert!(two.stddev.is_none());
@@ -1215,8 +1289,9 @@ mod tests {
 
     #[test]
     fn percentile_and_stddev_helpers() {
-        assert_eq!(percentile(&[10, 20, 30, 40], 0.50), 30);
-        assert_eq!(percentile(&[10, 20, 30, 40], 0.95), 40);
+        assert_eq!(percentile(&[10, 20], 0.50), 15);
+        assert_eq!(percentile(&[10, 20, 30, 40], 0.50), 25);
+        assert_eq!(percentile(&[10, 20, 30, 40], 0.95), 39);
         assert!((stddev(&[2, 4, 6], 4.0) - 1.632993161855452).abs() < 0.0001);
     }
 
@@ -1479,6 +1554,8 @@ mod tests {
         assert!((stats.variance.unwrap() - variance).abs() < 0.0001);
         assert_eq!(stats.min, 0.0);
         assert_eq!(stats.max, 1.0);
+
+        assert_eq!(pass_rate_variance(&[], 0.0), 0.0);
     }
 
     #[test]

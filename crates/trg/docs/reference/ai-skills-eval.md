@@ -76,7 +76,7 @@ $ trg ai skills eval run \
 
 ### Output layout
 
-```
+```text
 <out-dir>/
 └── <skill_name>/
     └── <report_id>/
@@ -335,7 +335,7 @@ Expected shape (illustrative):
 
 | Kind | CLI value | Runner behavior |
 | ---- | --------- | --------------- |
-| With skill | `with_skill` | Symlinks skill to `.skill/` in workspace; prompt prefixed with skill contents |
+| With skill | `with_skill` | Symlinks skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
 | Without skill | `without_skill` | Raw eval prompt; no skill symlink |
 | Old skill | `old_skill` | Scaffolded in report; **runners reject** with `UnsupportedScenario` today |
 

@@ -99,7 +99,7 @@ A previous run wrote to the same report ID.
 **Fix:** Use `--force` to overwrite, or delete the existing directory:
 
 ```shell
-$ trg ai skills eval run ... --force
+trg ai skills eval run ... --force
 ```
 
 Report IDs include a timestamp and random suffix, so collisions are rare unless
@@ -145,7 +145,7 @@ The `grading.json` summary counts are inconsistent with `assertion_results`.
 
 **Fix:** Recompute summary fields:
 
-```
+```text
 passed  = count of assertion_results where passed == true
 failed  = count where passed == false
 total   = len(assertion_results)
@@ -169,7 +169,7 @@ to the workspace under `--out-dir`.
 **Fix:** Check write permissions on `--out-dir`:
 
 ```shell
-$ mkdir -p ./artifacts && trg ai skills eval run --out-dir ./artifacts ...
+mkdir -p ./artifacts && trg ai skills eval run --out-dir ./artifacts ...
 ```
 
 ---

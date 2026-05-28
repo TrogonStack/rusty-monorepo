@@ -232,6 +232,18 @@ fn validate_eval_manifest_version(value: &serde_json::Value) -> Result<()> {
         .and_then(|version| version.as_u64())
         .unwrap_or(1) as u32;
 
+    if schema_version < 1 {
+        return Err(EvalError::Validation(
+            ValidationError::for_field(
+                "schema_version",
+                format!(
+                    "manifest schema_version {schema_version} is older than this trg build supports (min 1); update manifest or set schema_version to 1"
+                ),
+            )
+            .into(),
+        ));
+    }
+
     if schema_version > SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION {
         return Err(EvalError::Validation(
             ValidationError::for_field(
@@ -481,6 +493,10 @@ pub fn lint_eval_suite_fixtures(
     warnings
 }
 
+fn effective_max_fixture_bytes(max_fixture_bytes: Option<u64>) -> u64 {
+    max_fixture_bytes.unwrap_or(DEFAULT_MAX_FIXTURE_BYTES)
+}
+
 fn lint_fixture_files(
     fs: &impl FileSystem,
     skill_path: &Path,
@@ -488,7 +504,7 @@ fn lint_fixture_files(
     files: &[RelativeSkillPath],
     max_fixture_bytes: Option<u64>,
 ) -> Vec<EvalLintWarning> {
-    let limit = max_fixture_bytes.unwrap_or(DEFAULT_MAX_FIXTURE_BYTES);
+    let limit = effective_max_fixture_bytes(max_fixture_bytes);
     let mut warnings = Vec::new();
 
     for file in files {
@@ -604,6 +620,31 @@ pub fn check_eval_suite(
                     format!("{}.files", label),
                     format!("path '{}' does not exist", full_path.display()),
                 ));
+                continue;
+            }
+
+            if fs.is_file(&full_path) {
+                let limit = effective_max_fixture_bytes(options.max_fixture_bytes);
+                match fs.read_bytes(&full_path) {
+                    Ok(bytes) if bytes.len() as u64 > limit => {
+                        errors.push(ValidationError::for_field(
+                            format!("{}.files", label),
+                            format!(
+                                "path '{}' is {} bytes (exceeds {} byte limit)",
+                                full_path.display(),
+                                bytes.len(),
+                                limit
+                            ),
+                        ));
+                    }
+                    Err(source) => {
+                        errors.push(ValidationError::for_field(
+                            format!("{}.files", label),
+                            format!("path '{}': {source}", full_path.display()),
+                        ));
+                    }
+                    Ok(_) => {}
+                }
             }
         }
 
@@ -888,6 +929,42 @@ mod tests {
         assert_eq!(report.eval_count, 1);
         assert_eq!(report.file_count, 1);
         assert_eq!(report.assertion_count, 1);
+    }
+
+    #[test]
+    fn check_eval_suite_rejects_fixture_exceeding_byte_limit() {
+        let fs = MemFS::new();
+        fs.insert(
+            Path::new("/csv-analyzer/evals/evals.json"),
+            r#"{
+  "skill_name": "csv-analyzer",
+  "evals": [
+    {
+      "id": "large-file",
+      "prompt": "Analyze evals/files/sales.csv",
+      "expected_output": "A short summary.",
+      "files": ["evals/files/sales.csv"]
+    }
+  ]
+}"#,
+        );
+        fs.insert(
+            Path::new("/csv-analyzer/evals/files/sales.csv"),
+            "month,revenue\nMay,10",
+        );
+
+        let err = check_eval_suite(
+            &fs,
+            Path::new("/csv-analyzer"),
+            "csv-analyzer",
+            EvalCheckOptions {
+                max_fixture_bytes: Some(10),
+                ..EvalCheckOptions::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("exceeds 10 byte limit"));
     }
 
     #[test]
@@ -1274,6 +1351,25 @@ mod tests {
 }"#;
 
         parse_eval_suite(json).unwrap();
+    }
+
+    #[test]
+    fn parse_rejects_schema_version_below_minimum() {
+        let json = r#"{
+  "schema_version": 0,
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err();
+        assert!(err.to_string().contains("schema_version 0"));
+        assert!(err.to_string().contains("min 1"));
     }
 
     #[test]
