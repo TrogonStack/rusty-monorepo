@@ -389,6 +389,14 @@ mod tests {
             std::fs::write(output_path, format!("{}-output", run.scenario_id.as_str())).unwrap();
         }
 
+        let report_path = report_dir.join("report.json");
+        let mut report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+        for run in report["runs"].as_array_mut().unwrap() {
+            run["status"] = serde_json::json!("completed");
+        }
+        std::fs::write(report_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
         std::fs::create_dir_all(report_dir.join("iteration-1").join("case-a")).unwrap();
 
         let judge_script = temp.path().join("judge.py");

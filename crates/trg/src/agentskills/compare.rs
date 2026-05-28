@@ -378,9 +378,7 @@ fn select_latest_completed_run<'a>(
     scenario: ScenarioKind,
 ) -> Option<&'a LoadedRun> {
     runs.iter()
-        .filter(|run| {
-            run.eval_case_id == eval_case_id && run.scenario_id == scenario && run.status == "completed"
-        })
+        .filter(|run| run.eval_case_id == eval_case_id && run.scenario_id == scenario && run.status == "completed")
         .max_by_key(|run| run.attempt)
 }
 

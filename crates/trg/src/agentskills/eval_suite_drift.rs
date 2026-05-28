@@ -109,11 +109,8 @@ pub fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
 
     raw.try_into().map_err(|_| {
         EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "report.iteration",
-                format!("value {raw} exceeds u32::MAX"),
-            )
-            .into(),
+            super::validation::ValidationError::for_field("report.iteration", format!("value {raw} exceeds u32::MAX"))
+                .into(),
         )
     })
 }
@@ -329,11 +326,7 @@ mod tests {
             "suite": { "evals_hash": "sha256:abc" },
             "dimensions": { "eval_cases": [] }
         });
-        std::fs::write(
-            temp.path().join("report.json"),
-            serde_json::to_string(&report).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(temp.path().join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
 
         let error = load_report_drift_snapshot(temp.path()).unwrap_err();
         assert!(error.to_string().contains("report.iteration"));
