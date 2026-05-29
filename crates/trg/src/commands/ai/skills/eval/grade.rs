@@ -185,11 +185,8 @@ echo '{"passed": true, "evidence": "script confirmed custom check", "rationale":
 "#,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
         let fs = MemFS::new();
         fs.insert(

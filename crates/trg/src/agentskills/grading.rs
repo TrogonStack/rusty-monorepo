@@ -1436,11 +1436,8 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
 "#,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
         let ctx = ctx_with_outputs(tmp.path());
         fs::write(ctx.workspace_dir.join("done.txt"), "ok").unwrap();
