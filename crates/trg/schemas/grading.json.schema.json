@@ -3,6 +3,7 @@
     "AssertionGradeResult": {
       "properties": {
         "assertion": {
+          "minLength": 1,
           "type": "string"
         },
         "evidence": {
@@ -71,6 +72,8 @@
         },
         "pass_rate": {
           "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
           "type": "number"
         },
         "passed": {
@@ -103,6 +106,7 @@
       "type": "array"
     },
     "schema_version": {
+      "minLength": 1,
       "type": "string"
     },
     "summary": {

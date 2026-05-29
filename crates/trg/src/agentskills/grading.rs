@@ -63,6 +63,7 @@ pub struct GraderInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct AssertionGradeResult {
     #[serde(alias = "text")]
+    #[schemars(length(min = 1))]
     pub assertion: String,
     pub passed: bool,
     pub evidence: String,
@@ -76,11 +77,13 @@ pub struct GradingSummary {
     pub passed: usize,
     pub failed: usize,
     pub total: usize,
+    #[schemars(range(min = 0.0, max = 1.0))]
     pub pass_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GradingFile {
+    #[schemars(length(min = 1))]
     pub schema_version: String,
     pub assertion_results: Vec<AssertionGradeResult>,
     pub summary: GradingSummary,
