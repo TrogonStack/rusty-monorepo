@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.3.0...trg@v0.4.0) (2026-05-29)
+
+
+### Features
+
+* **trg:** Add skills eval subcommand for CI artifact bundles ([#36](https://github.com/TrogonStack/rusty-monorepo/issues/36)) ([94d933c](https://github.com/TrogonStack/rusty-monorepo/commit/94d933cc58124e64cedde38ac2be23bbb14bf0bd))
+* **trg:** Expand skills eval into full evaluation pipeline ([#39](https://github.com/TrogonStack/rusty-monorepo/issues/39)) ([228eb51](https://github.com/TrogonStack/rusty-monorepo/commit/228eb5136a8b495c1219aef2f1ffbb97dcc776e9))
+
 ## [0.3.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.2.1...trg@v0.3.0) (2026-05-24)
 
 
