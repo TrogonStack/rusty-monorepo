@@ -35,7 +35,7 @@ tiny_http = "0.12"
 open = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-sha2 = "0.10"
+sha2 = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex = { workspace = true }
 jsonschema = { version = "0.46", optional = true }
