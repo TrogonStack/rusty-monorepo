@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.4.0...trg@v0.4.1) (2026-05-29)
+
+
+### Bug Fixes
+
+* Drop Windows support; recommend WSL ([#44](https://github.com/TrogonStack/rusty-monorepo/issues/44)) ([9c1960d](https://github.com/TrogonStack/rusty-monorepo/commit/9c1960dde1b71352819b785663475a6492ec8d5a))
+* **trg:** Gate relative_path_from behind cfg(unix) ([#42](https://github.com/TrogonStack/rusty-monorepo/issues/42)) ([bf53675](https://github.com/TrogonStack/rusty-monorepo/commit/bf536757f866bf74d60ea8bd7fd4985040af643b))
+
 ## [0.4.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.3.0...trg@v0.4.0) (2026-05-29)
 
 
