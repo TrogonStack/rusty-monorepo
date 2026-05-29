@@ -2,10 +2,10 @@
 //!
 //! Canonical run outputs stay under `runs/run-###/workspace`. Each report also
 //! emits an `iteration-<N>/eval-<slug>/<scenario>/` tree that matches the
-//! agentskills.io docs layout. Scenario directories are **symlinks** on Unix
-//! pointing at the canonical workspace paths so outputs are not duplicated.
-//! When symlinks are unavailable, a thin `.workspace-ref` JSON file records
-//! the relative path to the canonical workspace instead.
+//! agentskills.io docs layout. Scenario directories are symlinks pointing at
+//! the canonical workspace paths so outputs are not duplicated. When the
+//! symlink call fails (e.g. read-only filesystem), a thin `.workspace-ref`
+//! JSON file records the relative path to the canonical workspace instead.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -327,9 +327,10 @@ fn write_scenario_mirror(
     Ok(())
 }
 
-/// Symlink the scenario leaf to the canonical workspace when supported; otherwise no-op.
+/// Symlink the scenario leaf to the canonical workspace.
 ///
-/// Failures are logged to stderr and ignored so exotic filesystems still get `alias-index.json`.
+/// Failures are logged to stderr and a `.workspace-ref` fallback is written so exotic
+/// filesystems (e.g. read-only or non-symlink-capable) still get `alias-index.json`.
 fn link_to_workspace(link_path: &Path, report_dir: &Path, workspace: &Path) {
     let relative = match workspace.strip_prefix(report_dir) {
         Ok(path) => path.to_path_buf(),
@@ -343,21 +344,13 @@ fn link_to_workspace(link_path: &Path, report_dir: &Path, workspace: &Path) {
         }
     };
 
-    #[cfg(unix)]
-    {
-        let relative_link = relative_path_from(link_path.parent().unwrap(), report_dir, &relative);
-        if let Err(error) = std::os::unix::fs::symlink(&relative_link, link_path) {
-            eprintln!(
-                "docs mirror: symlink {} -> {} failed ({error}); writing .workspace-ref fallback",
-                link_path.display(),
-                relative_link.display(),
-            );
-            write_workspace_ref(link_path, &relative);
-        }
-    }
-
-    #[cfg(not(unix))]
-    {
+    let relative_link = relative_path_from(link_path.parent().unwrap(), report_dir, &relative);
+    if let Err(error) = std::os::unix::fs::symlink(&relative_link, link_path) {
+        eprintln!(
+            "docs mirror: symlink {} -> {} failed ({error}); writing .workspace-ref fallback",
+            link_path.display(),
+            relative_link.display(),
+        );
         write_workspace_ref(link_path, &relative);
     }
 }
@@ -386,7 +379,6 @@ fn write_workspace_ref(link_path: &Path, workspace_relative: &Path) {
     }
 }
 
-#[cfg(unix)]
 fn relative_path_from(from_dir: &Path, report_dir: &Path, to_relative: &Path) -> PathBuf {
     let depth = from_dir
         .strip_prefix(report_dir)

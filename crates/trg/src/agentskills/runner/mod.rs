@@ -400,17 +400,10 @@ fn remove_staged_skill(path: &Path) -> std::io::Result<()> {
 /// Dot-prefixed so the skill is hidden from default `ls`/glob and won't collide with
 /// staged fixture paths or with a `skill/` directory the agent might create itself —
 /// the workspace is the agent's task space; the skill is sidecar reference material.
-#[cfg(unix)]
 fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_name: &str) -> std::io::Result<()> {
     let link = workspace_dir.join(link_name.trim_end_matches('/'));
     let absolute = std::fs::canonicalize(skill_path)?;
     std::os::unix::fs::symlink(absolute, link)
-}
-
-#[cfg(not(unix))]
-fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_name: &str) -> std::io::Result<()> {
-    let dest = workspace_dir.join(link_name.trim_end_matches('/'));
-    copy_skill_tree(skill_path, &dest)
 }
 
 fn copy_skill_into_workspace(skill_path: &Path, dest: &Path) -> std::io::Result<()> {
@@ -654,7 +647,6 @@ mod workspace_tests {
         assert!(workspace.join("outputs").is_dir());
 
         let link = workspace.join(".skill");
-        #[cfg(unix)]
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
         assert!(link.join("SKILL.md").is_file());
         assert!(workspace.join("evals/files/input.txt").is_file());
@@ -739,12 +731,9 @@ mod workspace_tests {
         assert!(!prepared.prompt.contains("# Current"));
 
         let link = workspace.join(".old-skill");
-        #[cfg(unix)]
-        {
-            assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-            let target = std::fs::read_link(&link).unwrap();
-            assert_eq!(target, std::fs::canonicalize(&old_skill).unwrap());
-        }
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        let target = std::fs::read_link(&link).unwrap();
+        assert_eq!(target, std::fs::canonicalize(&old_skill).unwrap());
         assert_eq!(
             std::fs::read_to_string(link.join("SKILL.md")).unwrap(),
             "---\nname: old-skill\ndescription: Old skill\n---\n# Old\n"
