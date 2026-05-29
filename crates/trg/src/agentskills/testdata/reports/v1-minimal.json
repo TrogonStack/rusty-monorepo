@@ -1,0 +1,33 @@
+{
+  "schema_version": "trg.skills-eval.report.v1",
+  "report": {
+    "id": "minimal-report",
+    "generated_at": "2026-05-26T12:00:00Z",
+    "iteration": 1,
+    "producer": {
+      "name": "trg",
+      "version": "0.3.0"
+    }
+  },
+  "suite": {
+    "skill_name": "demo-skill",
+    "skill_path": "demo-skill",
+    "skill_hash": "sha256:abc",
+    "evals_path": "demo-skill/evals/evals.json",
+    "evals_hash": "sha256:def"
+  },
+  "dimensions": {
+    "eval_cases": [],
+    "assertions": [],
+    "skill_revisions": [],
+    "model_configs": [],
+    "scenarios": [],
+    "graders": []
+  },
+  "runs": [],
+  "assertion_results": [],
+  "summaries": {
+    "by_scenario": []
+  },
+  "comparisons": []
+}

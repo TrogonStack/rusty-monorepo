@@ -1,0 +1,156 @@
+{
+  "schema_version": "trg.skills-eval.benchmark.v1",
+  "report_id": "report-test",
+  "generated_at": "2026-05-26T12:00:00Z",
+  "failed_runs_mode": "bucket",
+  "by_eval_scenario": [
+    {
+      "eval_case_id": "case-a",
+      "scenario_id": "with_skill",
+      "attempt_count": 1,
+      "pass_rate": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0
+      }
+    },
+    {
+      "eval_case_id": "case-a",
+      "scenario_id": "without_skill",
+      "attempt_count": 1,
+      "pass_rate": {
+        "mean": 0.5,
+        "min": 0.5,
+        "max": 0.5
+      }
+    },
+    {
+      "eval_case_id": "case-a",
+      "scenario_id": "old_skill",
+      "attempt_count": 1,
+      "pass_rate": {
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      }
+    }
+  ],
+  "iteration_summary": {
+    "always_pass": ["case-a: c"],
+    "helped_by_skill": ["case-a: b"]
+  },
+  "scenarios": {
+    "old_skill": {
+      "completed": {
+        "run_count": 1,
+        "assertions": {
+          "passed": 0,
+          "failed": 1,
+          "total": 1,
+          "pass_rate": 0.0
+        },
+        "runs": {
+          "passed": 0,
+          "failed": 1,
+          "total": 1,
+          "pass_rate": 0.0
+        },
+        "duration_ms": {
+          "mean": 1500.0,
+          "p50": 1500,
+          "p95": 1500,
+          "total": 1500
+        },
+        "tokens": {
+          "total": 400
+        },
+        "missing_grading": 0,
+        "missing_timing": 0
+      },
+      "skipped": {
+        "run_count": 0
+      }
+    },
+    "with_skill": {
+      "completed": {
+        "run_count": 1,
+        "assertions": {
+          "passed": 3,
+          "failed": 0,
+          "total": 3,
+          "pass_rate": 1.0
+        },
+        "runs": {
+          "passed": 1,
+          "failed": 0,
+          "total": 1,
+          "pass_rate": 1.0
+        },
+        "duration_ms": {
+          "mean": 1000.0,
+          "p50": 1000,
+          "p95": 1000,
+          "total": 1000
+        },
+        "tokens": {
+          "total": 300,
+          "input": 200,
+          "output": 100,
+          "cost_usd": 0.01
+        },
+        "missing_grading": 0,
+        "missing_timing": 0
+      },
+      "skipped": {
+        "run_count": 0
+      }
+    },
+    "without_skill": {
+      "completed": {
+        "run_count": 1,
+        "assertions": {
+          "passed": 1,
+          "failed": 1,
+          "total": 2,
+          "pass_rate": 0.5
+        },
+        "runs": {
+          "passed": 0,
+          "failed": 1,
+          "total": 1,
+          "pass_rate": 0.0
+        },
+        "duration_ms": {
+          "mean": 2000.0,
+          "p50": 2000,
+          "p95": 2000,
+          "total": 2000
+        },
+        "tokens": {
+          "total": 500,
+          "input": 300,
+          "output": 200
+        },
+        "missing_grading": 0,
+        "missing_timing": 0
+      },
+      "skipped": {
+        "run_count": 0
+      }
+    }
+  },
+  "deltas": {
+    "with_skill_vs_without_skill": {
+      "assertion_pass_rate": 0.5,
+      "run_pass_rate": 1.0,
+      "duration_ms_mean": -1000.0,
+      "tokens_total": -200
+    },
+    "with_skill_vs_old_skill": {
+      "assertion_pass_rate": 1.0,
+      "run_pass_rate": 1.0,
+      "duration_ms_mean": -500.0,
+      "tokens_total": -100
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "FeedbackCategory": {
+      "enum": [
+        "correctness",
+        "style",
+        "completeness",
+        "other"
+      ],
+      "type": "string"
+    },
+    "FeedbackNote": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FeedbackCategory"
+        },
+        "severity": {
+          "$ref": "#/$defs/FeedbackSeverity"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "category",
+        "text"
+      ],
+      "type": "object"
+    },
+    "FeedbackSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "blocker"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/feedback.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "notes": {
+      "items": {
+        "$ref": "#/$defs/FeedbackNote"
+      },
+      "type": "array"
+    },
+    "reviewed_at": {
+      "type": "string"
+    },
+    "reviewer": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "reviewer",
+    "reviewed_at",
+    "notes"
+  ],
+  "title": "trg skills eval feedback",
+  "type": "object"
+}

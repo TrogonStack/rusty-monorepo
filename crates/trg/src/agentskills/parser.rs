@@ -32,14 +32,27 @@ pub fn read_properties(fs: &impl FileSystem, skill_path: &Path) -> Result<(Skill
 
     let props: SkillProperties = data.deserialize()?;
 
-    if props.name.is_empty() {
-        return Err(SkillError::EmptyField("name"));
-    }
-    if props.description.is_empty() {
-        return Err(SkillError::EmptyField("description"));
-    }
+    ensure_required_frontmatter_field(&props.name, "name")?;
+    ensure_required_frontmatter_field(&props.description, "description")?;
 
     Ok((props, keys))
+}
+
+fn ensure_required_frontmatter_field(value: &str, field: &'static str) -> Result<()> {
+    if value.trim().is_empty() {
+        Err(SkillError::EmptyField(field))
+    } else {
+        Ok(())
+    }
+}
+
+/// Frontmatter fields embedded in eval runner prompts (full body lives in the symlinked skill).
+pub fn skill_summary_from_content(content: &str) -> Result<(String, String)> {
+    let data = parse_frontmatter(content)?;
+    let props: SkillProperties = data.deserialize()?;
+    ensure_required_frontmatter_field(&props.name, "name")?;
+    ensure_required_frontmatter_field(&props.description, "description")?;
+    Ok((props.name, props.description))
 }
 
 #[cfg(test)]
@@ -169,6 +182,24 @@ mod tests {
 
         let (props, _) = read_properties(&fs, Path::new("/skill")).unwrap();
         assert_eq!(props.allowed_tools, None);
+    }
+
+    #[test]
+    fn test_read_properties_rejects_whitespace_only_required_fields() {
+        let fs = MemFS::new();
+        fs.insert(
+            Path::new("/skill/SKILL.md"),
+            "---\nname: \"   \"\ndescription: Test\n---",
+        );
+        let err = read_properties(&fs, Path::new("/skill")).unwrap_err();
+        assert!(matches!(err, SkillError::EmptyField("name")));
+
+        fs.insert(
+            Path::new("/skill/SKILL.md"),
+            "---\nname: test-skill\ndescription: \"  \\t  \"\n---",
+        );
+        let err = read_properties(&fs, Path::new("/skill")).unwrap_err();
+        assert!(matches!(err, SkillError::EmptyField("description")));
     }
 
     #[test]

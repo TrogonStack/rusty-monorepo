@@ -14,6 +14,7 @@ pub use to_prompt::ToPromptArgs;
 pub use validate::ValidateArgs;
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum SkillsCommands {
     /// Validate a skill directory
     Validate(ValidateArgs),

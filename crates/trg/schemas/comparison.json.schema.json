@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "BlindLabelMapping": {
+      "properties": {
+        "A": {
+          "$ref": "#/$defs/ScenarioKind"
+        },
+        "B": {
+          "$ref": "#/$defs/ScenarioKind"
+        }
+      },
+      "required": [
+        "A",
+        "B"
+      ],
+      "type": "object"
+    },
+    "ComparisonJudgeMetadata": {
+      "properties": {
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/JudgeKind"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ComparisonWinner": {
+      "enum": [
+        "a",
+        "b",
+        "tie"
+      ],
+      "type": "string"
+    },
+    "JudgeKind": {
+      "enum": [
+        "none",
+        "llm",
+        "script"
+      ],
+      "type": "string"
+    },
+    "ScenarioKind": {
+      "enum": [
+        "with_skill",
+        "without_skill",
+        "old_skill"
+      ],
+      "type": "string"
+    },
+    "ScenarioPairRecord": {
+      "properties": {
+        "a": {
+          "$ref": "#/$defs/ScenarioKind"
+        },
+        "b": {
+          "$ref": "#/$defs/ScenarioKind"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/comparison.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "eval_case_id": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "string"
+    },
+    "judge": {
+      "$ref": "#/$defs/ComparisonJudgeMetadata"
+    },
+    "mapping": {
+      "$ref": "#/$defs/BlindLabelMapping"
+    },
+    "pair": {
+      "$ref": "#/$defs/ScenarioPairRecord"
+    },
+    "rubric": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "winner": {
+      "$ref": "#/$defs/ComparisonWinner"
+    },
+    "winner_scenario": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScenarioKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "eval_case_id",
+    "pair",
+    "mapping",
+    "winner",
+    "evidence",
+    "rubric",
+    "judge"
+  ],
+  "title": "trg skills eval comparison",
+  "type": "object"
+}

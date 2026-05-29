@@ -1,0 +1,318 @@
+{
+  "$defs": {
+    "AssertionStabilityRecord": {
+      "properties": {
+        "assertion_text": {
+          "type": "string"
+        },
+        "attempts_observed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cross_iteration_delta": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CrossIterationDelta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eval_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "eval_id",
+        "assertion_text",
+        "attempts_observed"
+      ],
+      "type": "object"
+    },
+    "CrossIterationDelta": {
+      "enum": [
+        "new",
+        "stable",
+        "lost"
+      ],
+      "type": "string"
+    },
+    "CrossIterationSection": {
+      "properties": {
+        "newly_always_fail": {
+          "items": {
+            "$ref": "#/$defs/AssertionStabilityRecord"
+          },
+          "type": "array"
+        },
+        "newly_always_pass": {
+          "items": {
+            "$ref": "#/$defs/AssertionStabilityRecord"
+          },
+          "type": "array"
+        },
+        "no_longer_always_fail": {
+          "items": {
+            "$ref": "#/$defs/AssertionStabilityRecord"
+          },
+          "type": "array"
+        },
+        "no_longer_always_pass": {
+          "items": {
+            "$ref": "#/$defs/AssertionStabilityRecord"
+          },
+          "type": "array"
+        },
+        "previous_iteration": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previous_report_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "previous_report_id",
+        "previous_iteration",
+        "newly_always_pass",
+        "no_longer_always_pass",
+        "newly_always_fail",
+        "no_longer_always_fail"
+      ],
+      "type": "object"
+    },
+    "FailedRunsMode": {
+      "enum": [
+        "bucket",
+        "exclude",
+        "zero"
+      ],
+      "type": "string"
+    },
+    "FlakyAssertionRecord": {
+      "properties": {
+        "assertion_text": {
+          "type": "string"
+        },
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eval_id": {
+          "type": "string"
+        },
+        "flakiness_ratio": {
+          "format": "double",
+          "type": "number"
+        },
+        "pass_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scenario": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "eval_id",
+        "scenario",
+        "assertion_text",
+        "attempts",
+        "pass_count",
+        "flakiness_ratio"
+      ],
+      "type": "object"
+    },
+    "HelpedBySkillRecord": {
+      "properties": {
+        "assertion_text": {
+          "type": "string"
+        },
+        "delta": {
+          "format": "double",
+          "type": "number"
+        },
+        "eval_id": {
+          "type": "string"
+        },
+        "with_skill_pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "without_skill_pass_rate": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "eval_id",
+        "assertion_text",
+        "with_skill_pass_rate",
+        "without_skill_pass_rate",
+        "delta"
+      ],
+      "type": "object"
+    },
+    "TimingOutlierRecord": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eval_id": {
+          "type": "string"
+        },
+        "mean_ms": {
+          "format": "double",
+          "type": "number"
+        },
+        "scenario": {
+          "type": "string"
+        },
+        "stddev_ms": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "eval_id",
+        "scenario",
+        "attempt",
+        "duration_ms",
+        "mean_ms",
+        "stddev_ms"
+      ],
+      "type": "object"
+    },
+    "TokenOutlierRecord": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eval_id": {
+          "type": "string"
+        },
+        "mean_tokens": {
+          "format": "double",
+          "type": "number"
+        },
+        "scenario": {
+          "type": "string"
+        },
+        "stddev_tokens": {
+          "format": "double",
+          "type": "number"
+        },
+        "total_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "eval_id",
+        "scenario",
+        "attempt",
+        "total_tokens",
+        "mean_tokens",
+        "stddev_tokens"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/iteration-summary.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "always_fail": {
+      "items": {
+        "$ref": "#/$defs/AssertionStabilityRecord"
+      },
+      "type": "array"
+    },
+    "always_pass": {
+      "items": {
+        "$ref": "#/$defs/AssertionStabilityRecord"
+      },
+      "type": "array"
+    },
+    "cross_iteration": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CrossIterationSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "failed_runs_mode": {
+      "$ref": "#/$defs/FailedRunsMode"
+    },
+    "flaky_assertions": {
+      "items": {
+        "$ref": "#/$defs/FlakyAssertionRecord"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "helped_by_skill": {
+      "items": {
+        "$ref": "#/$defs/HelpedBySkillRecord"
+      },
+      "type": "array"
+    },
+    "iteration": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "report_id": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "timing_outliers": {
+      "items": {
+        "$ref": "#/$defs/TimingOutlierRecord"
+      },
+      "type": "array"
+    },
+    "token_outliers": {
+      "items": {
+        "$ref": "#/$defs/TokenOutlierRecord"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_id",
+    "iteration",
+    "generated_at",
+    "failed_runs_mode",
+    "always_pass",
+    "always_fail",
+    "helped_by_skill",
+    "flaky_assertions",
+    "timing_outliers",
+    "token_outliers"
+  ],
+  "title": "trg skills eval iteration summary",
+  "type": "object"
+}

@@ -1,0 +1,555 @@
+{
+  "$defs": {
+    "AttemptPassRateStats": {
+      "properties": {
+        "max": {
+          "format": "double",
+          "type": "number"
+        },
+        "mean": {
+          "format": "double",
+          "type": "number"
+        },
+        "min": {
+          "format": "double",
+          "type": "number"
+        },
+        "variance": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mean",
+        "min",
+        "max"
+      ],
+      "type": "object"
+    },
+    "CompletedBucket": {
+      "properties": {
+        "assertions": {
+          "$ref": "#/$defs/PassFailSummary"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/DurationStats"
+        },
+        "missing_grading": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "missing_timing": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "$ref": "#/$defs/PassFailSummary"
+        },
+        "tokens": {
+          "$ref": "#/$defs/TokenStats"
+        }
+      },
+      "required": [
+        "run_count",
+        "assertions",
+        "runs",
+        "duration_ms",
+        "tokens",
+        "missing_grading",
+        "missing_timing"
+      ],
+      "type": "object"
+    },
+    "DurationStats": {
+      "properties": {
+        "mean": {
+          "format": "double",
+          "type": "number"
+        },
+        "p50": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "p95": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stddev": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mean",
+        "p50",
+        "p95",
+        "total"
+      ],
+      "type": "object"
+    },
+    "EvalScenarioAttemptRow": {
+      "properties": {
+        "attempt_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eval_case_id": {
+          "type": "string"
+        },
+        "flaky_assertions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pass_rate": {
+          "$ref": "#/$defs/AttemptPassRateStats"
+        },
+        "scenario_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "eval_case_id",
+        "scenario_id",
+        "attempt_count",
+        "pass_rate"
+      ],
+      "type": "object"
+    },
+    "EvalSuiteDriftWarning": {
+      "properties": {
+        "added_eval_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "current_hash": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "previous_hash": {
+          "type": "string"
+        },
+        "removed_eval_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "current_hash",
+        "previous_hash",
+        "added_eval_ids",
+        "removed_eval_ids"
+      ],
+      "type": "object"
+    },
+    "FailedRunsMode": {
+      "enum": [
+        "bucket",
+        "exclude",
+        "zero"
+      ],
+      "type": "string"
+    },
+    "FlakyAssertionRecord": {
+      "properties": {
+        "assertion": {
+          "type": "string"
+        },
+        "eval_case_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "eval_case_id",
+        "scenario_id",
+        "assertion"
+      ],
+      "type": "object"
+    },
+    "IterationComparison": {
+      "properties": {
+        "by_scenario": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ScenarioDelta"
+          },
+          "type": "object"
+        },
+        "current_iteration_id": {
+          "type": "string"
+        },
+        "previous_iteration_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "current_iteration_id",
+        "previous_iteration_id",
+        "by_scenario"
+      ],
+      "type": "object"
+    },
+    "IterationSummary": {
+      "properties": {
+        "always_fail": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "always_pass": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flaky_assertions": {
+          "items": {
+            "$ref": "#/$defs/FlakyAssertionRecord"
+          },
+          "type": "array"
+        },
+        "helped_by_skill": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timing_outliers": {
+          "items": {
+            "$ref": "#/$defs/MetricOutlier"
+          },
+          "type": "array"
+        },
+        "token_outliers": {
+          "items": {
+            "$ref": "#/$defs/MetricOutlier"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MetricOutlier": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eval_case_id": {
+          "type": "string"
+        },
+        "median": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "eval_case_id",
+        "scenario_id",
+        "attempt",
+        "value",
+        "median"
+      ],
+      "type": "object"
+    },
+    "PassFailSummary": {
+      "properties": {
+        "failed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "passed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "total",
+        "pass_rate"
+      ],
+      "type": "object"
+    },
+    "RunBucketSummary": {
+      "properties": {
+        "duration_ms": {
+          "$ref": "#/$defs/DurationStats"
+        },
+        "missing_timing": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tokens": {
+          "$ref": "#/$defs/TokenStats"
+        }
+      },
+      "required": [
+        "run_count",
+        "duration_ms",
+        "tokens",
+        "missing_timing"
+      ],
+      "type": "object"
+    },
+    "ScenarioBenchmark": {
+      "properties": {
+        "completed": {
+          "$ref": "#/$defs/CompletedBucket"
+        },
+        "failed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunBucketSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skipped": {
+          "$ref": "#/$defs/SkippedBucket"
+        }
+      },
+      "required": [
+        "completed",
+        "skipped"
+      ],
+      "type": "object"
+    },
+    "ScenarioDelta": {
+      "properties": {
+        "assertion_pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "duration_ms_mean": {
+          "format": "double",
+          "type": "number"
+        },
+        "run_pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "tokens_total": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "assertion_pass_rate",
+        "run_pass_rate",
+        "duration_ms_mean"
+      ],
+      "type": "object"
+    },
+    "ScenarioDeltas": {
+      "properties": {
+        "with_skill_vs_old_skill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioDelta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "with_skill_vs_without_skill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScenarioDelta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SkippedBucket": {
+      "properties": {
+        "run_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_count"
+      ],
+      "type": "object"
+    },
+    "TokenStats": {
+      "properties": {
+        "cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "input": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/benchmark.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "by_eval_scenario": {
+      "items": {
+        "$ref": "#/$defs/EvalScenarioAttemptRow"
+      },
+      "type": "array"
+    },
+    "deltas": {
+      "$ref": "#/$defs/ScenarioDeltas"
+    },
+    "failed_runs_mode": {
+      "$ref": "#/$defs/FailedRunsMode"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "iteration_comparison": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IterationComparison"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "iteration_summary": {
+      "$ref": "#/$defs/IterationSummary"
+    },
+    "report_id": {
+      "type": "string"
+    },
+    "scenarios": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ScenarioBenchmark"
+      },
+      "type": "object"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "warnings": {
+      "items": {
+        "$ref": "#/$defs/EvalSuiteDriftWarning"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_id",
+    "generated_at",
+    "failed_runs_mode",
+    "scenarios",
+    "deltas",
+    "iteration_summary"
+  ],
+  "title": "trg skills eval benchmark",
+  "type": "object"
+}

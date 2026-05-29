@@ -1,0 +1,134 @@
+{
+  "$defs": {
+    "EvalCase": {
+      "properties": {
+        "assertions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "type": "array"
+        },
+        "expected_output": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "expected_output_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "files": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RelativeSkillPath"
+          },
+          "type": "array"
+        },
+        "grader_hints": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/EvalCaseId"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvalPriority"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "prompt",
+        "expected_output"
+      ],
+      "type": "object"
+    },
+    "EvalCaseId": {
+      "description": "Non-empty string or non-negative integer",
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "minimum": 0,
+          "type": "integer"
+        }
+      ]
+    },
+    "EvalPriority": {
+      "enum": [
+        "low",
+        "normal",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "NonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "RelativeSkillPath": {
+      "type": "string"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/evals.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "evals": {
+      "items": {
+        "$ref": "#/$defs/EvalCase"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "default": 1,
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "skill_name": {
+      "$ref": "#/$defs/NonEmptyString"
+    }
+  },
+  "required": [
+    "skill_name",
+    "evals"
+  ],
+  "title": "trg skills eval suite",
+  "type": "object"
+}

@@ -1,11 +1,20 @@
 use std::process::Command;
-use std::time::Instant;
 
 use super::{
-    prepare_workspace, write_timing_file, write_transcript, EvalRunOutcome, EvalRunRequest, RunStatus, RunnerError,
+    capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
+    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
+    EvalRunOutcome, EvalRunRequest, RunStatus, RunnerError,
 };
+use crate::agentskills::evals::EvalError;
+use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
+use crate::agentskills::redact::{redact_command_args, redact_env};
 
 const PROGRAM: &str = "cursor-agent";
+const INSTALL_HINT: &str = "install Cursor Agent CLI and ensure `cursor-agent` is on PATH";
+
+pub fn check_available() -> Result<(), EvalError> {
+    check_runner_version(PROGRAM, INSTALL_HINT)
+}
 
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     let prepared = prepare_workspace(request)?;
@@ -25,32 +34,65 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
 
     command.arg(&prepared.prompt);
 
-    let start = Instant::now();
-    let output = command.output().map_err(|source| RunnerError::Spawn {
-        program: PROGRAM.to_string(),
-        source,
-    })?;
-    let wall_ms = start.elapsed().as_millis() as u64;
+    let mut cmd_args = vec![
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--force",
+        "--workspace",
+        request.workspace_dir.to_str().unwrap_or("."),
+    ];
+    if let Some(model) = request.runner_model {
+        cmd_args.push("--model");
+        cmd_args.push(model);
+    }
+    cmd_args.push(&prepared.prompt);
+    if let Some(run_dir) = request.transcript_path.parent() {
+        write_runner_invocation_metadata(run_dir, redact_command_args(PROGRAM, &cmd_args), redact_env())?;
+    }
 
-    write_transcript(request.transcript_path, &output.stdout)?;
+    let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
+    persist_runner_io(request, &captured)?;
 
-    let outcome = parse_outcome(&output.stdout, wall_ms, output.status.success())?;
+    if captured.timed_out {
+        let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
+        let outcome = timeout_outcome(timeout_ms, captured.exit_code);
+        write_timing(request, &outcome)?;
+        return Ok(outcome);
+    }
+
+    let exit_ok = captured.exit_code == Some(0);
+    let outcome = parse_outcome(&captured.stdout, captured.duration_ms, exit_ok, captured.exit_code);
+    if matches!(outcome.status, RunStatus::Completed) {
+        persist_final_markdown(request.workspace_dir, &outcome.final_text).map_err(|e| RunnerError::InvalidOutput {
+            program: PROGRAM.to_string(),
+            detail: e.to_string(),
+        })?;
+    }
+    cleanup_runner_temp_files(request.workspace_dir)?;
+    write_timing(request, &outcome)?;
+    Ok(outcome)
+}
+
+fn write_timing(request: &EvalRunRequest, outcome: &EvalRunOutcome) -> Result<(), RunnerError> {
     write_timing_file(
         &request
             .transcript_path
             .parent()
             .unwrap_or(request.workspace_dir)
             .join("timing.json"),
-        &outcome,
-    )?;
-    Ok(outcome)
+        outcome,
+    )
+    .map_err(RunnerError::from)
 }
 
-fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool) -> Result<EvalRunOutcome, RunnerError> {
-    let text = std::str::from_utf8(stdout).map_err(|_| RunnerError::InvalidOutput {
-        program: PROGRAM.to_string(),
-        detail: "stdout was not valid UTF-8".to_string(),
-    })?;
+fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i32>) -> EvalRunOutcome {
+    let text = match std::str::from_utf8(stdout) {
+        Ok(text) => text,
+        Err(_) => {
+            return runner_failure_outcome(wall_ms, exit_code, String::new());
+        }
+    };
 
     let mut last_result: Option<serde_json::Value> = None;
     for line in text.lines() {
@@ -67,9 +109,9 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool) -> Result<EvalRunOu
         }
     }
 
-    let result = last_result.ok_or_else(|| RunnerError::MissingResult {
-        program: PROGRAM.to_string(),
-    })?;
+    let Some(result) = last_result else {
+        return runner_failure_outcome(wall_ms, exit_code, String::new());
+    };
 
     let is_error = !exit_ok || result.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
     let final_text = result
@@ -78,6 +120,10 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool) -> Result<EvalRunOu
         .unwrap_or_default()
         .to_string();
     let duration_ms = result.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(wall_ms);
+
+    if is_error {
+        return runner_failure_outcome(duration_ms, exit_code, final_text);
+    }
 
     let usage = result.get("usage");
     let input_tokens = usage.and_then(|u| u.get("inputTokens")).and_then(|v| v.as_u64());
@@ -89,19 +135,15 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool) -> Result<EvalRunOu
         (None, None) => None,
     };
 
-    Ok(EvalRunOutcome {
-        status: if is_error {
-            RunStatus::Failed
-        } else {
-            RunStatus::Completed
-        },
+    completed_outcome(
         duration_ms,
+        exit_code,
         total_tokens,
         input_tokens,
         output_tokens,
-        cost_usd: None,
+        None,
         final_text,
-    })
+    )
 }
 
 #[cfg(test)]
@@ -113,7 +155,7 @@ mod tests {
         let stdout = br#"{"type":"system","subtype":"init"}
 {"type":"result","is_error":false,"duration_ms":1234,"duration_api_ms":1100,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":0}}
 "#;
-        let outcome = parse_outcome(stdout, 9999, true).unwrap();
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
         assert!(matches!(outcome.status, RunStatus::Completed));
         assert_eq!(outcome.duration_ms, 1234);
         assert_eq!(outcome.input_tokens, Some(100));
@@ -126,23 +168,26 @@ mod tests {
     fn marks_failed_when_is_error_true() {
         let stdout = br#"{"type":"result","is_error":true,"duration_ms":10,"result":"boom"}
 "#;
-        let outcome = parse_outcome(stdout, 0, true).unwrap();
+        let outcome = parse_outcome(stdout, 0, true, Some(0));
         assert!(matches!(outcome.status, RunStatus::Failed));
+        assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
     }
 
     #[test]
-    fn non_zero_exit_overrides_payload_success() {
+    fn non_zero_exit_is_runner_failure() {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":10,"result":"ok"}
 "#;
-        let outcome = parse_outcome(stdout, 0, false).unwrap();
+        let outcome = parse_outcome(stdout, 0, false, Some(1));
         assert!(matches!(outcome.status, RunStatus::Failed));
+        assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
     }
 
     #[test]
-    fn missing_result_event_errors() {
+    fn missing_result_event_is_runner_failure() {
         let stdout = br#"{"type":"system"}
 "#;
-        let err = parse_outcome(stdout, 0, true).unwrap_err();
-        assert!(matches!(err, RunnerError::MissingResult { .. }));
+        let outcome = parse_outcome(stdout, 0, true, Some(0));
+        assert!(matches!(outcome.status, RunStatus::Failed));
+        assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
     }
 }
