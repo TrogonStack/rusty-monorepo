@@ -99,6 +99,7 @@
       "type": "string"
     },
     "NonEmptyString": {
+      "minLength": 1,
       "type": "string"
     },
     "RelativeSkillPath": {

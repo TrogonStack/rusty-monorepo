@@ -114,7 +114,15 @@ impl<'de> Deserialize<'de> for EvalCaseId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+#[schemars(schema_with = "non_empty_string_schema")]
 pub struct NonEmptyString(String);
+
+fn non_empty_string_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "minLength": 1
+    })
+}
 
 impl NonEmptyString {
     pub fn as_str(&self) -> &str {
