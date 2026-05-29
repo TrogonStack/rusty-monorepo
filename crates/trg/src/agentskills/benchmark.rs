@@ -455,10 +455,10 @@ fn load_run_sample(report_dir: &Path, workspace_rel: &str) -> RunSample {
     let timing = timing_path.as_ref().and_then(|path| read_json_file(path).ok());
 
     RunSample {
+        missing_grading: grading.is_none(),
+        missing_timing: timing.is_none(),
         grading,
         timing,
-        missing_grading: grading_path.is_none(),
-        missing_timing: timing_path.is_none(),
     }
 }
 
@@ -1385,6 +1385,29 @@ mod tests {
         assert_eq!(zero.scenarios["with_skill"].completed.runs.passed, 1);
         assert_eq!(zero.scenarios["with_skill"].completed.runs.failed, 1);
         assert_eq!(zero.scenarios["with_skill"].completed.missing_grading, 0);
+    }
+
+    #[test]
+    fn unparseable_grading_counts_as_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        write_report(
+            temp.path(),
+            serde_json::json!([sample_run("run-001", "with_skill", "completed", None)]),
+            None,
+        );
+        write_run_artifacts(
+            temp.path(),
+            "run-001",
+            Some("{ this is not valid json"),
+            Some(r#"{ "duration_ms": 1000 }"#),
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let with_skill = &benchmark.scenarios["with_skill"];
+        assert_eq!(with_skill.completed.run_count, 1);
+        assert_eq!(with_skill.completed.missing_grading, 1);
+        assert_eq!(with_skill.completed.runs.passed, 0);
+        assert_eq!(with_skill.completed.runs.failed, 0);
     }
 
     #[test]

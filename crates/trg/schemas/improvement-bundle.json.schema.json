@@ -46,7 +46,7 @@
   "additionalProperties": true,
   "$defs": {
     "scenario_kind": {
-      "enum": ["with_skill", "without_skill"]
+      "enum": ["with_skill", "without_skill", "old_skill"]
     },
     "feedback_note": {
       "type": "object",
