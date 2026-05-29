@@ -692,7 +692,7 @@ fn env_var(key: &str) -> Option<String> {
 fn sha256_digest(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", super::hex_encode(hasher.finalize()))
 }
 
 fn path_to_string(path: &Path) -> String {

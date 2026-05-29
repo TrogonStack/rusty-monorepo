@@ -203,7 +203,7 @@ fn walk_output_files(
 fn file_sha256_digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", super::hex_encode(hasher.finalize()))
 }
 
 pub(crate) fn guess_mime_type(path: &Path) -> Option<String> {

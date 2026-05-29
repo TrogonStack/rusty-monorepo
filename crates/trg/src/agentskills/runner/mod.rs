@@ -547,7 +547,7 @@ fn walk_and_hash(root: &Path, dir: &Path, digest: &mut SkillDigest) -> std::io::
             let mut hasher = Sha256::new();
             hasher.update(&bytes);
             let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-            digest.insert(relative, format!("sha256:{:x}", hasher.finalize()));
+            digest.insert(relative, format!("sha256:{}", super::hex_encode(hasher.finalize())));
         }
     }
     Ok(())

@@ -377,13 +377,13 @@ fn sha256_digest(content: &str) -> String {
 fn sha256_digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("sha256:{:x}", hasher.finalize())
+    format!("sha256:{}", super::hex_encode(hasher.finalize()))
 }
 
 fn sha256_hex(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
+    super::hex_encode(hasher.finalize())
 }
 
 #[cfg(test)]
