@@ -386,6 +386,7 @@ fn write_workspace_ref(link_path: &Path, workspace_relative: &Path) {
     }
 }
 
+#[cfg(unix)]
 fn relative_path_from(from_dir: &Path, report_dir: &Path, to_relative: &Path) -> PathBuf {
     let depth = from_dir
         .strip_prefix(report_dir)
