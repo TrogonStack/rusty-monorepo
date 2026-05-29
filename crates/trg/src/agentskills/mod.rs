@@ -20,3 +20,13 @@ pub mod runner;
 pub mod schemas;
 pub mod validation;
 pub mod validator;
+
+pub(crate) fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    use std::fmt::Write;
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(&mut out, "{b:02x}").expect("writing to String never fails");
+    }
+    out
+}
