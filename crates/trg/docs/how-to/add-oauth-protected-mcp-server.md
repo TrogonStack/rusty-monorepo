@@ -5,7 +5,7 @@ endpoint. Linear is the worked example; the same shape applies to Notion,
 Atlassian, Cloudflare, and any other server that advertises OAuth via
 RFC 9728 / RFC 8414 discovery.
 
-> macOS only in this milestone. Linux / Windows backends are a follow-up.
+> macOS only in this milestone. A Linux backend is a follow-up.
 
 ## 1. Add the server to `config.toml`
 
