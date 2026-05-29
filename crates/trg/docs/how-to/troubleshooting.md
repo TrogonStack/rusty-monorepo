@@ -156,14 +156,6 @@ pass_rate = passed / total
 
 ## Permission errors
 
-### Symlink creation fails (non-Unix)
-
-On Windows (non-Unix), the runner copies the skill directory instead of
-symlinking. If copy fails:
-
-**Fix:** Ensure the CI user has read access to `--skill-dir` and write access
-to the workspace under `--out-dir`.
-
 ### `Failed to write eval report bundle: Permission denied`
 
 **Fix:** Check write permissions on `--out-dir`:

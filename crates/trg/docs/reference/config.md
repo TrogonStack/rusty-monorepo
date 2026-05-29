@@ -212,8 +212,8 @@ status if there is no matching item; scripts should account for that.
 
 ### Limitations
 
-- **Platform**: macOS only. Linux / Windows credential backends are tracked
-  for a follow-up milestone.
+- **Platform**: macOS only. A Linux credential backend is tracked for a
+  follow-up milestone.
 - **Interactive only**: a TTY on stdin and stderr is required for the
   browser handshake. Headless environments fail with
   `stdin/stderr is not a TTY; OAuth requires an interactive browser session`.

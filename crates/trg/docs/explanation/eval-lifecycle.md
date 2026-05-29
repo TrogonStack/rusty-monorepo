@@ -51,15 +51,16 @@ the directory tree:
 └── iteration-<N>/             (docs-compatible alias layer)
     ├── alias-index.json       (eval slug → run path mapping)
     ├── benchmark.json         (populated by `eval benchmark` or `eval run --benchmark`)
-    └── eval-<slug>/<scenario>/  (symlink → runs/run-NNN/workspace on Unix)
+    └── eval-<slug>/<scenario>/  (symlink → runs/run-NNN/workspace)
 ```
 
 Canonical run outputs live under `runs/run-NNN/workspace`. The
 `iteration-<N>/` tree mirrors the [agentskills.io](https://agentskills.io)
 layout as a **presentation layer only**: scenario directories are symlinks
-back to the canonical workspaces on Unix so artifacts are not duplicated.
-When symlinks are unavailable (Windows or exotic filesystems), the run still
-succeeds — only `alias-index.json` records the mapping.
+back to the canonical workspaces so artifacts are not duplicated. When the
+symlink call fails (e.g. read-only filesystem), the leaf gets a
+`.workspace-ref` JSON file and the run still succeeds —
+`alias-index.json` records the mapping either way.
 
 `alias-index.json` maps each `eval-<slug>` to scenario run directories:
 
