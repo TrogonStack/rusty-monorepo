@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use regex::Regex;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::evals::{parse_eval_suite, EvalCase, EvalError, EvalSuite, Result};
@@ -31,7 +32,7 @@ use super::validation::{ValidationError, ValidationErrors};
 
 pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraderKind {
     Mechanical,
@@ -50,7 +51,7 @@ pub enum GraderMode {
     Script,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct GraderInfo {
     pub kind: GraderKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -59,7 +60,7 @@ pub struct GraderInfo {
     pub command: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct AssertionGradeResult {
     #[serde(alias = "text")]
     pub assertion: String,
@@ -70,7 +71,7 @@ pub struct AssertionGradeResult {
     pub rationale: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GradingSummary {
     pub passed: usize,
     pub failed: usize,
@@ -78,7 +79,7 @@ pub struct GradingSummary {
     pub pass_rate: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GradingFile {
     pub schema_version: String,
     pub assertion_results: Vec<AssertionGradeResult>,
@@ -93,7 +94,7 @@ pub struct GradeOptions {
     pub strict: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct GradeReport {
     pub runs_graded: usize,
     pub assertions_graded: usize,

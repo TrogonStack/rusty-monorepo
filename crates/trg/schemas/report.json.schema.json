@@ -1,108 +1,108 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://trogonstack.dev/schemas/trg/report.json.schema.json",
-  "title": "trg skills eval report",
-  "type": "object",
-  "required": [
-    "schema_version",
-    "report",
-    "suite",
-    "dimensions",
-    "runs",
-    "assertion_results",
-    "summaries",
-    "comparisons"
-  ],
-  "properties": {
-    "schema_version": {
-      "const": "trg.skills-eval.report.v1"
-    },
-    "report": { "$ref": "#/$defs/report_section" },
-    "suite": { "$ref": "#/$defs/suite_section" },
-    "dimensions": { "$ref": "#/$defs/dimensions_section" },
-    "runs": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/run_record" }
-    },
-    "assertion_results": {
-      "type": "array",
-      "items": { "type": "object" }
-    },
-    "summaries": { "$ref": "#/$defs/summaries_section" },
-    "improvement_feedback": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/improvement_feedback_record" }
-    },
-    "comparisons": {
-      "type": "array",
-      "items": { "type": "object" }
-    }
-  },
-  "additionalProperties": true,
   "$defs": {
-    "scenario_kind": {
-      "enum": ["with_skill", "without_skill", "old_skill"]
-    },
-    "report_section": {
-      "type": "object",
-      "required": ["id", "generated_at", "iteration", "producer"],
+    "AssertionDimension": {
       "properties": {
-        "id": { "type": "string" },
-        "generated_at": { "type": "string" },
-        "iteration": { "type": "integer", "minimum": 1 },
-        "producer": { "$ref": "#/$defs/producer_section" },
-        "runner": { "type": "string" },
-        "runner_binary": { "type": "string" },
-        "runner_version": { "type": "string" },
-        "ci": { "$ref": "#/$defs/ci_section" }
+        "eval_case_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
       },
-      "additionalProperties": true
-    },
-    "producer_section": {
-      "type": "object",
-      "required": ["name", "version"],
-      "properties": {
-        "name": { "type": "string" },
-        "version": { "type": "string" }
-      },
-      "additionalProperties": true
-    },
-    "ci_section": {
-      "type": "object",
-      "required": ["provider"],
-      "properties": {
-        "provider": { "type": "string" },
-        "run_id": { "type": "string" },
-        "run_attempt": { "type": "string" },
-        "workflow": { "type": "string" },
-        "job": { "type": "string" },
-        "commit": { "type": "string" },
-        "git_ref": { "type": "string" }
-      },
-      "additionalProperties": true
-    },
-    "suite_section": {
-      "type": "object",
       "required": [
-        "skill_name",
-        "skill_path",
-        "skill_hash",
-        "evals_path",
-        "evals_hash"
+        "id",
+        "eval_case_id",
+        "text"
       ],
-      "properties": {
-        "skill_name": { "type": "string" },
-        "skill_path": { "type": "string" },
-        "skill_hash": { "type": "string" },
-        "evals_path": { "type": "string" },
-        "evals_hash": { "type": "string" },
-        "old_skill_path": { "type": "string" },
-        "old_skill_hash": { "type": "string" }
-      },
-      "additionalProperties": true
+      "type": "object"
     },
-    "dimensions_section": {
-      "type": "object",
+    "CiSection": {
+      "properties": {
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "git_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "job": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "run_attempt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workflow": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "type": "object"
+    },
+    "DimensionsSection": {
+      "properties": {
+        "assertions": {
+          "items": {
+            "$ref": "#/$defs/AssertionDimension"
+          },
+          "type": "array"
+        },
+        "eval_cases": {
+          "items": {
+            "$ref": "#/$defs/EvalCaseDimension"
+          },
+          "type": "array"
+        },
+        "graders": {
+          "items": {},
+          "type": "array"
+        },
+        "model_configs": {
+          "items": {
+            "$ref": "#/$defs/ModelConfigDimension"
+          },
+          "type": "array"
+        },
+        "scenarios": {
+          "items": {
+            "$ref": "#/$defs/ScenarioDimension"
+          },
+          "type": "array"
+        },
+        "skill_revisions": {
+          "items": {
+            "$ref": "#/$defs/SkillRevisionDimension"
+          },
+          "type": "array"
+        }
+      },
       "required": [
         "eval_cases",
         "assertions",
@@ -111,36 +111,35 @@
         "scenarios",
         "graders"
       ],
+      "type": "object"
+    },
+    "EvalCaseDimension": {
       "properties": {
-        "eval_cases": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/eval_case_dimension" }
+        "assertion_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
-        "assertions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/assertion_dimension" }
+        "expected_output": {
+          "type": "string"
         },
-        "skill_revisions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/skill_revision_dimension" }
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
-        "model_configs": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/model_config_dimension" }
+        "id": {
+          "type": "string"
         },
-        "scenarios": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/scenario_dimension" }
+        "prompt": {
+          "type": "string"
         },
-        "graders": {
-          "type": "array",
-          "items": { "type": "object" }
+        "slug": {
+          "type": "string"
         }
       },
-      "additionalProperties": true
-    },
-    "eval_case_dimension": {
-      "type": "object",
       "required": [
         "id",
         "slug",
@@ -149,43 +148,291 @@
         "files",
         "assertion_ids"
       ],
+      "type": "object"
+    },
+    "FeedbackCategory": {
+      "enum": [
+        "correctness",
+        "style",
+        "completeness",
+        "other"
+      ],
+      "type": "string"
+    },
+    "FeedbackCountByCategory": {
       "properties": {
-        "id": { "type": "string" },
-        "slug": { "type": "string" },
-        "prompt": { "type": "string" },
-        "expected_output": { "type": "string" },
-        "files": {
-          "type": "array",
-          "items": { "type": "string" }
+        "completeness": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         },
-        "assertion_ids": {
-          "type": "array",
-          "items": { "type": "string" }
+        "correctness": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "other": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "style": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
       },
-      "additionalProperties": true
+      "required": [
+        "correctness",
+        "style",
+        "completeness",
+        "other"
+      ],
+      "type": "object"
     },
-    "assertion_dimension": {
-      "type": "object",
-      "required": ["id", "eval_case_id", "text"],
+    "FeedbackCountBySeverity": {
       "properties": {
-        "id": { "type": "string" },
-        "eval_case_id": { "type": "string" },
-        "text": { "type": "string" }
+        "blocker": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "info": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warning": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
       },
-      "additionalProperties": true
+      "required": [
+        "info",
+        "warning",
+        "blocker"
+      ],
+      "type": "object"
     },
-    "skill_revision_dimension": {
-      "type": "object",
-      "required": ["id", "skill_hash"],
+    "FeedbackNote": {
+      "additionalProperties": false,
       "properties": {
-        "id": { "type": "string" },
-        "skill_hash": { "type": "string" }
+        "category": {
+          "$ref": "#/$defs/FeedbackCategory"
+        },
+        "severity": {
+          "$ref": "#/$defs/FeedbackSeverity"
+        },
+        "text": {
+          "type": "string"
+        }
       },
-      "additionalProperties": true
+      "required": [
+        "severity",
+        "category",
+        "text"
+      ],
+      "type": "object"
     },
-    "model_config_dimension": {
-      "type": "object",
+    "FeedbackSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "blocker"
+      ],
+      "type": "string"
+    },
+    "FlakyAssertionRecord": {
+      "properties": {
+        "assertion": {
+          "type": "string"
+        },
+        "eval_case_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "eval_case_id",
+        "scenario_id",
+        "assertion"
+      ],
+      "type": "object"
+    },
+    "HumanFeedbackSummary": {
+      "properties": {
+        "by_category": {
+          "$ref": "#/$defs/FeedbackCountByCategory"
+        },
+        "by_severity": {
+          "$ref": "#/$defs/FeedbackCountBySeverity"
+        },
+        "pending_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reviewed_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_runs",
+        "reviewed_runs",
+        "pending_runs",
+        "by_severity",
+        "by_category"
+      ],
+      "type": "object"
+    },
+    "ImprovementFeedbackRecord": {
+      "additionalProperties": false,
+      "description": "Per-run feedback preserved for future iteration improvement prompts.",
+      "properties": {
+        "eval_case_id": {
+          "type": "string"
+        },
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/FeedbackNote"
+          },
+          "type": "array"
+        },
+        "reviewed_at": {
+          "type": "string"
+        },
+        "reviewer": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/ScenarioKind"
+        }
+      },
+      "required": [
+        "run_id",
+        "eval_case_id",
+        "scenario_id",
+        "reviewer",
+        "reviewed_at",
+        "notes"
+      ],
+      "type": "object"
+    },
+    "IterationSummary": {
+      "properties": {
+        "always_fail": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "always_pass": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "flaky_assertions": {
+          "items": {
+            "$ref": "#/$defs/FlakyAssertionRecord"
+          },
+          "type": "array"
+        },
+        "helped_by_skill": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "timing_outliers": {
+          "items": {
+            "$ref": "#/$defs/MetricOutlier"
+          },
+          "type": "array"
+        },
+        "token_outliers": {
+          "items": {
+            "$ref": "#/$defs/MetricOutlier"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "MetricOutlier": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eval_case_id": {
+          "type": "string"
+        },
+        "median": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "type": "string"
+        },
+        "value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "eval_case_id",
+        "scenario_id",
+        "attempt",
+        "value",
+        "median"
+      ],
+      "type": "object"
+    },
+    "ModelConfigDimension": {
+      "properties": {
+        "capture_status": {
+          "type": "string"
+        },
+        "extra": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "parameter_sources": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "required": [
         "id",
         "capture_status",
@@ -194,27 +441,246 @@
         "parameter_sources",
         "extra"
       ],
-      "properties": {
-        "id": { "type": "string" },
-        "capture_status": { "type": "string" },
-        "label": { "type": "string" },
-        "parameters": { "type": "object" },
-        "parameter_sources": { "type": "object" },
-        "extra": { "type": "object" }
-      },
-      "additionalProperties": true
+      "type": "object"
     },
-    "scenario_dimension": {
-      "type": "object",
-      "required": ["id", "kind"],
+    "ProducerSection": {
       "properties": {
-        "id": { "$ref": "#/$defs/scenario_kind" },
-        "kind": { "$ref": "#/$defs/scenario_kind" }
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
       },
-      "additionalProperties": true
+      "required": [
+        "name",
+        "version"
+      ],
+      "type": "object"
     },
-    "run_record": {
-      "type": "object",
+    "ReportSection": {
+      "properties": {
+        "ci": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CiSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generated_at": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "iteration": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "producer": {
+          "$ref": "#/$defs/ProducerSection"
+        },
+        "runner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runner_binary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runner_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "generated_at",
+        "iteration",
+        "producer"
+      ],
+      "type": "object"
+    },
+    "RunCacheInfo": {
+      "properties": {
+        "hit": {
+          "type": "boolean"
+        },
+        "key": {
+          "type": "string"
+        },
+        "source_run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "hit",
+        "source_run_id",
+        "key"
+      ],
+      "type": "object"
+    },
+    "RunMetrics": {
+      "properties": {
+        "cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "exit_code": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RunPaths": {
+      "properties": {
+        "outputs": {
+          "type": "string"
+        },
+        "workspace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace",
+        "outputs"
+      ],
+      "type": "object"
+    },
+    "RunRecord": {
+      "properties": {
+        "artifacts": {
+          "items": {},
+          "type": "array"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunCacheInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eval_case_id": {
+          "type": "string"
+        },
+        "eval_slug": {
+          "type": "string"
+        },
+        "failure_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "iteration": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "metrics": {
+          "$ref": "#/$defs/RunMetrics"
+        },
+        "mirror_path": {
+          "type": "string"
+        },
+        "model_config_id": {
+          "type": "string"
+        },
+        "paths": {
+          "$ref": "#/$defs/RunPaths"
+        },
+        "runner_invocations": {
+          "default": 1,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/ScenarioKind"
+        },
+        "skill_integrity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SkillIntegrityReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "skill_revision_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
       "required": [
         "id",
         "eval_case_id",
@@ -230,85 +696,57 @@
         "artifacts",
         "metrics"
       ],
+      "type": "object"
+    },
+    "ScenarioDimension": {
       "properties": {
-        "id": { "type": "string" },
-        "eval_case_id": { "type": "string" },
-        "eval_slug": { "type": "string" },
-        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
-        "iteration": { "type": "integer", "minimum": 1 },
-        "model_config_id": { "type": "string" },
-        "skill_revision_id": { "type": "string" },
-        "attempt": { "type": "integer", "minimum": 1 },
-        "status": { "type": "string" },
-        "paths": { "$ref": "#/$defs/run_paths" },
-        "mirror_path": { "type": "string" },
-        "artifacts": {
-          "type": "array",
-          "items": { "type": "object" }
+        "id": {
+          "$ref": "#/$defs/ScenarioKind"
         },
-        "metrics": { "$ref": "#/$defs/run_metrics" },
-        "cache": {
-          "anyOf": [{ "type": "object" }, { "type": "null" }]
-        },
-        "skill_integrity": {
-          "anyOf": [
-            { "$ref": "#/$defs/skill_integrity_report" },
-            { "type": "null" }
-          ]
-        },
-        "warnings": {
-          "type": "array",
-          "items": { "type": "string" }
+        "kind": {
+          "$ref": "#/$defs/ScenarioKind"
         }
       },
-      "additionalProperties": true
+      "required": [
+        "id",
+        "kind"
+      ],
+      "type": "object"
     },
-    "run_paths": {
-      "type": "object",
-      "required": ["workspace", "outputs"],
-      "properties": {
-        "workspace": { "type": "string" },
-        "outputs": { "type": "string" }
-      },
-      "additionalProperties": true
+    "ScenarioKind": {
+      "enum": [
+        "with_skill",
+        "without_skill",
+        "old_skill"
+      ],
+      "type": "string"
     },
-    "run_metrics": {
-      "type": "object",
+    "ScenarioSummary": {
       "properties": {
-        "duration_ms": { "type": ["integer", "null"], "minimum": 0 },
-        "total_tokens": { "type": ["integer", "null"], "minimum": 0 },
-        "input_tokens": { "type": ["integer", "null"], "minimum": 0 },
-        "output_tokens": { "type": ["integer", "null"], "minimum": 0 },
-        "cost_usd": { "type": ["number", "null"], "minimum": 0 }
-      },
-      "additionalProperties": true
-    },
-    "skill_integrity_report": {
-      "type": "object",
-      "required": ["tampered", "tampered_files"],
-      "properties": {
-        "tampered": { "type": "boolean" },
-        "tampered_files": {
-          "type": "array",
-          "items": { "type": "string" }
+        "failed_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/ScenarioKind"
+        },
+        "skipped_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
       },
-      "additionalProperties": true
-    },
-    "summaries_section": {
-      "type": "object",
-      "required": ["by_scenario"],
-      "properties": {
-        "by_scenario": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/scenario_summary" }
-        },
-        "human_feedback": { "$ref": "#/$defs/human_feedback_summary" }
-      },
-      "additionalProperties": true
-    },
-    "scenario_summary": {
-      "type": "object",
       "required": [
         "scenario_id",
         "total_runs",
@@ -316,88 +754,164 @@
         "skipped_runs",
         "failed_runs"
       ],
-      "properties": {
-        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
-        "total_runs": { "type": "integer", "minimum": 0 },
-        "passed_runs": { "type": "integer", "minimum": 0 },
-        "skipped_runs": { "type": "integer", "minimum": 0 },
-        "failed_runs": { "type": "integer", "minimum": 0 }
-      },
-      "additionalProperties": true
+      "type": "object"
     },
-    "human_feedback_summary": {
-      "type": "object",
-      "required": [
-        "total_runs",
-        "reviewed_runs",
-        "pending_runs",
-        "by_severity",
-        "by_category"
-      ],
+    "SkillIntegrityReport": {
       "properties": {
-        "total_runs": { "type": "integer", "minimum": 0 },
-        "reviewed_runs": { "type": "integer", "minimum": 0 },
-        "pending_runs": { "type": "integer", "minimum": 0 },
-        "by_severity": { "$ref": "#/$defs/feedback_count_by_severity" },
-        "by_category": { "$ref": "#/$defs/feedback_count_by_category" }
-      },
-      "additionalProperties": true
-    },
-    "feedback_count_by_severity": {
-      "type": "object",
-      "properties": {
-        "info": { "type": "integer", "minimum": 0 },
-        "warning": { "type": "integer", "minimum": 0 },
-        "blocker": { "type": "integer", "minimum": 0 }
-      },
-      "additionalProperties": true
-    },
-    "feedback_count_by_category": {
-      "type": "object",
-      "properties": {
-        "correctness": { "type": "integer", "minimum": 0 },
-        "style": { "type": "integer", "minimum": 0 },
-        "completeness": { "type": "integer", "minimum": 0 },
-        "other": { "type": "integer", "minimum": 0 }
-      },
-      "additionalProperties": true
-    },
-    "improvement_feedback_record": {
-      "type": "object",
-      "required": [
-        "run_id",
-        "eval_case_id",
-        "scenario_id",
-        "reviewer",
-        "reviewed_at",
-        "notes"
-      ],
-      "properties": {
-        "run_id": { "type": "string" },
-        "eval_case_id": { "type": "string" },
-        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
-        "reviewer": { "type": "string" },
-        "reviewed_at": { "type": "string" },
-        "notes": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/feedback_note" }
+        "tampered": {
+          "type": "boolean"
+        },
+        "tampered_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
-      "additionalProperties": false
+      "required": [
+        "tampered",
+        "tampered_files"
+      ],
+      "type": "object"
     },
-    "feedback_note": {
-      "type": "object",
-      "required": ["severity", "category", "text"],
+    "SkillRevisionDimension": {
       "properties": {
-        "severity": {
-          "enum": ["info", "warning", "blocker"]
+        "id": {
+          "type": "string"
         },
-        "category": {
-          "enum": ["correctness", "style", "completeness", "other"]
-        },
-        "text": { "type": "string" }
+        "skill_hash": {
+          "type": "string"
+        }
       },
-      "additionalProperties": false
+      "required": [
+        "id",
+        "skill_hash"
+      ],
+      "type": "object"
+    },
+    "SuiteSection": {
+      "properties": {
+        "evals_hash": {
+          "type": "string"
+        },
+        "evals_path": {
+          "type": "string"
+        },
+        "old_skill_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_skill_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill_hash": {
+          "type": "string"
+        },
+        "skill_name": {
+          "type": "string"
+        },
+        "skill_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_name",
+        "skill_path",
+        "skill_hash",
+        "evals_path",
+        "evals_hash"
+      ],
+      "type": "object"
+    },
+    "SummariesSection": {
+      "properties": {
+        "by_scenario": {
+          "items": {
+            "$ref": "#/$defs/ScenarioSummary"
+          },
+          "type": "array"
+        },
+        "human_feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HumanFeedbackSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "by_scenario"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/report.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "assertion_results": {
+      "items": {},
+      "type": "array"
+    },
+    "comparisons": {
+      "items": {},
+      "type": "array"
+    },
+    "dimensions": {
+      "$ref": "#/$defs/DimensionsSection"
+    },
+    "improvement_feedback": {
+      "items": {
+        "$ref": "#/$defs/ImprovementFeedbackRecord"
+      },
+      "type": "array"
+    },
+    "iteration_summary": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IterationSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "report": {
+      "$ref": "#/$defs/ReportSection"
+    },
+    "runs": {
+      "items": {
+        "$ref": "#/$defs/RunRecord"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "suite": {
+      "$ref": "#/$defs/SuiteSection"
+    },
+    "summaries": {
+      "$ref": "#/$defs/SummariesSection"
+    }
+  },
+  "required": [
+    "schema_version",
+    "report",
+    "suite",
+    "dimensions",
+    "runs",
+    "assertion_results",
+    "summaries",
+    "comparisons"
+  ],
+  "title": "trg skills eval report",
+  "type": "object"
 }

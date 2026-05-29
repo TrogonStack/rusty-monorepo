@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::benchmark::{stddev, FailedRunsMode};
@@ -18,7 +19,7 @@ pub struct IterationSummaryOptions {
     pub previous_report_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IterationSummaryDocument {
     pub schema_version: String,
     pub report_id: String,
@@ -35,13 +36,13 @@ pub struct IterationSummaryDocument {
     pub cross_iteration: Option<CrossIterationSection>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
 pub struct AssertionKey {
     pub eval_id: String,
     pub assertion_text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AssertionStabilityRecord {
     pub eval_id: String,
     pub assertion_text: String,
@@ -50,7 +51,7 @@ pub struct AssertionStabilityRecord {
     pub cross_iteration_delta: Option<CrossIterationDelta>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossIterationDelta {
     New,
@@ -58,7 +59,7 @@ pub enum CrossIterationDelta {
     Lost,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HelpedBySkillRecord {
     pub eval_id: String,
     pub assertion_text: String,
@@ -67,7 +68,7 @@ pub struct HelpedBySkillRecord {
     pub delta: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FlakyAssertionRecord {
     pub eval_id: String,
     pub scenario: String,
@@ -77,7 +78,7 @@ pub struct FlakyAssertionRecord {
     pub flakiness_ratio: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TimingOutlierRecord {
     pub eval_id: String,
     pub scenario: String,
@@ -87,7 +88,7 @@ pub struct TimingOutlierRecord {
     pub stddev_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TokenOutlierRecord {
     pub eval_id: String,
     pub scenario: String,
@@ -97,7 +98,7 @@ pub struct TokenOutlierRecord {
     pub stddev_tokens: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CrossIterationSection {
     pub previous_report_id: String,
     pub previous_iteration: u32,

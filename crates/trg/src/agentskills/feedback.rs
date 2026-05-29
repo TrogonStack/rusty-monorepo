@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -45,7 +46,7 @@ impl From<FeedbackError> for EvalError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackSeverity {
     Info,
@@ -53,7 +54,7 @@ pub enum FeedbackSeverity {
     Blocker,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, clap::ValueEnum, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackCategory {
     Correctness,
@@ -62,7 +63,7 @@ pub enum FeedbackCategory {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackNote {
     pub severity: FeedbackSeverity,
@@ -70,7 +71,7 @@ pub struct FeedbackNote {
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDocument {
     pub reviewer: String,
@@ -87,7 +88,7 @@ pub struct RunFeedbackEntry {
     pub feedback: FeedbackDocument,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HumanFeedbackSummary {
     pub total_runs: usize,
     pub reviewed_runs: usize,
@@ -96,14 +97,14 @@ pub struct HumanFeedbackSummary {
     pub by_category: FeedbackCountByCategory,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct FeedbackCountBySeverity {
     pub info: usize,
     pub warning: usize,
     pub blocker: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 pub struct FeedbackCountByCategory {
     pub correctness: usize,
     pub style: usize,
@@ -112,7 +113,7 @@ pub struct FeedbackCountByCategory {
 }
 
 /// Per-run feedback preserved for future iteration improvement prompts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImprovementFeedbackRecord {
     pub run_id: String,
@@ -123,12 +124,12 @@ pub struct ImprovementFeedbackRecord {
     pub notes: Vec<FeedbackNote>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ReportRunsDocument {
     runs: Vec<ReportRunRef>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ReportRunRef {
     id: String,
     eval_case_id: String,
@@ -136,18 +137,18 @@ struct ReportRunRef {
     paths: ReportRunPaths,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ReportRunPaths {
     workspace: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FeedbackInitReport {
     pub created: usize,
     pub skipped: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FeedbackValidateReport {
     pub validated: usize,
     pub errors: Vec<String>,

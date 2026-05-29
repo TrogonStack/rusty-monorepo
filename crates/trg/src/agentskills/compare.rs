@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -17,7 +18,7 @@ pub const RUBRIC_ITEMS: &[&str] = &[
     "domain_fit",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JudgeKind {
     #[default]
@@ -72,7 +73,7 @@ fn parse_scenario_kind(raw: &str, field: &str) -> Result<ScenarioKind, EvalError
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum BlindLabel {
     A,
@@ -88,7 +89,7 @@ impl BlindLabel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ComparisonWinner {
     A,
@@ -96,13 +97,13 @@ pub enum ComparisonWinner {
     Tie,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ScenarioPairRecord {
     pub a: ScenarioKind,
     pub b: ScenarioKind,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BlindLabelMapping {
     #[serde(rename = "A")]
     pub label_a: ScenarioKind,
@@ -110,7 +111,7 @@ pub struct BlindLabelMapping {
     pub label_b: ScenarioKind,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ComparisonJudgeMetadata {
     pub kind: JudgeKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,7 +120,7 @@ pub struct ComparisonJudgeMetadata {
     pub command: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ComparisonRecord {
     pub eval_case_id: String,
     pub pair: ScenarioPairRecord,
@@ -180,7 +181,7 @@ struct LoadedRunPaths {
     workspace: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 struct JudgeScriptInput {
     eval_case_id: String,
     prompt: String,

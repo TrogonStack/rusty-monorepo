@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::eval_suite_drift::{
@@ -14,7 +15,7 @@ use super::report::ScenarioKind;
 
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.benchmark.v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FailedRunsMode {
     #[default]
@@ -30,7 +31,8 @@ pub struct BenchmarkOptions {
     pub previous_report_dir: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[schemars(title = "trg skills eval benchmark")]
 pub struct BenchmarkDocument {
     pub schema_version: String,
     pub report_id: String,
@@ -47,7 +49,7 @@ pub struct BenchmarkDocument {
     pub warnings: Vec<EvalSuiteDriftWarning>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvalScenarioAttemptRow {
     pub eval_case_id: String,
     pub scenario_id: String,
@@ -57,7 +59,7 @@ pub struct EvalScenarioAttemptRow {
     pub flaky_assertions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AttemptPassRateStats {
     pub mean: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,7 +68,7 @@ pub struct AttemptPassRateStats {
     pub max: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct IterationSummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub always_pass: Vec<String>,
@@ -82,14 +84,14 @@ pub struct IterationSummary {
     pub token_outliers: Vec<MetricOutlier>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FlakyAssertionRecord {
     pub eval_case_id: String,
     pub scenario_id: String,
     pub assertion: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MetricOutlier {
     pub run_id: String,
     pub eval_case_id: String,
@@ -99,7 +101,7 @@ pub struct MetricOutlier {
     pub median: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ScenarioBenchmark {
     pub completed: CompletedBucket,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,7 +109,7 @@ pub struct ScenarioBenchmark {
     pub skipped: SkippedBucket,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct CompletedBucket {
     pub run_count: usize,
     pub assertions: PassFailSummary,
@@ -118,7 +120,7 @@ pub struct CompletedBucket {
     pub missing_timing: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct RunBucketSummary {
     pub run_count: usize,
     pub duration_ms: DurationStats,
@@ -126,12 +128,12 @@ pub struct RunBucketSummary {
     pub missing_timing: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SkippedBucket {
     pub run_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, JsonSchema)]
 pub struct PassFailSummary {
     pub passed: usize,
     pub failed: usize,
@@ -139,7 +141,7 @@ pub struct PassFailSummary {
     pub pass_rate: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, JsonSchema)]
 pub struct DurationStats {
     pub mean: f64,
     pub p50: u64,
@@ -149,7 +151,7 @@ pub struct DurationStats {
     pub stddev: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, JsonSchema)]
 pub struct TokenStats {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -161,7 +163,7 @@ pub struct TokenStats {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, JsonSchema)]
 pub struct ScenarioDeltas {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub with_skill_vs_without_skill: Option<ScenarioDelta>,
@@ -169,7 +171,7 @@ pub struct ScenarioDeltas {
     pub with_skill_vs_old_skill: Option<ScenarioDelta>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ScenarioDelta {
     pub assertion_pass_rate: f64,
     pub run_pass_rate: f64,
@@ -180,7 +182,7 @@ pub struct ScenarioDelta {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct IterationComparison {
     pub current_iteration_id: String,
     pub previous_iteration_id: String,

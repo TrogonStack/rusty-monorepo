@@ -1,42 +1,65 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://trogonstack.dev/schemas/trg/feedback.json.schema.json",
-  "title": "trg skills eval feedback",
-  "type": "object",
-  "required": ["reviewer", "reviewed_at", "notes"],
-  "properties": {
-    "reviewer": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Reviewer identity, typically git user.email"
-    },
-    "reviewed_at": {
-      "type": "string",
-      "description": "RFC 3339 timestamp when feedback was recorded"
-    },
-    "notes": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/note" }
-    }
-  },
-  "additionalProperties": false,
   "$defs": {
-    "note": {
-      "type": "object",
-      "required": ["severity", "category", "text"],
+    "FeedbackCategory": {
+      "enum": [
+        "correctness",
+        "style",
+        "completeness",
+        "other"
+      ],
+      "type": "string"
+    },
+    "FeedbackNote": {
+      "additionalProperties": false,
       "properties": {
-        "severity": {
-          "enum": ["info", "warning", "blocker"]
-        },
         "category": {
-          "enum": ["correctness", "style", "completeness", "other"]
+          "$ref": "#/$defs/FeedbackCategory"
+        },
+        "severity": {
+          "$ref": "#/$defs/FeedbackSeverity"
         },
         "text": {
-          "type": "string",
-          "minLength": 1
+          "type": "string"
         }
       },
-      "additionalProperties": false
+      "required": [
+        "severity",
+        "category",
+        "text"
+      ],
+      "type": "object"
+    },
+    "FeedbackSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "blocker"
+      ],
+      "type": "string"
     }
-  }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/feedback.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "notes": {
+      "items": {
+        "$ref": "#/$defs/FeedbackNote"
+      },
+      "type": "array"
+    },
+    "reviewed_at": {
+      "type": "string"
+    },
+    "reviewer": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "reviewer",
+    "reviewed_at",
+    "notes"
+  ],
+  "title": "trg skills eval feedback",
+  "type": "object"
 }

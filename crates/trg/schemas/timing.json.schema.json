@@ -1,35 +1,54 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://trogonstack.dev/schemas/trg/timing.json.schema.json",
-  "title": "trg skills eval timing",
-  "type": "object",
-  "required": ["duration_ms"],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
-    "duration_ms": {
-      "type": "integer",
-      "exclusiveMinimum": 0,
-      "description": "Wall-clock duration of the runner execution in milliseconds (must be > 0)"
+    "cost_usd": {
+      "format": "double",
+      "type": [
+        "number",
+        "null"
+      ]
     },
-    "total_tokens": {
-      "type": "integer",
+    "duration_ms": {
+      "format": "uint64",
       "minimum": 0,
-      "description": "Total tokens consumed when reported by the runner"
+      "type": "integer"
+    },
+    "exit_code": {
+      "format": "int32",
+      "type": [
+        "integer",
+        "null"
+      ]
     },
     "input_tokens": {
-      "type": "integer",
+      "format": "uint64",
       "minimum": 0,
-      "description": "Input tokens when reported separately"
+      "type": [
+        "integer",
+        "null"
+      ]
     },
     "output_tokens": {
-      "type": "integer",
+      "format": "uint64",
       "minimum": 0,
-      "description": "Output tokens when reported separately"
+      "type": [
+        "integer",
+        "null"
+      ]
     },
-    "cost_usd": {
-      "type": "number",
+    "total_tokens": {
+      "format": "uint64",
       "minimum": 0,
-      "description": "Estimated cost in USD when available"
+      "type": [
+        "integer",
+        "null"
+      ]
     }
   },
-  "additionalProperties": true
+  "required": [
+    "duration_ms"
+  ],
+  "title": "trg skills eval timing",
+  "type": "object"
 }

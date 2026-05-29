@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -26,7 +27,7 @@ pub struct EvalSuiteDriftReport {
     pub removed_eval_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, JsonSchema)]
 pub struct EvalSuiteDriftWarning {
     pub kind: String,
     pub current_hash: String,

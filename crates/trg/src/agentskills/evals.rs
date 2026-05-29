@@ -2,6 +2,7 @@ use super::grading::{self, GradingFile};
 use super::outputs::guess_mime_type;
 use super::validation::{ValidationError, ValidationErrors};
 use crate::fs::FileSystem;
+use schemars::JsonSchema;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -30,7 +31,7 @@ pub enum EvalError {
 
 pub type Result<T> = std::result::Result<T, EvalError>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct EvalCaseId(String);
 
 impl EvalCaseId {
@@ -101,7 +102,7 @@ impl<'de> Deserialize<'de> for EvalCaseId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct NonEmptyString(String);
 
 impl NonEmptyString {
@@ -129,7 +130,7 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct RelativeSkillPath(String);
 
 impl RelativeSkillPath {
@@ -181,7 +182,7 @@ fn default_schema_version() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EvalPriority {
     Low,
@@ -190,7 +191,7 @@ pub enum EvalPriority {
     Critical,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EvalSuite {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -199,7 +200,7 @@ pub struct EvalSuite {
     pub evals: Vec<EvalCase>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EvalCase {
     pub id: EvalCaseId,
     pub prompt: NonEmptyString,
@@ -329,7 +330,7 @@ pub struct EvalLintWarning {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct EvalCheckReport {
     pub skill_name: String,
     pub eval_count: usize,
@@ -345,7 +346,7 @@ pub struct WorkspaceCheckOptions {
     pub fail_on_failed_assertions: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct WorkspaceCheckReport {
     pub grading_files: usize,
     pub timing_files: usize,

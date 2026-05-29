@@ -1,148 +1,55 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://trogonstack.dev/schemas/trg/improvement-bundle.json.schema.json",
-  "title": "trg skills eval improvement bundle",
-  "type": "object",
-  "required": [
-    "schema_version",
-    "generated_at",
-    "source_report_dir",
-    "output_dir",
-    "summary",
-    "eval_suite_drift",
-    "failed_assertions",
-    "human_feedback",
-    "human_feedback_summary",
-    "transcript_excerpts",
-    "suggested_focus"
-  ],
-  "properties": {
-    "schema_version": {
-      "const": "trg.skills-eval.improvement-bundle.v1"
-    },
-    "generated_at": { "type": "string" },
-    "source_report_dir": { "type": "string" },
-    "output_dir": { "type": "string" },
-    "summary": { "$ref": "#/$defs/bundle_summary" },
-    "eval_suite_drift": { "$ref": "#/$defs/eval_suite_drift" },
-    "failed_assertions": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/failed_assertion_group" }
-    },
-    "human_feedback": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/human_feedback_group" }
-    },
-    "human_feedback_summary": { "$ref": "#/$defs/human_feedback_summary" },
-    "transcript_excerpts": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/transcript_excerpt" }
-    },
-    "suggested_focus": {
-      "type": "array",
-      "items": { "type": "string" }
-    }
-  },
-  "additionalProperties": true,
   "$defs": {
-    "scenario_kind": {
-      "enum": ["with_skill", "without_skill", "old_skill"]
-    },
-    "feedback_note": {
-      "type": "object",
-      "required": ["severity", "category", "text"],
+    "BundleSummary": {
       "properties": {
-        "severity": {
-          "enum": ["info", "warning", "blocker"]
+        "completed_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         },
-        "category": {
-          "enum": ["correctness", "style", "completeness", "other"]
+        "evals_hash": {
+          "type": "string"
         },
-        "text": {
-          "type": "string",
-          "minLength": 1
+        "failed_assertions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "iteration": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed_assertions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "report_id": {
+          "type": "string"
+        },
+        "skill_hash": {
+          "type": "string"
+        },
+        "skill_name": {
+          "type": "string"
+        },
+        "skipped_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
         }
       },
-      "additionalProperties": false
-    },
-    "human_feedback_attachment": {
-      "type": "object",
-      "required": ["source_path", "reviewer", "reviewed_at", "notes"],
-      "properties": {
-        "source_path": { "type": "string" },
-        "reviewer": { "type": "string", "minLength": 1 },
-        "reviewed_at": { "type": "string" },
-        "notes": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/feedback_note" },
-          "minItems": 1
-        }
-      },
-      "additionalProperties": true
-    },
-    "human_feedback_summary": {
-      "type": "object",
-      "required": ["reviewed_no_issues_runs"],
-      "properties": {
-        "reviewed_no_issues_runs": {
-          "type": "integer",
-          "minimum": 0
-        }
-      },
-      "additionalProperties": true
-    },
-    "human_feedback_group": {
-      "type": "object",
-      "required": [
-        "eval_case_id",
-        "eval_slug",
-        "scenario_id",
-        "run_id",
-        "feedback"
-      ],
-      "properties": {
-        "eval_case_id": { "type": "string" },
-        "eval_slug": { "type": "string" },
-        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
-        "run_id": { "type": "string" },
-        "feedback": { "$ref": "#/$defs/human_feedback_attachment" }
-      },
-      "additionalProperties": true
-    },
-    "failed_assertion_entry": {
-      "type": "object",
-      "required": [
-        "run_id",
-        "scenario_id",
-        "attempt",
-        "assertion",
-        "evidence"
-      ],
-      "properties": {
-        "run_id": { "type": "string" },
-        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
-        "attempt": { "type": "integer", "minimum": 1 },
-        "assertion": { "type": "string" },
-        "evidence": { "type": "string" },
-        "human_feedback": { "$ref": "#/$defs/human_feedback_attachment" }
-      },
-      "additionalProperties": true
-    },
-    "failed_assertion_group": {
-      "type": "object",
-      "required": ["eval_case_id", "eval_slug", "failures"],
-      "properties": {
-        "eval_case_id": { "type": "string" },
-        "eval_slug": { "type": "string" },
-        "failures": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/failed_assertion_entry" }
-        }
-      },
-      "additionalProperties": true
-    },
-    "bundle_summary": {
-      "type": "object",
       "required": [
         "iteration",
         "report_id",
@@ -156,35 +63,263 @@
         "failed_runs",
         "skipped_runs"
       ],
-      "properties": {
-        "iteration": { "type": "integer", "minimum": 1 },
-        "report_id": { "type": "string" },
-        "skill_name": { "type": "string" },
-        "skill_hash": { "type": "string" },
-        "evals_hash": { "type": "string" },
-        "total_runs": { "type": "integer", "minimum": 0 },
-        "passed_assertions": { "type": "integer", "minimum": 0 },
-        "failed_assertions": { "type": "integer", "minimum": 0 },
-        "completed_runs": { "type": "integer", "minimum": 0 },
-        "failed_runs": { "type": "integer", "minimum": 0 },
-        "skipped_runs": { "type": "integer", "minimum": 0 }
-      },
-      "additionalProperties": true
+      "type": "object"
     },
-    "eval_suite_drift": {
-      "type": "object",
-      "required": ["detected", "previous_hash"],
+    "EvalSuiteDrift": {
       "properties": {
-        "detected": { "type": "boolean" },
-        "previous_hash": { "type": "string" },
-        "current_hash": { "type": "string" },
-        "current_evals_path": { "type": "string" },
-        "warning": { "type": "string" }
+        "added_eval_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "current_evals_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "detected": {
+          "type": "boolean"
+        },
+        "previous_hash": {
+          "type": "string"
+        },
+        "removed_eval_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "warning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       },
-      "additionalProperties": true
+      "required": [
+        "detected",
+        "previous_hash"
+      ],
+      "type": "object"
     },
-    "transcript_excerpt": {
-      "type": "object",
+    "FailedAssertionEntry": {
+      "properties": {
+        "assertion": {
+          "type": "string"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "human_feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HumanFeedbackAttachment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/ScenarioKind"
+        }
+      },
+      "required": [
+        "run_id",
+        "scenario_id",
+        "attempt",
+        "assertion",
+        "evidence"
+      ],
+      "type": "object"
+    },
+    "FailedAssertionGroup": {
+      "properties": {
+        "eval_case_id": {
+          "type": "string"
+        },
+        "eval_slug": {
+          "type": "string"
+        },
+        "failures": {
+          "items": {
+            "$ref": "#/$defs/FailedAssertionEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "eval_case_id",
+        "eval_slug",
+        "failures"
+      ],
+      "type": "object"
+    },
+    "FeedbackCategory": {
+      "enum": [
+        "correctness",
+        "style",
+        "completeness",
+        "other"
+      ],
+      "type": "string"
+    },
+    "FeedbackNote": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/FeedbackCategory"
+        },
+        "severity": {
+          "$ref": "#/$defs/FeedbackSeverity"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "category",
+        "text"
+      ],
+      "type": "object"
+    },
+    "FeedbackSeverity": {
+      "enum": [
+        "info",
+        "warning",
+        "blocker"
+      ],
+      "type": "string"
+    },
+    "HumanFeedbackAttachment": {
+      "properties": {
+        "notes": {
+          "items": {
+            "$ref": "#/$defs/FeedbackNote"
+          },
+          "type": "array"
+        },
+        "reviewed_at": {
+          "type": "string"
+        },
+        "reviewer": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_path",
+        "reviewer",
+        "reviewed_at",
+        "notes"
+      ],
+      "type": "object"
+    },
+    "HumanFeedbackGroup": {
+      "properties": {
+        "eval_case_id": {
+          "type": "string"
+        },
+        "eval_slug": {
+          "type": "string"
+        },
+        "feedback": {
+          "$ref": "#/$defs/HumanFeedbackAttachment"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/ScenarioKind"
+        }
+      },
+      "required": [
+        "eval_case_id",
+        "eval_slug",
+        "scenario_id",
+        "run_id",
+        "feedback"
+      ],
+      "type": "object"
+    },
+    "HumanFeedbackSectionSummary": {
+      "properties": {
+        "reviewed_no_issues_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "reviewed_no_issues_runs"
+      ],
+      "type": "object"
+    },
+    "ScenarioKind": {
+      "enum": [
+        "with_skill",
+        "without_skill",
+        "old_skill"
+      ],
+      "type": "string"
+    },
+    "TranscriptExcerpt": {
+      "properties": {
+        "eval_case_id": {
+          "type": "string"
+        },
+        "eval_slug": {
+          "type": "string"
+        },
+        "head": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "scenario_id": {
+          "$ref": "#/$defs/ScenarioKind"
+        },
+        "tail": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "total_lines": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
       "required": [
         "run_id",
         "eval_case_id",
@@ -196,24 +331,71 @@
         "head",
         "tail"
       ],
-      "properties": {
-        "run_id": { "type": "string" },
-        "eval_case_id": { "type": "string" },
-        "eval_slug": { "type": "string" },
-        "scenario_id": { "$ref": "#/$defs/scenario_kind" },
-        "path": { "type": "string" },
-        "total_lines": { "type": "integer", "minimum": 0 },
-        "truncated": { "type": "boolean" },
-        "head": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "tail": {
-          "type": "array",
-          "items": { "type": "string" }
-        }
-      },
-      "additionalProperties": true
+      "type": "object"
     }
-  }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/improvement-bundle.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "eval_suite_drift": {
+      "$ref": "#/$defs/EvalSuiteDrift"
+    },
+    "failed_assertions": {
+      "items": {
+        "$ref": "#/$defs/FailedAssertionGroup"
+      },
+      "type": "array"
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "human_feedback": {
+      "items": {
+        "$ref": "#/$defs/HumanFeedbackGroup"
+      },
+      "type": "array"
+    },
+    "human_feedback_summary": {
+      "$ref": "#/$defs/HumanFeedbackSectionSummary"
+    },
+    "output_dir": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "source_report_dir": {
+      "type": "string"
+    },
+    "suggested_focus": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "$ref": "#/$defs/BundleSummary"
+    },
+    "transcript_excerpts": {
+      "items": {
+        "$ref": "#/$defs/TranscriptExcerpt"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "generated_at",
+    "source_report_dir",
+    "output_dir",
+    "summary",
+    "eval_suite_drift",
+    "failed_assertions",
+    "human_feedback",
+    "human_feedback_summary",
+    "transcript_excerpts",
+    "suggested_focus"
+  ],
+  "title": "trg skills eval improvement bundle",
+  "type": "object"
 }

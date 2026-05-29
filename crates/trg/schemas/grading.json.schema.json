@@ -1,61 +1,119 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://trogonstack.dev/schemas/trg/grading.json.schema.json",
-  "title": "trg skills eval grading",
-  "type": "object",
-  "required": ["schema_version", "assertion_results", "summary"],
-  "properties": {
-    "schema_version": {
-      "const": "trg.skills-eval.grading.v1"
-    },
-    "assertion_results": {
-      "type": "array",
-      "minItems": 1,
-      "items": { "$ref": "#/$defs/assertion_result" }
-    },
-    "summary": { "$ref": "#/$defs/summary" }
-  },
-  "additionalProperties": true,
   "$defs": {
-    "grader_info": {
-      "type": "object",
-      "required": ["kind"],
+    "AssertionGradeResult": {
       "properties": {
-        "kind": {
-          "enum": ["mechanical", "llm", "script", "needs_llm", "none"]
+        "assertion": {
+          "type": "string"
         },
-        "model": { "type": "string" },
-        "command": { "type": "string" }
+        "evidence": {
+          "type": "string"
+        },
+        "grader": {
+          "$ref": "#/$defs/GraderInfo"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "rationale": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       },
-      "additionalProperties": true
-    },
-    "assertion_result": {
-      "type": "object",
-      "required": ["passed", "evidence", "grader"],
-      "properties": {
-        "assertion": { "type": "string" },
-        "text": { "type": "string" },
-        "passed": { "type": "boolean" },
-        "evidence": { "type": "string" },
-        "grader": { "$ref": "#/$defs/grader_info" },
-        "rationale": { "type": "string" }
-      },
-      "anyOf": [
-        { "required": ["assertion"] },
-        { "required": ["text"] }
+      "required": [
+        "assertion",
+        "passed",
+        "evidence",
+        "grader"
       ],
-      "additionalProperties": true
+      "type": "object"
+    },
+    "GraderInfo": {
+      "properties": {
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/GraderKind"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "GraderKind": {
+      "enum": [
+        "mechanical",
+        "llm",
+        "script",
+        "needs_llm",
+        "none"
+      ],
+      "type": "string"
+    },
+    "GradingSummary": {
+      "properties": {
+        "failed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "passed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "total",
+        "pass_rate"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/grading.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "assertion_results": {
+      "items": {
+        "$ref": "#/$defs/AssertionGradeResult"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "type": "string"
     },
     "summary": {
-      "type": "object",
-      "required": ["passed", "failed", "total", "pass_rate"],
-      "properties": {
-        "passed": { "type": "integer", "minimum": 0 },
-        "failed": { "type": "integer", "minimum": 0 },
-        "total": { "type": "integer", "minimum": 0 },
-        "pass_rate": { "type": "number", "minimum": 0, "maximum": 1 }
-      },
-      "additionalProperties": true
+      "$ref": "#/$defs/GradingSummary"
     }
-  }
+  },
+  "required": [
+    "schema_version",
+    "assertion_results",
+    "summary"
+  ],
+  "title": "trg skills eval grading",
+  "type": "object"
 }

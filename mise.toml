@@ -1,0 +1,10 @@
+[tasks."schemas:generate"]
+description = "Generate JSON schemas from Rust structs (crates/trg/schemas/)"
+run = "cargo run -p trg --bin generate-schemas"
+
+[tasks."schemas:check"]
+description = "Verify checked-in JSON schemas match the Rust structs"
+run = [
+  "cargo run -p trg --bin generate-schemas",
+  "git diff --exit-code crates/trg/schemas/",
+]

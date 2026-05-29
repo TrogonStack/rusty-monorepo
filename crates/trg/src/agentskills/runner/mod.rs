@@ -15,6 +15,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -495,18 +497,33 @@ pub fn write_runner_invocation_metadata(
     std::fs::write(run_dir.join("env.json"), serde_json::to_string_pretty(&env)?)
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TimingFile {
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
 pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::io::Result<()> {
     if let Some(parent) = timing_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut body = serde_json::Map::new();
-    body.insert("duration_ms".to_string(), serde_json::json!(outcome.duration_ms));
-    if let Some(exit_code) = outcome.exit_code {
-        body.insert("exit_code".to_string(), serde_json::json!(exit_code));
-    }
-    if let Some(total) = outcome.total_tokens {
-        body.insert("total_tokens".to_string(), serde_json::json!(total));
-    }
+    let body = TimingFile {
+        duration_ms: outcome.duration_ms,
+        exit_code: outcome.exit_code,
+        total_tokens: outcome.total_tokens,
+        input_tokens: outcome.input_tokens,
+        output_tokens: outcome.output_tokens,
+        cost_usd: outcome.cost_usd,
+    };
     std::fs::write(timing_path, serde_json::to_string_pretty(&body).unwrap())
 }
 

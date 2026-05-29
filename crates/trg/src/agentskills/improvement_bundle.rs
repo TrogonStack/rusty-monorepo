@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::eval_suite_drift::{detect_eval_suite_drift_vs_skill, maybe_emit_eval_suite_drift_warning};
@@ -37,7 +38,7 @@ impl Default for NextIterationOptions {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct EvalSuiteDrift {
     pub detected: bool,
     pub previous_hash: String,
@@ -53,7 +54,7 @@ pub struct EvalSuiteDrift {
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct BundleSummary {
     pub iteration: u32,
     pub report_id: String,
@@ -68,7 +69,7 @@ pub struct BundleSummary {
     pub skipped_runs: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct FailedAssertionEntry {
     pub run_id: String,
     pub scenario_id: ScenarioKind,
@@ -79,7 +80,7 @@ pub struct FailedAssertionEntry {
     pub human_feedback: Option<HumanFeedbackAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct HumanFeedbackAttachment {
     pub source_path: String,
     pub reviewer: String,
@@ -87,14 +88,14 @@ pub struct HumanFeedbackAttachment {
     pub notes: Vec<FeedbackNote>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct FailedAssertionGroup {
     pub eval_case_id: String,
     pub eval_slug: String,
     pub failures: Vec<FailedAssertionEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct HumanFeedbackGroup {
     pub eval_case_id: String,
     pub eval_slug: String,
@@ -103,12 +104,12 @@ pub struct HumanFeedbackGroup {
     pub feedback: HumanFeedbackAttachment,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 pub struct HumanFeedbackSectionSummary {
     pub reviewed_no_issues_runs: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct TranscriptExcerpt {
     pub run_id: String,
     pub eval_case_id: String,
@@ -121,7 +122,7 @@ pub struct TranscriptExcerpt {
     pub tail: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ImprovementBundleDocument {
     pub schema_version: String,
     pub generated_at: String,

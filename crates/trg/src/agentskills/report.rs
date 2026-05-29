@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -19,7 +20,9 @@ use super::validation::ValidationError;
 
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.report.v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillStaging {
     #[value(name = "symlink")]
@@ -37,7 +40,9 @@ impl SkillStaging {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioKind {
     #[value(name = "with_skill")]
@@ -103,7 +108,7 @@ pub struct ReportBundle {
     pub workspace_dirs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReportDocument {
     pub schema_version: String,
     pub report: ReportSection,
@@ -119,7 +124,7 @@ pub struct ReportDocument {
     pub iteration_summary: Option<super::benchmark::IterationSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReportSection {
     pub id: String,
     pub generated_at: String,
@@ -135,13 +140,13 @@ pub struct ReportSection {
     pub ci: Option<CiSection>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProducerSection {
     pub name: String,
     pub version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CiSection {
     pub provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,7 +163,7 @@ pub struct CiSection {
     pub git_ref: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SuiteSection {
     pub skill_name: String,
     pub skill_path: String,
@@ -171,7 +176,7 @@ pub struct SuiteSection {
     pub old_skill_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DimensionsSection {
     pub eval_cases: Vec<EvalCaseDimension>,
     pub assertions: Vec<AssertionDimension>,
@@ -181,7 +186,7 @@ pub struct DimensionsSection {
     pub graders: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvalCaseDimension {
     pub id: String,
     pub slug: String,
@@ -191,20 +196,20 @@ pub struct EvalCaseDimension {
     pub assertion_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AssertionDimension {
     pub id: String,
     pub eval_case_id: String,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SkillRevisionDimension {
     pub id: String,
     pub skill_hash: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModelConfigDimension {
     pub id: String,
     pub capture_status: String,
@@ -214,13 +219,13 @@ pub struct ModelConfigDimension {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ScenarioDimension {
     pub id: ScenarioKind,
     pub kind: ScenarioKind,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RunRecord {
     pub id: String,
     pub eval_case_id: String,
@@ -250,19 +255,19 @@ fn default_runner_invocations() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SkillIntegrityReport {
     pub tampered: bool,
     pub tampered_files: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RunPaths {
     pub workspace: String,
     pub outputs: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RunMetrics {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,14 +278,14 @@ pub struct RunMetrics {
     pub cost_usd: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SummariesSection {
     pub by_scenario: Vec<ScenarioSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub human_feedback: Option<HumanFeedbackSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ScenarioSummary {
     pub scenario_id: ScenarioKind,
     pub total_runs: usize,
