@@ -77,7 +77,17 @@
       "type": "object"
     },
     "EvalCaseId": {
-      "type": "string"
+      "description": "Non-empty string or non-negative integer",
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "minimum": 0,
+          "type": "integer"
+        }
+      ]
     },
     "EvalPriority": {
       "enum": [

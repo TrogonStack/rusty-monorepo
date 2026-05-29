@@ -32,7 +32,18 @@ pub enum EvalError {
 pub type Result<T> = std::result::Result<T, EvalError>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+#[schemars(schema_with = "eval_case_id_schema")]
 pub struct EvalCaseId(String);
+
+fn eval_case_id_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "Non-empty string or non-negative integer",
+        "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "integer", "minimum": 0 }
+        ]
+    })
+}
 
 impl EvalCaseId {
     pub fn as_str(&self) -> &str {
