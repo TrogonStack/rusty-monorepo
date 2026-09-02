@@ -58,12 +58,21 @@ pub async fn ensure_credentials_for(
     let url = profile.url.expose_secret();
 
     let mut manager = AuthorizationManager::new(url).await?;
-    let metadata = match manager.discover_metadata().await {
-        Ok(m) => m,
+    let resolution = match manager.resolve_metadata().await {
+        Ok(resolution) => resolution,
         Err(AuthError::NoAuthorizationSupport) => return Ok(EnsureOutcome::NoAuthRequired),
         Err(e) => return Err(e.into()),
     };
-    manager.set_metadata(metadata);
+
+    // rmcp 3 synthesizes legacy `/authorize` and `/token` endpoints rather than
+    // reporting that discovery found nothing, so a server with no OAuth at all
+    // would otherwise be taken through the browser flow against URLs it never
+    // published.
+    if !resolution.source.is_discovered() {
+        return Ok(EnsureOutcome::NoAuthRequired);
+    }
+
+    manager.set_metadata(resolution.metadata);
     manager.set_credential_store(KeychainCredentialStore::new(server_name));
 
     if manager.initialize_from_store().await? {
