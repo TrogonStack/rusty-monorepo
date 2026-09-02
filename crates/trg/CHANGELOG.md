@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.4.1...trg@v0.4.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* **trg:** Keep the recovery command copy-pasteable for any server name ([#70](https://github.com/TrogonStack/rusty-monorepo/issues/70)) ([3d629ac](https://github.com/TrogonStack/rusty-monorepo/commit/3d629accd634ca6a87f32f968197098642554433))
+* **trg:** Tell the user how to recover from the OAuth TTY error ([#67](https://github.com/TrogonStack/rusty-monorepo/issues/67)) ([13d7c6d](https://github.com/TrogonStack/rusty-monorepo/commit/13d7c6d143e78d92647d1d839d5700f38105589f))
+
 ## [0.4.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.4.0...trg@v0.4.1) (2026-05-29)
 
 
