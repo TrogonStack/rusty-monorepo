@@ -70,7 +70,7 @@ pub async fn ensure_credentials_for(
         return Ok(EnsureOutcome::AlreadyAuthorized(manager));
     }
 
-    let _ = run_authorization(manager, &[], FlowConfig::default()).await?;
+    let _ = run_authorization(manager, server_name, &[], FlowConfig::default()).await?;
 
     let mut manager = AuthorizationManager::new(url).await?;
     manager.set_credential_store(KeychainCredentialStore::new(server_name));

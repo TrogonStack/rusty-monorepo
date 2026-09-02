@@ -12,8 +12,11 @@ use tiny_http::{Header, Response, Server};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FlowError {
-    #[error("stdin/stderr is not a TTY; OAuth requires an interactive browser session")]
-    NotATerminal,
+    #[error(
+        "stdin/stderr is not a TTY; OAuth requires an interactive browser session\n\
+         run `trg mcp auth login --server {server}` once from a terminal, then try again"
+    )]
+    NotATerminal { server: String },
 
     #[error("failed to bind a loopback port: {0}")]
     BindFailed(#[source] std::io::Error),
@@ -55,11 +58,14 @@ impl Default for FlowConfig {
 /// Token exchange uses [`AuthorizationSession::handle_callback`] (rmcp `AuthorizationManager::exchange_code_for_token`).
 pub async fn run_authorization(
     auth_manager: AuthorizationManager,
+    server_name: &str,
     scopes: &[&str],
     config: FlowConfig,
 ) -> Result<StoredCredentials, FlowError> {
     if !stdin().is_terminal() || !stderr().is_terminal() {
-        return Err(FlowError::NotATerminal);
+        return Err(FlowError::NotATerminal {
+            server: server_name.to_string(),
+        });
     }
 
     let server = Server::http("127.0.0.1:0").map_err(|e| FlowError::BindFailed(boxed_error_to_io(e)))?;
@@ -335,8 +341,12 @@ mod tests {
     #[test]
     fn flow_error_display_not_a_terminal() {
         assert_eq!(
-            FlowError::NotATerminal.to_string(),
-            "stdin/stderr is not a TTY; OAuth requires an interactive browser session"
+            FlowError::NotATerminal {
+                server: "exa".to_string(),
+            }
+            .to_string(),
+            "stdin/stderr is not a TTY; OAuth requires an interactive browser session\n\
+             run `trg mcp auth login --server exa` once from a terminal, then try again"
         );
     }
 
