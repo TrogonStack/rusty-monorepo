@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use reqwest::Url;
 use rmcp::transport::auth::{
-    AuthError, AuthorizationManager, AuthorizationSession, OAuthTokenResponse, StoredCredentials,
+    AuthError, AuthorizationManager, AuthorizationRequest, AuthorizationSession, OAuthTokenResponse, StoredCredentials,
 };
 use tiny_http::{Header, Response, Server};
 
@@ -91,7 +91,10 @@ pub async fn run_authorization(
     let port = loopback_port(server.as_ref())?;
     let redirect_uri = format!("http://127.0.0.1:{port}/oauth/callback");
 
-    let session = AuthorizationSession::new(auth_manager, scopes, &redirect_uri, None, None).await?;
+    let request = AuthorizationRequest::new(&redirect_uri).with_scopes(scopes.iter().copied());
+    let session = AuthorizationSession::new(auth_manager, request)
+        .await
+        .map_err(|(_, e)| FlowError::Oauth(e))?;
 
     let auth_url = session.get_authorization_url().to_string();
     let expected_state = oauth_state_from_authorization_url(&auth_url)
