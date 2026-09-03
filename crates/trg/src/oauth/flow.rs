@@ -45,7 +45,7 @@ pub enum FlowError {
 /// Render a server name for the recovery command so it survives a copy-paste into
 /// a shell. Config keys are arbitrary strings, so a name can carry spaces or shell
 /// metacharacters that would otherwise split it into several arguments.
-fn quote_for_shell(name: &str) -> String {
+pub(crate) fn quote_for_shell(name: &str) -> String {
     let is_bare = !name.is_empty()
         && name
             .chars()

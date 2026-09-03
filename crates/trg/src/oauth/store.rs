@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::secrets::{Backend, SecretKey, SecretPath, SecretsError};
+use crate::oauth::flow::quote_for_shell;
+use crate::secrets::{Backend, SecretKey, SecretMap, SecretPath, SecretsError};
 
 /// The key under which a server's OAuth credentials live.
 pub const CREDENTIALS_KEY: &str = "credentials";
@@ -54,14 +55,29 @@ impl CredentialStore for OAuthCredentialStore {
         let json = serde_json::to_string(&credentials)
             .map_err(|e| AuthError::InternalError(format!("encode credentials: {e}")))?;
 
-        let mut map = self.backend.get(&self.path).await.unwrap_or(None).unwrap_or_default();
+        let mut map = match self.backend.get(&self.path).await {
+            Ok(existing) => existing.unwrap_or_default(),
+            // An unreadable payload is the one read failure worth overwriting:
+            // no sibling keys survived decoding, so none can be lost.
+            Err(SecretsError::Malformed { .. }) => SecretMap::new(),
+            // Anything else is transient. Writing through it would replace the
+            // whole map with just this key and take any siblings with it.
+            Err(e) => return Err(to_auth_error(e)),
+        };
         map.insert(Self::key(), SecretString::from(json));
 
         self.backend.set(&self.path, &map).await.map_err(to_auth_error)
     }
 
     async fn clear(&self) -> Result<(), AuthError> {
-        let Some(mut map) = self.backend.get(&self.path).await.unwrap_or(None) else {
+        let existing = match self.backend.get(&self.path).await {
+            Ok(existing) => existing,
+            // `logout` is the documented recovery for an unreadable payload, so
+            // it has to drop the path rather than refuse.
+            Err(SecretsError::Malformed { .. }) => None,
+            Err(e) => return Err(to_auth_error(e)),
+        };
+        let Some(mut map) = existing else {
             return self.backend.delete(&self.path).await.map_err(to_auth_error);
         };
         map.remove(&Self::key());
@@ -77,9 +93,12 @@ impl CredentialStore for OAuthCredentialStore {
 /// [`SecretsError`] variant survives only in the message.
 fn to_auth_error(err: SecretsError) -> AuthError {
     match &err {
-        SecretsError::Malformed { path, .. } => AuthError::InternalError(format!(
-            "{err}. Run `trg mcp auth logout --server {path}` then `trg mcp auth login --server {path}` to re-authorize"
-        )),
+        SecretsError::Malformed { path, .. } => {
+            let server = quote_for_shell(path.as_str());
+            AuthError::InternalError(format!(
+                "{err}. Run `trg mcp auth logout --server {server}` then `trg mcp auth login --server {server}` to re-authorize"
+            ))
+        }
         _ => AuthError::InternalError(err.to_string()),
     }
 }
@@ -87,7 +106,7 @@ fn to_auth_error(err: SecretsError) -> AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::secrets::{fake::FakeBackend, SecretMap};
+    use crate::secrets::{fake::FakeBackend, FakeFailure};
 
     fn store() -> (Backend, OAuthCredentialStore) {
         let backend = Backend::Fake(FakeBackend::new());
@@ -168,6 +187,86 @@ mod tests {
         store.clear().await.expect("clear");
 
         assert!(backend.get(&path).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn save_propagates_a_read_failure_rather_than_clobbering_siblings() {
+        let (backend, store) = store();
+        let path = SecretPath::parse("github").expect("parse");
+        let mut seed = SecretMap::new();
+        seed.insert(SecretKey::parse("api_key").unwrap(), SecretString::from("keep-me"));
+        backend.set(&path, &seed).await.expect("seed");
+
+        let Backend::Fake(fake) = &backend else {
+            unreachable!("store() builds a fake")
+        };
+        fake.set_get_failure(Some(FakeFailure::Transport));
+        store
+            .save(credentials("abc"))
+            .await
+            .expect_err("should not write through a read failure");
+        fake.set_get_failure(None);
+
+        let map = backend.get(&path).await.expect("get").expect("some");
+        assert_eq!(
+            map.get(&SecretKey::parse("api_key").unwrap())
+                .map(|v| v.expose_secret()),
+            Some("keep-me")
+        );
+    }
+
+    #[tokio::test]
+    async fn save_overwrites_when_the_existing_payload_is_unreadable() {
+        let (backend, store) = store();
+        let Backend::Fake(fake) = &backend else {
+            unreachable!("store() builds a fake")
+        };
+        fake.set_get_failure(Some(FakeFailure::Malformed));
+        store
+            .save(credentials("abc"))
+            .await
+            .expect("save over an unreadable payload");
+        fake.set_get_failure(None);
+
+        assert_eq!(store.load().await.expect("load").expect("some").client_id, "abc");
+    }
+
+    #[tokio::test]
+    async fn clear_propagates_a_read_failure_rather_than_deleting_the_path() {
+        let (backend, store) = store();
+        let path = SecretPath::parse("github").expect("parse");
+        let mut seed = SecretMap::new();
+        seed.insert(SecretKey::parse("api_key").unwrap(), SecretString::from("keep-me"));
+        backend.set(&path, &seed).await.expect("seed");
+
+        let Backend::Fake(fake) = &backend else {
+            unreachable!("store() builds a fake")
+        };
+        fake.set_get_failure(Some(FakeFailure::Transport));
+        store
+            .clear()
+            .await
+            .expect_err("should not delete through a read failure");
+        fake.set_get_failure(None);
+
+        assert!(backend.get(&path).await.expect("get").is_some());
+    }
+
+    #[tokio::test]
+    async fn malformed_recovery_command_is_copy_pasteable_for_any_server_name() {
+        let backend = Backend::Fake(FakeBackend::new());
+        let path = SecretPath::parse("my server").expect("parse");
+        let store = OAuthCredentialStore::new(backend.clone(), path);
+
+        let Backend::Fake(fake) = &backend else { unreachable!() };
+        fake.set_get_failure(Some(FakeFailure::Malformed));
+
+        let rendered = store.load().await.expect_err("malformed").to_string();
+        assert!(
+            rendered.contains("--server 'my server'"),
+            "recovery command must survive copy-paste: {rendered}"
+        );
+        assert!(!rendered.contains("--server my server"), "{rendered}");
     }
 
     #[tokio::test]

@@ -357,9 +357,20 @@ impl fmt::Debug for Backend {
 }
 
 #[cfg(test)]
+pub use fake::FakeFailure;
+
+#[cfg(test)]
 pub mod fake {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// Read failures a test can inject, so that callers which must distinguish
+    /// "unreadable" from "unreachable" can be exercised.
+    #[derive(Clone, Copy, Debug)]
+    pub enum FakeFailure {
+        Transport,
+        Malformed,
+    }
 
     /// In-memory backend for unit tests.
     ///
@@ -369,6 +380,7 @@ pub mod fake {
     #[derive(Clone, Default)]
     pub struct FakeBackend {
         entries: Arc<Mutex<HashMap<SecretPath, SecretMap>>>,
+        get_failure: Arc<Mutex<Option<FakeFailure>>>,
     }
 
     impl FakeBackend {
@@ -376,7 +388,22 @@ pub mod fake {
             Self::default()
         }
 
+        /// Make every subsequent `get` fail until cleared with `None`.
+        pub fn set_get_failure(&self, failure: Option<FakeFailure>) {
+            *self.get_failure.lock().expect("fake backend lock") = failure;
+        }
+
         pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
+            match *self.get_failure.lock().expect("fake backend lock") {
+                Some(FakeFailure::Transport) => return Err(SecretsError::Transport("injected".to_string())),
+                Some(FakeFailure::Malformed) => {
+                    return Err(SecretsError::Malformed {
+                        path: path.clone(),
+                        cause: "injected".to_string(),
+                    })
+                }
+                None => {}
+            }
             Ok(self.entries.lock().expect("fake backend lock").get(path).cloned())
         }
 
