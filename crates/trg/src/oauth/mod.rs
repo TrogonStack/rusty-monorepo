@@ -1,7 +1,6 @@
 //! OAuth 2.1 support for `trg mcp proxy`.
 //!
 //! Storage lives in [`store`]; the interactive browser/loopback dance lives in [`flow`].
-//! See `crates/trg/PLAN.md` for the milestone scope (macOS Keychain only for now).
 
 pub mod flow;
 pub mod store;
@@ -11,11 +10,12 @@ use rmcp::transport::auth::{AuthError, AuthorizationManager};
 use secrecy::ExposeSecret;
 
 use crate::{
-    config::{self, ResolvedMcpServer},
+    config::ResolvedMcpServer,
     oauth::{
         flow::{run_authorization, FlowConfig, FlowError},
-        store::KeychainCredentialStore,
+        store::OAuthCredentialStore,
     },
+    secrets::{Backend, SecretPath},
 };
 
 pub enum EnsureOutcome {
@@ -26,30 +26,26 @@ pub enum EnsureOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnsureError {
-    #[error("{0}")]
-    Config(#[from] config::ConfigError),
-
     #[error("OAuth: {0}")]
     Auth(#[from] AuthError),
 
     #[error("OAuth: {0}")]
     Flow(#[from] FlowError),
 
-    #[error("OAuth completed but credentials are missing from the keychain — refusing to start")]
+    #[error("OAuth completed but credentials are missing from the secrets backend, refusing to start")]
     MissingAfterFlow,
 }
 
-/// Resolve `server_name` from config and return a ready-to-use
-/// `AuthorizationManager` (running the interactive flow if needed) or signal
-/// that no OAuth is required.
-pub async fn ensure_credentials(server_name: &str) -> Result<EnsureOutcome, EnsureError> {
-    let resolved = config::load_mcp_server(server_name)?;
-    ensure_credentials_for(&resolved, server_name).await
-}
-
+/// Return a ready-to-use `AuthorizationManager` (running the interactive flow
+/// if needed) or signal that no OAuth is required.
+///
+/// The backend and the path it stores under are injected: this function neither
+/// reads config nor decides where credentials live. See `main`.
 pub async fn ensure_credentials_for(
     profile: &ResolvedMcpServer,
     server_name: &str,
+    backend: &Backend,
+    cred_path: &SecretPath,
 ) -> Result<EnsureOutcome, EnsureError> {
     if profile.http_headers.contains_key(&AUTHORIZATION) {
         return Ok(EnsureOutcome::NoAuthRequired);
@@ -73,7 +69,7 @@ pub async fn ensure_credentials_for(
     }
 
     manager.set_metadata(resolution.metadata);
-    manager.set_credential_store(KeychainCredentialStore::new(server_name));
+    manager.set_credential_store(OAuthCredentialStore::new(backend.clone(), cred_path.clone()));
 
     if manager.initialize_from_store().await? {
         return Ok(EnsureOutcome::AlreadyAuthorized(manager));
@@ -82,7 +78,7 @@ pub async fn ensure_credentials_for(
     let _ = run_authorization(manager, server_name, &[], FlowConfig::default()).await?;
 
     let mut manager = AuthorizationManager::new(url).await?;
-    manager.set_credential_store(KeychainCredentialStore::new(server_name));
+    manager.set_credential_store(OAuthCredentialStore::new(backend.clone(), cred_path.clone()));
     if !manager.initialize_from_store().await? {
         return Err(EnsureError::MissingAfterFlow);
     }

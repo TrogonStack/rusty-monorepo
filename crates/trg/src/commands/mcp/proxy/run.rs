@@ -18,11 +18,10 @@ use secrecy::ExposeSecret;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    config::{self, ResolvedMcpServer},
+    commands::mcp::McpContext,
+    config::ResolvedMcpServer,
     oauth::{ensure_credentials_for, EnsureError, EnsureOutcome},
 };
-
-use super::cli::ProxyArgs;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportBuildError {
@@ -32,9 +31,6 @@ pub enum TransportBuildError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
-    #[error("{0}")]
-    Config(#[from] config::ConfigError),
-
     #[error("remote MCP transport configuration: {0}")]
     TransportCfg(#[from] TransportBuildError),
 
@@ -48,26 +44,19 @@ pub enum ProxyError {
     Ensure(#[from] EnsureError),
 }
 
-pub async fn run_mcp_daemon(args: &ProxyArgs) -> Result<(), ProxyError> {
-    let server_name = args.server.trim();
-    info!(server = server_name, pid = std::process::id(), "startup");
-
-    let resolved = match config::load_mcp_server(server_name) {
-        Ok(r) => r,
-        Err(e) => {
-            error!(server = server_name, error = %e, "config load failed");
-            return Err(e.into());
-        }
-    };
+pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
+    let server_name = ctx.server_name.as_str();
+    let resolved = &ctx.profile;
     info!(
         server = server_name,
+        pid = std::process::id(),
         headers = resolved.http_headers.len(),
-        "config loaded"
+        "startup"
     );
 
-    let http_conf = streamable_http_config(&resolved)?;
+    let http_conf = streamable_http_config(resolved)?;
 
-    let outcome = match ensure_credentials_for(&resolved, server_name).await {
+    let outcome = match ensure_credentials_for(resolved, server_name, &ctx.backend, &ctx.cred_path).await {
         Ok(o) => o,
         Err(e) => {
             error!(server = server_name, error = %e, "ensure_credentials failed");
