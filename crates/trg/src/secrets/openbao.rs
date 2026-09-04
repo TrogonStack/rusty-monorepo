@@ -43,6 +43,10 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 /// Connect budget, capped by the total so a tight `timeout_ms` stays honest.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
 
+/// Matches reqwest's own default. Named here only because following redirects
+/// at all is a deliberate choice once a token rides along.
+const MAX_REDIRECTS: usize = 10;
+
 /// Where the token comes from. Exactly one is declared per backend.
 #[derive(Clone, Debug)]
 pub enum TokenSource {
@@ -71,6 +75,13 @@ pub enum OpenBaoBuildError {
     #[error("`addr` must start with `http://` or `https://`, got `{0}`")]
     Scheme(String),
 
+    #[error(
+        "`addr` must use `https://` for a remote OpenBao, got `{0}`: the token travels in an \
+         `X-Vault-Token` header, so plain `http://` would put it on the wire in cleartext. \
+         Plain `http://` is accepted only for a loopback address."
+    )]
+    Insecure(String),
+
     #[error("could not read `ca_cert_file` at `{path}`: {cause}")]
     CaCertRead { path: PathBuf, cause: String },
 
@@ -97,6 +108,10 @@ impl OpenBaoBackend {
         if !(addr.starts_with("http://") || addr.starts_with("https://")) {
             return Err(OpenBaoBuildError::Scheme(settings.addr));
         }
+        let parsed = reqwest::Url::parse(&addr).map_err(|_| OpenBaoBuildError::Scheme(settings.addr.clone()))?;
+        if !carries_a_token_safely(&parsed) {
+            return Err(OpenBaoBuildError::Insecure(settings.addr));
+        }
 
         // Both budgets are explicit: an unreachable backend inside a headless
         // `trg mcp proxy` child surfaces only as MCP error -32000, so a hang is
@@ -104,7 +119,19 @@ impl OpenBaoBackend {
         let connect = settings.timeout.min(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
         let mut builder = reqwest::Client::builder()
             .connect_timeout(connect)
-            .timeout(settings.timeout);
+            .timeout(settings.timeout)
+            // A redirect re-sends `X-Vault-Token`, and reqwest only strips the
+            // headers it knows are sensitive. An HA standby answering 307 with
+            // the active node is legitimate; a downgrade to cleartext is not.
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if !carries_a_token_safely(attempt.url()) {
+                    attempt.stop()
+                } else if attempt.previous().len() > MAX_REDIRECTS {
+                    attempt.error("too many redirects")
+                } else {
+                    attempt.follow()
+                }
+            }));
 
         if let Some(ref pem_path) = settings.ca_cert_file {
             let pem = std::fs::read(pem_path).map_err(|e| OpenBaoBuildError::CaCertRead {
@@ -219,7 +246,7 @@ impl OpenBaoBackend {
     pub async fn list(&self, prefix: Option<&SecretPath>) -> Result<Vec<String>, SecretsError> {
         let full = match prefix {
             Some(p) => self.full_path(p)?,
-            None => self.path_prefix.clone(),
+            None => self.checked_prefix()?,
         };
         let url = format!("{}/v1/{}/metadata/{full}", self.addr, self.mount);
         let anchor = prefix.cloned().unwrap_or_else(|| {
@@ -272,6 +299,24 @@ impl OpenBaoBackend {
         ))
     }
 
+    /// The bare prefix, which reaches the URL without passing through
+    /// [`Self::full_path`] when `list` is given nothing to scope to.
+    fn checked_prefix(&self) -> Result<String, SecretsError> {
+        if self
+            .path_prefix
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .all(is_addressable_segment)
+        {
+            return Ok(self.path_prefix.clone());
+        }
+        Err(SecretsError::Unavailable(format!(
+            "`path_prefix` `{}` is not addressable in OpenBao: each segment must match \
+             [A-Za-z0-9._-] and be neither `.` nor `..`",
+            self.path_prefix
+        )))
+    }
+
     /// The prefix-joined path, checked against what is safe to put in a URL.
     ///
     /// [`SecretPath`] accepts anything a Keychain account attribute accepts,
@@ -280,12 +325,12 @@ impl OpenBaoBackend {
     fn full_path(&self, path: &SecretPath) -> Result<String, SecretsError> {
         let full = path.with_prefix(&self.path_prefix);
         for segment in full.split('/') {
-            if segment.is_empty() || !segment.bytes().all(is_path_byte) {
+            if !is_addressable_segment(segment) {
                 return Err(SecretsError::Unauthorized {
                     path: path.clone(),
                     cause: format!(
-                        "`{full}` is not addressable in OpenBao: each segment must be non-empty and \
-                         match [A-Za-z0-9._-]"
+                        "`{full}` is not addressable in OpenBao: each segment must match \
+                         [A-Za-z0-9._-] and be neither empty, `.`, nor `..`"
                     ),
                 });
             }
@@ -394,6 +439,32 @@ fn is_path_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')
 }
 
+/// Whether one path segment addresses what it spells.
+///
+/// `.` and `..` are spelled with bytes [`is_path_byte`] allows, but the URL
+/// parser resolves them before the request goes out, so a segment naming a
+/// server would silently address a different secret.
+pub(crate) fn is_addressable_segment(segment: &str) -> bool {
+    !segment.is_empty() && segment != "." && segment != ".." && segment.bytes().all(is_path_byte)
+}
+
+/// Whether `X-Vault-Token` may be sent to this URL in the clear.
+fn carries_a_token_safely(url: &reqwest::Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host_str() {
+            Some("localhost") => true,
+            Some(host) => host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback()),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
 /// Pull OpenBao's `errors[]` out of a response. Only that array is ever
 /// surfaced: the rest of the body may hold secret material.
 fn errors_of(body: &str) -> Vec<String> {
@@ -479,10 +550,16 @@ fn read_token_file(path: &Path) -> Result<SecretString, SecretsError> {
 
 /// Expand a leading `~` against `HOME`. Anything else is taken literally.
 pub fn expand_tilde(raw: &str) -> PathBuf {
+    expand_tilde_from(raw, std::env::var_os("HOME").map(PathBuf::from))
+}
+
+/// The half of [`expand_tilde`] that does not read the process environment, so
+/// a test can pin a home directory without mutating it for every other thread.
+fn expand_tilde_from(raw: &str, home: Option<PathBuf>) -> PathBuf {
     let Some(rest) = raw.strip_prefix('~') else {
         return PathBuf::from(raw);
     };
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = home else {
         return PathBuf::from(raw);
     };
     match rest.strip_prefix('/') {
@@ -609,6 +686,89 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_is_refused_for_a_remote_backend() {
+        for addr in [
+            "http://bao.example.com:8200",
+            "http://10.0.0.5:8200",
+            "http://[2001:db8::1]:8200",
+        ] {
+            assert!(
+                matches!(OpenBaoBackend::new(settings(addr)), Err(OpenBaoBuildError::Insecure(_))),
+                "the token would go out in cleartext to {addr}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_http_is_allowed_for_a_loopback_backend() {
+        for addr in ["http://127.0.0.1:8200", "http://localhost:8200", "http://[::1]:8200"] {
+            assert!(
+                OpenBaoBackend::new(settings(addr)).is_ok(),
+                "{addr} never leaves the host"
+            );
+        }
+    }
+
+    #[test]
+    fn a_redirect_may_not_downgrade_the_token_onto_cleartext() {
+        let https = reqwest::Url::parse("https://bao.example.com/v1/x").expect("url");
+        let remote_http = reqwest::Url::parse("http://bao.example.com/v1/x").expect("url");
+        let loopback_http = reqwest::Url::parse("http://127.0.0.1:8200/v1/x").expect("url");
+
+        assert!(carries_a_token_safely(&https));
+        assert!(carries_a_token_safely(&loopback_http));
+        assert!(!carries_a_token_safely(&remote_http));
+    }
+
+    /// `SecretPath` already refuses a dot segment, so the prefix is the only
+    /// way one can reach the joined path that becomes a URL.
+    #[test]
+    fn a_dot_segment_in_the_prefix_cannot_walk_out_of_it() {
+        for prefix in ["trg/..", "..", "trg/."] {
+            let mut s = settings("https://bao.example.com:8200");
+            s.path_prefix = prefix.to_string();
+            let b = OpenBaoBackend::new(s).expect("build");
+
+            assert!(
+                matches!(b.full_path(&path("github")), Err(SecretsError::Unauthorized { .. })),
+                "should refuse the prefix {prefix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prefix_with_a_dot_segment_is_refused_when_list_has_nothing_to_scope_to() {
+        let mut s = settings("https://bao.example.com:8200");
+        s.path_prefix = "trg/..".to_string();
+        let b = OpenBaoBackend::new(s).expect("build");
+
+        assert!(matches!(b.checked_prefix(), Err(SecretsError::Unavailable(_))));
+    }
+
+    #[test]
+    fn tilde_expands_against_the_home_it_is_given() {
+        let home = Some(PathBuf::from("/home/tester"));
+        assert_eq!(
+            expand_tilde_from("~/.vault-token", home.clone()),
+            PathBuf::from("/home/tester/.vault-token")
+        );
+        assert_eq!(expand_tilde_from("~", home.clone()), PathBuf::from("/home/tester"));
+        assert_eq!(
+            expand_tilde_from("/etc/token", home.clone()),
+            PathBuf::from("/etc/token")
+        );
+        assert_eq!(expand_tilde_from("~other/token", home), PathBuf::from("~other/token"));
+    }
+
+    #[test]
+    fn a_tilde_survives_unexpanded_when_there_is_no_home() {
+        assert_eq!(
+            expand_tilde_from("~/.vault-token", None),
+            PathBuf::from("~/.vault-token")
+        );
+    }
+
+    #[test]
     fn rejects_an_addr_without_a_scheme() {
         let mut s = settings("bao.example.com:8200");
         s.addr = "bao.example.com:8200".to_string();
@@ -617,39 +777,39 @@ mod tests {
 
     #[test]
     fn trailing_slashes_do_not_double_up_in_urls() {
-        let b = backend("http://bao.example.com:8200/");
+        let b = backend("https://bao.example.com:8200/");
         let path = SecretPath::parse("mcp/laptop/github").expect("parse");
         assert_eq!(
             b.data_url(&path).expect("url"),
-            "http://bao.example.com:8200/v1/secret/data/trg/mcp/laptop/github"
+            "https://bao.example.com:8200/v1/secret/data/trg/mcp/laptop/github"
         );
         assert_eq!(
             b.metadata_url(&path).expect("url"),
-            "http://bao.example.com:8200/v1/secret/metadata/trg/mcp/laptop/github"
+            "https://bao.example.com:8200/v1/secret/metadata/trg/mcp/laptop/github"
         );
     }
 
     #[test]
     fn an_empty_path_prefix_does_not_leave_a_double_slash() {
-        let mut s = settings("http://bao.example.com:8200");
+        let mut s = settings("https://bao.example.com:8200");
         s.path_prefix = String::new();
         let b = OpenBaoBackend::new(s).expect("build");
         let path = SecretPath::parse("mcp/laptop/github").expect("parse");
         assert_eq!(
             b.data_url(&path).expect("url"),
-            "http://bao.example.com:8200/v1/secret/data/mcp/laptop/github"
+            "https://bao.example.com:8200/v1/secret/data/mcp/laptop/github"
         );
     }
 
     #[test]
     fn credential_paths_are_scoped_per_machine() {
-        let b = backend("http://bao.example.com:8200");
+        let b = backend("https://bao.example.com:8200");
         assert_eq!(b.credential_path("github"), "mcp/laptop/github");
     }
 
     #[test]
     fn paths_a_keychain_accepts_but_a_url_should_not_are_refused() {
-        let b = backend("http://bao.example.com:8200");
+        let b = backend("https://bao.example.com:8200");
         for raw in ["my server", "Ünïcode", "a b/c", "we?rd"] {
             let path = SecretPath::parse(raw).expect("structurally valid");
             assert!(
@@ -661,7 +821,7 @@ mod tests {
 
     #[test]
     fn ordinary_names_are_addressable() {
-        let b = backend("http://bao.example.com:8200");
+        let b = backend("https://bao.example.com:8200");
         for raw in ["github", "my-server", "a.b", "mcp/laptop/x_1"] {
             let path = SecretPath::parse(raw).expect("parse");
             assert!(b.full_path(&path).is_ok(), "should accept {raw:?}");
@@ -696,18 +856,6 @@ mod tests {
             map.get(&SecretKey::parse("a").unwrap()).map(|v| v.expose_secret()),
             Some("1")
         );
-    }
-
-    #[test]
-    fn tilde_expands_only_against_the_current_home() {
-        std::env::set_var("HOME", "/home/tester");
-        assert_eq!(
-            expand_tilde("~/.vault-token"),
-            PathBuf::from("/home/tester/.vault-token")
-        );
-        assert_eq!(expand_tilde("~"), PathBuf::from("/home/tester"));
-        assert_eq!(expand_tilde("/etc/token"), PathBuf::from("/etc/token"));
-        assert_eq!(expand_tilde("~other/token"), PathBuf::from("~other/token"));
     }
 
     #[test]
@@ -904,7 +1052,7 @@ mod tests {
     async fn an_unreachable_backend_fails_instead_of_hanging() {
         // 203.0.113.0/24 is TEST-NET-3, reserved for documentation and
         // guaranteed not to be routed, so this connect can only time out.
-        let mut s = settings("http://203.0.113.1:8200");
+        let mut s = settings("https://203.0.113.1:8200");
         s.timeout = Duration::from_millis(300);
         let b = OpenBaoBackend::new(s).expect("build");
         let path = SecretPath::parse("x").expect("parse");

@@ -252,7 +252,7 @@ mod tests {
             r#"
             [secrets.backends.work]
             kind = "openbao"
-            addr = "http://bao.example.com:8200"
+            addr = "https://bao.example.com:8200"
             mount = "secret"
             path_prefix = "trg"
             machine_id = "laptop"

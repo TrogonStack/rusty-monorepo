@@ -159,9 +159,10 @@ Declaring a backend costs nothing until a server addresses it, so a machine
 that cannot reach the OpenBao instance declared here can still use every
 server that names a different backend.
 
-Values in a backend declaration accept `VarSource` (a literal string, or
-`{ env = "...", default = "..." }`) but **not** `{ secret = "..." }`: nothing
-needed to reach the secret store may itself live in the secret store.
+The fields typed `VarSource` below (`addr` and `token`) accept a literal string
+or `{ env = "...", default = "..." }`. Every other field is a literal. No
+backend field accepts `{ secret = "..." }`: nothing needed to reach the secret
+store may itself live in the secret store.
 
 ### `kind = "keychain"`
 
@@ -178,7 +179,7 @@ Speaks the KV v2 HTTP API of an [OpenBao](https://openbao.org) instance.
 
 | Field          | Type        | Required | Notes                                                                     |
 | -------------- | ----------- | -------- | ------------------------------------------------------------------------- |
-| `addr`         | `VarSource` | yes      | Base URL. Must start with `http://` or `https://`.                        |
+| `addr`         | `VarSource` | yes      | Base URL. `https://` is required unless the host is loopback.              |
 | `mount`        | string      | yes      | KV v2 mount, e.g. `secret`.                                               |
 | `path_prefix`  | string      | yes      | Prefix under the mount. May be empty.                                     |
 | `machine_id`   | string      | no       | Defaults to `hostname -s`. Scopes credential paths per machine.           |
@@ -186,6 +187,16 @@ Speaks the KV v2 HTTP API of an [OpenBao](https://openbao.org) instance.
 | `token`        | `VarSource` | one of   | The token itself, usually `{ env = "BAO_TOKEN" }`.                        |
 | `ca_cert_file` | string      | no       | PEM bundle. **Replaces** the OS trust store for this backend.             |
 | `timeout_ms`   | integer     | no       | Total request budget. Defaults to `5000`.                                 |
+
+`addr` must be `https://` for any remote instance. The token travels in an
+`X-Vault-Token` header, so plain `http://` would put it on the wire in
+cleartext; it is accepted only when the host is a loopback address
+(`127.0.0.1`, `::1`, or `localhost`). A redirect is followed only when the
+target is likewise safe, so an instance cannot be talked into downgrading.
+
+Set `machine_id` explicitly wherever two machines could share a short
+hostname. It is the only thing separating their credential paths, and two
+machines writing one path will rotate each other's refresh tokens away.
 
 Exactly one of `token_file` or `token` must be declared. Declaring neither or
 both fails at load time.
@@ -258,9 +269,9 @@ other than "no such entry", the command aborts with the underlying error.
   callback on `http://127.0.0.1:<random-port>/oauth/callback`. The
   authorization URL is also echoed on stderr so it can be pasted manually
   if `open(1)` cannot launch a browser.
-- Subsequent invocations read the token from the Keychain; the browser is
-  not opened. Expired access tokens refresh transparently via the refresh
-  token.
+- Subsequent invocations read the token from the server's backend; the
+  browser is not opened. Expired access tokens refresh transparently via the
+  refresh token.
 
 ### Clearing credentials
 
@@ -391,6 +402,7 @@ keeps using the macOS Keychain exactly as it did before `[secrets]` existed.
 | `undefined variable <NAME> referenced; declare it in [mcp.servers.<name>.vars]` | `{ var = "..." }` references a name not present in `vars`. |
 | TOML parse errors                                 | Unknown fields, malformed TOML, or `{ env = "..." }` used directly in `url`/headers (must go through `vars`). |
 | `<name> is not a declared secrets backend; declared: ...` | A server's `secrets` field names a backend with no `[secrets.backends.<name>]` entry. |
+| `` `addr` must use `https://` for a remote OpenBao ... `` | Plain `http://` was given for a non-loopback host. The token would go out in cleartext. |
 | `declare exactly one of token_file or token, not ...` | The openbao backend declared neither token source, or both. |
 | `the token file at <path> is readable by other users` | The token file's mode grants group or other access. Run `chmod 600`. |
 | `OpenBao at <addr> has no <mount> mount, or it is not a KV v2 mount` | The mount name is wrong, or the mount is KV v1. |

@@ -580,7 +580,7 @@ mod tests {
     fn an_openbao_credential_path_is_scoped_per_machine() {
         let backend = Backend::OpenBao(
             openbao::OpenBaoBackend::new(openbao::OpenBaoSettings {
-                addr: "http://bao.example.com:8200".to_string(),
+                addr: "https://bao.example.com:8200".to_string(),
                 mount: "secret".to_string(),
                 path_prefix: "trg".to_string(),
                 machine_id: "laptop".to_string(),

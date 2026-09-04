@@ -112,7 +112,7 @@ scripting around it (for example `|| true`).
 
 | Symptom                                                                            | Likely cause                                                                                              |
 | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `stdin/stderr is not a TTY; OAuth requires an interactive browser session`         | First-time auth was attempted from a non-TTY context. Run `trg mcp proxy --server linear` once in a real terminal to seed the Keychain. |
+| `stdin/stderr is not a TTY; OAuth requires an interactive browser session`         | First-time auth was attempted from a non-TTY context. Run `trg mcp proxy --server linear` once in a real terminal to seed the backend. |
 | `timed out waiting for the OAuth callback after 300s`                              | Browser never returned. Re-run; ensure no firewall is blocking the loopback listener.                     |
 | `authorization provider returned an error: access_denied`                          | You declined consent on the provider's page. Re-run and approve.                                          |
 | `OAuth state mismatch (csrf protection)`                                           | Stale browser tab from a previous run hit the listener. Close the old tab and re-run.                     |

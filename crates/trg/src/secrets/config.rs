@@ -16,7 +16,8 @@ use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
 use super::openbao::{
-    expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
+    expand_tilde, is_addressable_segment, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource,
+    DEFAULT_TIMEOUT_MS,
 };
 use super::Backend;
 use crate::config::{VarResolveError, VarSource};
@@ -255,11 +256,7 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
 }
 
 fn check_segment(backend: &str, field: &'static str, value: &str) -> Result<(), BackendError> {
-    let ok = !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-    if ok {
+    if is_addressable_segment(value) {
         Ok(())
     } else {
         Err(BackendError::Token1Segment {
@@ -355,7 +352,7 @@ mod tests {
             r#"
             [backends.work]
             kind = "openbao"
-            addr = "http://bao:8200"
+            addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
             token_file = "~/.vault-token"
@@ -410,7 +407,7 @@ mod tests {
             r#"
             [backends.work]
             kind = "openbao"
-            addr = "http://bao:8200"
+            addr = "https://bao:8200"
             mount = "secret"
             path_prefix = ""
             token_file = "~/.vault-token"
@@ -427,7 +424,7 @@ mod tests {
             r#"
             [backends.work]
             kind = "openbao"
-            addr = "http://bao:8200"
+            addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
             "#,
@@ -442,7 +439,7 @@ mod tests {
             r#"
             [backends.work]
             kind = "openbao"
-            addr = "http://bao:8200"
+            addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
             token_file = "~/.vault-token"
@@ -481,7 +478,7 @@ mod tests {
             r#"
             [backends.work]
             kind = "openbao"
-            addr = "http://bao:8200"
+            addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
             machine_id = "my laptop"
@@ -532,7 +529,7 @@ mod tests {
                 r#"
                 [backends.work]
                 kind = "openbao"
-                addr = "http://bao.example.com:8200"
+                addr = "https://bao.example.com:8200"
                 mount = "secret"
                 path_prefix = "trg"
                 token_file = "~/.vault-token"
@@ -555,7 +552,7 @@ mod tests {
 
                 [backends.work]
                 kind = "openbao"
-                addr = "http://bao.example.com:8200"
+                addr = "https://bao.example.com:8200"
                 mount = "secret"
                 path_prefix = "trg"
                 machine_id = "laptop"

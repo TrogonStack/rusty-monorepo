@@ -2,8 +2,14 @@
 
 By default `trg` keeps OAuth credentials for an MCP server in the macOS
 Keychain. This guide points one server at an [OpenBao](https://openbao.org)
-KV v2 mount instead, so the same credentials are reachable from a Linux
-machine, a container, or a second workstation.
+KV v2 mount instead, so a Linux machine, a container, or a second workstation
+can reach the same backend.
+
+Reaching the same backend is not the same as sharing one credential. Paths are
+scoped by `machine_id`, so each machine gets its own entry and authorizes
+separately. That is deliberate: providers that rotate refresh tokens invalidate
+the previous one on use, so two machines sharing an entry would log each other
+out. See [Secrets backends](../explanation/secrets-backends.md).
 
 ## Before you start
 
@@ -142,6 +148,12 @@ bao kv get secret/trg/mcp/$(hostname -s)/internal
 `trg` re-reads `token_file` on every operation, so running `bao login` in
 another terminal fixes a running `trg mcp proxy` without restarting the editor
 that spawned it.
+
+**`` `addr` must use `https://` for a remote OpenBao ``**
+
+The token travels in a header, so `trg` sends it in the clear only to a
+loopback address. Put TLS in front of a remote instance and use `https://`.
+For a private CA, see [Using a private CA](#using-a-private-ca).
 
 **`the token file at ~/.vault-token is readable by other users (mode 0644)`**
 

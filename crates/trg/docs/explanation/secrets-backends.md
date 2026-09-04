@@ -50,9 +50,10 @@ fallback because nothing ever arrives there after a named backend fails.
 
 ## Bootstrap stays acyclic
 
-Backend declarations accept literal values and `{ env = "..." }`, but not
-`{ secret = "..." }`. Nothing needed to reach the secret store may itself live
-in the secret store.
+The backend fields that resolve at all (`addr` and `token`) accept a literal
+value or `{ env = "..." }`, never `{ secret = "..." }`; every other field is a
+literal. Nothing needed to reach the secret store may itself live in the secret
+store.
 
 ## Each backend owns its own path layout
 
