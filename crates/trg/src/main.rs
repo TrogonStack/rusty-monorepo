@@ -4,7 +4,7 @@ use trg::commands::ai::AiCommands;
 use trg::commands::mcp::{McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
-use trg::secrets::{Backend, KeychainBackend, PathError, SecretPath};
+use trg::secrets::{CredentialPathError, Registry, ServerBackendError};
 
 #[derive(Parser)]
 #[command(name = "trg")]
@@ -19,21 +19,29 @@ enum WireError {
     #[error("{0}")]
     Config(#[from] config::ConfigError),
 
-    #[error("server name is not usable as a secret path: {0}")]
-    CredentialPath(#[from] PathError),
+    #[error("{0}")]
+    Backend(#[from] ServerBackendError),
+
+    #[error("{0}")]
+    CredentialPath(#[from] CredentialPathError),
 }
 
 /// Resolve everything `trg mcp` depends on. This is the only place that reads
 /// config or picks a secrets backend.
-fn wire_mcp(command: &McpCommands) -> Result<McpContext, WireError> {
+fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
     let server_name = command.server_name().to_string();
-    let profile = config::load_mcp_server(&server_name)?;
-    let cred_path = SecretPath::parse(&server_name)?;
-    let backend = Backend::Keychain(KeychainBackend::with_default_service());
+    let loaded = config::load_mcp(&server_name).map_err(WireError::from)?;
+    let registry = Registry::new(loaded.secrets);
+
+    let backend = registry
+        .for_server(&server_name, loaded.server.secrets.as_deref())
+        .map_err(WireError::from)?;
+
+    let cred_path = backend.credential_path(&server_name).map_err(WireError::from)?;
 
     Ok(McpContext {
         server_name,
-        profile,
+        profile: loaded.server,
         backend,
         cred_path,
     })

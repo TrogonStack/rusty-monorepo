@@ -9,14 +9,18 @@
 //! through a vtable. Adding a kind is a variant plus an arm, and the compiler
 //! then names every site that needs updating.
 
+pub mod config;
 pub mod keychain;
+pub mod openbao;
 
 use std::collections::HashMap;
 use std::fmt;
 
 use secrecy::{ExposeSecret, SecretString};
 
+pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::KeychainBackend;
+pub use openbao::OpenBaoBackend;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretsError {
@@ -40,6 +44,19 @@ pub enum SecretsError {
 
     #[error("`{op}` is not supported by the `{kind}` backend")]
     Unsupported { kind: &'static str, op: &'static str },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialPathError {
+    #[error("server name is not usable as a secret path: {0}")]
+    Path(#[from] PathError),
+
+    #[error("server name `{name}` cannot address the `{kind}` backend: {reason}")]
+    Name {
+        name: String,
+        kind: &'static str,
+        reason: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -294,6 +311,7 @@ impl fmt::Debug for SecretMap {
 #[derive(Clone)]
 pub enum Backend {
     Keychain(KeychainBackend),
+    OpenBao(OpenBaoBackend),
     #[cfg(test)]
     Fake(fake::FakeBackend),
 }
@@ -302,6 +320,7 @@ impl Backend {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Keychain(_) => "keychain",
+            Self::OpenBao(_) => "openbao",
             #[cfg(test)]
             Self::Fake(_) => "fake",
         }
@@ -312,14 +331,39 @@ impl Backend {
     pub fn describe(&self) -> String {
         match self {
             Self::Keychain(b) => format!("the macOS Keychain (service `{}`)", b.service()),
+            Self::OpenBao(b) => format!("OpenBao at {} (mount `{}`)", b.addr(), b.mount()),
             #[cfg(test)]
             Self::Fake(_) => "an in-memory fake".to_string(),
+        }
+    }
+
+    /// Where this backend keeps the OAuth credentials for one MCP server.
+    ///
+    /// The layout is the backend's own concern: the Keychain is already scoped
+    /// to one machine and one login keychain, so it keeps addressing items by
+    /// bare server name and existing items stay readable. OpenBao is shared
+    /// across machines, so it scopes the path per machine.
+    pub fn credential_path(&self, server: &str) -> Result<SecretPath, CredentialPathError> {
+        match self {
+            Self::OpenBao(b) => {
+                b.check_server_name(server)
+                    .map_err(|reason| CredentialPathError::Name {
+                        name: server.to_string(),
+                        kind: "openbao",
+                        reason,
+                    })?;
+                Ok(SecretPath::parse(&b.credential_path(server))?)
+            }
+            Self::Keychain(_) => Ok(SecretPath::parse(server)?),
+            #[cfg(test)]
+            Self::Fake(_) => Ok(SecretPath::parse(server)?),
         }
     }
 
     pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
         match self {
             Self::Keychain(b) => b.get(path).await,
+            Self::OpenBao(b) => b.get(path).await,
             #[cfg(test)]
             Self::Fake(b) => b.get(path).await,
         }
@@ -328,6 +372,7 @@ impl Backend {
     pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {
         match self {
             Self::Keychain(b) => b.set(path, map).await,
+            Self::OpenBao(b) => b.set(path, map).await,
             #[cfg(test)]
             Self::Fake(b) => b.set(path, map).await,
         }
@@ -336,6 +381,7 @@ impl Backend {
     pub async fn delete(&self, path: &SecretPath) -> Result<(), SecretsError> {
         match self {
             Self::Keychain(b) => b.delete(path).await,
+            Self::OpenBao(b) => b.delete(path).await,
             #[cfg(test)]
             Self::Fake(b) => b.delete(path).await,
         }
@@ -344,6 +390,7 @@ impl Backend {
     pub async fn list(&self, prefix: Option<&SecretPath>) -> Result<Vec<String>, SecretsError> {
         match self {
             Self::Keychain(b) => b.list(prefix).await,
+            Self::OpenBao(b) => b.list(prefix).await,
             #[cfg(test)]
             Self::Fake(b) => b.list(prefix).await,
         }
@@ -521,6 +568,36 @@ mod tests {
             back.get(&SecretKey::parse("b").unwrap()).map(|v| v.expose_secret()),
             Some("2")
         );
+    }
+
+    #[test]
+    fn a_keychain_credential_path_is_the_server_name_verbatim() {
+        let backend = Backend::Keychain(KeychainBackend::with_default_service());
+        assert_eq!(backend.credential_path("github").expect("path").as_str(), "github");
+    }
+
+    #[test]
+    fn an_openbao_credential_path_is_scoped_per_machine() {
+        let backend = Backend::OpenBao(
+            openbao::OpenBaoBackend::new(openbao::OpenBaoSettings {
+                addr: "http://bao.example.com:8200".to_string(),
+                mount: "secret".to_string(),
+                path_prefix: "trg".to_string(),
+                machine_id: "laptop".to_string(),
+                token: openbao::TokenSource::Var(crate::config::VarSource::Literal("t".to_string())),
+                ca_cert_file: None,
+                timeout: std::time::Duration::from_secs(5),
+            })
+            .expect("build"),
+        );
+
+        assert_eq!(
+            backend.credential_path("github").expect("path").as_str(),
+            "mcp/laptop/github"
+        );
+
+        let err = backend.credential_path("my server").expect_err("should refuse");
+        assert!(err.to_string().contains("openbao"), "{err}");
     }
 
     #[tokio::test]
