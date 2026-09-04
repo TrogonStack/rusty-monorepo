@@ -104,7 +104,7 @@ impl KeychainBackend {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn with_bin(service: impl Into<String>, bin: impl AsRef<std::path::Path>) -> Self {
         Self {
             service: service.into(),
