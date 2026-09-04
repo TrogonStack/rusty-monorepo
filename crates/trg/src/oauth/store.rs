@@ -22,11 +22,19 @@ pub const CREDENTIALS_KEY: &str = "credentials";
 pub struct OAuthCredentialStore {
     backend: Backend,
     path: SecretPath,
+    /// The `--server` name recovery advice has to quote. Not recoverable from
+    /// `path`: only the Keychain stores a server under its bare name, and
+    /// OpenBao stores it under `mcp/<machine_id>/<server>`.
+    server: String,
 }
 
 impl OAuthCredentialStore {
-    pub fn new(backend: Backend, path: SecretPath) -> Self {
-        Self { backend, path }
+    pub fn new(backend: Backend, path: SecretPath, server: impl Into<String>) -> Self {
+        Self {
+            backend,
+            path,
+            server: server.into(),
+        }
     }
 
     fn key() -> SecretKey {
@@ -37,14 +45,14 @@ impl OAuthCredentialStore {
 #[async_trait]
 impl CredentialStore for OAuthCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
-        let Some(map) = self.backend.get(&self.path).await.map_err(to_auth_error)? else {
+        let Some(map) = self.backend.get(&self.path).await.map_err(|e| self.to_auth_error(e))? else {
             return Ok(None);
         };
         let Some(raw) = map.get(&Self::key()) else {
             return Ok(None);
         };
         serde_json::from_str(raw.expose_secret()).map(Some).map_err(|e| {
-            to_auth_error(SecretsError::Malformed {
+            self.to_auth_error(SecretsError::Malformed {
                 path: self.path.clone(),
                 cause: e.to_string(),
             })
@@ -62,11 +70,14 @@ impl CredentialStore for OAuthCredentialStore {
             Err(SecretsError::Malformed { .. }) => SecretMap::new(),
             // Anything else is transient. Writing through it would replace the
             // whole map with just this key and take any siblings with it.
-            Err(e) => return Err(to_auth_error(e)),
+            Err(e) => return Err(self.to_auth_error(e)),
         };
         map.insert(Self::key(), SecretString::from(json));
 
-        self.backend.set(&self.path, &map).await.map_err(to_auth_error)
+        self.backend
+            .set(&self.path, &map)
+            .await
+            .map_err(|e| self.to_auth_error(e))
     }
 
     async fn clear(&self) -> Result<(), AuthError> {
@@ -75,31 +86,36 @@ impl CredentialStore for OAuthCredentialStore {
             // `logout` is the documented recovery for an unreadable payload, so
             // it has to drop the path rather than refuse.
             Err(SecretsError::Malformed { .. }) => None,
-            Err(e) => return Err(to_auth_error(e)),
+            Err(e) => return Err(self.to_auth_error(e)),
         };
         let Some(mut map) = existing else {
-            return self.backend.delete(&self.path).await.map_err(to_auth_error);
+            return self.backend.delete(&self.path).await.map_err(|e| self.to_auth_error(e));
         };
         map.remove(&Self::key());
         if map.is_empty() {
-            self.backend.delete(&self.path).await.map_err(to_auth_error)
+            self.backend.delete(&self.path).await.map_err(|e| self.to_auth_error(e))
         } else {
-            self.backend.set(&self.path, &map).await.map_err(to_auth_error)
+            self.backend
+                .set(&self.path, &map)
+                .await
+                .map_err(|e| self.to_auth_error(e))
         }
     }
 }
 
-/// rmcp models every storage failure as `InternalError(String)`, so the
-/// [`SecretsError`] variant survives only in the message.
-fn to_auth_error(err: SecretsError) -> AuthError {
-    match &err {
-        SecretsError::Malformed { path, .. } => {
-            let server = quote_for_shell(path.as_str());
-            AuthError::InternalError(format!(
-                "{err}. Run `trg mcp auth logout --server {server}` then `trg mcp auth login --server {server}` to re-authorize"
-            ))
+impl OAuthCredentialStore {
+    /// rmcp models every storage failure as `InternalError(String)`, so the
+    /// [`SecretsError`] variant survives only in the message.
+    fn to_auth_error(&self, err: SecretsError) -> AuthError {
+        match &err {
+            SecretsError::Malformed { .. } => {
+                let server = quote_for_shell(&self.server);
+                AuthError::InternalError(format!(
+                    "{err}. Run `trg mcp auth logout --server {server}` then `trg mcp auth login --server {server}` to re-authorize"
+                ))
+            }
+            _ => AuthError::InternalError(err.to_string()),
         }
-        _ => AuthError::InternalError(err.to_string()),
     }
 }
 
@@ -111,7 +127,7 @@ mod tests {
     fn store() -> (Backend, OAuthCredentialStore) {
         let backend = Backend::Fake(FakeBackend::new());
         let path = SecretPath::parse("github").expect("parse");
-        (backend.clone(), OAuthCredentialStore::new(backend, path))
+        (backend.clone(), OAuthCredentialStore::new(backend, path, "github"))
     }
 
     fn credentials(client_id: &str) -> StoredCredentials {
@@ -256,7 +272,7 @@ mod tests {
     async fn malformed_recovery_command_is_copy_pasteable_for_any_server_name() {
         let backend = Backend::Fake(FakeBackend::new());
         let path = SecretPath::parse("my server").expect("parse");
-        let store = OAuthCredentialStore::new(backend.clone(), path);
+        let store = OAuthCredentialStore::new(backend.clone(), path, "my server");
 
         let Backend::Fake(fake) = &backend else { unreachable!() };
         fake.set_get_failure(Some(FakeFailure::Malformed));
@@ -267,6 +283,22 @@ mod tests {
             "recovery command must survive copy-paste: {rendered}"
         );
         assert!(!rendered.contains("--server my server"), "{rendered}");
+    }
+
+    /// OpenBao stores a server under `mcp/<machine_id>/<server>`, so a recovery
+    /// command derived from the path would name something `--server` rejects.
+    #[tokio::test]
+    async fn malformed_recovery_command_names_the_server_not_its_storage_path() {
+        let backend = Backend::Fake(FakeBackend::new());
+        let path = SecretPath::parse("mcp/laptop/github").expect("parse");
+        let store = OAuthCredentialStore::new(backend.clone(), path, "github");
+
+        let Backend::Fake(fake) = &backend else { unreachable!() };
+        fake.set_get_failure(Some(FakeFailure::Malformed));
+
+        let rendered = store.load().await.expect_err("malformed").to_string();
+        assert!(rendered.contains("--server github"), "{rendered}");
+        assert!(!rendered.contains("--server mcp/laptop/github"), "{rendered}");
     }
 
     #[tokio::test]
@@ -308,13 +340,14 @@ mod legacy_payload_tests {
     }
 
     #[tokio::test]
+    #[ignore = "writes to the developer's real login keychain"]
     async fn load_reports_malformed_and_clear_still_removes_it() {
         let keychain = KeychainBackend::with_default_service();
         let path = test_path(1);
         seed_legacy(keychain.service(), &path);
 
         let backend = Backend::Keychain(keychain.clone());
-        let store = OAuthCredentialStore::new(backend, path.clone());
+        let store = OAuthCredentialStore::new(backend, path.clone(), path.as_str());
 
         let err = store.load().await.expect_err("legacy payload should not decode");
         let rendered = err.to_string();
