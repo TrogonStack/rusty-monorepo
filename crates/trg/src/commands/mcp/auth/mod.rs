@@ -1,4 +1,4 @@
-//! `trg mcp auth`: manage OAuth credentials stored in the macOS Keychain.
+//! `trg mcp auth`: manage the OAuth credentials of a configured MCP server.
 
 use clap::{Args, Subcommand, ValueEnum};
 use oauth2::TokenResponse;
@@ -6,7 +6,8 @@ use rmcp::transport::auth::{CredentialStore, OAuthTokenResponse, StoredCredentia
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::oauth::{ensure_credentials, store::KeychainCredentialStore, EnsureError, EnsureOutcome};
+use crate::commands::mcp::McpContext;
+use crate::oauth::{ensure_credentials_for, store::OAuthCredentialStore, EnsureError, EnsureOutcome};
 
 /// Display view over an `OAuthTokenResponse`.
 ///
@@ -141,19 +142,27 @@ pub enum AuthError {
 }
 
 impl AuthCommands {
-    pub async fn handle(self) -> i32 {
+    pub fn server_name(&self) -> &str {
         match self {
-            AuthCommands::Login(args) => match login(&args).await {
+            AuthCommands::Login(args) => args.server.trim(),
+            AuthCommands::Status(args) => args.server.trim(),
+            AuthCommands::Logout(args) => args.server.trim(),
+        }
+    }
+
+    pub async fn handle(self, ctx: &McpContext) -> i32 {
+        match self {
+            AuthCommands::Login(_) => match login(ctx).await {
                 Ok(()) => 0,
                 Err(e) => emit(e),
             },
-            AuthCommands::Status(args) => match status(&args).await {
+            AuthCommands::Status(args) => match status(&args, ctx).await {
                 Ok(()) => 0,
                 Err(e) => emit(e),
             },
-            AuthCommands::Logout(args) => match logout(&args).await {
+            AuthCommands::Logout(_) => match logout(ctx).await {
                 Ok(()) => {
-                    println!("OAuth credentials cleared for `{}`.", args.server.trim());
+                    println!("OAuth credentials cleared for `{}`.", ctx.server_name);
                     0
                 }
                 Err(e) => emit(e),
@@ -167,9 +176,10 @@ fn emit<E: std::fmt::Display>(e: E) -> i32 {
     1
 }
 
-async fn login(args: &LoginArgs) -> Result<(), AuthError> {
-    let server = args.server.trim();
-    match ensure_credentials(server).await? {
+async fn login(ctx: &McpContext) -> Result<(), AuthError> {
+    let server = ctx.server_name.as_str();
+    let where_stored = ctx.backend.describe();
+    match ensure_credentials_for(&ctx.profile, server, &ctx.backend, &ctx.cred_path).await? {
         EnsureOutcome::NoAuthRequired => {
             println!(
                 "`{server}` does not require OAuth (no discovery support, or static \
@@ -178,23 +188,23 @@ async fn login(args: &LoginArgs) -> Result<(), AuthError> {
         }
         EnsureOutcome::AlreadyAuthorized(_) => {
             println!(
-                "OAuth credentials already cached for `{server}` in the macOS Keychain. \
+                "OAuth credentials already cached for `{server}` in {where_stored}. \
                  Use `trg mcp auth logout --server {server}` to force re-auth."
             );
         }
         EnsureOutcome::Authorized(_) => {
             println!(
-                "OAuth complete for `{server}`. Credentials stored in the macOS Keychain \
-                 (service `trg MCP Credentials`, account `{server}`)."
+                "OAuth complete for `{server}`. Credentials stored in {where_stored} at `{}`.",
+                ctx.cred_path
             );
         }
     }
     Ok(())
 }
 
-async fn status(args: &StatusArgs) -> Result<(), AuthError> {
-    let server = args.server.trim();
-    let store = KeychainCredentialStore::new(server);
+async fn status(args: &StatusArgs, ctx: &McpContext) -> Result<(), AuthError> {
+    let server = ctx.server_name.as_str();
+    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone());
 
     let Some(stored) = store.load().await? else {
         match args.format {
@@ -212,14 +222,15 @@ async fn status(args: &StatusArgs) -> Result<(), AuthError> {
             let json = serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("<failed to serialize: {e}>"));
             println!("{json}");
         }
-        StatusFormat::Text => print_summary(server, &stored, summary.as_ref()),
+        StatusFormat::Text => print_summary(ctx, &stored, summary.as_ref()),
     }
     Ok(())
 }
 
-fn print_summary(server: &str, stored: &StoredCredentials, summary: Option<&TokenSummary>) {
-    println!("Server:       {server}");
-    println!("Service:      trg MCP Credentials");
+fn print_summary(ctx: &McpContext, stored: &StoredCredentials, summary: Option<&TokenSummary>) {
+    println!("Server:       {}", ctx.server_name);
+    println!("Backend:      {}", ctx.backend.describe());
+    println!("Path:         {}", ctx.cred_path);
     println!("Client ID:    {}", stored.client_id);
 
     if stored.granted_scopes.is_empty() || (stored.granted_scopes.len() == 1 && stored.granted_scopes[0].is_empty()) {
@@ -231,7 +242,7 @@ fn print_summary(server: &str, stored: &StoredCredentials, summary: Option<&Toke
     match (summary, stored.token_received_at) {
         (Some(s), Some(received_at)) => print_token_summary(s, received_at),
         (Some(_), None) => println!("Issued at:    <unknown>"),
-        (None, _) => println!("Token:        <not present — re-auth required>"),
+        (None, _) => println!("Token:        <not present, re-auth required>"),
     }
 }
 
@@ -305,8 +316,8 @@ fn format_duration(secs: u64) -> String {
     parts.join(" ")
 }
 
-async fn logout(args: &LogoutArgs) -> Result<(), AuthError> {
-    let store = KeychainCredentialStore::new(args.server.trim());
+async fn logout(ctx: &McpContext) -> Result<(), AuthError> {
+    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone());
     store.clear().await?;
     Ok(())
 }
