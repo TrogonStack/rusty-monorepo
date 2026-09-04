@@ -117,14 +117,18 @@ impl OpenBaoBackend {
         // `trg mcp proxy` child surfaces only as MCP error -32000, so a hang is
         // the failure mode this design is most exposed to.
         let connect = settings.timeout.min(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
+        // reqwest strips only the headers it knows are sensitive, and
+        // `X-Vault-Token` is not one of them, so a followed redirect re-sends
+        // the token verbatim. The configured instance is therefore the only
+        // origin allowed to receive it, and everything else is refused: a
+        // remote answering 307 with somewhere else is asking for the token,
+        // whether or not the target is itself https.
+        let origin = parsed.origin();
         let mut builder = reqwest::Client::builder()
             .connect_timeout(connect)
             .timeout(settings.timeout)
-            // A redirect re-sends `X-Vault-Token`, and reqwest only strips the
-            // headers it knows are sensitive. An HA standby answering 307 with
-            // the active node is legitimate; a downgrade to cleartext is not.
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if !carries_a_token_safely(attempt.url()) {
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.url().origin() != origin {
                     attempt.stop()
                 } else if attempt.previous().len() > MAX_REDIRECTS {
                     attempt.error("too many redirects")
@@ -439,6 +443,15 @@ impl OpenBaoBackend {
                 self.addr,
                 join_or(&errors, "service unavailable")
             ))),
+            // Reached only when the redirect policy refused to follow, since
+            // a redirect within the configured origin is followed before the
+            // response gets here.
+            other if (300..400).contains(&other) => Err(SecretsError::Transport(format!(
+                "OpenBao at {} redirected {other} to another host, and the token is not sent \
+                 anywhere but `addr`. Point `addr` at the active node or at a load balancer \
+                 in front of the cluster.",
+                self.addr
+            ))),
             other => Err(SecretsError::Transport(format!(
                 "OpenBao at {} answered {other}: {}",
                 self.addr,
@@ -655,6 +668,50 @@ mod tests {
             Self { addr, seen, server }
         }
 
+        /// Answers the first request with a 307 to `location` and every later
+        /// one with a hit, recording each so a test can see whether the token
+        /// travelled and where.
+        fn start_redirecting_once_to(location: String) -> Self {
+            let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind"));
+            let addr = format!(
+                "http://{}",
+                server.server_addr().to_ip().expect("a loopback tcp address")
+            );
+            let seen = Arc::new(Mutex::new(Vec::new()));
+
+            let worker = Arc::clone(&server);
+            let recorder = Arc::clone(&seen);
+            std::thread::spawn(move || {
+                let mut first = true;
+                while let Ok(request) = worker.recv() {
+                    recorder.lock().expect("stub lock").push(Seen {
+                        method: request.method().as_str().to_string(),
+                        url: request.url().to_string(),
+                        token: request
+                            .headers()
+                            .iter()
+                            .find(|h| h.field.equiv("X-Vault-Token"))
+                            .map(|h| h.value.as_str().to_string()),
+                        body: String::new(),
+                    });
+
+                    let response = if std::mem::take(&mut first) {
+                        tiny_http::Response::empty(307)
+                            .with_header(
+                                tiny_http::Header::from_bytes(&b"Location"[..], location.as_bytes())
+                                    .expect("a location header"),
+                            )
+                            .boxed()
+                    } else {
+                        tiny_http::Response::from_string(r#"{"data":{"data":{"k":"v"}}}"#).boxed()
+                    };
+                    let _ = request.respond(response);
+                }
+            });
+
+            Self { addr, seen, server }
+        }
+
         fn backend(&self) -> OpenBaoBackend {
             let mut s = settings(&self.addr);
             s.timeout = Duration::from_secs(2);
@@ -720,6 +777,48 @@ mod tests {
                 "{addr} never leaves the host"
             );
         }
+    }
+
+    /// reqwest strips `Authorization` across origins but not `X-Vault-Token`,
+    /// so nothing but the policy keeps the token off a third party. Both stubs
+    /// are loopback http, which the scheme check accepts: only the origin
+    /// check can refuse this one.
+    #[tokio::test]
+    async fn a_redirect_to_another_origin_never_carries_the_token() {
+        let elsewhere = StubBao::start(vec![(200, r#"{"data":{"data":{"k":"v"}}}"#)]);
+        let bao = StubBao::start_redirecting_once_to(format!("{}/v1/secret/data/trg/mcp/laptop/x", elsewhere.addr));
+
+        let err = bao
+            .backend()
+            .get(&path("mcp/laptop/x"))
+            .await
+            .expect_err("the redirect is refused");
+
+        assert!(
+            elsewhere.requests().is_empty(),
+            "the token reached a third party: {:?}",
+            elsewhere.requests()
+        );
+        let SecretsError::Transport(reason) = err else {
+            panic!("expected a transport error, got {err:?}")
+        };
+        assert!(reason.contains("307"), "{reason}");
+        assert!(reason.contains("not sent"), "{reason}");
+    }
+
+    /// The instance moving a request around inside itself is ordinary, and
+    /// the token is already its own.
+    #[tokio::test]
+    async fn a_redirect_within_the_configured_origin_is_followed() {
+        let bao = StubBao::start_redirecting_once_to("/v1/secret/data/trg/elsewhere".to_string());
+
+        let hit = bao.backend().get(&path("mcp/laptop/x")).await.expect("followed");
+
+        assert!(hit.is_some(), "the redirect target answered a hit");
+        let seen = bao.requests();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[1].url, "/v1/secret/data/trg/elsewhere");
+        assert_eq!(seen[1].token.as_deref(), Some("t"));
     }
 
     #[test]

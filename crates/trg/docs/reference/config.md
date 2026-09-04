@@ -191,8 +191,13 @@ Speaks the KV v2 HTTP API of an [OpenBao](https://openbao.org) instance.
 `addr` must be `https://` for any remote instance. The token travels in an
 `X-Vault-Token` header, so plain `http://` would put it on the wire in
 cleartext; it is accepted only when the host is a loopback address
-(`127.0.0.1`, `::1`, or `localhost`). A redirect is followed only when the
-target is likewise safe, so an instance cannot be talked into downgrading.
+(`127.0.0.1`, `::1`, or `localhost`).
+
+The token is sent to the `addr` origin and nowhere else. A redirect that
+leaves it is refused rather than followed, so an instance cannot hand the
+token to a third party. Point `addr` at the active node or at a load balancer
+in front of the cluster; a standby that answers 307 with a different node is
+reported as an error, not chased.
 
 Omitting `machine_id` gives every machine one shared credential per server,
 which is the usual reason to leave the Keychain. Set it when a provider
@@ -411,3 +416,4 @@ keeps using the macOS Keychain exactly as it did before `[secrets]` existed.
 | `the token file at <path> is readable by other users` | The token file's mode grants group or other access. Run `chmod 600`. |
 | `OpenBao at <addr> has no <mount> mount, or it is not a KV v2 mount` | The mount name is wrong, or the mount is KV v1. |
 | `OpenBao rejected the token (...); run bao login and retry` | The token is absent, expired, or lacks a policy for the path. |
+| `OpenBao at <addr> redirected <status> to another host` | The instance answered a redirect leaving the `addr` origin. The token is not followed there. Point `addr` at the active node or a load balancer. |
