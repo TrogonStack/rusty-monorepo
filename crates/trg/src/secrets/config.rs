@@ -96,7 +96,10 @@ pub enum BackendError {
     #[error("`[secrets.backends.{name}]`: {cause}")]
     Build { name: String, cause: OpenBaoBuildError },
 
-    #[error("`[secrets.backends.{name}]`: `{field}` must be non-empty and match [A-Za-z0-9._-], got `{value}`")]
+    #[error(
+        "`[secrets.backends.{name}]`: `{field}` must match [A-Za-z0-9._-] and be neither empty, \
+         `.`, nor `..`, got `{value}`"
+    )]
     Token1Segment {
         name: String,
         field: &'static str,
@@ -231,14 +234,22 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
             };
             check_segment(name, "machine_id", &machine_id)?;
             check_segment(name, "mount", mount)?;
-            for segment in path_prefix.split('/').filter(|s| !s.is_empty()) {
-                check_segment(name, "path_prefix", segment)?;
+
+            // Trimmed before checking, so a leading or trailing slash is a
+            // spelling of the same prefix, but an interior empty segment is
+            // not: it would otherwise pass here and fail on the first secret
+            // operation instead, when the config is no longer in view.
+            let path_prefix = path_prefix.trim_matches('/');
+            if !path_prefix.is_empty() {
+                for segment in path_prefix.split('/') {
+                    check_segment(name, "path_prefix", segment)?;
+                }
             }
 
             let settings = OpenBaoSettings {
                 addr,
                 mount: mount.clone(),
-                path_prefix: path_prefix.trim_matches('/').to_string(),
+                path_prefix: path_prefix.to_string(),
                 machine_id,
                 token,
                 ca_cert_file: ca_cert_file.as_deref().map(expand_tilde),
@@ -399,6 +410,52 @@ mod tests {
             let err = section(&lines.join("\n")).expect_err("should require {missing}");
             assert!(err.to_string().contains(missing), "missing {missing}: {err}");
         }
+    }
+
+    /// A bad prefix has to fail while the user is looking at their config, not
+    /// on the first secret operation long after it loaded.
+    #[test]
+    fn a_prefix_that_cannot_address_anything_is_refused_at_config_time() {
+        for prefix in ["trg//mcp", "trg/../mcp", "trg/./mcp", "trg/ mcp"] {
+            let s = section(&format!(
+                r#"
+                [backends.work]
+                kind = "openbao"
+                addr = "https://bao:8200"
+                mount = "secret"
+                path_prefix = "{prefix}"
+                token_file = "~/.vault-token"
+                "#
+            ))
+            .expect("parse");
+
+            assert!(
+                matches!(
+                    build("work", &s.backends["work"]),
+                    Err(BackendError::Token1Segment {
+                        field: "path_prefix",
+                        ..
+                    })
+                ),
+                "should refuse the prefix {prefix:?} at config time"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slash_wrapped_prefix_is_the_same_prefix() {
+        let s = section(
+            r#"
+            [backends.work]
+            kind = "openbao"
+            addr = "https://bao:8200"
+            mount = "secret"
+            path_prefix = "/trg/mcp/"
+            token_file = "~/.vault-token"
+            "#,
+        )
+        .expect("parse");
+        assert!(build("work", &s.backends["work"]).is_ok());
     }
 
     #[test]
