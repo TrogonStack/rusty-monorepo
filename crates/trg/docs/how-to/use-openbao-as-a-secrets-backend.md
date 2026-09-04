@@ -5,11 +5,11 @@ Keychain. This guide points one server at an [OpenBao](https://openbao.org)
 KV v2 mount instead, so a Linux machine, a container, or a second workstation
 can reach the same backend.
 
-Reaching the same backend is not the same as sharing one credential. Paths are
-scoped by `machine_id`, so each machine gets its own entry and authorizes
-separately. That is deliberate: providers that rotate refresh tokens invalidate
-the previous one on use, so two machines sharing an entry would log each other
-out. See [Secrets backends](../explanation/secrets-backends.md).
+Every machine pointed at the same path shares one credential, so logging in
+once is enough. Some providers rotate refresh tokens and treat a reused one as
+a replay, revoking the whole grant; against those, add `machine_id` to give
+each machine its own entry. See
+[Secrets backends](../explanation/secrets-backends.md).
 
 ## Before you start
 
@@ -93,12 +93,12 @@ The command names the backend it wrote to. Confirm it landed:
 
 ```sh
 trg mcp auth status --server internal
-bao kv get secret/trg/mcp/$(hostname -s)/internal
+bao kv get secret/trg/mcp/internal
 ```
 
-The path is scoped per machine on purpose: OAuth refresh tokens are
-client-bound, and providers that rotate them invalidate the previous one on
-use, so two machines sharing one path would repeatedly log each other out.
+Every machine reading that path now uses the same credential. To give this
+machine its own instead, add `machine_id = "laptop"` to the backend and log in
+again; the entry moves to `secret/trg/mcp/laptop/internal`.
 
 ## Using a private CA
 
@@ -142,7 +142,7 @@ The token expired, or its policy does not cover the path. Check both:
 
 ```sh
 bao token lookup
-bao kv get secret/trg/mcp/$(hostname -s)/internal
+bao kv get secret/trg/mcp/internal
 ```
 
 `trg` re-reads `token_file` on every operation, so running `bao login` in

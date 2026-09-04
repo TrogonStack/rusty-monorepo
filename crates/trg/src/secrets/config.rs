@@ -105,12 +105,6 @@ pub enum BackendError {
         field: &'static str,
         value: String,
     },
-
-    #[error(
-        "`[secrets.backends.{name}]`: could not determine this machine's name ({cause}); \
-         set `machine_id` explicitly"
-    )]
-    MachineId { name: String, cause: String },
 }
 
 /// The declared backends, resolved by name on demand.
@@ -225,14 +219,12 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                 }
             };
 
-            let machine_id = match machine_id {
-                Some(id) => id.clone(),
-                None => host_machine_id().map_err(|cause| BackendError::MachineId {
-                    name: name.to_string(),
-                    cause,
-                })?,
-            };
-            check_segment(name, "machine_id", &machine_id)?;
+            // Absent means one credential shared by every machine, which is
+            // the reason to use a remote backend at all. Present means opt-in
+            // isolation. Nothing is derived, so nothing collides silently.
+            if let Some(id) = machine_id {
+                check_segment(name, "machine_id", id)?;
+            }
             check_segment(name, "mount", mount)?;
 
             // Trimmed before checking, so a leading or trailing slash is a
@@ -250,7 +242,7 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                 addr,
                 mount: mount.clone(),
                 path_prefix: path_prefix.to_string(),
-                machine_id,
+                machine_id: machine_id.clone(),
                 token,
                 ca_cert_file: ca_cert_file.as_deref().map(expand_tilde),
                 timeout: Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
@@ -276,30 +268,6 @@ fn check_segment(backend: &str, field: &'static str, value: &str) -> Result<(), 
             value: value.to_string(),
         })
     }
-}
-
-/// This machine's short host name, used to scope per-machine credential paths.
-///
-/// Shelling out rather than taking a `libc` dependency for one call, matching
-/// what the keychain backend already does for `security`.
-fn host_machine_id() -> Result<String, String> {
-    let out = std::process::Command::new("hostname")
-        .arg("-s")
-        .output()
-        .map_err(|e| format!("could not run `hostname -s`: {e}"))?;
-
-    if !out.status.success() {
-        return Err(format!(
-            "`hostname -s` failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if name.is_empty() {
-        return Err("`hostname -s` printed nothing".to_string());
-    }
-    Ok(name)
 }
 
 #[cfg(test)]
@@ -456,6 +424,53 @@ mod tests {
         )
         .expect("parse");
         assert!(build("work", &s.backends["work"]).is_ok());
+    }
+
+    /// Nothing is derived from the host any more, so nothing can silently
+    /// collide with another machine that happens to share a short hostname.
+    #[test]
+    fn an_omitted_machine_id_stays_omitted_rather_than_being_guessed() {
+        let s = section(
+            r#"
+            [backends.work]
+            kind = "openbao"
+            addr = "https://bao:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            token_file = "~/.vault-token"
+            "#,
+        )
+        .expect("parse");
+
+        let Backend::OpenBao(b) = build("work", &s.backends["work"]).expect("build") else {
+            panic!("expected an openbao backend")
+        };
+        assert_eq!(b.machine_id(), None);
+        assert_eq!(b.credential_path("github"), "mcp/github");
+    }
+
+    #[test]
+    fn a_declared_machine_id_still_has_to_be_addressable() {
+        let s = section(
+            r#"
+            [backends.work]
+            kind = "openbao"
+            addr = "https://bao:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            machine_id = "my laptop"
+            token_file = "~/.vault-token"
+            "#,
+        )
+        .expect("parse");
+
+        assert!(matches!(
+            build("work", &s.backends["work"]),
+            Err(BackendError::Token1Segment {
+                field: "machine_id",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -649,14 +664,5 @@ mod tests {
         let backend = Registry::default_backend();
         assert_eq!(backend.kind(), "keychain");
         assert!(backend.describe().contains(DEFAULT_SERVICE), "{}", backend.describe());
-    }
-
-    #[test]
-    fn this_machine_has_a_usable_name() {
-        // Guards the default path for `machine_id`: if `hostname -s` is
-        // unavailable or prints something unaddressable here, it will be
-        // unavailable for users too.
-        let id = host_machine_id().expect("hostname -s");
-        assert!(check_segment("probe", "machine_id", &id).is_ok(), "hostname was {id:?}");
     }
 }

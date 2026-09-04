@@ -60,20 +60,22 @@ store.
 | Backend    | Where one server's credentials live                       |
 | ---------- | ---------------------------------------------------------- |
 | `keychain` | Service = the backend's `service`, account = the server name. |
-| `openbao`  | `<mount>/data/<path_prefix>/mcp/<machine_id>/<server-name>` |
+| `openbao`  | `<mount>/data/<path_prefix>/mcp/<server-name>`, plus `<machine_id>/` when declared |
 
 The Keychain is already scoped to one machine and one login keychain, so it
 addresses items by bare server name. Adding a machine segment there would
 orphan every credential stored before `[secrets]` existed and buy nothing.
 
-OpenBao is shared across machines, so it scopes per machine. This is not
-tidiness. OAuth refresh tokens are client-bound, and providers that rotate
-refresh tokens invalidate the previous one when it is used. Two machines
-sharing one path would take turns invalidating each other's token, producing
-an intermittent re-authentication loop that looks like a provider bug.
-
-The cost is that a new machine logs in once per server. That is the correct
-trade.
+OpenBao shares by default, because reaching one credential from everywhere is
+the reason to leave the Keychain at all. Isolation is the opt-in, not the
+other way around, for two reasons. A derived default cannot be trusted: two
+hosts can answer `hostname -s` identically and silently collide, while an
+ephemeral host answers differently on every run, so a container or a CI job
+would find an empty path and need a browser flow it cannot run. And the
+hazard isolation protects against is narrow. It bites only where a provider
+both rotates refresh tokens and treats a reused one as replay, which revokes
+the whole grant family. Declaring `machine_id` is how you avoid that, and the
+cost you accept for it is one login per machine per server.
 
 ## Why the OpenBao client is not a client crate
 

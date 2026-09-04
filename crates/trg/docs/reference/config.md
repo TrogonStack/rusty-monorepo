@@ -182,7 +182,7 @@ Speaks the KV v2 HTTP API of an [OpenBao](https://openbao.org) instance.
 | `addr`         | `VarSource` | yes      | Base URL. `https://` is required unless the host is loopback.              |
 | `mount`        | string      | yes      | KV v2 mount, e.g. `secret`.                                               |
 | `path_prefix`  | string      | yes      | Prefix under the mount. May be empty.                                     |
-| `machine_id`   | string      | no       | Defaults to `hostname -s`. Scopes credential paths per machine.           |
+| `machine_id`   | string      | no       | Adds a per-machine segment to credential paths. Omit to share them.       |
 | `token_file`   | string      | one of   | Path to the token file. `~` expands against `$HOME`.                      |
 | `token`        | `VarSource` | one of   | The token itself, usually `{ env = "BAO_TOKEN" }`.                        |
 | `ca_cert_file` | string      | no       | PEM bundle. **Replaces** the OS trust store for this backend.             |
@@ -194,15 +194,19 @@ cleartext; it is accepted only when the host is a loopback address
 (`127.0.0.1`, `::1`, or `localhost`). A redirect is followed only when the
 target is likewise safe, so an instance cannot be talked into downgrading.
 
-Set `machine_id` explicitly wherever two machines could share a short
-hostname. It is the only thing separating their credential paths, and two
-machines writing one path will rotate each other's refresh tokens away.
+Omitting `machine_id` gives every machine one shared credential per server,
+which is the usual reason to leave the Keychain. Set it when a provider
+rotates refresh tokens and detects replay: there, two machines refreshing the
+same token will get the whole grant revoked, and a per-machine segment is how
+you avoid that. Nothing is derived from the host, so a value only ever appears
+in the path because you wrote it in the config.
 
 Exactly one of `token_file` or `token` must be declared. Declaring neither or
 both fails at load time.
 
-`mount`, `machine_id`, and every segment of `path_prefix` must be non-empty
-and match `[A-Za-z0-9._-]`, because each becomes a URL path segment.
+`mount`, `machine_id` when declared, and every segment of `path_prefix` must
+be non-empty and match `[A-Za-z0-9._-]`, because each becomes a URL path
+segment.
 
 There is no option to skip TLS verification. A private CA is configured by
 pointing `ca_cert_file` at its certificate.
@@ -217,11 +221,11 @@ with a `chmod 600` message rather than used.
 | Backend    | Where one server's credentials live                             |
 | ---------- | ---------------------------------------------------------------- |
 | `keychain` | Service = the backend's `service`, account = the server name.     |
-| `openbao`  | `<mount>/data/<path_prefix>/mcp/<machine_id>/<server-name>`       |
+| `openbao`  | `<mount>/data/<path_prefix>/mcp/<server-name>`                    |
+| `openbao`  | `<mount>/data/<path_prefix>/mcp/<machine_id>/<server-name>`, with `machine_id` |
 
-OpenBao paths are scoped per machine because OAuth refresh tokens are
-client-bound and providers that rotate them invalidate the previous one on
-use, so two machines sharing a path would repeatedly log each other out.
+Declaring `machine_id` inserts that segment, giving each machine its own
+entry to authorize separately.
 
 A server stored in OpenBao must be named with `[A-Za-z0-9._-]`, since the name
 becomes a path segment. The Keychain accepts any name.

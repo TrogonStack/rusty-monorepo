@@ -64,7 +64,7 @@ pub struct OpenBaoSettings {
     pub addr: String,
     pub mount: String,
     pub path_prefix: String,
-    pub machine_id: String,
+    pub machine_id: Option<String>,
     pub token: TokenSource,
     pub ca_cert_file: Option<PathBuf>,
     pub timeout: Duration,
@@ -98,7 +98,7 @@ pub struct OpenBaoBackend {
     addr: String,
     mount: String,
     path_prefix: String,
-    machine_id: String,
+    machine_id: Option<String>,
     token: TokenSource,
 }
 
@@ -167,17 +167,30 @@ impl OpenBaoBackend {
         &self.mount
     }
 
-    pub fn machine_id(&self) -> &str {
-        &self.machine_id
+    pub fn machine_id(&self) -> Option<&str> {
+        self.machine_id.as_deref()
     }
 
     /// Where the OAuth credentials for one server live.
     ///
-    /// Scoped per machine: OAuth tokens are client-bound, and providers that
-    /// rotate refresh tokens invalidate the previous one on use, so two
-    /// machines sharing a path would repeatedly log each other out.
+    /// Shared across machines unless `machine_id` says otherwise, because
+    /// reaching one credential from everywhere is the reason to leave the
+    /// Keychain at all. Isolation is the opt-in: a provider that rotates
+    /// refresh tokens and detects replay will revoke the whole grant when two
+    /// machines refresh the same one, and `machine_id` is how you avoid that.
     pub fn credential_path(&self, server: &str) -> String {
-        format!("mcp/{}/{server}", self.machine_id)
+        match &self.machine_id {
+            Some(id) => format!("mcp/{id}/{server}"),
+            None => format!("mcp/{server}"),
+        }
+    }
+
+    /// The prefix `credential_path` writes under, for error messages.
+    fn credential_root(&self) -> String {
+        match &self.machine_id {
+            Some(id) => format!("{}/{}/mcp/{id}/", self.mount, self.path_prefix),
+            None => format!("{}/{}/mcp/", self.mount, self.path_prefix),
+        }
     }
 
     /// Whether a server name can address this backend at all.
@@ -188,8 +201,8 @@ impl OpenBaoBackend {
         if server.is_empty() || !server.bytes().all(is_path_byte) {
             return Err(format!(
                 "a server stored in OpenBao must be named with [A-Za-z0-9._-], because the name \
-                 becomes a path segment at `{}/{}/mcp/{}/`",
-                self.mount, self.path_prefix, self.machine_id
+                 becomes a path segment at `{}`",
+                self.credential_root()
             ));
         }
         Ok(())
@@ -674,7 +687,7 @@ mod tests {
             addr: addr.to_string(),
             mount: "secret".to_string(),
             path_prefix: "trg".to_string(),
-            machine_id: "laptop".to_string(),
+            machine_id: Some("laptop".to_string()),
             token: TokenSource::Var(VarSource::Literal("t".to_string())),
             ca_cert_file: None,
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
@@ -802,9 +815,35 @@ mod tests {
     }
 
     #[test]
-    fn credential_paths_are_scoped_per_machine() {
+    fn a_machine_id_scopes_the_credential_path_to_that_machine() {
         let b = backend("https://bao.example.com:8200");
         assert_eq!(b.credential_path("github"), "mcp/laptop/github");
+    }
+
+    /// The reason to leave the Keychain is that one credential is reachable
+    /// from everywhere, so sharing is what you get when you ask for nothing.
+    #[test]
+    fn without_a_machine_id_every_machine_shares_one_credential() {
+        let mut s = settings("https://bao.example.com:8200");
+        s.machine_id = None;
+        let b = OpenBaoBackend::new(s).expect("build");
+
+        assert_eq!(b.credential_path("github"), "mcp/github");
+        assert_eq!(b.machine_id(), None);
+    }
+
+    #[test]
+    fn an_unaddressable_server_name_is_blamed_on_the_path_it_would_take() {
+        let mut shared = settings("https://bao.example.com:8200");
+        shared.machine_id = None;
+        let shared = OpenBaoBackend::new(shared).expect("build");
+        let reason = shared.check_server_name("my server").expect_err("refused");
+        assert!(reason.contains("secret/trg/mcp/"), "{reason}");
+        assert!(!reason.contains("laptop"), "{reason}");
+
+        let scoped = backend("https://bao.example.com:8200");
+        let reason = scoped.check_server_name("my server").expect_err("refused");
+        assert!(reason.contains("secret/trg/mcp/laptop/"), "{reason}");
     }
 
     #[test]
