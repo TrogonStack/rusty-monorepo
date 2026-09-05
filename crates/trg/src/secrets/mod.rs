@@ -584,7 +584,7 @@ mod tests {
                 addr: "https://bao.example.com:8200".to_string(),
                 mount: "secret".to_string(),
                 path_prefix: "trg".to_string(),
-                owner: None,
+                owner: "yordis".to_string(),
                 machine_id: Some("laptop".to_string()),
                 token: openbao::TokenSource::Var(crate::config::VarSource::Literal("t".to_string())),
                 ca_cert_file: None,

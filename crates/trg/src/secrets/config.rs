@@ -53,8 +53,16 @@ pub struct OpenbaoConfig {
     pub addr: VarSource,
     pub mount: String,
     pub path_prefix: String,
-    #[serde(default)]
-    pub owner: Option<String>,
+    /// Required, unlike every other segment field.
+    ///
+    /// A shared instance is the reason to reach for this backend at all, and
+    /// on one the subtree a credential lands in is the ACL boundary. Letting
+    /// it default means the first person to log in quietly takes `trg/mcp/*`
+    /// for everyone, and the second silently rotates their refresh token. That
+    /// is not a failure anyone sees until a provider treats the reuse as replay
+    /// and revokes the grant, so it is refused while the config is still in
+    /// view instead.
+    pub owner: String,
     #[serde(default)]
     pub machine_id: Option<String>,
     #[serde(default)]
@@ -289,6 +297,7 @@ mod tests {
             addr = { env = "BAO_ADDR" }
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token_file = "~/.vault-token"
             "#,
         )
@@ -319,6 +328,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token_file = "~/.vault-token"
             tls_skip_verify = true
             "#,
@@ -336,6 +346,7 @@ mod tests {
             addr = { secret = "bootstrap#addr" }
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token_file = "~/.vault-token"
             "#,
         )
@@ -365,6 +376,26 @@ mod tests {
         }
     }
 
+    /// The whole point of the field: a config that leaves the ACL boundary
+    /// unstated must not load. Serde names the field, which is the shortest
+    /// route from the error to the line that has to change.
+    #[test]
+    fn a_declaration_without_an_owner_is_refused_rather_than_shared() {
+        let err = section(
+            r#"
+            [backends.work]
+            kind = "openbao"
+            addr = "https://bao:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            token_file = "~/.vault-token"
+            "#,
+        )
+        .expect_err("an openbao backend without an owner should not parse");
+
+        assert!(err.to_string().contains("owner"), "{err}");
+    }
+
     /// `owner` is one path segment, not a subtree, so a slash in it would
     /// silently widen what a templated ACL path has to match.
     #[test]
@@ -389,7 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_and_a_machine_id_are_both_optional_and_neither_is_derived() {
+    fn a_machine_id_is_optional_and_is_not_derived_from_the_owner() {
         let s = section(
             r#"
             [backends.work]
@@ -397,6 +428,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token_file = "~/.vault-token"
             "#,
         )
@@ -421,6 +453,7 @@ mod tests {
                 addr = "https://bao:8200"
                 mount = "secret"
                 path_prefix = "{prefix}"
+                owner = "yordis"
                 token_file = "~/.vault-token"
                 "#
             ))
@@ -451,6 +484,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "/trg/mcp/"
+            owner = "yordis"
             token_file = "~/.vault-token"
             "#,
         )
@@ -469,6 +503,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token_file = "~/.vault-token"
             "#,
         )
@@ -490,6 +525,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             machine_id = "my laptop"
             token_file = "~/.vault-token"
             "#,
@@ -517,6 +553,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = ""
+            owner = "yordis"
             token_file = "~/.vault-token"
             "#,
         )
@@ -534,6 +571,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             "#,
         )
         .expect("parse");
@@ -549,6 +587,7 @@ mod tests {
             addr = "https://bao:8200"
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token_file = "~/.vault-token"
             token = { env = "BAO_TOKEN" }
             "#,
@@ -569,6 +608,7 @@ mod tests {
             addr = { env = "TRG_TEST_DEFINITELY_UNSET_BAO_ADDR" }
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token_file = "~/.vault-token"
             "#,
         )
@@ -616,6 +656,7 @@ mod tests {
                 addr = "https://bao.example.com:8200"
                 mount = "secret"
                 path_prefix = "trg"
+                owner = "yordis"
                 token_file = "~/.vault-token"
                 "#,
             )
@@ -639,6 +680,7 @@ mod tests {
                 addr = "https://bao.example.com:8200"
                 mount = "secret"
                 path_prefix = "trg"
+                owner = "yordis"
                 machine_id = "laptop"
                 token_file = "~/.vault-token"
                 "#,
