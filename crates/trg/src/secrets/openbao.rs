@@ -145,25 +145,10 @@ impl OpenBaoBackend {
         // `trg mcp proxy` child surfaces only as MCP error -32000, so a hang is
         // the failure mode this design is most exposed to.
         let connect = settings.timeout.min(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
-        // reqwest strips only the headers it knows are sensitive, and
-        // `X-Vault-Token` is not one of them, so a followed redirect re-sends
-        // the token verbatim. The configured instance is therefore the only
-        // origin allowed to receive it, and everything else is refused: a
-        // remote answering 307 with somewhere else is asking for the token,
-        // whether or not the target is itself https.
-        let origin = parsed.origin();
         let mut builder = reqwest::Client::builder()
             .connect_timeout(connect)
             .timeout(settings.timeout)
-            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                if attempt.url().origin() != origin {
-                    attempt.stop()
-                } else if attempt.previous().len() > MAX_REDIRECTS {
-                    attempt.error("too many redirects")
-                } else {
-                    attempt.follow()
-                }
-            }));
+            .redirect(only_this_origin(&parsed));
 
         if let Some(ref pem_path) = settings.ca_cert_file {
             let pem = std::fs::read(pem_path).map_err(|e| OpenBaoBuildError::CaCertRead {
@@ -310,13 +295,7 @@ impl OpenBaoBackend {
             None => self.storage_prefix(),
         };
         let url = format!("{}/v1/{}/metadata/{full}", self.addr, self.mount);
-        let anchor = prefix.cloned().unwrap_or_else(|| {
-            // `list` with no prefix has no path to blame in an error, so borrow
-            // the backend's own prefix for the message.
-            let prefix = self.storage_prefix();
-            SecretPath::parse(if prefix.is_empty() { "." } else { &prefix })
-                .unwrap_or_else(|_| SecretPath::parse("openbao").expect("static path is valid"))
-        });
+        let anchor = prefix.cloned().unwrap_or_else(|| prefix_anchor(&self.storage_prefix()));
 
         let method = reqwest::Method::from_bytes(b"LIST").expect("LIST is a valid method token");
         let response = self.send(method, &url, &anchor, None).await?;
@@ -491,6 +470,32 @@ fn is_path_byte(b: u8) -> bool {
 /// server would silently address a different secret.
 fn is_addressable_segment(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".." && segment.bytes().all(is_path_byte)
+}
+
+/// The configured instance is the only origin allowed to receive the token.
+///
+/// reqwest strips only the headers it knows are sensitive, and `X-Vault-Token`
+/// is not one of them, so a followed redirect re-sends the token verbatim. A
+/// remote answering 307 with somewhere else is asking for the token, whether or
+/// not the target is itself https.
+fn only_this_origin(addr: &reqwest::Url) -> reqwest::redirect::Policy {
+    let origin = addr.origin();
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.url().origin() != origin {
+            attempt.stop()
+        } else if attempt.previous().len() > MAX_REDIRECTS {
+            attempt.error("too many redirects")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+/// `list` with no prefix has no path to blame in an error, so the backend's
+/// own prefix stands in for one.
+fn prefix_anchor(prefix: &str) -> SecretPath {
+    SecretPath::parse(if prefix.is_empty() { "." } else { prefix })
+        .unwrap_or_else(|_| SecretPath::parse("openbao").expect("static path is valid"))
 }
 
 fn check_segment(field: &'static str, value: &str) -> Result<(), OpenBaoBuildError> {
@@ -778,48 +783,82 @@ mod tests {
         server: Arc<tiny_http::Server>,
     }
 
+    /// A loopback listener and the address that reaches it.
+    fn bind_loopback() -> (Arc<tiny_http::Server>, String) {
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind"));
+        let addr = format!(
+            "http://{}",
+            server.server_addr().to_ip().expect("a loopback tcp address")
+        );
+        (server, addr)
+    }
+
+    /// What the stub saw, so a test can assert on the request rather than only
+    /// on what the client made of the answer.
+    fn seen_from(request: &tiny_http::Request, body: String) -> Seen {
+        Seen {
+            method: request.method().as_str().to_string(),
+            url: request.url().to_string(),
+            token: request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("X-Vault-Token"))
+                .map(|h| h.value.as_str().to_string()),
+            body,
+        }
+    }
+
+    fn respond_with(request: tiny_http::Request, reply: Reply) {
+        let response = if reply.body.is_empty() {
+            tiny_http::Response::empty(reply.status).boxed()
+        } else {
+            tiny_http::Response::from_string(reply.body)
+                .with_status_code(reply.status)
+                .with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                        .expect("static header"),
+                )
+                .boxed()
+        };
+        let _ = request.respond(response);
+    }
+
+    fn serve_in_order(server: Arc<tiny_http::Server>, seen: Arc<Mutex<Vec<Seen>>>, replies: Vec<Reply>) {
+        for reply in replies {
+            let Ok(mut request) = server.recv() else { return };
+
+            let mut raw = String::new();
+            let _ = request.as_reader().read_to_string(&mut raw);
+            seen.lock().expect("stub lock").push(seen_from(&request, raw));
+
+            respond_with(request, reply);
+        }
+    }
+
+    fn serve_one_redirect_then_hits(server: Arc<tiny_http::Server>, seen: Arc<Mutex<Vec<Seen>>>, location: String) {
+        let mut first = true;
+        while let Ok(request) = server.recv() {
+            seen.lock().expect("stub lock").push(seen_from(&request, String::new()));
+
+            if std::mem::take(&mut first) {
+                let redirect = tiny_http::Response::empty(307).with_header(
+                    tiny_http::Header::from_bytes(&b"Location"[..], location.as_bytes()).expect("a location header"),
+                );
+                let _ = request.respond(redirect);
+            } else {
+                respond_with(request, Reply::hit(&[("k", "v")]));
+            }
+        }
+    }
+
     impl StubBao {
         fn start(replies: Vec<Reply>) -> Self {
-            let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind"));
-            let addr = format!(
-                "http://{}",
-                server.server_addr().to_ip().expect("a loopback tcp address")
-            );
+            let (server, addr) = bind_loopback();
             let seen = Arc::new(Mutex::new(Vec::new()));
 
             let worker = Arc::clone(&server);
             let recorder = Arc::clone(&seen);
-            std::thread::spawn(move || {
-                for reply in replies {
-                    let Ok(mut request) = worker.recv() else { return };
-
-                    let mut raw = String::new();
-                    let _ = request.as_reader().read_to_string(&mut raw);
-                    recorder.lock().expect("stub lock").push(Seen {
-                        method: request.method().as_str().to_string(),
-                        url: request.url().to_string(),
-                        token: request
-                            .headers()
-                            .iter()
-                            .find(|h| h.field.equiv("X-Vault-Token"))
-                            .map(|h| h.value.as_str().to_string()),
-                        body: raw,
-                    });
-
-                    let response = if reply.body.is_empty() {
-                        tiny_http::Response::empty(reply.status).boxed()
-                    } else {
-                        tiny_http::Response::from_string(reply.body)
-                            .with_status_code(reply.status)
-                            .with_header(
-                                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
-                                    .expect("static header"),
-                            )
-                            .boxed()
-                    };
-                    let _ = request.respond(response);
-                }
-            });
+            std::thread::spawn(move || serve_in_order(worker, recorder, replies));
 
             Self { addr, seen, server }
         }
@@ -828,45 +867,12 @@ mod tests {
         /// one with a hit, recording each so a test can see whether the token
         /// travelled and where.
         fn start_redirecting_once_to(location: String) -> Self {
-            let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind"));
-            let addr = format!(
-                "http://{}",
-                server.server_addr().to_ip().expect("a loopback tcp address")
-            );
+            let (server, addr) = bind_loopback();
             let seen = Arc::new(Mutex::new(Vec::new()));
 
             let worker = Arc::clone(&server);
             let recorder = Arc::clone(&seen);
-            std::thread::spawn(move || {
-                let mut first = true;
-                while let Ok(request) = worker.recv() {
-                    recorder.lock().expect("stub lock").push(Seen {
-                        method: request.method().as_str().to_string(),
-                        url: request.url().to_string(),
-                        token: request
-                            .headers()
-                            .iter()
-                            .find(|h| h.field.equiv("X-Vault-Token"))
-                            .map(|h| h.value.as_str().to_string()),
-                        body: String::new(),
-                    });
-
-                    let response = if std::mem::take(&mut first) {
-                        tiny_http::Response::empty(307)
-                            .with_header(
-                                tiny_http::Header::from_bytes(&b"Location"[..], location.as_bytes())
-                                    .expect("a location header"),
-                            )
-                            .boxed()
-                    } else {
-                        let hit = Reply::hit(&[("k", "v")]);
-                        tiny_http::Response::from_string(hit.body)
-                            .with_status_code(hit.status)
-                            .boxed()
-                    };
-                    let _ = request.respond(response);
-                }
-            });
+            std::thread::spawn(move || serve_one_redirect_then_hits(worker, recorder, location));
 
             Self { addr, seen, server }
         }
