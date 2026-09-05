@@ -21,7 +21,7 @@ use clap::{Args, ValueEnum};
 use serde::Serialize;
 
 use crate::secrets::openbao::{Health, TokenSource};
-use crate::secrets::{Backend, KeychainBackend, OpenBaoBackend, Registry, SecretsError};
+use crate::secrets::{Backend, BackendError, KeychainBackend, OpenBaoBackend, Registry, SecretsError};
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -353,30 +353,43 @@ impl Diagnosis {
     }
 }
 
+/// The name a report carries when nothing was declared to give it one.
+const IMPLICIT: &str = "(default)";
+
 /// Diagnose one named backend, or every declared one.
-pub async fn run(registry: &Registry, args: &DoctorArgs) -> i32 {
-    let subjects: Vec<String> = match &args.backend {
-        Some(name) => vec![name.clone()],
+///
+/// Declaring nothing is not the same as using nothing: every MCP server then
+/// falls to the built-in default, so that is what gets checked. Reporting it as
+/// having nothing to check would pass on a platform where the default cannot
+/// work at all.
+pub async fn diagnose_all(registry: &Registry, only: Option<&str>) -> Result<Diagnosis, BackendError> {
+    let names: Vec<String> = match only {
+        Some(name) => vec![name.to_string()],
         None => registry.declared().into_iter().map(str::to_string).collect(),
     };
 
-    if subjects.is_empty() {
-        println!("no secrets backends are declared, so every MCP server uses the default keychain");
-        return 0;
+    if names.is_empty() {
+        return Ok(Diagnosis {
+            backends: vec![diagnose(IMPLICIT, &Registry::default_backend()).await],
+        });
     }
 
-    let mut backends = Vec::with_capacity(subjects.len());
-    for name in subjects {
-        match registry.resolve(&name) {
-            Ok(backend) => backends.push(diagnose(&name, &backend).await),
-            Err(e) => {
-                eprintln!("{e}");
-                return 1;
-            }
+    let mut backends = Vec::with_capacity(names.len());
+    for name in names {
+        let backend = registry.resolve(&name)?;
+        backends.push(diagnose(&name, &backend).await);
+    }
+    Ok(Diagnosis { backends })
+}
+
+pub async fn run(registry: &Registry, args: &DoctorArgs) -> i32 {
+    let diagnosis = match diagnose_all(registry, args.backend.as_deref()).await {
+        Ok(diagnosis) => diagnosis,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
         }
-    }
-
-    let diagnosis = Diagnosis { backends };
+    };
 
     match args.format {
         DoctorFormat::Text => print!("{}", diagnosis.to_text()),
@@ -637,6 +650,19 @@ mod tests {
         };
         assert!(!failed.is_healthy());
         assert_eq!(failed.exit_code(), 1);
+    }
+
+    /// Nothing declared is not nothing used, and the platform check is the one
+    /// that fails on a machine where the default cannot work at all.
+    #[tokio::test]
+    async fn declaring_no_backend_still_diagnoses_the_one_that_will_be_used() {
+        let empty = Registry::new(crate::secrets::SecretsSection::default());
+        let diagnosis = diagnose_all(&empty, None).await.expect("nothing to resolve");
+
+        assert_eq!(diagnosis.backends.len(), 1);
+        assert_eq!(diagnosis.backends[0].backend, IMPLICIT);
+        assert_eq!(diagnosis.backends[0].kind, "keychain");
+        assert_eq!(diagnosis.is_healthy(), cfg!(target_os = "macos"));
     }
 
     fn report(backend: &str, checks: Vec<Check>) -> Report {

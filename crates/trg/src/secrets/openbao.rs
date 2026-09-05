@@ -284,7 +284,9 @@ impl OpenBaoBackend {
             .map_err(|e| self.transport_error(&path, &e))?;
 
         let status = response.status().as_u16();
-        let body = response.text().await.unwrap_or_default();
+        // A body that never finished arriving is a transport failure, not a
+        // health report the instance got wrong.
+        let body = response.text().await.map_err(|e| self.transport_error(&path, &e))?;
 
         serde_json::from_str(&body).map_err(|e| SecretsError::Malformed {
             path,
