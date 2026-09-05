@@ -57,6 +57,18 @@ pub enum TokenSource {
     Var(VarSource),
 }
 
+/// What a `404` carrying no `errors` array means to the caller that asked.
+///
+/// A read that finds nothing found nothing. A write that finds nothing wrote
+/// nothing, which is what something standing in front of OpenBao answers for a
+/// path it does not know, so reporting it as a stored credential would lose the
+/// credential silently.
+#[derive(Clone, Copy)]
+enum Absence {
+    IsAMiss,
+    IsAFailure,
+}
+
 /// Everything the backend needs.
 ///
 /// Whatever ends up in a URL is checked by [`OpenBaoBackend::new`], so a value
@@ -243,7 +255,7 @@ impl OpenBaoBackend {
         let url = self.data_url(path)?;
         let response = self.send(reqwest::Method::GET, &url, path, None).await?;
 
-        let Some(body) = self.read_body(response, path).await? else {
+        let Some(body) = self.read_body(response, path, Absence::IsAMiss).await? else {
             return Ok(None);
         };
 
@@ -278,14 +290,14 @@ impl OpenBaoBackend {
         })?;
 
         let response = self.send(reqwest::Method::POST, &url, path, Some(body)).await?;
-        self.read_body(response, path).await?;
+        self.read_body(response, path, Absence::IsAFailure).await?;
         Ok(())
     }
 
     pub async fn delete(&self, path: &SecretPath) -> Result<(), SecretsError> {
         let url = self.metadata_url(path)?;
         let response = self.send(reqwest::Method::DELETE, &url, path, None).await?;
-        self.read_body(response, path).await?;
+        self.read_body(response, path, Absence::IsAMiss).await?;
         Ok(())
     }
 
@@ -300,7 +312,7 @@ impl OpenBaoBackend {
         let method = reqwest::Method::from_bytes(b"LIST").expect("LIST is a valid method token");
         let response = self.send(method, &url, &anchor, None).await?;
 
-        let Some(body) = self.read_body(response, &anchor).await? else {
+        let Some(body) = self.read_body(response, &anchor, Absence::IsAMiss).await? else {
             return Ok(Vec::new());
         };
 
@@ -401,7 +413,12 @@ impl OpenBaoBackend {
 
     /// Classify the response. `Ok(None)` is the "no such secret" case, which
     /// every caller turns into its own empty answer.
-    async fn read_body(&self, response: reqwest::Response, path: &SecretPath) -> Result<Option<Value>, SecretsError> {
+    async fn read_body(
+        &self,
+        response: reqwest::Response,
+        path: &SecretPath,
+        absence: Absence,
+    ) -> Result<Option<Value>, SecretsError> {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
 
@@ -422,7 +439,15 @@ impl OpenBaoBackend {
         match status.as_u16() {
             // Both a missing secret and a missing mount answer 404; only the
             // body separates a miss from a misconfiguration.
-            404 if errors.is_empty() => Ok(None),
+            404 if errors.is_empty() => match absence {
+                Absence::IsAMiss => Ok(None),
+                Absence::IsAFailure => Err(SecretsError::Unavailable(format!(
+                    "OpenBao at {} answered `404` with no error to report, so nothing was \
+                     stored: check that `{}` is a KV v2 mount and that `addr` names OpenBao \
+                     itself rather than something standing in front of it",
+                    self.addr, self.mount
+                ))),
+            },
             404 => Err(SecretsError::Unavailable(format!(
                 "OpenBao at {} has no `{}` mount, or it is not a KV v2 mount: {}",
                 self.addr,
@@ -1325,6 +1350,35 @@ mod tests {
         assert_eq!(seen.method, "POST");
         assert_eq!(seen.url, "/v1/secret/data/trg/mcp/laptop/github");
         assert_eq!(seen.body, r#"{"data":{"credentials":"v"}}"#);
+    }
+
+    /// The same bare `404` that means "no such secret" to a read means the
+    /// write never happened, so the two cannot share an answer.
+    #[tokio::test]
+    async fn a_write_that_is_answered_with_a_bare_404_did_not_store_anything() {
+        let stub = StubBao::start(vec![Reply::miss()]);
+        let mut map = SecretMap::new();
+        map.insert(
+            SecretKey::parse("credentials").unwrap(),
+            SecretString::from("v".to_string()),
+        );
+
+        let err = stub
+            .backend()
+            .set(&path("mcp/laptop/github"), &map)
+            .await
+            .expect_err("a 404 is not a completed write");
+
+        assert!(matches!(err, SecretsError::Unavailable(_)), "{err}");
+        assert!(err.to_string().contains("nothing was stored"), "{err}");
+    }
+
+    /// Deleting what is already absent leaves the caller where it wanted to be.
+    #[tokio::test]
+    async fn a_delete_of_something_already_gone_is_not_an_error() {
+        let stub = StubBao::start(vec![Reply::miss()]);
+
+        stub.backend().delete(&path("mcp/laptop/github")).await.expect("delete");
     }
 
     #[tokio::test]
