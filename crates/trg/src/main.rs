@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use trg::commands::ai::AiCommands;
-use trg::commands::mcp::{McpCommands, McpContext};
+use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
 use trg::secrets::{CredentialPathError, Registry, ServerBackendError};
@@ -68,10 +68,7 @@ async fn main() {
         },
         Commands::Mcp { command } => match wire_mcp(&command) {
             Ok(ctx) => command.handle(&ctx).await,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
+            Err(e) => report_startup_failure(&command, &e).await,
         },
         Commands::Doctor(args) => match wire_secrets() {
             Ok(registry) => trg::commands::doctor::run(&registry, &args).await,

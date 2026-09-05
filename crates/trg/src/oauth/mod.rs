@@ -13,7 +13,7 @@ use crate::{
     config::ResolvedMcpServer,
     oauth::{
         flow::{run_authorization, FlowConfig, FlowError},
-        store::OAuthCredentialStore,
+        store::{OAuthCredentialStore, StorageFailure},
     },
     secrets::{Backend, SecretPath},
 };
@@ -26,6 +26,12 @@ pub enum EnsureOutcome {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EnsureError {
+    /// Reported bare, and separately from [`EnsureError::Auth`], because the
+    /// backend refusing a token is not an OAuth problem and naming it one sends
+    /// the reader to re-authorize the wrong service.
+    #[error("{0}")]
+    Storage(String),
+
     #[error("OAuth: {0}")]
     Auth(#[from] AuthError),
 
@@ -34,6 +40,14 @@ pub enum EnsureError {
 
     #[error("OAuth completed but credentials are missing from the secrets backend, refusing to start")]
     MissingAfterFlow,
+}
+
+/// Prefer what the credential store recorded over what rmcp made of it.
+fn storage_or(failure: &StorageFailure, err: AuthError) -> EnsureError {
+    match failure.take() {
+        Some(message) => EnsureError::Storage(message),
+        None => EnsureError::Auth(err),
+    }
 }
 
 /// Return a ready-to-use `AuthorizationManager` (running the interactive flow
@@ -69,25 +83,29 @@ pub async fn ensure_credentials_for(
     }
 
     manager.set_metadata(resolution.metadata);
-    manager.set_credential_store(OAuthCredentialStore::new(
-        backend.clone(),
-        cred_path.clone(),
-        server_name,
-    ));
+    let store = OAuthCredentialStore::new(backend.clone(), cred_path.clone(), server_name);
+    let failure = store.failure();
+    manager.set_credential_store(store);
 
-    if manager.initialize_from_store().await? {
+    if manager
+        .initialize_from_store()
+        .await
+        .map_err(|e| storage_or(&failure, e))?
+    {
         return Ok(EnsureOutcome::AlreadyAuthorized(manager));
     }
 
     let _ = run_authorization(manager, server_name, &[], FlowConfig::default()).await?;
 
     let mut manager = AuthorizationManager::new(url).await?;
-    manager.set_credential_store(OAuthCredentialStore::new(
-        backend.clone(),
-        cred_path.clone(),
-        server_name,
-    ));
-    if !manager.initialize_from_store().await? {
+    let store = OAuthCredentialStore::new(backend.clone(), cred_path.clone(), server_name);
+    let failure = store.failure();
+    manager.set_credential_store(store);
+    if !manager
+        .initialize_from_store()
+        .await
+        .map_err(|e| storage_or(&failure, e))?
+    {
         return Err(EnsureError::MissingAfterFlow);
     }
     Ok(EnsureOutcome::Authorized(manager))

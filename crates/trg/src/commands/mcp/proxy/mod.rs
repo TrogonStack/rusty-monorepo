@@ -4,4 +4,4 @@ mod cli;
 mod run;
 
 pub use cli::ProxyArgs;
-pub use run::{run_mcp_daemon, ProxyError};
+pub use run::{refuse_over_stdio, run_mcp_daemon, ProxyError};

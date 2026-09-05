@@ -9,6 +9,8 @@
 //! the map stored at the server's [`SecretPath`], which keeps the backend
 //! ignorant of OAuth and leaves room for other keys at the same path later.
 
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use secrecy::{ExposeSecret, SecretString};
@@ -19,6 +21,31 @@ use crate::secrets::{Backend, SecretKey, SecretMap, SecretPath, SecretsError};
 /// The key under which a server's OAuth credentials live.
 pub const CREDENTIALS_KEY: &str = "credentials";
 
+/// Where the store leaves what it was actually told, on the way past rmcp.
+///
+/// [`CredentialStore`] may only answer with rmcp's [`AuthError`], whose one
+/// variant able to carry a storage failure renders as `Internal error: ...`.
+/// That reads like a bug in `trg` rather than the expired token it usually is,
+/// so the message written here is what the caller reports instead.
+///
+/// Cloning shares the slot, which is the point: the store itself is moved into
+/// rmcp and never seen again.
+#[derive(Clone, Default)]
+pub struct StorageFailure(Arc<Mutex<Option<String>>>);
+
+impl StorageFailure {
+    fn record(&self, message: &str) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(message.to_string());
+        }
+    }
+
+    /// The last failure, if the store reached the backend and was refused.
+    pub fn take(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|mut slot| slot.take())
+    }
+}
+
 pub struct OAuthCredentialStore {
     backend: Backend,
     path: SecretPath,
@@ -26,6 +53,7 @@ pub struct OAuthCredentialStore {
     /// `path`: only the Keychain stores a server under its bare name, and
     /// OpenBao stores it under `mcp/<machine_id>/<server>`.
     server: String,
+    failure: StorageFailure,
 }
 
 impl OAuthCredentialStore {
@@ -34,7 +62,13 @@ impl OAuthCredentialStore {
             backend,
             path,
             server: server.into(),
+            failure: StorageFailure::default(),
         }
+    }
+
+    /// A handle on the slot, to be kept before the store is handed to rmcp.
+    pub fn failure(&self) -> StorageFailure {
+        self.failure.clone()
     }
 
     fn key() -> SecretKey {
@@ -105,17 +139,20 @@ impl CredentialStore for OAuthCredentialStore {
 
 impl OAuthCredentialStore {
     /// rmcp models every storage failure as `InternalError(String)`, so the
-    /// [`SecretsError`] variant survives only in the message.
+    /// [`SecretsError`] variant survives only in the message. The message is
+    /// also left in [`StorageFailure`], which is the copy that reaches a person.
     fn to_auth_error(&self, err: SecretsError) -> AuthError {
-        match &err {
+        let message = match &err {
             SecretsError::Malformed { .. } => {
                 let server = quote_for_shell(&self.server);
-                AuthError::InternalError(format!(
+                format!(
                     "{err}. Run `trg mcp auth logout --server {server}` then `trg mcp auth login --server {server}` to re-authorize"
-                ))
+                )
             }
-            _ => AuthError::InternalError(err.to_string()),
-        }
+            _ => err.to_string(),
+        };
+        self.failure.record(&message);
+        AuthError::InternalError(message)
     }
 }
 
@@ -203,6 +240,52 @@ mod tests {
         store.clear().await.expect("clear");
 
         assert!(backend.get(&path).await.expect("get").is_none());
+    }
+
+    /// The rendered message, not the `AuthError` rmcp wraps it in, is what a
+    /// person reads, so it has to survive the trip.
+    #[tokio::test]
+    async fn a_refusal_is_left_behind_without_the_prefix_rmcp_would_add() {
+        let (backend, store) = store();
+        let failure = store.failure();
+        let Backend::Fake(fake) = &backend else {
+            unreachable!("store() builds a fake")
+        };
+        fake.set_get_failure(Some(FakeFailure::Transport));
+
+        let err = store.load().await.expect_err("a transport failure should not load");
+
+        let left = failure.take().expect("the refusal should have been recorded");
+        assert!(!left.starts_with("Internal error"), "{left}");
+        assert!(err.to_string().contains(&left), "{err} should carry {left}");
+    }
+
+    /// Taking it clears it: a later failure that never reached the backend must
+    /// not be reported as this one.
+    #[tokio::test]
+    async fn a_refusal_is_reported_once() {
+        let (backend, store) = store();
+        let failure = store.failure();
+        let Backend::Fake(fake) = &backend else {
+            unreachable!("store() builds a fake")
+        };
+        fake.set_get_failure(Some(FakeFailure::Transport));
+        store.load().await.expect_err("a transport failure should not load");
+
+        assert!(failure.take().is_some());
+        assert!(failure.take().is_none());
+    }
+
+    /// A load that simply found nothing is not a refusal, and reporting the
+    /// empty slot as one would invent a backend problem.
+    #[tokio::test]
+    async fn a_load_that_succeeds_leaves_nothing_behind() {
+        let (_, store) = store();
+        let failure = store.failure();
+
+        store.load().await.expect("load");
+
+        assert!(failure.take().is_none());
     }
 
     #[tokio::test]
