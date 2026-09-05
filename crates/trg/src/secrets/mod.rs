@@ -11,6 +11,7 @@
 
 pub mod config;
 pub mod keychain;
+pub mod kv_v2;
 pub mod openbao;
 
 use std::collections::HashMap;

@@ -34,6 +34,7 @@ use std::time::Duration;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Map, Value};
 
+use super::kv_v2::{Envelope, ErrorBody, ListPayload, ReadPayload};
 use super::{SecretKey, SecretMap, SecretPath, SecretsError};
 use crate::config::VarSource;
 
@@ -220,22 +221,19 @@ impl OpenBaoBackend {
             return Ok(None);
         };
 
-        let data = body
-            .get("data")
-            .and_then(|d| d.get("data"))
-            .ok_or_else(|| SecretsError::Malformed {
-                path: path.clone(),
-                cause: "response has no `data.data` object".to_string(),
-            })?;
+        let read: Envelope<ReadPayload> = serde_json::from_value(body).map_err(|e| SecretsError::Malformed {
+            path: path.clone(),
+            cause: format!("response is not a KV v2 read: {e}"),
+        })?;
 
-        // Defensive. A soft-deleted version answers 404 with a `data.data` of
-        // null and no `errors`, which `read_body` already turns into a miss,
-        // so this only catches a 200 shaped the same way.
-        if data.is_null() {
+        // Defensive. A soft-deleted version answers 404 with a null `data`,
+        // which `read_body` already turns into a miss, so this only catches a
+        // 200 shaped the same way.
+        let Some(data) = read.data.data else {
             return Ok(None);
-        }
+        };
 
-        map_from_json(data, path).map(Some)
+        map_from_json(&data, path).map(Some)
     }
 
     pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {
@@ -248,7 +246,10 @@ impl OpenBaoBackend {
                 Value::String(value.expose_secret().to_string()),
             );
         }
-        let body = Value::Object([("data".to_string(), Value::Object(data))].into_iter().collect());
+        let body = serde_json::to_value(Envelope { data }).map_err(|e| SecretsError::Malformed {
+            path: path.clone(),
+            cause: e.to_string(),
+        })?;
 
         let response = self.send(reqwest::Method::POST, &url, path, Some(body)).await?;
         self.read_body(response, path).await?;
@@ -286,16 +287,12 @@ impl OpenBaoBackend {
             return Ok(Vec::new());
         };
 
-        let keys = body
-            .get("data")
-            .and_then(|d| d.get("keys"))
-            .and_then(Value::as_array)
-            .ok_or_else(|| SecretsError::Malformed {
-                path: anchor.clone(),
-                cause: "response has no `data.keys` array".to_string(),
-            })?;
+        let listing: Envelope<ListPayload> = serde_json::from_value(body).map_err(|e| SecretsError::Malformed {
+            path: anchor.clone(),
+            cause: format!("response is not a KV v2 listing: {e}"),
+        })?;
 
-        let mut out: Vec<String> = keys.iter().filter_map(Value::as_str).map(str::to_string).collect();
+        let mut out = listing.data.keys;
         out.sort();
         Ok(out)
     }
@@ -421,7 +418,7 @@ impl OpenBaoBackend {
                 });
         }
 
-        let errors = errors_of(&body);
+        let errors = ErrorBody::of(&body);
 
         match status.as_u16() {
             // Both a missing secret and a missing mount answer 404; only the
@@ -493,18 +490,6 @@ fn carries_a_token_safely(url: &reqwest::Url) -> bool {
     }
 }
 
-/// Pull OpenBao's `errors[]` out of a response. Only that array is ever
-/// surfaced: the rest of the body may hold secret material.
-fn errors_of(body: &str) -> Vec<String> {
-    serde_json::from_str::<Value>(body)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.get("errors"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-        .unwrap_or_default()
-}
-
 fn join_or(errors: &[String], fallback: &str) -> String {
     if errors.is_empty() {
         fallback.to_string()
@@ -513,12 +498,10 @@ fn join_or(errors: &[String], fallback: &str) -> String {
     }
 }
 
-fn map_from_json(data: &Value, path: &SecretPath) -> Result<SecretMap, SecretsError> {
-    let object = data.as_object().ok_or_else(|| SecretsError::Malformed {
-        path: path.clone(),
-        cause: "`data.data` is not an object".to_string(),
-    })?;
-
+/// The values stay [`Value`] rather than deserializing straight into strings,
+/// so a non-string is reported against the key that carries it instead of as a
+/// serde error against the whole response.
+fn map_from_json(object: &Map<String, Value>, path: &SecretPath) -> Result<SecretMap, SecretsError> {
     let mut map = SecretMap::new();
     for (name, value) in object {
         let text = value.as_str().ok_or_else(|| SecretsError::Malformed {
@@ -602,6 +585,7 @@ fn expand_tilde_from(raw: &str, home: Option<PathBuf>) -> PathBuf {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use super::super::kv_v2::{VersionMetadata, WritePayload};
     use super::*;
 
     /// One request the backend actually put on the wire.
@@ -611,6 +595,145 @@ mod tests {
         url: String,
         token: Option<String>,
         body: String,
+    }
+
+    /// A synthetic timestamp. Nothing reads these fields; they exist so a
+    /// fixture is the same shape as a real response.
+    const WHENEVER: &str = "1970-01-01T00:00:00Z";
+
+    fn version_metadata(version: u64, deleted: bool) -> VersionMetadata {
+        VersionMetadata {
+            version,
+            created_time: WHENEVER.to_string(),
+            deletion_time: if deleted { WHENEVER.to_string() } else { String::new() },
+            destroyed: false,
+            custom_metadata: None,
+        }
+    }
+
+    /// One scripted answer, named for what OpenBao does rather than spelled
+    /// out as a status and a JSON literal.
+    ///
+    /// The status each case carries is written down once, here, instead of at
+    /// every call site, which is what stops a fixture from claiming a shape
+    /// the server never sends.
+    struct Reply {
+        status: u16,
+        body: String,
+    }
+
+    impl Reply {
+        fn json<T: serde::Serialize>(status: u16, payload: &T) -> Self {
+            Self {
+                status,
+                body: serde_json::to_string(payload).expect("a fixture serializes"),
+            }
+        }
+
+        /// `GET` on a live version.
+        fn hit(pairs: &[(&str, &str)]) -> Self {
+            let data = pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+                .collect();
+            Self::json(
+                200,
+                &Envelope {
+                    data: ReadPayload {
+                        data: Some(data),
+                        metadata: Some(version_metadata(1, false)),
+                    },
+                },
+            )
+        }
+
+        /// `GET` on a path never written. The `errors` array is present and
+        /// empty, which is the only thing separating this from a bad mount.
+        fn miss() -> Self {
+            Self::json(404, &ErrorBody::default())
+        }
+
+        /// `GET` on a soft-deleted version: `404`, the version metadata still
+        /// there, and no `errors` key at all.
+        fn soft_deleted() -> Self {
+            Self::json(
+                404,
+                &Envelope {
+                    data: ReadPayload {
+                        data: None,
+                        metadata: Some(version_metadata(1, true)),
+                    },
+                },
+            )
+        }
+
+        /// A `200` carrying a null `data`, which no observed OpenBao sends.
+        fn ok_with_no_data() -> Self {
+            Self::json(
+                200,
+                &Envelope {
+                    data: ReadPayload {
+                        data: None,
+                        metadata: Some(version_metadata(4, false)),
+                    },
+                },
+            )
+        }
+
+        /// `POST` accepted.
+        fn written(version: u64) -> Self {
+            Self::json(
+                200,
+                &Envelope {
+                    data: WritePayload {
+                        version,
+                        created_time: WHENEVER.to_string(),
+                        deletion_time: String::new(),
+                        destroyed: false,
+                        custom_metadata: None,
+                    },
+                },
+            )
+        }
+
+        /// `LIST` on a folder. A key naming a folder ends in `/`.
+        fn listed(keys: &[&str]) -> Self {
+            Self::json(
+                200,
+                &Envelope {
+                    data: ListPayload {
+                        keys: keys.iter().map(|k| (*k).to_string()).collect(),
+                    },
+                },
+            )
+        }
+
+        /// `DELETE` accepted, with nothing to say.
+        fn no_content() -> Self {
+            Self {
+                status: 204,
+                body: String::new(),
+            }
+        }
+
+        /// Any refusal that carries OpenBao's `errors` array.
+        fn refused(status: u16, errors: &[&str]) -> Self {
+            Self::json(
+                status,
+                &ErrorBody {
+                    errors: errors.iter().map(|e| (*e).to_string()).collect(),
+                },
+            )
+        }
+
+        /// Something that is not OpenBao answering, such as an intercepting
+        /// proxy, or a status the client does not classify.
+        fn verbatim(status: u16, body: &str) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+            }
+        }
     }
 
     /// A real HTTP server answering scripted responses on a loopback port.
@@ -625,7 +748,7 @@ mod tests {
     }
 
     impl StubBao {
-        fn start(replies: Vec<(u16, &'static str)>) -> Self {
+        fn start(replies: Vec<Reply>) -> Self {
             let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind"));
             let addr = format!(
                 "http://{}",
@@ -636,7 +759,7 @@ mod tests {
             let worker = Arc::clone(&server);
             let recorder = Arc::clone(&seen);
             std::thread::spawn(move || {
-                for (status, body) in replies {
+                for reply in replies {
                     let Ok(mut request) = worker.recv() else { return };
 
                     let mut raw = String::new();
@@ -652,11 +775,11 @@ mod tests {
                         body: raw,
                     });
 
-                    let response = if body.is_empty() {
-                        tiny_http::Response::empty(status).boxed()
+                    let response = if reply.body.is_empty() {
+                        tiny_http::Response::empty(reply.status).boxed()
                     } else {
-                        tiny_http::Response::from_string(body)
-                            .with_status_code(status)
+                        tiny_http::Response::from_string(reply.body)
+                            .with_status_code(reply.status)
                             .with_header(
                                 tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
                                     .expect("static header"),
@@ -705,7 +828,10 @@ mod tests {
                             )
                             .boxed()
                     } else {
-                        tiny_http::Response::from_string(r#"{"data":{"data":{"k":"v"}}}"#).boxed()
+                        let hit = Reply::hit(&[("k", "v")]);
+                        tiny_http::Response::from_string(hit.body)
+                            .with_status_code(hit.status)
+                            .boxed()
                     };
                     let _ = request.respond(response);
                 }
@@ -787,7 +913,7 @@ mod tests {
     /// check can refuse this one.
     #[tokio::test]
     async fn a_redirect_to_another_origin_never_carries_the_token() {
-        let elsewhere = StubBao::start(vec![(200, r#"{"data":{"data":{"k":"v"}}}"#)]);
+        let elsewhere = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
         let bao = StubBao::start_redirecting_once_to(format!("{}/v1/secret/data/trg/mcp/laptop/x", elsewhere.addr));
 
         let err = bao
@@ -970,16 +1096,19 @@ mod tests {
 
     #[test]
     fn errors_of_extracts_only_the_errors_array() {
-        assert_eq!(errors_of(r#"{"errors":[]}"#), Vec::<String>::new());
-        assert_eq!(errors_of(r#"{"errors":["permission denied"]}"#), ["permission denied"]);
-        assert_eq!(errors_of("not json"), Vec::<String>::new());
-        assert_eq!(errors_of(r#"{"data":{"secret":"hunter2"}}"#), Vec::<String>::new());
+        assert_eq!(ErrorBody::of(r#"{"errors":[]}"#), Vec::<String>::new());
+        assert_eq!(
+            ErrorBody::of(r#"{"errors":["permission denied"]}"#),
+            ["permission denied"]
+        );
+        assert_eq!(ErrorBody::of("not json"), Vec::<String>::new());
+        assert_eq!(ErrorBody::of(r#"{"data":{"secret":"hunter2"}}"#), Vec::<String>::new());
     }
 
     #[test]
     fn map_from_json_rejects_non_string_values() {
         let path = SecretPath::parse("x").expect("parse");
-        let data: Value = serde_json::from_str(r#"{"a":1}"#).expect("json");
+        let data: Map<String, Value> = serde_json::from_str(r#"{"a":1}"#).expect("json");
         assert!(matches!(
             map_from_json(&data, &path),
             Err(SecretsError::Malformed { .. })
@@ -989,7 +1118,7 @@ mod tests {
     #[test]
     fn map_from_json_reads_string_values() {
         let path = SecretPath::parse("x").expect("parse");
-        let data: Value = serde_json::from_str(r#"{"a":"1","b":"2"}"#).expect("json");
+        let data: Map<String, Value> = serde_json::from_str(r#"{"a":"1","b":"2"}"#).expect("json");
         let map = map_from_json(&data, &path).expect("map");
         assert_eq!(map.len(), 2);
         assert_eq!(
@@ -1037,10 +1166,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_hit_reads_the_nested_data_object() {
-        let stub = StubBao::start(vec![(
-            200,
-            r#"{"data":{"data":{"credentials":"{\"a\":1}","other":"x"},"metadata":{"version":3}}}"#,
-        )]);
+        let stub = StubBao::start(vec![Reply::hit(&[("credentials", r#"{"a":1}"#), ("other", "x")])]);
         let map = stub
             .backend()
             .get(&path("mcp/laptop/github"))
@@ -1063,15 +1189,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_secret_is_a_miss_not_an_error() {
-        let stub = StubBao::start(vec![(404, r#"{"errors":[]}"#)]);
+        let stub = StubBao::start(vec![Reply::miss()]);
         assert!(stub.backend().get(&path("x")).await.expect("get").is_none());
     }
 
     #[tokio::test]
     async fn a_missing_mount_is_a_configuration_error_not_a_miss() {
-        let stub = StubBao::start(vec![(
+        let stub = StubBao::start(vec![Reply::refused(
             404,
-            r#"{"errors":["no handler for route \"nope/data/x\". route entry not found."]}"#,
+            &[r#"no handler for route "nope/data/x". route entry not found."#],
         )]);
         let err = stub.backend().get(&path("x")).await.expect_err("should fail");
 
@@ -1081,26 +1207,23 @@ mod tests {
 
     #[tokio::test]
     async fn a_soft_deleted_version_reads_as_a_miss() {
-        // Status and shape captured from a live OpenBao 2.5.5 after
-        // `DELETE /v1/<mount>/data/<path>`. The status is 404, and the body
-        // carries `data` but no `errors`. Request id replaced.
-        let stub = StubBao::start(vec![(
-            404,
-            r#"{"request_id":"00000000-0000-0000-0000-000000000000","lease_id":"","renewable":false,"lease_duration":0,"data":{"data":null,"metadata":{"created_time":"2026-09-05T00:40:09.009570287Z","custom_metadata":null,"deletion_time":"2026-09-05T00:40:25.107479352Z","destroyed":false,"version":1}},"wrap_info":null,"warnings":null,"auth":null}"#,
-        )]);
+        // A live OpenBao 2.5.5 answers `DELETE /v1/<mount>/data/<path>` and then
+        // a read of that path with a `404` whose body carries `data` but no
+        // `errors`, which is what [`Reply::soft_deleted`] reproduces.
+        let stub = StubBao::start(vec![Reply::soft_deleted()]);
         assert!(stub.backend().get(&path("x")).await.expect("get").is_none());
     }
 
     /// The guard in `get`, which no observed OpenBao response reaches.
     #[tokio::test]
     async fn a_success_carrying_a_null_data_object_is_also_a_miss() {
-        let stub = StubBao::start(vec![(200, r#"{"data":{"data":null,"metadata":{"version":4}}}"#)]);
+        let stub = StubBao::start(vec![Reply::ok_with_no_data()]);
         assert!(stub.backend().get(&path("x")).await.expect("get").is_none());
     }
 
     #[tokio::test]
     async fn a_rejected_token_names_the_recovery_command() {
-        let stub = StubBao::start(vec![(403, r#"{"errors":["permission denied"]}"#)]);
+        let stub = StubBao::start(vec![Reply::refused(403, &["permission denied"])]);
         let err = stub.backend().get(&path("x")).await.expect_err("should fail");
 
         assert!(matches!(err, SecretsError::Unauthorized { .. }), "{err:?}");
@@ -1109,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_sealed_backend_is_unavailable() {
-        let stub = StubBao::start(vec![(503, r#"{"errors":["Vault is sealed"]}"#)]);
+        let stub = StubBao::start(vec![Reply::refused(503, &["Vault is sealed"])]);
         let err = stub.backend().get(&path("x")).await.expect_err("should fail");
 
         assert!(matches!(err, SecretsError::Unavailable(_)), "{err:?}");
@@ -1118,7 +1241,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unclassified_status_never_repeats_the_response_body() {
-        let stub = StubBao::start(vec![(500, r#"{"data":{"credentials":"hunter2"}}"#)]);
+        let stub = StubBao::start(vec![Reply::verbatim(500, r#"{"data":{"credentials":"hunter2"}}"#)]);
         let err = stub.backend().get(&path("x")).await.expect_err("should fail");
 
         assert!(matches!(err, SecretsError::Transport(_)), "{err:?}");
@@ -1127,7 +1250,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_success_that_is_not_json_is_malformed() {
-        let stub = StubBao::start(vec![(200, "<html>proxy says no</html>")]);
+        let stub = StubBao::start(vec![Reply::verbatim(200, "<html>proxy says no</html>")]);
         let err = stub.backend().get(&path("x")).await.expect_err("should fail");
 
         assert!(matches!(err, SecretsError::Malformed { .. }), "{err:?}");
@@ -1135,10 +1258,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_wraps_the_map_in_the_kv_v2_data_envelope() {
-        let stub = StubBao::start(vec![(
-            200,
-            r#"{"request_id":"00000000-0000-0000-0000-000000000000","lease_id":"","renewable":false,"lease_duration":0,"data":{"created_time":"2026-09-05T00:40:09.009570287Z","custom_metadata":null,"deletion_time":"","destroyed":false,"version":1},"wrap_info":null,"warnings":null,"auth":null}"#,
-        )]);
+        let stub = StubBao::start(vec![Reply::written(1)]);
         let mut map = SecretMap::new();
         map.insert(
             SecretKey::parse("credentials").unwrap(),
@@ -1155,7 +1275,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_addresses_metadata_and_accepts_an_empty_204() {
-        let stub = StubBao::start(vec![(204, "")]);
+        let stub = StubBao::start(vec![Reply::no_content()]);
         stub.backend().delete(&path("mcp/laptop/github")).await.expect("delete");
 
         let seen = stub.only_request();
@@ -1165,7 +1285,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sorts_the_keys_it_is_given() {
-        let stub = StubBao::start(vec![(200, r#"{"data":{"keys":["zeta","alpha","mid/"]}}"#)]);
+        let stub = StubBao::start(vec![Reply::listed(&["zeta", "alpha", "mid/"])]);
         let keys = stub.backend().list(None).await.expect("list");
 
         assert_eq!(keys, ["alpha", "mid/", "zeta"]);
@@ -1177,7 +1297,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_of_an_empty_folder_is_empty_not_an_error() {
-        let stub = StubBao::start(vec![(404, r#"{"errors":[]}"#)]);
+        let stub = StubBao::start(vec![Reply::miss()]);
         assert!(stub.backend().list(None).await.expect("list").is_empty());
     }
 
@@ -1190,7 +1310,7 @@ mod tests {
         std::fs::write(&token, "first").expect("write");
         std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("chmod");
 
-        let stub = StubBao::start(vec![(404, r#"{"errors":[]}"#), (404, r#"{"errors":[]}"#)]);
+        let stub = StubBao::start(vec![Reply::miss(), Reply::miss()]);
         let mut s = settings(&stub.addr);
         s.token = TokenSource::File(token.clone());
         let backend = OpenBaoBackend::new(s).expect("build");
