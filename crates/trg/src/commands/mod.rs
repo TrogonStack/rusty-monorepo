@@ -1,12 +1,12 @@
 pub mod ai;
+pub mod doctor;
 pub mod mcp;
-pub mod secrets;
 
 use clap::Subcommand;
 
 use ai::AiCommands;
+use doctor::DoctorArgs;
 use mcp::McpCommands;
-use secrets::SecretsCommands;
 
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
@@ -21,9 +21,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: McpCommands,
     },
-    /// Configured secrets backends (`doctor` subcommand)
-    Secrets {
-        #[command(subcommand)]
-        command: SecretsCommands,
-    },
+    /// Check that the configured secrets backends are reachable and usable
+    Doctor(DoctorArgs),
 }

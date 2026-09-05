@@ -257,12 +257,13 @@ becomes a path segment. The Keychain accepts any name.
 ### Checking a backend
 
 ```sh
-trg secrets doctor --backend work
+trg doctor
 ```
 
-Reports whether the token can be read, the instance is serving, the mount
-answers, and the subtree lists. It only reads, and exits non-zero if any check
-failed. `--format json` prints the same report for a script to consume.
+Checks every declared backend, or one named with `--backend work`. Reports
+whether the token can be read, the instance is serving, the mount answers, and
+the subtree lists. It only reads, and exits non-zero if any check failed.
+`--format json` prints the same report for a script to consume.
 
 The mount and subtree checks issue the same list `trg` itself issues, so the
 command never needs more privilege than the tool it is diagnosing. A token

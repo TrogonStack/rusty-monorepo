@@ -93,7 +93,7 @@ can migrate one server at a time.
 ## 5. Check the backend before logging in
 
 ```sh
-trg secrets doctor --backend work
+trg doctor --backend work
 ```
 
 ```text
@@ -116,10 +116,12 @@ token whose policy stops at its own subtree is denied before OpenBao looks the
 mount up, and the mount check reports `skipped` rather than claiming a mount it
 never reached.
 
+Run it without `--backend` to check every declared backend at once.
+
 For a script, `--format json` prints the same report:
 
 ```sh
-trg secrets doctor --backend work --format json
+trg doctor --backend work --format json
 ```
 
 ## 6. Log in to the MCP server
@@ -235,8 +237,9 @@ Exactly one of `token_file` or `token` may be declared.
 
 ## Troubleshooting
 
-Start with `trg secrets doctor --backend work`, which narrows most of the
-below to a single failing check.
+Start with `trg doctor`, which narrows most of the below to a single failing
+check. It takes `--backend work` to look at one backend rather than every
+declared one.
 
 **`OpenBao rejected the token (permission denied); run bao login and retry`**
 

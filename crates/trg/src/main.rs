@@ -47,7 +47,7 @@ fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
     })
 }
 
-/// `trg secrets` reads the config for the backends alone, since a config that
+/// `trg doctor` reads the config for the backends alone, since a config that
 /// declares one before declaring anything that uses it is still a config this
 /// command can answer about.
 fn wire_secrets() -> Result<Registry, Box<WireError>> {
@@ -73,8 +73,8 @@ async fn main() {
                 1
             }
         },
-        Commands::Secrets { command } => match wire_secrets() {
-            Ok(registry) => command.handle(&registry).await,
+        Commands::Doctor(args) => match wire_secrets() {
+            Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
             Err(e) => {
                 eprintln!("{e}");
                 1

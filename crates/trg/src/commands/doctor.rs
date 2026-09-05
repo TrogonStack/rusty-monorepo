@@ -1,4 +1,9 @@
-//! The checks behind `trg secrets doctor`.
+//! The checks behind `trg doctor`.
+//!
+//! `doctor` sits at the top level rather than under the subsystem it checks,
+//! because it is what an operator reaches for before knowing which subsystem
+//! is at fault. Filing it under `secrets` would mean having to know the answer
+//! to find the command.
 //!
 //! Every probe here is a read. A doctor that wrote to prove writing works
 //! would need a path it is allowed to clobber, and picking one on the
@@ -12,10 +17,29 @@
 //! demands more privilege than the tool it diagnoses reports healthy setups as
 //! broken.
 
+use clap::{Args, ValueEnum};
 use serde::Serialize;
 
 use crate::secrets::openbao::{Health, TokenSource};
-use crate::secrets::{Backend, KeychainBackend, OpenBaoBackend, SecretsError};
+use crate::secrets::{Backend, KeychainBackend, OpenBaoBackend, Registry, SecretsError};
+
+#[derive(Args, Debug, Clone)]
+pub struct DoctorArgs {
+    /// Check only this backend, as named under `[secrets.backends.<name>]`.
+    /// Every declared backend is checked when this is omitted.
+    #[arg(long)]
+    pub backend: Option<String>,
+
+    /// Output format. Neither format emits a secret value.
+    #[arg(long, value_enum, default_value_t = DoctorFormat::Text)]
+    pub format: DoctorFormat,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum DoctorFormat {
+    Text,
+    Json,
+}
 
 /// What one check established.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -295,6 +319,79 @@ fn keychain(name: &str, kc: &KeychainBackend) -> Report {
     }
 }
 
+/// Every subject one `doctor` run looked at.
+///
+/// A config declaring several backends is one an operator is midway through
+/// setting up, which is exactly when checking them one at a time is the least
+/// useful thing to be asked to do.
+#[derive(Debug, Clone, Serialize)]
+pub struct Diagnosis {
+    pub backends: Vec<Report>,
+}
+
+impl Diagnosis {
+    pub fn is_healthy(&self) -> bool {
+        self.backends.iter().all(Report::is_healthy)
+    }
+
+    pub fn exit_code(&self) -> i32 {
+        i32::from(!self.is_healthy())
+    }
+
+    pub fn to_text(&self) -> String {
+        let mut out = self.backends.iter().map(Report::to_text).collect::<Vec<_>>().join("\n");
+
+        if self.backends.len() > 1 {
+            let failed = self.backends.iter().filter(|r| !r.is_healthy()).count();
+            out.push_str(&format!(
+                "\n{} backends checked, {failed} failed\n",
+                self.backends.len()
+            ));
+        }
+
+        out
+    }
+}
+
+/// Diagnose one named backend, or every declared one.
+pub async fn run(registry: &Registry, args: &DoctorArgs) -> i32 {
+    let subjects: Vec<String> = match &args.backend {
+        Some(name) => vec![name.clone()],
+        None => registry.declared().into_iter().map(str::to_string).collect(),
+    };
+
+    if subjects.is_empty() {
+        println!("no secrets backends are declared, so every MCP server uses the default keychain");
+        return 0;
+    }
+
+    let mut backends = Vec::with_capacity(subjects.len());
+    for name in subjects {
+        match registry.resolve(&name) {
+            Ok(backend) => backends.push(diagnose(&name, &backend).await),
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        }
+    }
+
+    let diagnosis = Diagnosis { backends };
+
+    match args.format {
+        DoctorFormat::Text => print!("{}", diagnosis.to_text()),
+        DoctorFormat::Json => match serde_json::to_string_pretty(&diagnosis) {
+            Ok(json) => println!("{json}"),
+            Err(e) => {
+                eprintln!("could not render the report: {e}");
+                return 1;
+            }
+        },
+    }
+
+    diagnosis.exit_code()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -540,6 +637,59 @@ mod tests {
         };
         assert!(!failed.is_healthy());
         assert_eq!(failed.exit_code(), 1);
+    }
+
+    fn report(backend: &str, checks: Vec<Check>) -> Report {
+        Report {
+            backend: backend.to_string(),
+            kind: "openbao",
+            target: "somewhere".to_string(),
+            checks,
+        }
+    }
+
+    #[test]
+    fn one_backend_reads_exactly_as_it_did_before_there_were_several() {
+        let one = Diagnosis {
+            backends: vec![report("work", vec![Check::new("token", Outcome::passed("a literal"))])],
+        };
+
+        assert_eq!(one.to_text(), one.backends[0].to_text());
+        assert!(!one.to_text().contains("backends checked"));
+    }
+
+    #[test]
+    fn several_backends_are_counted_so_the_failing_one_is_not_scrolled_past() {
+        let several = Diagnosis {
+            backends: vec![
+                report("work", vec![Check::new("token", Outcome::passed("a literal"))]),
+                report("ci", vec![Check::new("mount", Outcome::failed("gone", "put it back"))]),
+            ],
+        };
+
+        assert!(
+            several.to_text().contains("2 backends checked, 1 failed"),
+            "{}",
+            several.to_text()
+        );
+        assert!(!several.is_healthy());
+        assert_eq!(several.exit_code(), 1);
+    }
+
+    #[test]
+    fn a_diagnosis_is_healthy_only_when_every_backend_is() {
+        let healthy = Diagnosis {
+            backends: vec![
+                report("work", vec![Check::new("token", Outcome::passed("a literal"))]),
+                report(
+                    "ci",
+                    vec![Check::new("subtree", Outcome::skipped("nothing to enumerate"))],
+                ),
+            ],
+        };
+
+        assert!(healthy.is_healthy());
+        assert_eq!(healthy.exit_code(), 0);
     }
 
     #[test]

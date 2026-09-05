@@ -125,11 +125,16 @@ impl Registry {
         self.declared.is_empty()
     }
 
-    /// Declared backend names, sorted, for error messages.
-    pub fn names(&self) -> String {
+    /// Declared backend names, sorted.
+    pub fn declared(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.declared.keys().map(String::as_str).collect();
         names.sort_unstable();
-        names.join(", ")
+        names
+    }
+
+    /// Declared backend names, sorted, for error messages.
+    pub fn names(&self) -> String {
+        self.declared().join(", ")
     }
 
     pub fn resolve(&self, name: &str) -> Result<Backend, BackendError> {
