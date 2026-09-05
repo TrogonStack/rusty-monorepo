@@ -91,11 +91,16 @@ pub enum BackendError {
     Resolve {
         name: String,
         field: &'static str,
+        #[source]
         cause: VarResolveError,
     },
 
     #[error("`[secrets.backends.{name}]`: {cause}")]
-    Build { name: String, cause: OpenBaoBuildError },
+    Build {
+        name: String,
+        #[source]
+        cause: OpenBaoBuildError,
+    },
 }
 
 /// The declared backends, resolved by name on demand.
@@ -168,6 +173,7 @@ impl Registry {
 pub struct ServerBackendError {
     pub server: String,
     pub backend: String,
+    #[source]
     pub cause: Box<BackendError>,
 }
 

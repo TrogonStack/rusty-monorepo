@@ -100,13 +100,20 @@ pub enum OpenBaoBuildError {
     Insecure(String),
 
     #[error("could not read `ca_cert_file` at `{path}`: {cause}")]
-    CaCertRead { path: PathBuf, cause: String },
+    CaCertRead {
+        path: PathBuf,
+        #[source]
+        cause: std::io::Error,
+    },
 
     #[error("`ca_cert_file` at `{path}` is not a PEM certificate: {cause}")]
-    CaCertParse { path: PathBuf, cause: String },
-
+    CaCertParse {
+        path: PathBuf,
+        #[source]
+        cause: reqwest::Error,
+    },
     #[error("could not build an HTTP client for the openbao backend: {0}")]
-    Client(String),
+    Client(#[source] reqwest::Error),
 
     #[error("`{field}` must match [A-Za-z0-9._-] and be neither empty, `.`, nor `..`, got `{value}`")]
     Segment { field: &'static str, value: String },
@@ -157,26 +164,14 @@ impl OpenBaoBackend {
         // `trg mcp proxy` child surfaces only as MCP error -32000, so a hang is
         // the failure mode this design is most exposed to.
         let connect = settings.timeout.min(Duration::from_millis(DEFAULT_CONNECT_TIMEOUT_MS));
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .connect_timeout(connect)
             .timeout(settings.timeout)
             .redirect(only_this_origin(&parsed));
 
-        if let Some(ref pem_path) = settings.ca_cert_file {
-            let pem = std::fs::read(pem_path).map_err(|e| OpenBaoBuildError::CaCertRead {
-                path: pem_path.clone(),
-                cause: e.to_string(),
-            })?;
-            let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| OpenBaoBuildError::CaCertParse {
-                path: pem_path.clone(),
-                cause: e.to_string(),
-            })?;
-            // A pinned deployment stays pinned: `tls_certs_only` replaces the
-            // OS roots for this backend rather than merging with them.
-            builder = builder.tls_certs_only(certs);
-        }
-
-        let client = builder.build().map_err(|e| OpenBaoBuildError::Client(e.to_string()))?;
+        let client = trusting_only(builder, settings.ca_cert_file.as_deref())?
+            .build()
+            .map_err(OpenBaoBuildError::Client)?;
 
         Ok(Self {
             client,
@@ -514,6 +509,30 @@ fn only_this_origin(addr: &reqwest::Url) -> reqwest::redirect::Policy {
             attempt.follow()
         }
     })
+}
+
+/// The roots this backend trusts, which are the OS roots until a
+/// `ca_cert_file` says otherwise.
+///
+/// A pinned deployment stays pinned: `tls_certs_only` replaces the OS roots
+/// rather than merging with them, so a backend given a bundle trusts that
+/// bundle and nothing else.
+fn trusting_only(
+    builder: reqwest::ClientBuilder,
+    ca_cert_file: Option<&Path>,
+) -> Result<reqwest::ClientBuilder, OpenBaoBuildError> {
+    let Some(path) = ca_cert_file else {
+        return Ok(builder);
+    };
+    let pem = std::fs::read(path).map_err(|cause| OpenBaoBuildError::CaCertRead {
+        path: path.to_path_buf(),
+        cause,
+    })?;
+    let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|cause| OpenBaoBuildError::CaCertParse {
+        path: path.to_path_buf(),
+        cause,
+    })?;
+    Ok(builder.tls_certs_only(certs))
 }
 
 /// `list` with no prefix has no path to blame in an error, so the backend's
@@ -1062,6 +1081,27 @@ mod tests {
                 other => panic!("{field} should be refused at construction, got {other:?}"),
             }
         }
+    }
+
+    /// The point of a typed source: the original error survives instead of
+    /// being flattened into a string, so a caller can ask what went wrong
+    /// rather than matching on prose.
+    #[test]
+    fn a_ca_cert_file_that_is_not_there_keeps_the_io_error() {
+        let mut s = settings("https://bao.example.com:8200");
+        s.ca_cert_file = Some(PathBuf::from("/definitely/not/here.pem"));
+
+        let err = OpenBaoBackend::new(s).map(|_| ()).expect_err("should refuse");
+
+        assert!(err.to_string().contains("/definitely/not/here.pem"), "{err}");
+        let source = std::error::Error::source(&err).expect("the io error is kept");
+        assert_eq!(
+            source
+                .downcast_ref::<std::io::Error>()
+                .expect("an io error, not a string")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]
