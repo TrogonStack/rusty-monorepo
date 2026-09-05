@@ -15,8 +15,15 @@ each machine its own entry. See
 
 You need:
 
-- An OpenBao instance you can reach, with a KV v2 mount (this guide uses the
-  default `secret` mount).
+- An OpenBao instance you can reach, with a KV v2 mount. This guide uses
+  `secret`, which is what `bao server -dev` mounts. A deployed instance often
+  mounts KV v2 elsewhere, commonly `kv`. Check before you start, and use that
+  name wherever this guide says `secret`:
+
+  ```sh
+  bao secrets list
+  ```
+
 - Permission to write a policy on it, or someone who can.
 - The `bao` CLI on your `PATH`.
 
