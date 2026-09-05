@@ -107,7 +107,8 @@ pub async fn run_authorization(
         let server = server.clone();
         let timeout = config.callback_timeout;
         let expected_state = expected_state.clone();
-        tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state))
+        let server_name = server_name.to_string();
+        tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state, server_name))
             .await
             .map_err(|e| AuthError::InternalError(format!("OAuth callback task failed to run: {e}")))?
     };
@@ -239,7 +240,12 @@ impl Drop for UnblockServer {
     }
 }
 
-fn wait_for_callback(server: Arc<Server>, overall_timeout: Duration, expected_state: String) -> CallbackWait {
+fn wait_for_callback(
+    server: Arc<Server>,
+    overall_timeout: Duration,
+    expected_state: String,
+    server_name: String,
+) -> CallbackWait {
     let _cleanup = UnblockServer(server.clone());
     let start = Instant::now();
 
@@ -258,7 +264,7 @@ fn wait_for_callback(server: Arc<Server>, overall_timeout: Duration, expected_st
         let url_str = request.url();
         match parse_oauth_callback_url(url_str) {
             Ok(ParsedOAuthCallback::Success { code, state }) if state == expected_state => {
-                let _ = request.respond(success_response());
+                let _ = request.respond(success_response(&server_name));
                 return CallbackWait::Success { code, state };
             }
             Ok(ParsedOAuthCallback::Success { state, .. }) => {
@@ -282,14 +288,144 @@ fn wait_for_callback(server: Arc<Server>, overall_timeout: Duration, expected_st
     }
 }
 
-fn success_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = "<html><body>Authentication complete. You can close this tab.</body></html>";
-    html_response(body)
+fn success_response(server_name: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    html_response(&page(
+        "Authorized",
+        Mark::Ok,
+        "Authorized",
+        &format!(
+            "<p class=\"subject\"><code>{}</code></p>\n<p><code>trg</code> stored the credential. You can close this tab.</p>",
+            escape_html(server_name)
+        ),
+    ))
 }
 
 fn provider_error_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = "<html><body>Authentication failed. You can close this tab.</body></html>";
-    html_response(body)
+    html_response(&page(
+        "Authorization failed",
+        Mark::Bad,
+        "Authorization failed",
+        "<p>Nothing was stored. Your terminal has the reason. You can close this tab.</p>",
+    ))
+}
+
+enum Mark {
+    Ok,
+    Bad,
+}
+
+impl Mark {
+    fn svg(&self) -> &'static str {
+        match self {
+            Mark::Ok => {
+                r##"<svg class="mark" viewBox="0 0 44 44" fill="none" aria-hidden="true"><circle cx="22" cy="22" r="20" stroke="var(--ok)" stroke-width="2" opacity=".3"/><path d="M14 22.5l5.5 5.5L30 17" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+            }
+            Mark::Bad => {
+                r##"<svg class="mark" viewBox="0 0 44 44" fill="none" aria-hidden="true"><circle cx="22" cy="22" r="20" stroke="var(--bad)" stroke-width="2" opacity=".3"/><path d="M16.5 16.5l11 11M27.5 16.5l-11 11" stroke="var(--bad)" stroke-width="2.5" stroke-linecap="round"/></svg>"##
+            }
+        }
+    }
+}
+
+/// The page a browser lands on when the flow ends.
+///
+/// Everything is inline: no fonts, no scripts, no images fetched. A page served
+/// by this crate that reached off the machine would turn every login into a
+/// request some third party could count, and it would break on the air-gapped
+/// hosts that are the reason `token` exists alongside `token_file`.
+///
+/// `body` is interpolated as markup, so anything from outside this function has
+/// to go through [`escape_html`] before it gets here.
+fn page(title: &str, mark: Mark, heading: &str, body: &str) -> String {
+    let mark = mark.svg();
+    format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{title} &middot; trg</title>
+<style>
+:root {{
+  --bg:#f6f7f9; --card:#fff; --line:#e4e7eb; --fg:#11151b; --muted:#5b6672;
+  --chip:rgba(17,21,27,.06); --ok:#1a7f37; --bad:#b3261e;
+  --shadow:0 1px 2px rgba(17,21,27,.05),0 10px 30px rgba(17,21,27,.08);
+}}
+@media (prefers-color-scheme:dark) {{
+  :root {{
+    --bg:#0b0d10; --card:#14171c; --line:#232831; --fg:#e6e9ed; --muted:#98a1ad;
+    --chip:rgba(230,233,237,.08); --ok:#3fb950; --bad:#f85149;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  }}
+}}
+*{{box-sizing:border-box}}
+html,body{{height:100%}}
+body{{
+  margin:0; display:grid; place-items:center; padding:24px;
+  background:var(--bg); color:var(--fg);
+  font:15px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}}
+.card{{
+  width:100%; max-width:27rem; text-align:center;
+  background:var(--card); border:1px solid var(--line); border-radius:14px;
+  box-shadow:var(--shadow); padding:34px 32px 18px;
+}}
+.mark{{width:44px;height:44px}}
+h1{{margin:18px 0 10px;font-size:1.2rem;font-weight:600;letter-spacing:-.01em}}
+p{{margin:0;color:var(--muted)}}
+.subject{{margin:0 0 12px}}
+.subject code{{font-size:13.5px;padding:.28em .6em}}
+code{{
+  font:13px/1.4 ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  background:var(--chip); border-radius:5px; padding:.12em .4em;
+}}
+footer{{
+  margin-top:28px; padding-top:16px; border-top:1px solid var(--line);
+  display:flex; align-items:center; justify-content:center; gap:8px;
+  font-size:12.5px; color:var(--muted);
+}}
+footer a{{color:inherit;text-decoration:none}}
+footer a:hover{{color:var(--fg);text-decoration:underline}}
+.wordmark{{font-weight:600;color:var(--fg)}}
+.sep{{opacity:.45}}
+</style>
+</head>
+<body>
+<main class="card">
+{mark}
+<h1>{heading}</h1>
+{body}
+<footer>
+<span class="wordmark">TrogonStack</span>
+<span class="sep">&middot;</span>
+<a href="https://github.com/TrogonStack">github.com/TrogonStack</a>
+</footer>
+</main>
+</body>
+</html>
+"##
+    )
+}
+
+/// Escape text for interpolation into [`page`].
+///
+/// A server name reaches this page, and the Keychain backend accepts any name
+/// at all, so one containing markup would otherwise be rendered as markup.
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn html_response(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -326,6 +462,58 @@ fn boxed_error_to_io(err: Box<dyn std::error::Error + Send + Sync>) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Keychain backend accepts any server name, so one carrying markup
+    /// reaches this page. It has to arrive as text.
+    #[test]
+    fn a_server_name_is_escaped_into_the_page() {
+        let body = read_body(success_response("<script>alert(1)</script>"));
+
+        assert!(!body.contains("<script>"), "{body}");
+        assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{body}");
+    }
+
+    #[test]
+    fn the_success_page_names_the_server_that_was_authorized() {
+        let body = read_body(success_response("linear"));
+
+        assert!(body.contains("Authorized"), "{body}");
+        assert!(body.contains("<code>linear</code>"), "{body}");
+    }
+
+    /// A page served off a loopback port during a login must not turn that
+    /// login into a request anyone else can observe, and must render on a host
+    /// with no route out.
+    #[test]
+    fn the_pages_fetch_nothing_but_the_one_link_they_offer() {
+        for body in [
+            read_body(success_response("linear")),
+            read_body(provider_error_response()),
+        ] {
+            assert!(!body.contains("<script"), "{body}");
+            for attr in ["src=", "@import", "url("] {
+                assert!(!body.contains(attr), "found {attr} in {body}");
+            }
+            assert_eq!(body.matches("https://").count(), 1, "{body}");
+            assert!(body.contains("https://github.com/TrogonStack"), "{body}");
+        }
+    }
+
+    #[test]
+    fn the_failure_page_says_nothing_was_kept() {
+        let body = read_body(provider_error_response());
+
+        assert!(body.contains("Authorization failed"), "{body}");
+        assert!(body.contains("Nothing was stored"), "{body}");
+    }
+
+    fn read_body(response: Response<std::io::Cursor<Vec<u8>>>) -> String {
+        let mut out = Vec::new();
+        response
+            .raw_print(&mut out, (1, 1).into(), &[], false, None)
+            .expect("render");
+        String::from_utf8(out).expect("utf-8")
+    }
 
     #[test]
     fn flow_config_default_callback_timeout_is_300_seconds() {
