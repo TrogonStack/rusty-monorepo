@@ -10,8 +10,10 @@
 //! side speaks, and the proxy is a pipe between two implementations of exactly
 //! these types.
 //!
-//! The server points at a closed loopback port, which fails discovery without
-//! reaching the network and without depending on any credential store.
+//! The failure used throughout is a server naming a secrets backend that was
+//! never declared. It is refused while `main` resolves config, so nothing here
+//! opens a socket, waits on a timeout, or depends on what is listening on the
+//! machine running the tests.
 
 use std::fs;
 
@@ -35,15 +37,21 @@ fn initialized() -> ClientJsonRpcMessage {
     ))
 }
 
-fn config_home_pointing_at_a_closed_port() -> tempfile::TempDir {
+fn config_home_naming_an_undeclared_backend() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("trg")).unwrap();
     fs::write(
         dir.path().join("trg/config.toml"),
-        "[mcp.servers.nowhere]\nurl = \"http://127.0.0.1:1/mcp\"\n",
+        "[mcp.servers.nowhere]\nurl = \"https://mcp.example.com/mcp\"\nsecrets = \"nosuch\"\n",
     )
     .unwrap();
     dir
+}
+
+fn trg(config_home: &std::path::Path) -> Command {
+    let mut cmd = Command::cargo_bin("trg").unwrap();
+    cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd
 }
 
 fn proxy(config_home: &std::path::Path, sent: &[ClientJsonRpcMessage]) -> std::process::Output {
@@ -52,8 +60,7 @@ fn proxy(config_home: &std::path::Path, sent: &[ClientJsonRpcMessage]) -> std::p
         .map(|msg| serde_json::to_string(msg).expect("an rmcp message serializes") + "\n")
         .collect::<String>();
 
-    let mut cmd = Command::cargo_bin("trg").unwrap();
-    cmd.env("XDG_CONFIG_HOME", config_home);
+    let mut cmd = trg(config_home);
     cmd.args(["mcp", "proxy", "--server", "nowhere"]);
     cmd.write_stdin(stdin);
     cmd.output().unwrap()
@@ -69,7 +76,7 @@ fn received(stdout: &[u8]) -> Vec<ServerJsonRpcMessage> {
 
 #[test]
 fn a_proxy_that_cannot_start_answers_the_request_rather_than_only_exiting() {
-    let home = config_home_pointing_at_a_closed_port();
+    let home = config_home_naming_an_undeclared_backend();
     let id = RequestId::Number(1);
     let out = proxy(home.path(), &[initialize(id.clone())]);
 
@@ -80,8 +87,8 @@ fn a_proxy_that_cannot_start_answers_the_request_rather_than_only_exiting() {
 
     assert_eq!(refusal.id, Some(id), "the answer has to name the request it answers");
     assert!(
-        !refusal.error.message.is_empty(),
-        "the refusal has to carry a reason: {refusal:#?}"
+        refusal.error.message.contains("nosuch"),
+        "the refusal has to carry the reason, not a generic failure: {refusal:#?}"
     );
 
     // Answering the host is not the same as having worked.
@@ -92,7 +99,7 @@ fn a_proxy_that_cannot_start_answers_the_request_rather_than_only_exiting() {
 /// would be a response to a request the host never made.
 #[test]
 fn a_notification_is_not_answered() {
-    let home = config_home_pointing_at_a_closed_port();
+    let home = config_home_naming_an_undeclared_backend();
     let out = proxy(home.path(), &[initialized()]);
 
     let messages = received(&out.stdout);
@@ -104,7 +111,7 @@ fn a_notification_is_not_answered() {
 /// request the proxy quietly dropped.
 #[test]
 fn every_request_is_answered_and_not_only_the_first() {
-    let home = config_home_pointing_at_a_closed_port();
+    let home = config_home_naming_an_undeclared_backend();
     let first = RequestId::Number(1);
     let second = RequestId::String("second".into());
     let out = proxy(
@@ -121,4 +128,24 @@ fn every_request_is_answered_and_not_only_the_first() {
         .collect();
 
     assert_eq!(ids, vec![Some(first), Some(second)]);
+}
+
+/// The protocol is the proxy's channel and nobody else's. `trg mcp auth` is
+/// typed by a person watching stderr, and JSON on their stdout would be noise
+/// they have to read past.
+#[test]
+fn only_the_proxy_answers_over_the_protocol() {
+    let home = config_home_naming_an_undeclared_backend();
+    let out = trg(home.path())
+        .args(["mcp", "auth", "status", "--server", "nowhere"])
+        .output()
+        .unwrap();
+
+    assert!(out.stdout.is_empty(), "{:?}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("nosuch"),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(1));
 }

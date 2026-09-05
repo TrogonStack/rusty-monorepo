@@ -6,7 +6,7 @@ pub use proxy::ProxyArgs;
 use clap::Subcommand;
 
 use auth::AuthCommands;
-use proxy::{run_mcp_daemon, ProxyError};
+use proxy::{refuse_over_stdio, run_mcp_daemon, ProxyError};
 
 use crate::{
     config::ResolvedMcpServer,
@@ -57,5 +57,21 @@ impl McpCommands {
 
 fn emit_proxy_err(e: ProxyError) -> i32 {
     eprintln!("{e}");
+    1
+}
+
+/// Report a failure that happened before [`McpCommands::handle`] could run.
+///
+/// Config and the backend are resolved in `main`, so a proxy can be dead before
+/// it owns anything. To the editor that spawned it those failures look exactly
+/// like the ones the bridge reports, and they need the same channel.
+///
+/// Only the proxy gets that treatment. Every other subcommand is typed by a
+/// person who is already looking at stderr.
+pub async fn report_startup_failure(command: &McpCommands, reason: &str) -> i32 {
+    eprintln!("{reason}");
+    if matches!(command, McpCommands::Proxy(_)) {
+        refuse_over_stdio(reason).await;
+    }
     1
 }

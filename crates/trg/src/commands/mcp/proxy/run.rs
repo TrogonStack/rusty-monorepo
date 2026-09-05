@@ -90,16 +90,17 @@ pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
 
 /// Answer the host over the protocol instead of dying before one exists.
 ///
-/// Credentials are ensured before any bridge is built, so an auth failure used
-/// to leave stdout empty and the reason on a stderr an editor discards: the
-/// host could report only that its MCP server had exited. Every request gets
-/// the reason back instead, starting with `initialize`, which is the one an
-/// editor puts in front of the person who has to renew the token.
+/// A proxy can fail before its bridge is built: while reading config, while
+/// picking a backend, or while ensuring credentials. All three used to leave
+/// stdout empty and the reason on a stderr an editor discards, so the host
+/// could report only that its MCP server had exited. Every request gets the
+/// reason back instead, starting with `initialize`, which is the one an editor
+/// puts in front of the person who has to act on it.
 ///
 /// Skipped when stdin is a terminal, where there is no host to answer and
 /// waiting for a request that will never be typed would hang a `trg mcp proxy`
 /// run by hand.
-async fn refuse_over_stdio(reason: &str) {
+pub async fn refuse_over_stdio(reason: &str) {
     if std::io::stdin().is_terminal() {
         return;
     }
