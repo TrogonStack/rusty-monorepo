@@ -55,6 +55,8 @@ pub struct OpenbaoConfig {
     pub mount: String,
     pub path_prefix: String,
     #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
     pub machine_id: Option<String>,
     #[serde(default)]
     pub token_file: Option<String>,
@@ -190,6 +192,7 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                 addr,
                 mount,
                 path_prefix,
+                owner,
                 machine_id,
                 token_file,
                 token,
@@ -219,9 +222,16 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                 }
             };
 
-            // Absent means one credential shared by every machine, which is
-            // the reason to use a remote backend at all. Present means opt-in
-            // isolation. Nothing is derived, so nothing collides silently.
+            // Two separate axes, and neither is derived from anything.
+            //
+            // `owner` says whose credential it is, which is the boundary an
+            // ACL draws. `machine_id` says which holder may refresh it, which
+            // matters only where a provider rotates refresh tokens and treats
+            // a reused one as replay. One person on two machines is one owner
+            // and two holders, so neither substitutes for the other.
+            if let Some(owner) = owner {
+                check_segment(name, "owner", owner)?;
+            }
             if let Some(id) = machine_id {
                 check_segment(name, "machine_id", id)?;
             }
@@ -242,6 +252,7 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                 addr,
                 mount: mount.clone(),
                 path_prefix: path_prefix.to_string(),
+                owner: owner.clone(),
                 machine_id: machine_id.clone(),
                 token,
                 ca_cert_file: ca_cert_file.as_deref().map(expand_tilde),
@@ -378,6 +389,50 @@ mod tests {
             let err = section(&lines.join("\n")).expect_err("should require {missing}");
             assert!(err.to_string().contains(missing), "missing {missing}: {err}");
         }
+    }
+
+    /// `owner` is one path segment, not a subtree, so a slash in it would
+    /// silently widen what a templated ACL path has to match.
+    #[test]
+    fn an_owner_that_is_not_a_single_segment_is_refused_at_config_time() {
+        for owner in ["a/b", "..", ".", "", "yor dis"] {
+            let s = section(&format!(
+                r#"
+                [backends.work]
+                kind = "openbao"
+                addr = "https://bao:8200"
+                mount = "secret"
+                path_prefix = "trg"
+                owner = "{owner}"
+                token_file = "~/.vault-token"
+                "#
+            ))
+            .expect("parse");
+
+            let err = build("work", &s.backends["work"]).expect_err("should refuse {owner:?}");
+            assert!(err.to_string().contains("owner"), "{owner:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_owner_and_a_machine_id_are_both_optional_and_neither_is_derived() {
+        let s = section(
+            r#"
+            [backends.work]
+            kind = "openbao"
+            addr = "https://bao:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            token_file = "~/.vault-token"
+            "#,
+        )
+        .expect("parse");
+
+        let Backend::OpenBao(b) = build("work", &s.backends["work"]).expect("build") else {
+            panic!("expected an openbao backend")
+        };
+        assert_eq!(b.machine_id(), None);
+        assert_eq!(b.credential_path("github"), "mcp/github");
     }
 
     /// A bad prefix has to fail while the user is looking at their config, not

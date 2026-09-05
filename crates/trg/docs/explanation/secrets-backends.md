@@ -60,7 +60,7 @@ store.
 | Backend    | Where one server's credentials live                       |
 | ---------- | ---------------------------------------------------------- |
 | `keychain` | Service = the backend's `service`, account = the server name. |
-| `openbao`  | `<mount>/data/<path_prefix>/mcp/<server-name>`, plus `<machine_id>/` when declared |
+| `openbao`  | `<mount>/data/<path_prefix>/[<owner>/]mcp/[<machine_id>/]<server-name>` |
 
 The Keychain is already scoped to one machine and one login keychain, so it
 addresses items by bare server name. Adding a machine segment there would
@@ -77,24 +77,48 @@ both rotates refresh tokens and treats a reused one as replay, which revokes
 the whole grant family. Declaring `machine_id` is how you avoid that, and the
 cost you accept for it is one login per machine per server.
 
-## `path_prefix` names a location, it does not enforce one
+## `owner` and `machine_id` are two axes, not one
 
-On a shared instance the natural next question is how one user is kept out of
-another's credentials. The answer is the policy, not the config.
+They look like the same idea spelled twice, and collapsing them is the obvious
+simplification to reach for. It does not work, because they answer different
+questions.
 
-`path_prefix` is a literal. It does not expand `{{identity.entity...}}` or
-anything else, because `trg` has no idea who the token belongs to. The token
-is opaque to it: `trg` reads a file and sets a header, and never calls
-`lookup-self` or touches `auth/` at all. Resolving an identity in order to
-build a path would add a round trip before every operation, and a bootstrap
-dependency on the very thing the path is supposed to address.
+`owner` answers *whose credential is this*. It is an authorization boundary,
+and its unit is the person or the service account. `machine_id` answers *which
+holder may refresh this*. It is a concurrency hazard, and its unit is the
+installation.
+
+The case that separates them is one person on two machines. That is a single
+owner and two holders. Against a provider that rotates refresh tokens and
+treats a reused one as replay, those two machines revoke each other's grant
+even though they belong to the same person and are equally entitled to it. So
+keying isolation on identity does not merely fail to help, it guarantees the
+collision by putting both machines on one path.
+
+Falling back from one to the other would be worse still. The path would then
+depend on which field happened to be set, so "where does this credential live"
+would stop being answerable from the config, which is the same defect this
+design rejects in searched backends.
+
+## `owner` names a location, it does not enforce one
+
+`owner` is a literal. It does not expand `{{identity.entity...}}` or anything
+else, because `trg` has no idea who the token belongs to. The token is opaque
+to it: `trg` reads a file and sets a header, and never calls `lookup-self` or
+touches `auth/` at all. Resolving an identity in order to build a path would
+add a round trip before every operation, and a bootstrap dependency on the
+very thing the path is supposed to address.
 
 It would also be the wrong place for it. A boundary that the client computes
 is a boundary the client can be edited out of. OpenBao already templates ACL
 paths on the caller's identity, and that check runs on the server whatever the
-config says, so a wrong `path_prefix` is a `permission denied` rather than a
-read of someone else's secret. Duplicating the rule in `trg` would buy nothing
-and give two places for it to be wrong.
+config says, so a wrong `owner` is a `permission denied` rather than a read of
+someone else's secret. Duplicating the rule in `trg` would buy nothing and
+give two places for it to be wrong.
+
+`owner` sits ahead of `mcp/` in the path so that granting a person their
+subtree covers everything `trg` keeps for them, rather than having to be
+re-granted for each kind of thing it later stores.
 
 ## Why the OpenBao client is not a client crate
 

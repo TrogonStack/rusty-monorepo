@@ -7,9 +7,14 @@
 //! BAO_MOUNT=kv cargo test -p trg --test openbao_live -- --ignored --nocapture
 //! ```
 //!
-//! `BAO_PREFIX` picks the subtree, so an instance whose policy templates the
-//! path on the caller's identity can be exercised at the subtree that policy
-//! actually grants.
+//! `BAO_PREFIX` and `BAO_OWNER` pick the subtree, so an instance whose policy
+//! templates the path on the caller's identity can be exercised at the subtree
+//! that policy actually grants.
+//!
+//! Beware when pointing these at a throwaway `bao server -dev`: dev mode
+//! persists its root token to the token helper, overwriting whatever
+//! `~/.vault-token` held for a real instance. Start it with
+//! `-dev-no-store-token`.
 use std::time::Duration;
 
 use secrecy::ExposeSecret;
@@ -25,6 +30,7 @@ fn live() -> OpenBaoBackend {
         addr,
         mount,
         path_prefix: prefix(),
+        owner: std::env::var("BAO_OWNER").ok(),
         machine_id: None,
         token: TokenSource::File(dirs_home().join(".vault-token")),
         ca_cert_file: None,
@@ -78,6 +84,7 @@ async fn a_bad_mount_is_reported_as_a_configuration_error() {
         addr,
         mount: "definitely-not-a-mount".to_string(),
         path_prefix: prefix(),
+        owner: std::env::var("BAO_OWNER").ok(),
         machine_id: None,
         token: TokenSource::File(dirs_home().join(".vault-token")),
         ca_cert_file: None,
@@ -99,6 +106,7 @@ async fn a_rejected_token_is_reported_as_unauthorized() {
         addr,
         mount,
         path_prefix: prefix(),
+        owner: std::env::var("BAO_OWNER").ok(),
         machine_id: None,
         token: TokenSource::Var(VarSource::Literal("definitely-not-a-token".to_string())),
         ca_cert_file: None,

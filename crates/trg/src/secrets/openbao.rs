@@ -65,6 +65,9 @@ pub struct OpenBaoSettings {
     pub addr: String,
     pub mount: String,
     pub path_prefix: String,
+    /// Whose credentials these are. A person is one owner across every
+    /// machine they use, so this is stable in a config shared between them.
+    pub owner: Option<String>,
     pub machine_id: Option<String>,
     pub token: TokenSource,
     pub ca_cert_file: Option<PathBuf>,
@@ -99,6 +102,7 @@ pub struct OpenBaoBackend {
     addr: String,
     mount: String,
     path_prefix: String,
+    owner: Option<String>,
     machine_id: Option<String>,
     token: TokenSource,
 }
@@ -159,6 +163,7 @@ impl OpenBaoBackend {
             addr,
             mount: settings.mount,
             path_prefix: settings.path_prefix,
+            owner: settings.owner,
             machine_id: settings.machine_id,
             token: settings.token,
         })
@@ -190,11 +195,24 @@ impl OpenBaoBackend {
         }
     }
 
+    /// Everything this backend stores lives under `path_prefix`, then
+    /// `owner` when one is declared.
+    ///
+    /// Kept apart from the configured `path_prefix` so an error about an
+    /// unaddressable prefix can still name the key that was written.
+    fn storage_prefix(&self) -> String {
+        match &self.owner {
+            Some(owner) if self.path_prefix.is_empty() => owner.clone(),
+            Some(owner) => format!("{}/{owner}", self.path_prefix),
+            None => self.path_prefix.clone(),
+        }
+    }
+
     /// The prefix `credential_path` writes under, for error messages.
     fn credential_root(&self) -> String {
         match &self.machine_id {
-            Some(id) => format!("{}/{}/mcp/{id}/", self.mount, self.path_prefix),
-            None => format!("{}/{}/mcp/", self.mount, self.path_prefix),
+            Some(id) => format!("{}/{}/mcp/{id}/", self.mount, self.storage_prefix()),
+            None => format!("{}/{}/mcp/", self.mount, self.storage_prefix()),
         }
     }
 
@@ -272,12 +290,9 @@ impl OpenBaoBackend {
         let anchor = prefix.cloned().unwrap_or_else(|| {
             // `list` with no prefix has no path to blame in an error, so borrow
             // the backend's own prefix for the message.
-            SecretPath::parse(if self.path_prefix.is_empty() {
-                "."
-            } else {
-                &self.path_prefix
-            })
-            .unwrap_or_else(|_| SecretPath::parse("openbao").expect("static path is valid"))
+            let prefix = self.storage_prefix();
+            SecretPath::parse(if prefix.is_empty() { "." } else { &prefix })
+                .unwrap_or_else(|_| SecretPath::parse("openbao").expect("static path is valid"))
         });
 
         let method = reqwest::Method::from_bytes(b"LIST").expect("LIST is a valid method token");
@@ -318,18 +333,13 @@ impl OpenBaoBackend {
     /// The bare prefix, which reaches the URL without passing through
     /// [`Self::full_path`] when `list` is given nothing to scope to.
     fn checked_prefix(&self) -> Result<String, SecretsError> {
-        if self
-            .path_prefix
-            .split('/')
-            .filter(|s| !s.is_empty())
-            .all(is_addressable_segment)
-        {
-            return Ok(self.path_prefix.clone());
+        let prefix = self.storage_prefix();
+        if prefix.split('/').filter(|s| !s.is_empty()).all(is_addressable_segment) {
+            return Ok(prefix);
         }
         Err(SecretsError::Unavailable(format!(
-            "`path_prefix` `{}` is not addressable in OpenBao: each segment must match \
-             [A-Za-z0-9._-] and be neither `.` nor `..`",
-            self.path_prefix
+            "`{prefix}` is not addressable in OpenBao: each segment of `path_prefix` and \
+             `owner` must match [A-Za-z0-9._-] and be neither `.` nor `..`"
         )))
     }
 
@@ -339,7 +349,7 @@ impl OpenBaoBackend {
     /// including spaces and non-ASCII, so the narrower rule is applied here at
     /// the backend that needs it rather than being imposed on every backend.
     fn full_path(&self, path: &SecretPath) -> Result<String, SecretsError> {
-        let full = path.with_prefix(&self.path_prefix);
+        let full = path.with_prefix(&self.storage_prefix());
         for segment in full.split('/') {
             if !is_addressable_segment(segment) {
                 return Err(SecretsError::Unauthorized {
@@ -872,6 +882,7 @@ mod tests {
             addr: addr.to_string(),
             mount: "secret".to_string(),
             path_prefix: "trg".to_string(),
+            owner: None,
             machine_id: Some("laptop".to_string()),
             token: TokenSource::Var(VarSource::Literal("t".to_string())),
             ca_cert_file: None,
@@ -1285,21 +1296,77 @@ mod tests {
         assert_eq!(seen.url, "/v1/secret/metadata/trg/mcp/laptop/github");
     }
 
-    /// A per-user subtree is spelled as a multi-segment `path_prefix`, which
-    /// has to reach the wire with its segments intact for a templated ACL
-    /// path to match it.
+    /// A prefix may still carry several segments of its own, independently
+    /// of `owner`, and they have to reach the wire intact.
     #[tokio::test]
     async fn a_multi_segment_path_prefix_keeps_its_segments() {
         let stub = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
         let mut s = settings(&stub.addr);
-        s.path_prefix = "trg/alice".to_string();
+        s.path_prefix = "trg/shared".to_string();
         s.machine_id = None;
         s.timeout = Duration::from_secs(2);
         let backend = OpenBaoBackend::new(s).expect("build");
 
         backend.get(&path("mcp/internal")).await.expect("get").expect("some");
 
-        assert_eq!(stub.only_request().url, "/v1/secret/data/trg/alice/mcp/internal");
+        assert_eq!(stub.only_request().url, "/v1/secret/data/trg/shared/mcp/internal");
+    }
+
+    /// `owner` is the segment a templated ACL path matches on, so it has to
+    /// land between the prefix and `mcp/`.
+    #[tokio::test]
+    async fn an_owner_scopes_the_path_to_that_person() {
+        let stub = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
+        let mut s = settings(&stub.addr);
+        s.owner = Some("yordis".to_string());
+        s.machine_id = None;
+        s.timeout = Duration::from_secs(2);
+        let backend = OpenBaoBackend::new(s).expect("build");
+
+        backend.get(&path("mcp/internal")).await.expect("get").expect("some");
+
+        assert_eq!(stub.only_request().url, "/v1/secret/data/trg/yordis/mcp/internal");
+    }
+
+    /// One person on two machines is one owner and two holders, so the two
+    /// segments have to compose rather than stand in for each other.
+    ///
+    /// `owner` scopes everything the backend addresses, while `machine_id`
+    /// scopes only the credential layout, so this goes through
+    /// [`OpenBaoBackend::credential_path`] the way a caller does rather than
+    /// naming the path directly.
+    #[tokio::test]
+    async fn an_owner_and_a_machine_id_are_independent_segments() {
+        let stub = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
+        let mut s = settings(&stub.addr);
+        s.owner = Some("yordis".to_string());
+        s.machine_id = Some("desktop".to_string());
+        s.timeout = Duration::from_secs(2);
+        let backend = OpenBaoBackend::new(s).expect("build");
+
+        let p = path(&backend.credential_path("internal"));
+        backend.get(&p).await.expect("get").expect("some");
+
+        assert_eq!(
+            stub.only_request().url,
+            "/v1/secret/data/trg/yordis/mcp/desktop/internal"
+        );
+    }
+
+    #[test]
+    fn an_owner_survives_an_empty_path_prefix_without_a_double_slash() {
+        let mut s = settings("https://bao.example.com:8200");
+        s.path_prefix = String::new();
+        s.owner = Some("yordis".to_string());
+        let b = OpenBaoBackend::new(s).expect("build");
+
+        assert_eq!(b.storage_prefix(), "yordis");
+    }
+
+    #[test]
+    fn without_an_owner_the_prefix_is_what_was_configured() {
+        let b = backend("https://bao.example.com:8200");
+        assert_eq!(b.storage_prefix(), "trg");
     }
 
     #[tokio::test]

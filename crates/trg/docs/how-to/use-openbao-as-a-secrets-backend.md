@@ -133,26 +133,35 @@ EOF
 bao policy write trg-mcp trg-mcp.hcl
 ```
 
-Each user then names their own subtree in `path_prefix`:
+Each user then names themselves with `owner`:
 
 ```toml
 [secrets.backends.work]
 kind = "openbao"
 addr = { env = "BAO_ADDR" }
 mount = "secret"
-path_prefix = "trg/alice"
+path_prefix = "trg"
+owner = "alice"
 token_file = "~/.vault-token"
 ```
 
-`path_prefix` is a literal and expands nothing, so each user's config carries
-their own name. Getting it wrong is not a way to read someone else's
-credential: the policy answers `permission denied` for any subtree but the
-caller's.
+That stores alice's credentials at `secret/trg/alice/mcp/<server>`, which is
+the subtree the templated policy grants her.
+
+`owner` is a literal and expands nothing, so each user's config carries their
+own name. Getting it wrong is not a way to read someone else's credential: the
+policy answers `permission denied` for any subtree but the caller's.
 
 > Do not reach for `{{identity.entity.name}}` here. Unless an operator has
 > set one, OpenBao generates that name itself, so it comes out as something
 > like `entity_1a2b3c4d.root` rather than the username. The alias name is the
-> one a person can type into `path_prefix`.
+> one a person can type into `owner`.
+
+`owner` is about who may read a credential. It is not what keeps two of your
+own machines from rotating each other's refresh tokens, since both of them are
+the same owner. `machine_id` is the field for that, and the two compose:
+`owner = "alice"` with `machine_id = "laptop"` stores at
+`secret/trg/alice/mcp/laptop/<server>`.
 
 ## Using a private CA
 

@@ -182,6 +182,7 @@ Speaks the KV v2 HTTP API of an [OpenBao](https://openbao.org) instance.
 | `addr`         | `VarSource` | yes      | Base URL. `https://` is required unless the host is loopback.              |
 | `mount`        | string      | yes      | KV v2 mount, e.g. `secret`.                                               |
 | `path_prefix`  | string      | yes      | Prefix under the mount. May be empty.                                     |
+| `owner`        | string      | no       | Whose credentials these are. One segment, added after `path_prefix`.      |
 | `machine_id`   | string      | no       | Adds a per-machine segment to credential paths. Omit to share them.       |
 | `token_file`   | string      | one of   | Path to the token file. `~` expands against `$HOME`.                      |
 | `token`        | `VarSource` | one of   | The token itself, usually `{ env = "BAO_TOKEN" }`.                        |
@@ -199,19 +200,32 @@ token to a third party. Point `addr` at the active node or at a load balancer
 in front of the cluster; a standby that answers 307 with a different node is
 reported as an error, not chased.
 
-Omitting `machine_id` gives every machine one shared credential per server,
-which is the usual reason to leave the Keychain. Set it when a provider
-rotates refresh tokens and detects replay: there, two machines refreshing the
-same token will get the whole grant revoked, and a per-machine segment is how
-you avoid that. Nothing is derived from the host, so a value only ever appears
-in the path because you wrote it in the config.
+`owner` and `machine_id` answer different questions, and neither substitutes
+for the other.
+
+`owner` is whose credentials these are. It is the segment a templated ACL path
+matches on, so it is how one person is kept out of another's subtree on a
+shared instance. A person is one owner across every machine they use, which is
+why it is stable in a config synced between them.
+
+`machine_id` is which holder may refresh a credential. Omitting it gives every
+machine one shared credential per server, which is the usual reason to leave
+the Keychain. Set it when a provider rotates refresh tokens and detects replay:
+there, two machines refreshing the same token get the whole grant revoked. Note
+that one person on two machines is a single `owner` and two holders, so `owner`
+does not protect against this and `machine_id` is the field that does.
+
+Both are optional and nothing is derived, from the host or from anywhere else,
+so a segment only ever appears in a path because it was written in the config.
 
 Exactly one of `token_file` or `token` must be declared. Declaring neither or
 both fails at load time.
 
-`mount`, `machine_id` when declared, and every segment of `path_prefix` must
-be non-empty and match `[A-Za-z0-9._-]`, because each becomes a URL path
-segment.
+`mount`, `owner` and `machine_id` when declared, and every segment of
+`path_prefix` must be non-empty and match `[A-Za-z0-9._-]`, because each
+becomes a URL path segment. `owner` and `machine_id` are each a single
+segment: a slash in either is refused rather than quietly widening what a
+templated ACL path has to match.
 
 There is no option to skip TLS verification. A private CA is configured by
 pointing `ca_cert_file` at its certificate.
@@ -226,11 +240,16 @@ with a `chmod 600` message rather than used.
 | Backend    | Where one server's credentials live                             |
 | ---------- | ---------------------------------------------------------------- |
 | `keychain` | Service = the backend's `service`, account = the server name.     |
-| `openbao`  | `<mount>/data/<path_prefix>/mcp/<server-name>`                    |
-| `openbao`  | `<mount>/data/<path_prefix>/mcp/<machine_id>/<server-name>`, with `machine_id` |
+| `openbao`  | `<mount>/data/<path_prefix>/[<owner>/]mcp/[<machine_id>/]<server-name>` |
 
-Declaring `machine_id` inserts that segment, giving each machine its own
-entry to authorize separately.
+Each optional segment appears only when the matching field is declared, so the
+full form is `<mount>/data/<path_prefix>/<owner>/mcp/<machine_id>/<server-name>`
+and the bare form is `<mount>/data/<path_prefix>/mcp/<server-name>`.
+
+`owner` sits before `mcp/` so that a policy granting a person their subtree
+covers everything `trg` stores for them, not just MCP credentials. Declaring
+`machine_id` inserts its segment inside that subtree, giving each machine its
+own entry to authorize separately.
 
 A server stored in OpenBao must be named with `[A-Za-z0-9._-]`, since the name
 becomes a path segment. The Keychain accepts any name.
