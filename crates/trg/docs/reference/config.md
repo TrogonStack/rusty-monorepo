@@ -416,4 +416,4 @@ keeps using the macOS Keychain exactly as it did before `[secrets]` existed.
 | `the token file at <path> is readable by other users` | The token file's mode grants group or other access. Run `chmod 600`. |
 | `OpenBao at <addr> has no <mount> mount, or it is not a KV v2 mount` | The mount name is wrong, or the mount is KV v1. |
 | `OpenBao rejected the token (...); run bao login and retry` | The token is absent, expired, or lacks a policy for the path. |
-| `OpenBao at <addr> redirected <status> to another host` | The instance answered a redirect leaving the `addr` origin. The token is not followed there. Point `addr` at the active node or a load balancer. |
+| `OpenBao at <addr> redirected <status> to a different origin` | The instance answered a redirect leaving the `addr` origin, meaning any change of scheme, host, or port. The token is not followed there. Point `addr` at the active node or a load balancer. |

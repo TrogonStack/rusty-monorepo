@@ -446,8 +446,8 @@ impl OpenBaoBackend {
             // a redirect within the configured origin is followed before the
             // response gets here.
             other if (300..400).contains(&other) => Err(SecretsError::Transport(format!(
-                "OpenBao at {} redirected {other} to another host, and the token is not sent \
-                 anywhere but `addr`. Point `addr` at the active node or at a load balancer \
+                "OpenBao at {} redirected {other} to a different origin, and the token is not \
+                 sent anywhere but `addr`. Point `addr` at the active node or at a load balancer \
                  in front of the cluster.",
                 self.addr
             ))),
@@ -909,8 +909,10 @@ mod tests {
 
     /// reqwest strips `Authorization` across origins but not `X-Vault-Token`,
     /// so nothing but the policy keeps the token off a third party. Both stubs
-    /// are loopback http, which the scheme check accepts: only the origin
-    /// check can refuse this one.
+    /// are `127.0.0.1` over http and differ only in port, so the scheme check
+    /// accepts both and only the origin check can refuse this one. Which is
+    /// also the case worth pinning: an origin is scheme, host and port, so a
+    /// port change alone is already somewhere else.
     #[tokio::test]
     async fn a_redirect_to_another_origin_never_carries_the_token() {
         let elsewhere = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
