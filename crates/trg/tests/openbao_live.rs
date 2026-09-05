@@ -1,50 +1,86 @@
 //! Drives the real backend against a live OpenBao.
 //!
 //! Ignored by default: it needs a reachable instance and a token that may
-//! write. Run it with `BAO_ADDR`, `BAO_MOUNT`, and a `bao login` already done:
+//! write. Run it with `BAO_ADDR` and a `bao login` already done:
 //!
 //! ```sh
 //! BAO_MOUNT=kv cargo test -p trg --test openbao_live -- --ignored --nocapture
 //! ```
 //!
-//! `BAO_PREFIX` and `BAO_OWNER` pick the subtree, so an instance whose policy
-//! templates the path on the caller's identity can be exercised at the subtree
-//! that policy actually grants.
+//! The backend comes out of a config document through [`Registry`], the same
+//! way a real run gets one, so a live pass covers the config layer and not
+//! only the HTTP client. `BAO_MOUNT`, `BAO_PREFIX`, and `BAO_OWNER` fill in
+//! the document, which lets an instance whose policy templates the path on the
+//! caller's identity be exercised at the subtree that policy actually grants.
+//! `BAO_CONFIG` replaces the document with a real config file, and
+//! `BAO_BACKEND` names which of its backends to drive.
 //!
 //! Beware when pointing these at a throwaway `bao server -dev`: dev mode
 //! persists its root token to the token helper, overwriting whatever
 //! `~/.vault-token` held for a real instance. Start it with
 //! `-dev-no-store-token`.
-use std::time::Duration;
-
 use secrecy::ExposeSecret;
+use serde::Deserialize;
 
-use trg::config::VarSource;
-use trg::secrets::openbao::{OpenBaoSettings, TokenSource};
-use trg::secrets::{OpenBaoBackend, SecretKey, SecretMap, SecretPath};
+use trg::secrets::{Backend, OpenBaoBackend, Registry, SecretKey, SecretMap, SecretPath, SecretsSection};
+
+/// Enough of a config file to reach `[secrets]`, so `BAO_CONFIG` can point at
+/// a real one rather than at something shaped only for this suite.
+#[derive(Deserialize)]
+struct Root {
+    secrets: SecretsSection,
+}
+
+const TOKEN_FILE: &str = r#"token_file = "~/.vault-token""#;
 
 fn live() -> OpenBaoBackend {
-    let addr = std::env::var("BAO_ADDR").expect("BAO_ADDR");
-    let mount = std::env::var("BAO_MOUNT").unwrap_or_else(|_| "secret".to_string());
-    OpenBaoBackend::new(OpenBaoSettings {
-        addr,
-        mount,
-        path_prefix: prefix(),
-        owner: std::env::var("BAO_OWNER").ok(),
-        machine_id: None,
-        token: TokenSource::File(dirs_home().join(".vault-token")),
-        ca_cert_file: None,
-        timeout: Duration::from_secs(10),
-    })
-    .expect("build")
+    match std::env::var("BAO_CONFIG") {
+        Ok(path) => {
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("BAO_CONFIG at `{path}`: {e}"));
+            resolve(
+                &text,
+                &std::env::var("BAO_BACKEND").unwrap_or_else(|_| "live".to_string()),
+            )
+        }
+        Err(_) => resolve(&generated(&mount(), TOKEN_FILE), "live"),
+    }
+}
+
+fn resolve(text: &str, name: &str) -> OpenBaoBackend {
+    let root: Root = toml::from_str(text).expect("the live config should parse");
+    match Registry::new(root.secrets)
+        .resolve(name)
+        .expect("the live backend should resolve")
+    {
+        Backend::OpenBao(backend) => backend,
+        other => panic!("`{name}` is a {} backend, not openbao", other.kind()),
+    }
+}
+
+fn generated(mount: &str, token: &str) -> String {
+    let owner = match std::env::var("BAO_OWNER") {
+        Ok(owner) => format!("owner = \"{owner}\"\n"),
+        Err(_) => String::new(),
+    };
+    format!(
+        "[secrets.backends.live]\n\
+         kind = \"openbao\"\n\
+         addr = {{ env = \"BAO_ADDR\" }}\n\
+         mount = \"{mount}\"\n\
+         path_prefix = \"{prefix}\"\n\
+         {owner}\
+         {token}\n\
+         timeout_ms = 10000\n",
+        prefix = prefix(),
+    )
+}
+
+fn mount() -> String {
+    std::env::var("BAO_MOUNT").unwrap_or_else(|_| "secret".to_string())
 }
 
 fn prefix() -> String {
     std::env::var("BAO_PREFIX").unwrap_or_else(|_| "trg-adapter-check".to_string())
-}
-
-fn dirs_home() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
 }
 
 #[tokio::test]
@@ -79,18 +115,7 @@ async fn round_trips_a_credential_against_a_live_instance() {
 #[tokio::test]
 #[ignore = "needs a live OpenBao"]
 async fn a_bad_mount_is_reported_as_a_configuration_error() {
-    let addr = std::env::var("BAO_ADDR").expect("BAO_ADDR");
-    let bao = OpenBaoBackend::new(OpenBaoSettings {
-        addr,
-        mount: "definitely-not-a-mount".to_string(),
-        path_prefix: prefix(),
-        owner: std::env::var("BAO_OWNER").ok(),
-        machine_id: None,
-        token: TokenSource::File(dirs_home().join(".vault-token")),
-        ca_cert_file: None,
-        timeout: Duration::from_secs(10),
-    })
-    .expect("build");
+    let bao = resolve(&generated("definitely-not-a-mount", TOKEN_FILE), "live");
 
     let p = SecretPath::parse("mcp/live-probe").expect("path");
     let err = bao.get(&p).await.expect_err("a missing mount is not a miss");
@@ -100,19 +125,7 @@ async fn a_bad_mount_is_reported_as_a_configuration_error() {
 #[tokio::test]
 #[ignore = "needs a live OpenBao"]
 async fn a_rejected_token_is_reported_as_unauthorized() {
-    let addr = std::env::var("BAO_ADDR").expect("BAO_ADDR");
-    let mount = std::env::var("BAO_MOUNT").unwrap_or_else(|_| "secret".to_string());
-    let bao = OpenBaoBackend::new(OpenBaoSettings {
-        addr,
-        mount,
-        path_prefix: prefix(),
-        owner: std::env::var("BAO_OWNER").ok(),
-        machine_id: None,
-        token: TokenSource::Var(VarSource::Literal("definitely-not-a-token".to_string())),
-        ca_cert_file: None,
-        timeout: Duration::from_secs(10),
-    })
-    .expect("build");
+    let bao = resolve(&generated(&mount(), r#"token = "definitely-not-a-token""#), "live");
 
     let p = SecretPath::parse("mcp/live-probe").expect("path");
     let err = bao.get(&p).await.expect_err("a bad token is not a miss");
