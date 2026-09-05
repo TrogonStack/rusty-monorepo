@@ -47,6 +47,14 @@ fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
     })
 }
 
+/// `trg secrets` reads the config for the backends alone, since a config that
+/// declares one before declaring anything that uses it is still a config this
+/// command can answer about.
+fn wire_secrets() -> Result<Registry, Box<WireError>> {
+    let section = config::load_secrets().map_err(WireError::from)?;
+    Ok(Registry::new(section))
+}
+
 #[tokio::main]
 async fn main() {
     trg::telemetry::init();
@@ -60,6 +68,13 @@ async fn main() {
         },
         Commands::Mcp { command } => match wire_mcp(&command) {
             Ok(ctx) => command.handle(&ctx).await,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        Commands::Secrets { command } => match wire_secrets() {
+            Ok(registry) => command.handle(&registry).await,
             Err(e) => {
                 eprintln!("{e}");
                 1

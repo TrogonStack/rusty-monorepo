@@ -128,6 +128,22 @@ pub fn load_mcp(selected_name: &str) -> Result<LoadedMcp, ConfigError> {
     load_mcp_at(&trg_config_path(), selected_name)
 }
 
+/// The `[secrets]` section on its own.
+///
+/// `load_mcp` refuses a config without `[mcp.servers]`, which is the right
+/// answer for a command that is about to talk to an MCP server and the wrong
+/// one for a command that only inspects a backend. Declaring a backend before
+/// declaring anything that uses it is an ordinary order to do things in.
+pub fn load_secrets() -> Result<SecretsSection, ConfigError> {
+    load_secrets_at(&trg_config_path())
+}
+
+fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|_| ConfigError::NotFound(path.to_path_buf()))?;
+    let root: FileRoot = toml::from_str(&text)?;
+    Ok(root.secrets.unwrap_or_default())
+}
+
 fn load_mcp_at(path: &Path, selected_name: &str) -> Result<LoadedMcp, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,

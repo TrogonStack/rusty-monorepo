@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::kv_v2::{Envelope, ErrorBody, ListPayload, ReadPayload};
@@ -55,6 +56,48 @@ pub enum TokenSource {
     File(PathBuf),
     /// A literal or `{ env = "..." }` declaration.
     Var(VarSource),
+}
+
+/// The part of `sys/health` this crate reads.
+///
+/// Every field defaults for the same reason the version metadata does: a
+/// deployment that spells one of them differently should still be reportable
+/// rather than refused.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Health {
+    pub initialized: bool,
+    pub sealed: bool,
+    pub standby: bool,
+    pub version: String,
+}
+
+impl Health {
+    /// One line an operator can read, in the order that matters: an
+    /// uninitialized or sealed instance cannot serve anything, and a standby
+    /// serves only after forwarding.
+    pub fn summary(&self) -> String {
+        let state = if !self.initialized {
+            "uninitialized"
+        } else if self.sealed {
+            "sealed"
+        } else if self.standby {
+            "unsealed, standby"
+        } else {
+            "unsealed, active"
+        };
+
+        if self.version.is_empty() {
+            state.to_string()
+        } else {
+            format!("{state} (OpenBao {})", self.version)
+        }
+    }
+
+    /// Whether the instance can serve a request right now.
+    pub fn is_serving(&self) -> bool {
+        self.initialized && !self.sealed
+    }
 }
 
 /// What a `404` carrying no `errors` array means to the caller that asked.
@@ -199,6 +242,52 @@ impl OpenBaoBackend {
         &self.mount
     }
 
+    pub fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
+    }
+
+    /// Where the token comes from, for reporting. Never the token itself.
+    pub fn token_source(&self) -> &TokenSource {
+        &self.token
+    }
+
+    /// Whether the configured token can be read at all, discarding it.
+    ///
+    /// The value never leaves this method, so a caller can report that the
+    /// source works without ever holding what it produced.
+    pub fn token_is_readable(&self) -> Result<(), SecretsError> {
+        self.read_token().map(|_| ())
+    }
+
+    /// What the instance says about itself.
+    ///
+    /// `sys/health` takes no token, so it answers even when the token is
+    /// rejected, which is what separates an instance that is down from one
+    /// that will not talk to this caller.
+    ///
+    /// It also reports state through the status code rather than through
+    /// failure: `429` is an unsealed standby, `473` a DR secondary, `501`
+    /// uninitialized, `503` sealed. Treating those as errors would report a
+    /// perfectly healthy standby as unreachable, so only a transport failure
+    /// is an error here.
+    pub async fn health(&self) -> Result<Health, SecretsError> {
+        let path = SecretPath::parse("sys/health").expect("static path is valid");
+        let response = self
+            .client
+            .get(format!("{}/v1/sys/health", self.addr))
+            .send()
+            .await
+            .map_err(|e| self.transport_error(&path, &e))?;
+
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+
+        serde_json::from_str(&body).map_err(|e| SecretsError::Malformed {
+            path,
+            cause: format!("`sys/health` answered {status} with something other than a health report: {e}"),
+        })
+    }
+
     pub fn machine_id(&self) -> Option<&str> {
         self.machine_id.as_deref()
     }
@@ -222,7 +311,9 @@ impl OpenBaoBackend {
     ///
     /// Kept apart from the configured `path_prefix` so an error about an
     /// unaddressable prefix can still name the key that was written.
-    fn storage_prefix(&self) -> String {
+    /// The subtree every path is resolved under, which is what `list` scopes
+    /// to and therefore what a reader needs to see to know where they are.
+    pub fn storage_prefix(&self) -> String {
         match &self.owner {
             Some(owner) if self.path_prefix.is_empty() => owner.clone(),
             Some(owner) => format!("{}/{owner}", self.path_prefix),
