@@ -301,6 +301,7 @@ mod tests {
             addr = "https://bao.example.com:8200"
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             machine_id = "laptop"
             token_file = "~/.vault-token"
 

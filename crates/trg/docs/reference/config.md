@@ -182,7 +182,7 @@ Speaks the KV v2 HTTP API of an [OpenBao](https://openbao.org) instance.
 | `addr`         | `VarSource` | yes      | Base URL. `https://` is required unless the host is loopback.              |
 | `mount`        | string      | yes      | KV v2 mount, e.g. `secret`.                                               |
 | `path_prefix`  | string      | yes      | Prefix under the mount. May be empty.                                     |
-| `owner`        | string      | no       | Whose credentials these are. One segment, added after `path_prefix`.      |
+| `owner`        | string      | yes      | Whose credentials these are. One segment, added after `path_prefix`.      |
 | `machine_id`   | string      | no       | Adds a per-machine segment to credential paths. Omit to share them.       |
 | `token_file`   | string      | one of   | Path to the token file. `~` expands against `$HOME`.                      |
 | `token`        | `VarSource` | one of   | The token itself, usually `{ env = "BAO_TOKEN" }`.                        |
@@ -215,13 +215,17 @@ there, two machines refreshing the same token get the whole grant revoked. Note
 that one person on two machines is a single `owner` and two holders, so `owner`
 does not protect against this and `machine_id` is the field that does.
 
-Both are optional and nothing is derived, from the host or from anywhere else,
-so a segment only ever appears in a path because it was written in the config.
+`owner` is required and `machine_id` is not. A shared instance is the reason to
+reach for this backend at all, and on one the subtree a credential lands in is
+the ACL boundary, so leaving it to a default would mean the first person to log
+in quietly takes `<path_prefix>/mcp/*` for everyone. Nothing is derived, from the
+host or the OS user or anywhere else: a segment appears in a path only because it
+was written in the config.
 
 Exactly one of `token_file` or `token` must be declared. Declaring neither or
 both fails at load time.
 
-`mount`, `owner` and `machine_id` when declared, and every segment of
+`mount`, `owner`, `machine_id` when declared, and every segment of
 `path_prefix` must be non-empty and match `[A-Za-z0-9._-]`, because each
 becomes a URL path segment. `owner` and `machine_id` are each a single
 segment: a slash in either is refused rather than quietly widening what a
@@ -240,11 +244,11 @@ with a `chmod 600` message rather than used.
 | Backend    | Where one server's credentials live                             |
 | ---------- | ---------------------------------------------------------------- |
 | `keychain` | Service = the backend's `service`, account = the server name.     |
-| `openbao`  | `<mount>/data/<path_prefix>/[<owner>/]mcp/[<machine_id>/]<server-name>` |
+| `openbao`  | `<mount>/data/<path_prefix>/<owner>/mcp/[<machine_id>/]<server-name>` |
 
-Each optional segment appears only when the matching field is declared, so the
-full form is `<mount>/data/<path_prefix>/<owner>/mcp/<machine_id>/<server-name>`
-and the bare form is `<mount>/data/<path_prefix>/mcp/<server-name>`.
+`machine_id` is the only optional segment, so the full form is
+`<mount>/data/<path_prefix>/<owner>/mcp/<machine_id>/<server-name>` and the bare
+form is `<mount>/data/<path_prefix>/<owner>/mcp/<server-name>`.
 
 `owner` sits before `mcp/` so that a policy granting a person their subtree
 covers everything `trg` stores for them, not just MCP credentials. Declaring

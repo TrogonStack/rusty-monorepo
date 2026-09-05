@@ -127,7 +127,7 @@ pub struct OpenBaoSettings {
     pub path_prefix: String,
     /// Whose credentials these are. A person is one owner across every
     /// machine they use, so this is stable in a config shared between them.
-    pub owner: Option<String>,
+    pub owner: String,
     pub machine_id: Option<String>,
     pub token: TokenSource,
     pub ca_cert_file: Option<PathBuf>,
@@ -179,7 +179,7 @@ pub struct OpenBaoBackend {
     addr: String,
     mount: String,
     path_prefix: String,
-    owner: Option<String>,
+    owner: String,
     machine_id: Option<String>,
     token: TokenSource,
 }
@@ -199,9 +199,7 @@ impl OpenBaoBackend {
         // rather than at the first secret operation, when the config that
         // spelled them is no longer in view.
         check_segment("mount", &settings.mount)?;
-        if let Some(owner) = &settings.owner {
-            check_segment("owner", owner)?;
-        }
+        check_segment("owner", &settings.owner)?;
         if let Some(id) = &settings.machine_id {
             check_segment("machine_id", id)?;
         }
@@ -246,8 +244,8 @@ impl OpenBaoBackend {
         &self.mount
     }
 
-    pub fn owner(&self) -> Option<&str> {
-        self.owner.as_deref()
+    pub fn owner(&self) -> &str {
+        &self.owner
     }
 
     /// Where the token comes from, for reporting. Never the token itself.
@@ -313,18 +311,17 @@ impl OpenBaoBackend {
     }
 
     /// Everything this backend stores lives under `path_prefix`, then
-    /// `owner` when one is declared.
+    /// `owner`.
     ///
     /// Kept apart from the configured `path_prefix` so an error about an
     /// unaddressable prefix can still name the key that was written.
     /// The subtree every path is resolved under, which is what `list` scopes
     /// to and therefore what a reader needs to see to know where they are.
     pub fn storage_prefix(&self) -> String {
-        match &self.owner {
-            Some(owner) if self.path_prefix.is_empty() => owner.clone(),
-            Some(owner) => format!("{}/{owner}", self.path_prefix),
-            None => self.path_prefix.clone(),
+        if self.path_prefix.is_empty() {
+            return self.owner.clone();
         }
+        format!("{}/{}", self.path_prefix, self.owner)
     }
 
     /// The prefix `credential_path` writes under, for error messages.
@@ -1111,7 +1108,7 @@ mod tests {
             addr: addr.to_string(),
             mount: "secret".to_string(),
             path_prefix: "trg".to_string(),
-            owner: None,
+            owner: "yordis".to_string(),
             machine_id: Some("laptop".to_string()),
             token: TokenSource::Var(VarSource::Literal("t".to_string())),
             ca_cert_file: None,
@@ -1181,14 +1178,14 @@ mod tests {
     /// the token is already its own.
     #[tokio::test]
     async fn a_redirect_within_the_configured_origin_is_followed() {
-        let bao = StubBao::start_redirecting_once_to(307, "/v1/secret/data/trg/elsewhere".to_string());
+        let bao = StubBao::start_redirecting_once_to(307, "/v1/secret/data/trg/yordis/elsewhere".to_string());
 
         let hit = bao.backend().get(&path("mcp/laptop/x")).await.expect("followed");
 
         assert!(hit.is_some(), "the redirect target answered a hit");
         let seen = bao.requests();
         assert_eq!(seen.len(), 2, "{seen:?}");
-        assert_eq!(seen[1].url, "/v1/secret/data/trg/elsewhere");
+        assert_eq!(seen[1].url, "/v1/secret/data/trg/yordis/elsewhere");
         assert_eq!(seen[1].token.as_deref(), Some("t"));
     }
 
@@ -1197,7 +1194,7 @@ mod tests {
     /// `200` from that read is indistinguishable from a stored credential.
     #[tokio::test]
     async fn a_write_is_never_redirected_into_a_read_that_stores_nothing() {
-        let stub = StubBao::start_redirecting_once_to(302, "/v1/secret/data/trg/elsewhere".to_string());
+        let stub = StubBao::start_redirecting_once_to(302, "/v1/secret/data/trg/yordis/elsewhere".to_string());
         let mut map = SecretMap::new();
         map.insert(
             SecretKey::parse("credentials").unwrap(),
@@ -1269,7 +1266,7 @@ mod tests {
             let mut s = settings("https://bao.example.com:8200");
             match field {
                 "mount" => s.mount = "sec ret".to_string(),
-                "owner" => s.owner = Some("a/b".to_string()),
+                "owner" => s.owner = "a/b".to_string(),
                 _ => s.machine_id = Some("..".to_string()),
             }
 
@@ -1403,11 +1400,11 @@ mod tests {
         let path = SecretPath::parse("mcp/laptop/github").expect("parse");
         assert_eq!(
             b.data_url(&path).expect("url"),
-            "https://bao.example.com:8200/v1/secret/data/trg/mcp/laptop/github"
+            "https://bao.example.com:8200/v1/secret/data/trg/yordis/mcp/laptop/github"
         );
         assert_eq!(
             b.metadata_url(&path).expect("url"),
-            "https://bao.example.com:8200/v1/secret/metadata/trg/mcp/laptop/github"
+            "https://bao.example.com:8200/v1/secret/metadata/trg/yordis/mcp/laptop/github"
         );
     }
 
@@ -1419,7 +1416,7 @@ mod tests {
         let path = SecretPath::parse("mcp/laptop/github").expect("parse");
         assert_eq!(
             b.data_url(&path).expect("url"),
-            "https://bao.example.com:8200/v1/secret/data/mcp/laptop/github"
+            "https://bao.example.com:8200/v1/secret/data/yordis/mcp/laptop/github"
         );
     }
 
@@ -1447,12 +1444,12 @@ mod tests {
         shared.machine_id = None;
         let shared = OpenBaoBackend::new(shared).expect("build");
         let reason = shared.check_server_name("my server").expect_err("refused");
-        assert!(reason.contains("secret/trg/mcp/"), "{reason}");
+        assert!(reason.contains("secret/trg/yordis/mcp/"), "{reason}");
         assert!(!reason.contains("laptop"), "{reason}");
 
         let scoped = backend("https://bao.example.com:8200");
         let reason = scoped.check_server_name("my server").expect_err("refused");
-        assert!(reason.contains("secret/trg/mcp/laptop/"), "{reason}");
+        assert!(reason.contains("secret/trg/yordis/mcp/laptop/"), "{reason}");
     }
 
     #[test]
@@ -1565,7 +1562,7 @@ mod tests {
 
         let seen = stub.only_request();
         assert_eq!(seen.method, "GET");
-        assert_eq!(seen.url, "/v1/secret/data/trg/mcp/laptop/github");
+        assert_eq!(seen.url, "/v1/secret/data/trg/yordis/mcp/laptop/github");
         assert_eq!(seen.token.as_deref(), Some("t"));
     }
 
@@ -1651,7 +1648,7 @@ mod tests {
 
         let seen = stub.only_request();
         assert_eq!(seen.method, "POST");
-        assert_eq!(seen.url, "/v1/secret/data/trg/mcp/laptop/github");
+        assert_eq!(seen.url, "/v1/secret/data/trg/yordis/mcp/laptop/github");
         assert_eq!(seen.body, r#"{"data":{"credentials":"v"}}"#);
     }
 
@@ -1715,7 +1712,7 @@ mod tests {
 
         let seen = stub.only_request();
         assert_eq!(seen.method, "DELETE");
-        assert_eq!(seen.url, "/v1/secret/metadata/trg/mcp/laptop/github");
+        assert_eq!(seen.url, "/v1/secret/metadata/trg/yordis/mcp/laptop/github");
     }
 
     /// A prefix may still carry several segments of its own, independently
@@ -1731,7 +1728,10 @@ mod tests {
 
         backend.get(&path("mcp/internal")).await.expect("get").expect("some");
 
-        assert_eq!(stub.only_request().url, "/v1/secret/data/trg/shared/mcp/internal");
+        assert_eq!(
+            stub.only_request().url,
+            "/v1/secret/data/trg/shared/yordis/mcp/internal"
+        );
     }
 
     /// `owner` is the segment a templated ACL path matches on, so it has to
@@ -1740,7 +1740,6 @@ mod tests {
     async fn an_owner_scopes_the_path_to_that_person() {
         let stub = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
         let mut s = settings(&stub.addr);
-        s.owner = Some("yordis".to_string());
         s.machine_id = None;
         s.timeout = Duration::from_secs(2);
         let backend = OpenBaoBackend::new(s).expect("build");
@@ -1761,7 +1760,6 @@ mod tests {
     async fn an_owner_and_a_machine_id_are_independent_segments() {
         let stub = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
         let mut s = settings(&stub.addr);
-        s.owner = Some("yordis".to_string());
         s.machine_id = Some("desktop".to_string());
         s.timeout = Duration::from_secs(2);
         let backend = OpenBaoBackend::new(s).expect("build");
@@ -1779,16 +1777,18 @@ mod tests {
     fn an_owner_survives_an_empty_path_prefix_without_a_double_slash() {
         let mut s = settings("https://bao.example.com:8200");
         s.path_prefix = String::new();
-        s.owner = Some("yordis".to_string());
         let b = OpenBaoBackend::new(s).expect("build");
 
         assert_eq!(b.storage_prefix(), "yordis");
     }
 
+    /// The subtree a caller is scoped to is the prefix and the owner together,
+    /// which is what a templated ACL matches and therefore what `list` must not
+    /// reach above.
     #[test]
-    fn without_an_owner_the_prefix_is_what_was_configured() {
+    fn the_owner_is_part_of_the_subtree_and_not_only_of_the_keys_under_it() {
         let b = backend("https://bao.example.com:8200");
-        assert_eq!(b.storage_prefix(), "trg");
+        assert_eq!(b.storage_prefix(), "trg/yordis");
     }
 
     #[tokio::test]
@@ -1800,7 +1800,7 @@ mod tests {
 
         let seen = stub.only_request();
         assert_eq!(seen.method, "LIST");
-        assert_eq!(seen.url, "/v1/secret/metadata/trg");
+        assert_eq!(seen.url, "/v1/secret/metadata/trg/yordis");
     }
 
     #[tokio::test]

@@ -489,7 +489,7 @@ mod tests {
                 addr: self.addr.clone(),
                 mount: "secret".to_string(),
                 path_prefix: "trg".to_string(),
-                owner: None,
+                owner: "yordis".to_string(),
                 machine_id: None,
                 token,
                 ca_cert_file: None,
@@ -701,6 +701,7 @@ mod tests {
             addr = { env = "A_VAR_THAT_IS_NOT_SET_ANYWHERE" }
             mount = "secret"
             path_prefix = "trg"
+            owner = "yordis"
             token = "irrelevant"
 
             [secrets.backends.zzz]

@@ -76,8 +76,15 @@ kind = "openbao"
 addr = { env = "BAO_ADDR", default = "http://127.0.0.1:8200" }
 mount = "secret"
 path_prefix = "trg"
+owner = "alice"
 token_file = "~/.vault-token"
 ```
+
+`owner` is required and is your own name on the instance. It is the segment an
+ACL is templated on, so a config that left it out would put everyone's
+credentials in one subtree and let the second person to log in rotate the
+first's refresh token. Nothing derives it for you: it expands nothing, so each
+person's config carries their own name.
 
 ## 4. Point a server at it
 
@@ -134,19 +141,19 @@ The command names the backend it wrote to. Confirm it landed:
 
 ```sh
 trg mcp auth status --server internal
-bao kv get secret/trg/mcp/internal
+bao kv get secret/trg/alice/mcp/internal
 ```
 
 Every machine reading that path now uses the same credential. To give this
 machine its own instead, add `machine_id = "laptop"` to the backend and log in
-again; the entry moves to `secret/trg/mcp/laptop/internal`.
+again; the entry moves to `secret/trg/alice/mcp/laptop/internal`.
 
-## Giving each user their own subtree
+## Letting the server enforce the subtree
 
-The policy in step 1 grants everyone holding it the same `trg/*` subtree. On a
-shared instance, template the path on the caller's identity instead, so the
-server enforces the boundary rather than trusting every config to stay in its
-own lane.
+`owner` puts each person's credentials in their own subtree, but the policy in
+step 1 still grants everyone holding it all of `trg/*`, so the separation is one
+every config is trusted to respect. On a shared instance, template the path on
+the caller's identity as well, and the server enforces it instead.
 
 Template on the caller's *alias* name, which for `userpass` is the username.
 It needs the auth mount's accessor, which differs per instance. Set
@@ -171,24 +178,13 @@ EOF
 bao policy write trg-mcp trg-mcp.hcl
 ```
 
-Each user then names themselves with `owner`:
+The `owner` each user already declared in step 3 is what has to match the alias
+name in that policy. Alice's `owner = "alice"` stores at
+`secret/trg/alice/mcp/<server>`, which is the subtree the template grants her.
 
-```toml
-[secrets.backends.work]
-kind = "openbao"
-addr = { env = "BAO_ADDR" }
-mount = "secret"
-path_prefix = "trg"
-owner = "alice"
-token_file = "~/.vault-token"
-```
-
-That stores alice's credentials at `secret/trg/alice/mcp/<server>`, which is
-the subtree the templated policy grants her.
-
-`owner` is a literal and expands nothing, so each user's config carries their
-own name. Getting it wrong is not a way to read someone else's credential: the
-policy answers `permission denied` for any subtree but the caller's.
+Getting it wrong is then not a way to read someone else's credential: the policy
+answers `permission denied` for any subtree but the caller's, and `trg doctor`
+reports that as a failing `subtree` check.
 
 > Do not reach for `{{identity.entity.name}}` here. Unless an operator has
 > set one, OpenBao generates that name itself, so it comes out as something
@@ -197,8 +193,8 @@ policy answers `permission denied` for any subtree but the caller's.
 
 `owner` is about who may read a credential. It is not what keeps two of your
 own machines from rotating each other's refresh tokens, since both of them are
-the same owner. `machine_id` is the field for that, and the two compose:
-`owner = "alice"` with `machine_id = "laptop"` stores at
+the same owner. `machine_id` is the field for that, it stays optional, and the
+two compose: `owner = "alice"` with `machine_id = "laptop"` stores at
 `secret/trg/alice/mcp/laptop/<server>`.
 
 ## Using a private CA
@@ -211,6 +207,7 @@ kind = "openbao"
 addr = "https://bao.internal.example.com:8200"
 mount = "secret"
 path_prefix = "trg"
+owner = "alice"
 token_file = "~/.vault-token"
 ca_cert_file = "~/.config/trg/bao-ca.pem"
 ```
@@ -230,6 +227,7 @@ kind = "openbao"
 addr = { env = "BAO_ADDR" }
 mount = "secret"
 path_prefix = "trg"
+owner = "ci"
 token = { env = "BAO_TOKEN" }
 ```
 
@@ -247,7 +245,7 @@ The token expired, or its policy does not cover the path. Check both:
 
 ```sh
 bao token lookup
-bao kv get secret/trg/mcp/internal
+bao kv get secret/trg/alice/mcp/internal
 ```
 
 `trg` re-reads `token_file` on every operation, so running `bao login` in
