@@ -200,21 +200,9 @@ fn token_check(bao: &OpenBaoBackend) -> Check {
 
     match bao.token_is_readable() {
         Ok(()) => Check::new("token", Outcome::passed(source)),
-        Err(e) => Check::new(
-            "token",
-            Outcome::failed(
-                match bao.token_source() {
-                    // Every way a token file can fail already names the file,
-                    // so prefixing with the source prints the path twice.
-                    TokenSource::File(_) => e.to_string(),
-                    TokenSource::Var(_) => format!("{source}: {e}"),
-                },
-                match bao.token_source() {
-                    TokenSource::File(_) => "run `bao login` to write one",
-                    TokenSource::Var(_) => "set the variable the config names",
-                },
-            ),
-        ),
+        // The error names its own source, and the remedy has a line of its
+        // own here, so neither is worth repeating alongside it.
+        Err(e) => Check::new("token", Outcome::failed(e.report(), e.remedy())),
     }
 }
 
@@ -263,7 +251,7 @@ async fn subtree_checks(bao: &OpenBaoBackend) -> Vec<Check> {
         // neither says anything about whether the mount is there.
         Err(
             e @ (SecretsError::Unauthorized { .. }
-            | SecretsError::Unauthenticated(_)
+            | SecretsError::Unauthenticated { .. }
             | SecretsError::PermissionDenied(_)),
         ) => vec![
             Check::new(

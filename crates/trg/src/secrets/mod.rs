@@ -21,7 +21,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::KeychainBackend;
-pub use openbao::OpenBaoBackend;
+pub use openbao::{OpenBaoBackend, TokenError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretsError {
@@ -37,8 +37,16 @@ pub enum SecretsError {
     /// nothing was denied. Reporting these as [`SecretsError::Unauthorized`]
     /// meant naming a path anyway, and the placeholder that went in sent the
     /// reader looking for a secret that does not exist.
-    #[error("{0}")]
-    Unauthenticated(String),
+    ///
+    /// The remedy is appended here because most callers render an error as one
+    /// line with nowhere else to put it. A report with a place of its own,
+    /// like `trg doctor`, should match on the inner [`TokenError`] and use
+    /// [`TokenError::remedy`] rather than this.
+    #[error("{}; {}", cause.report(), cause.remedy())]
+    Unauthenticated {
+        #[from]
+        cause: openbao::TokenError,
+    },
 
     #[error("secrets backend unavailable: {0}")]
     Unavailable(String),

@@ -37,7 +37,7 @@ use serde_json::{Map, Value};
 
 use super::kv_v2::{Envelope, ErrorBody, ListPayload, ReadPayload};
 use super::{SecretKey, SecretMap, SecretPath, SecretsError};
-use crate::config::VarSource;
+use crate::config::{VarResolveError, VarSource};
 
 /// Total request budget when the backend does not override it.
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -56,6 +56,62 @@ pub enum TokenSource {
     File(PathBuf),
     /// A literal or `{ env = "..." }` declaration.
     Var(VarSource),
+}
+
+/// Why no token could be presented.
+///
+/// Every one of these is a failure to *obtain* a credential, as opposed to one
+/// the instance looked at and refused, so they carry no secret path: nothing
+/// was addressed and nothing was denied.
+///
+/// The recovery advice lives in [`TokenError::remedy`] rather than in these
+/// messages, so the report that has a place for it can put it there and the
+/// one that does not can append it.
+#[derive(Debug, thiserror::Error)]
+pub enum TokenError {
+    #[error("could not read the token file at `{}`", path.display())]
+    Unreadable {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A token file another user can read is a live credential leak, and
+    /// silently using it would hide that.
+    #[error("the token file at `{}` is readable by other users (mode {mode:04o})", path.display())]
+    LooseMode { path: PathBuf, mode: u32 },
+
+    #[error("the token file at `{}` is empty", path.display())]
+    Empty { path: PathBuf },
+
+    #[error(transparent)]
+    Var(#[from] VarResolveError),
+}
+
+impl TokenError {
+    /// This error and the chain under it, on one line.
+    ///
+    /// These name what failed and leave why to a `#[source]`, so a caller that
+    /// printed only the outer message would say a token file could not be read
+    /// without saying whether it was absent, unreadable, or something else.
+    pub fn report(&self) -> String {
+        let mut out = self.to_string();
+        let mut cause = std::error::Error::source(self);
+        while let Some(e) = cause {
+            out.push_str(&format!(": {e}"));
+            cause = e.source();
+        }
+        out
+    }
+
+    /// What to do about it, phrased as a command where there is one.
+    pub fn remedy(&self) -> String {
+        match self {
+            TokenError::Unreadable { .. } | TokenError::Empty { .. } => "run `bao login` to write one".to_string(),
+            TokenError::LooseMode { path, .. } => format!("run `chmod 600 {}`", path.display()),
+            TokenError::Var(_) => "set the variable the config names".to_string(),
+        }
+    }
 }
 
 /// The part of `sys/health` this crate reads.
@@ -257,7 +313,7 @@ impl OpenBaoBackend {
     ///
     /// The value never leaves this method, so a caller can report that the
     /// source works without ever holding what it produced.
-    pub fn token_is_readable(&self) -> Result<(), SecretsError> {
+    pub fn token_is_readable(&self) -> Result<(), TokenError> {
         self.read_token().map(|_| ())
     }
 
@@ -462,12 +518,9 @@ impl OpenBaoBackend {
     }
 
     /// Read the token afresh, so `bao login` recovers a running process.
-    fn read_token(&self) -> Result<SecretString, SecretsError> {
+    fn read_token(&self) -> Result<SecretString, TokenError> {
         match &self.token {
-            TokenSource::Var(source) => source
-                .resolve()
-                .map(|v| SecretString::from(v.trim().to_string()))
-                .map_err(|e| SecretsError::Unauthenticated(e.to_string())),
+            TokenSource::Var(source) => Ok(SecretString::from(source.resolve()?.trim().to_string())),
             TokenSource::File(path) => read_token_file(path),
         }
     }
@@ -748,35 +801,31 @@ fn map_from_json(object: &Map<String, Value>, path: &SecretPath) -> Result<Secre
 ///
 /// `bao login` writes `~/.vault-token` with mode 600. A file that has been
 /// loosened is a live credential leak, and silently using it would hide that.
-fn read_token_file(path: &Path) -> Result<SecretString, SecretsError> {
+fn read_token_file(path: &Path) -> Result<SecretString, TokenError> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let meta = std::fs::metadata(path).map_err(|e| {
-        SecretsError::Unauthenticated(format!(
-            "could not read the token file at `{}`: {e}; run `bao login` first",
-            path.display()
-        ))
-    })?;
+    let unreadable = |source| TokenError::Unreadable {
+        path: path.to_path_buf(),
+        source,
+    };
+
+    let meta = std::fs::metadata(path).map_err(unreadable)?;
 
     let mode = meta.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
-        return Err(SecretsError::PermissionDenied(format!(
-            "the token file at `{}` is readable by other users (mode {mode:04o}); run `chmod 600 {}`",
-            path.display(),
-            path.display()
-        )));
+        return Err(TokenError::LooseMode {
+            path: path.to_path_buf(),
+            mode,
+        });
     }
 
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        SecretsError::Unauthenticated(format!("could not read the token file at `{}`: {e}", path.display()))
-    })?;
+    let raw = std::fs::read_to_string(path).map_err(unreadable)?;
 
     let token = raw.trim();
     if token.is_empty() {
-        return Err(SecretsError::Unauthenticated(format!(
-            "the token file at `{}` is empty; run `bao login` and retry",
-            path.display()
-        )));
+        return Err(TokenError::Empty {
+            path: path.to_path_buf(),
+        });
     }
     Ok(SecretString::from(token.to_string()))
 }
@@ -1507,7 +1556,9 @@ mod tests {
         std::fs::write(&path, "s.abc").expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
 
-        assert!(matches!(read_token_file(&path), Err(SecretsError::PermissionDenied(_))));
+        let err = read_token_file(&path).expect_err("should refuse");
+        assert!(matches!(err, TokenError::LooseMode { mode: 0o640, .. }), "{err:?}");
+        assert!(err.remedy().starts_with("run `chmod 600 "), "{}", err.remedy());
     }
 
     #[test]
@@ -1530,11 +1581,24 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = read_token_file(&dir.path().join("absent")).expect_err("should refuse");
 
-        assert!(matches!(err, SecretsError::Unauthenticated(_)), "{err:?}");
-        let message = err.to_string();
+        assert!(matches!(err, TokenError::Unreadable { .. }), "{err:?}");
+
+        let message = SecretsError::from(err).to_string();
         assert!(!message.contains("not authorized to read"), "{message}");
         assert!(message.starts_with("could not read the token file"), "{message}");
         assert!(message.contains("bao login"), "{message}");
+    }
+
+    /// The cause is what separates a token file that is absent from one that
+    /// is there and unreadable, and only the source carries it.
+    #[test]
+    fn an_unreadable_token_keeps_what_the_filesystem_said() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = read_token_file(&dir.path().join("absent")).expect_err("should refuse");
+
+        let source = std::error::Error::source(&err).expect("a source");
+        assert!(source.to_string().contains("No such file"), "{source}");
+        assert!(err.report().contains("No such file"), "{}", err.report());
     }
 
     #[test]
@@ -1547,9 +1611,20 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
 
         let err = read_token_file(&path).expect_err("should refuse");
-        assert!(matches!(err, SecretsError::Unauthenticated(_)), "{err:?}");
+        assert!(matches!(err, TokenError::Empty { .. }), "{err:?}");
         assert!(err.to_string().starts_with("the token file at"), "{err}");
-        assert!(err.to_string().contains("bao login"), "{err}");
+        assert!(err.remedy().contains("bao login"), "{}", err.remedy());
+    }
+
+    /// A caller with one line to print has nowhere to put the remedy, so the
+    /// composed error has to carry it.
+    #[test]
+    fn the_remedy_survives_being_wrapped_for_a_one_line_caller() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = SecretsError::from(read_token_file(&dir.path().join("absent")).expect_err("refuse"));
+        let message = err.to_string();
+        assert!(message.ends_with("run `bao login` to write one"), "{message}");
+        assert!(message.contains("No such file"), "{message}");
     }
 
     #[tokio::test]
