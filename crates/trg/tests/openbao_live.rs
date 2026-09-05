@@ -1,35 +1,30 @@
 //! Drives the real backend against a live OpenBao.
 //!
 //! Ignored by default: it needs a reachable instance and a token that may
-//! write. It also needs `BAO_CONFIG` naming a config file, because it declares
-//! nothing on your behalf: the instance, the mount, the subtree, and where the
-//! token comes from are all read from that file, so a live pass covers the
-//! config layer and not only the HTTP client.
-//!
-//! ```toml
-//! [secrets.backends.live]
-//! kind = "openbao"
-//! addr = { env = "BAO_ADDR" }
-//! mount = "kv"
-//! path_prefix = "trg-adapter-check"
-//! owner = "alice"
-//! token_file = "~/.vault-token"
-//! ```
+//! write. It reads the same `config.toml` that `trg` itself reads, and
+//! declares nothing on your behalf, so the instance, the mount, the subtree,
+//! and where the token comes from are all whatever your machine is already
+//! configured with. A live pass therefore covers the config layer and not only
+//! the HTTP client.
 //!
 //! ```sh
-//! BAO_CONFIG=./live.toml BAO_ADDR=https://bao.example.com \
-//!   cargo test -p trg --test openbao_live -- --ignored --nocapture
+//! cargo test -p trg --test openbao_live -- --ignored --nocapture
 //! ```
 //!
-//! `BAO_BACKEND` picks which declared backend to drive, and defaults to
-//! `live`. Pointing `BAO_CONFIG` at your own `config.toml` is what this suite
-//! is for: an instance whose policy templates the path on the caller's
-//! identity then gets exercised at the subtree that policy actually grants.
+//! It writes and then deletes `<path_prefix>/mcp/live-probe` in whichever
+//! backend it drives. That is a real write to a real instance.
+//!
+//! `BAO_CONFIG` points it at a different config file, which is what you want
+//! for a throwaway instance rather than your own. `BAO_BACKEND` names which
+//! backend to drive, and is needed only when a config declares more than one
+//! openbao backend.
 //!
 //! Beware when pointing these at a throwaway `bao server -dev`: dev mode
 //! persists its root token to the token helper, overwriting whatever
 //! `~/.vault-token` held for a real instance. Start it with
 //! `-dev-no-store-token`.
+use std::path::{Path, PathBuf};
+
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 
@@ -39,28 +34,60 @@ use trg::secrets::{
     Backend, BackendConfig, OpenBaoBackend, Registry, SecretKey, SecretMap, SecretPath, SecretsSection,
 };
 
-/// Enough of a config file to reach `[secrets]`, so `BAO_CONFIG` can name a
-/// real one rather than something shaped only for this suite.
+/// Enough of a config file to reach `[secrets]`, so this suite reads the
+/// operator's real config rather than something shaped only for itself.
 #[derive(Deserialize)]
 struct Root {
     secrets: SecretsSection,
 }
 
-fn section() -> SecretsSection {
-    let path = std::env::var("BAO_CONFIG").unwrap_or_else(|_| {
-        panic!(
-            "BAO_CONFIG must name a config file declaring the backend to drive: this suite \
-             declares nothing on your behalf, so the instance, the mount, the subtree, and the \
-             token source all come from that file"
-        )
-    });
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("BAO_CONFIG at `{path}`: {e}"));
-    let root: Root = toml::from_str(&text).unwrap_or_else(|e| panic!("BAO_CONFIG at `{path}`: {e}"));
+/// The config `trg` itself would read, unless pointed elsewhere.
+fn config_path() -> PathBuf {
+    match std::env::var_os("BAO_CONFIG") {
+        Some(path) => PathBuf::from(path),
+        None => trg::config::trg_config_path(),
+    }
+}
+
+fn section(path: &Path) -> SecretsSection {
+    let path = path.display();
+    let text = std::fs::read_to_string(path.to_string()).unwrap_or_else(|e| panic!("config at `{path}`: {e}"));
+    let root: Root = toml::from_str(&text).unwrap_or_else(|e| panic!("config at `{path}`: {e}"));
     root.secrets
 }
 
-fn name() -> String {
-    std::env::var("BAO_BACKEND").unwrap_or_else(|_| "live".to_string())
+/// Which backend to drive. A config that declares exactly one openbao backend
+/// needs no help naming it, which is the case this suite is usually run in.
+fn openbao_backend(section: &SecretsSection, path: &Path) -> String {
+    if let Ok(name) = std::env::var("BAO_BACKEND") {
+        return name;
+    }
+    let mut declared: Vec<&str> = section
+        .backends
+        .iter()
+        .filter(|(_, config)| matches!(config, BackendConfig::Openbao(_)))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    declared.sort_unstable();
+
+    match declared.as_slice() {
+        [only] => (*only).to_string(),
+        [] => panic!("`{}` declares no openbao backend", path.display()),
+        many => panic!(
+            "`{}` declares several openbao backends ({}); name one with BAO_BACKEND",
+            path.display(),
+            many.join(", ")
+        ),
+    }
+}
+
+/// The declared backend and its name, so a test can drive it or break one
+/// field of it.
+fn configured() -> (SecretsSection, String) {
+    let path = config_path();
+    let section = section(&path);
+    let name = openbao_backend(&section, &path);
+    (section, name)
 }
 
 fn resolve(section: SecretsSection, name: &str) -> OpenBaoBackend {
@@ -79,7 +106,7 @@ fn declared<'a>(section: &'a mut SecretsSection, name: &str) -> &'a mut OpenbaoC
     match section
         .backends
         .get_mut(name)
-        .unwrap_or_else(|| panic!("`{name}` is not declared in BAO_CONFIG"))
+        .unwrap_or_else(|| panic!("`{name}` is not a declared backend"))
     {
         BackendConfig::Openbao(config) => config,
         other => panic!("`{name}` is a {} backend, not openbao", other.kind()),
@@ -87,7 +114,8 @@ fn declared<'a>(section: &'a mut SecretsSection, name: &str) -> &'a mut OpenbaoC
 }
 
 fn live() -> OpenBaoBackend {
-    resolve(section(), &name())
+    let (section, name) = configured();
+    resolve(section, &name)
 }
 
 #[tokio::test]
@@ -126,9 +154,9 @@ async fn round_trips_a_credential_against_a_live_instance() {
 #[tokio::test]
 #[ignore = "needs a live OpenBao"]
 async fn a_bad_mount_is_never_silently_a_miss() {
-    let mut section = section();
-    declared(&mut section, &name()).mount = "definitely-not-a-mount".to_string();
-    let bao = resolve(section, &name());
+    let (mut section, name) = configured();
+    declared(&mut section, &name).mount = "definitely-not-a-mount".to_string();
+    let bao = resolve(section, &name);
 
     let p = SecretPath::parse("mcp/live-probe").expect("path");
     let err = bao.get(&p).await.expect_err("a missing mount is not a miss");
@@ -138,11 +166,11 @@ async fn a_bad_mount_is_never_silently_a_miss() {
 #[tokio::test]
 #[ignore = "needs a live OpenBao"]
 async fn a_rejected_token_is_reported_as_unauthorized() {
-    let mut section = section();
-    let config = declared(&mut section, &name());
+    let (mut section, name) = configured();
+    let config = declared(&mut section, &name);
     config.token_file = None;
     config.token = Some(VarSource::Literal("definitely-not-a-token".to_string()));
-    let bao = resolve(section, &name());
+    let bao = resolve(section, &name);
 
     let p = SecretPath::parse("mcp/live-probe").expect("path");
     let err = bao.get(&p).await.expect_err("a bad token is not a miss");
