@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use crate::commands::mcp::McpContext;
 use crate::oauth::{ensure_credentials_for, store::OAuthCredentialStore, EnsureError, EnsureOutcome};
+use crate::term;
 
 /// Display view over an `OAuthTokenResponse`.
 ///
@@ -193,8 +194,13 @@ async fn login(ctx: &McpContext) -> Result<(), AuthError> {
             );
         }
         EnsureOutcome::Authorized(_) => {
+            // Only this outcome reaches the browser, so only this one lands
+            // directly under the authorize URL the flow wrote to stderr. The
+            // other two short-circuit before that and need no separation.
+            println!();
             println!(
-                "OAuth complete for `{server}`. Credentials stored in {where_stored} at `{}`.",
+                "{} Credentials stored in {where_stored} at `{}`.",
+                term::green(&format!("OAuth complete for `{server}`.")),
                 ctx.cred_path
             );
         }
