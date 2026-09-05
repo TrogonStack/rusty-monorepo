@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::io::IsTerminal;
 
 use http::HeaderValue;
@@ -62,7 +63,7 @@ pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
         Ok(o) => o,
         Err(e) => {
             error!(server = server_name, error = %e, "ensure_credentials failed");
-            refuse_over_stdio(&e.to_string()).await;
+            refuse_over_stdio(&e).await;
             return Err(e.into());
         }
     };
@@ -100,10 +101,12 @@ pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
 /// Skipped when stdin is a terminal, where there is no host to answer and
 /// waiting for a request that will never be typed would hang a `trg mcp proxy`
 /// run by hand.
-pub async fn refuse_over_stdio(reason: &str) {
+pub async fn refuse_over_stdio(reason: &dyn Display) {
     if std::io::stdin().is_terminal() {
         return;
     }
+
+    let reason = reason.to_string();
 
     let (stdin, stdout) = stdio();
     let mut local = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
@@ -116,7 +119,7 @@ pub async fn refuse_over_stdio(reason: &str) {
         };
 
         let refusal = JsonRpcMessage::error(
-            ErrorData::new(ErrorCode::INTERNAL_ERROR, reason.to_string(), None),
+            ErrorData::new(ErrorCode::INTERNAL_ERROR, reason.clone(), None),
             Some(request.id),
         );
         if let Err(e) = local.send(refusal).await {

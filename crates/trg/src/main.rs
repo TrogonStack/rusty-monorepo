@@ -68,7 +68,7 @@ async fn main() {
         },
         Commands::Mcp { command } => match wire_mcp(&command) {
             Ok(ctx) => command.handle(&ctx).await,
-            Err(e) => report_startup_failure(&command, &e.to_string()).await,
+            Err(e) => report_startup_failure(&command, &e).await,
         },
         Commands::Doctor(args) => match wire_secrets() {
             Ok(registry) => trg::commands::doctor::run(&registry, &args).await,

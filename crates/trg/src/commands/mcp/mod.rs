@@ -3,6 +3,8 @@ mod proxy;
 
 pub use proxy::ProxyArgs;
 
+use std::fmt::Display;
+
 use clap::Subcommand;
 
 use auth::AuthCommands;
@@ -68,10 +70,10 @@ fn emit_proxy_err(e: ProxyError) -> i32 {
 ///
 /// Only the proxy gets that treatment. Every other subcommand is typed by a
 /// person who is already looking at stderr.
-pub async fn report_startup_failure(command: &McpCommands, reason: &str) -> i32 {
-    eprintln!("{reason}");
+pub async fn report_startup_failure(command: &McpCommands, error: &dyn Display) -> i32 {
+    eprintln!("{error}");
     if matches!(command, McpCommands::Proxy(_)) {
-        refuse_over_stdio(reason).await;
+        refuse_over_stdio(error).await;
     }
     1
 }
