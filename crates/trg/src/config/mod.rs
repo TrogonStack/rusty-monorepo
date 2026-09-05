@@ -19,6 +19,8 @@ pub use secrecy::SecretString;
 use serde::Deserialize;
 pub use var::{Segment, VarRef, VarResolveError, VarSource, VarTemplate};
 
+use crate::secrets::SecretsSection;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("{0}")]
@@ -54,6 +56,8 @@ pub enum ConfigError {
 struct FileRoot {
     #[serde(default)]
     mcp: Option<McpSection>,
+    #[serde(default)]
+    secrets: Option<SecretsSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,11 +83,15 @@ struct McpServerEntryRaw {
     headers: Option<HashMap<String, VarTemplate>>,
     #[serde(default)]
     vars: Option<HashMap<String, VarSource>>,
+    #[serde(default)]
+    secrets: Option<String>,
 }
 
 /// Resolved server profile for MCP `proxy`.
 #[derive(Debug, Clone)]
 pub struct ResolvedMcpServer {
+    /// The `[secrets.backends]` entry this server addresses, if it names one.
+    pub secrets: Option<String>,
     pub url: SecretString,
     pub transport: Option<String>,
     pub max_disconnected_time: Option<u64>,
@@ -106,11 +114,21 @@ fn env_config_dir() -> PathBuf {
         })
 }
 
-pub fn load_mcp_server(selected_name: &str) -> Result<ResolvedMcpServer, ConfigError> {
-    load_mcp_server_at(&trg_config_path(), selected_name)
+/// Everything one `trg mcp` invocation needs out of the config file.
+///
+/// Loaded in a single read so that `[mcp]` and `[secrets]` cannot drift apart
+/// between two parses of the same file.
+#[derive(Debug)]
+pub struct LoadedMcp {
+    pub server: ResolvedMcpServer,
+    pub secrets: SecretsSection,
 }
 
-fn load_mcp_server_at(path: &Path, selected_name: &str) -> Result<ResolvedMcpServer, ConfigError> {
+pub fn load_mcp(selected_name: &str) -> Result<LoadedMcp, ConfigError> {
+    load_mcp_at(&trg_config_path(), selected_name)
+}
+
+fn load_mcp_at(path: &Path, selected_name: &str) -> Result<LoadedMcp, ConfigError> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -120,6 +138,7 @@ fn load_mcp_server_at(path: &Path, selected_name: &str) -> Result<ResolvedMcpSer
     };
 
     let root: FileRoot = toml::from_str(&text)?;
+    let secrets = root.secrets.unwrap_or_default();
     let servers = root
         .mcp
         .and_then(|m| (!m.servers.is_empty()).then_some(m.servers))
@@ -177,13 +196,17 @@ fn load_mcp_server_at(path: &Path, selected_name: &str) -> Result<ResolvedMcpSer
         }
     }
 
-    Ok(ResolvedMcpServer {
-        url: SecretString::new(url_string.into_boxed_str()),
-        transport: raw.transport.clone(),
-        max_disconnected_time: raw.max_disconnected_time,
-        initial_retry_interval: raw.initial_retry_interval,
-        override_protocol_version: raw.override_protocol_version.clone(),
-        http_headers,
+    Ok(LoadedMcp {
+        server: ResolvedMcpServer {
+            secrets: raw.secrets.clone(),
+            url: SecretString::new(url_string.into_boxed_str()),
+            transport: raw.transport.clone(),
+            max_disconnected_time: raw.max_disconnected_time,
+            initial_retry_interval: raw.initial_retry_interval,
+            override_protocol_version: raw.override_protocol_version.clone(),
+            http_headers,
+        },
+        secrets,
     })
 }
 
@@ -217,7 +240,59 @@ mod tests {
     }
 
     fn load_at(path: &Path, server: &str) -> Result<ResolvedMcpServer, ConfigError> {
-        load_mcp_server_at(path, server)
+        load_mcp_at(path, server).map(|loaded| loaded.server)
+    }
+
+    #[test]
+    fn a_server_carries_the_backend_it_names_and_the_secrets_section_beside_it() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [secrets.backends.work]
+            kind = "openbao"
+            addr = "https://bao.example.com:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            machine_id = "laptop"
+            token_file = "~/.vault-token"
+
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+            secrets = "work"
+
+            [mcp.servers.s2]
+            url = "https://example.com/mcp"
+            "#,
+        );
+
+        let loaded = load_mcp_at(&path, "s1").unwrap();
+        assert_eq!(loaded.server.secrets.as_deref(), Some("work"));
+        assert!(loaded.secrets.backends.contains_key("work"));
+
+        let loaded = load_mcp_at(&path, "s2").unwrap();
+        assert_eq!(loaded.server.secrets, None);
+        assert!(
+            loaded.secrets.backends.contains_key("work"),
+            "the section travels with every server, so `[mcp]` and `[secrets]` cannot drift"
+        );
+    }
+
+    #[test]
+    fn a_config_without_a_secrets_section_still_loads() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+            "#,
+        );
+
+        let loaded = load_mcp_at(&path, "s1").unwrap();
+        assert!(loaded.secrets.backends.is_empty());
     }
 
     #[test]
@@ -675,7 +750,7 @@ transport = "from-toml"
         let dir = tempdir().unwrap();
         let path = dir.path().join("missing.toml");
         assert!(matches!(
-            load_mcp_server_at(&path, "s1").unwrap_err(),
+            load_mcp_at(&path, "s1").unwrap_err(),
             ConfigError::NotFound(_)
         ));
     }

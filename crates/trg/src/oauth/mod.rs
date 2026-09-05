@@ -69,7 +69,11 @@ pub async fn ensure_credentials_for(
     }
 
     manager.set_metadata(resolution.metadata);
-    manager.set_credential_store(OAuthCredentialStore::new(backend.clone(), cred_path.clone()));
+    manager.set_credential_store(OAuthCredentialStore::new(
+        backend.clone(),
+        cred_path.clone(),
+        server_name,
+    ));
 
     if manager.initialize_from_store().await? {
         return Ok(EnsureOutcome::AlreadyAuthorized(manager));
@@ -78,7 +82,11 @@ pub async fn ensure_credentials_for(
     let _ = run_authorization(manager, server_name, &[], FlowConfig::default()).await?;
 
     let mut manager = AuthorizationManager::new(url).await?;
-    manager.set_credential_store(OAuthCredentialStore::new(backend.clone(), cred_path.clone()));
+    manager.set_credential_store(OAuthCredentialStore::new(
+        backend.clone(),
+        cred_path.clone(),
+        server_name,
+    ));
     if !manager.initialize_from_store().await? {
         return Err(EnsureError::MissingAfterFlow);
     }

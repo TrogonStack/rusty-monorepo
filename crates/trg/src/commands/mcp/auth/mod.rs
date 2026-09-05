@@ -204,7 +204,7 @@ async fn login(ctx: &McpContext) -> Result<(), AuthError> {
 
 async fn status(args: &StatusArgs, ctx: &McpContext) -> Result<(), AuthError> {
     let server = ctx.server_name.as_str();
-    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone());
+    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone(), &ctx.server_name);
 
     let Some(stored) = store.load().await? else {
         match args.format {
@@ -317,7 +317,7 @@ fn format_duration(secs: u64) -> String {
 }
 
 async fn logout(ctx: &McpContext) -> Result<(), AuthError> {
-    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone());
+    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone(), &ctx.server_name);
     store.clear().await?;
     Ok(())
 }

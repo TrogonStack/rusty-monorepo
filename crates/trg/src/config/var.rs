@@ -9,6 +9,7 @@ use serde::Deserialize;
 /// in `url` or header values.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
+#[serde(expecting = "a string, or an inline table `{ env = \"NAME\", default = \"...\" }`")]
 pub enum VarSource {
     Literal(String),
     Env {

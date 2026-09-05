@@ -76,6 +76,8 @@
 //! `security-framework` / `core-foundation` dependency chain while remaining
 //! exactly as auditable.
 
+use std::path::PathBuf;
+
 use tokio::process::Command;
 
 use super::{SecretMap, SecretPath, SecretsError};
@@ -88,12 +90,25 @@ const SECURITY_BIN: &str = "/usr/bin/security";
 #[derive(Clone)]
 pub struct KeychainBackend {
     service: String,
+    /// The `security` executable to drive. Held as data rather than hardcoded
+    /// at the call site so tests can drive a scripted one and pin the exact
+    /// argv and the exact stderr tokens this backend keys off.
+    bin: PathBuf,
 }
 
 impl KeychainBackend {
     pub fn new(service: impl Into<String>) -> Self {
         Self {
             service: service.into(),
+            bin: PathBuf::from(SECURITY_BIN),
+        }
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    fn with_bin(service: impl Into<String>, bin: impl AsRef<std::path::Path>) -> Self {
+        Self {
+            service: service.into(),
+            bin: bin.as_ref().to_path_buf(),
         }
     }
 
@@ -194,7 +209,7 @@ impl KeychainBackend {
     }
 
     async fn run(&self, args: &[&str]) -> Result<std::process::Output, SecretsError> {
-        Command::new(SECURITY_BIN)
+        Command::new(&self.bin)
             .args(args)
             .output()
             .await
@@ -216,12 +231,58 @@ mod tests {
     use crate::secrets::SecretKey;
     use secrecy::{ExposeSecret, SecretString};
 
-    fn test_path(ns: u32) -> SecretPath {
-        SecretPath::parse(&format!("trg-test-{}-{ns}", std::process::id())).expect("parse")
+    /// A stand-in for `/usr/bin/security` that records its argv and answers
+    /// with a fixed exit code, stdout and stderr.
+    ///
+    /// The backend under test is the production one driving a real child
+    /// process, so what these tests pin down is the real argv and the real
+    /// stderr tokens, not a re-description of them.
+    struct StubSecurity {
+        dir: tempfile::TempDir,
     }
 
-    fn backend() -> KeychainBackend {
-        KeychainBackend::with_default_service()
+    fn sh_quote(raw: &str) -> String {
+        format!("'{}'", raw.replace('\'', r"'\''"))
+    }
+
+    impl StubSecurity {
+        fn answering(exit: i32, stdout: &str, stderr: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let bin = dir.path().join("security");
+            let argv = dir.path().join("argv");
+            let script = format!(
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {argv}; done\nprintf '%s' {stdout}\nprintf '%s' {stderr} >&2\nexit {exit}\n",
+                argv = sh_quote(&argv.display().to_string()),
+                stdout = sh_quote(stdout),
+                stderr = sh_quote(stderr),
+            );
+            std::fs::write(&bin, script).expect("write stub");
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+            Self { dir }
+        }
+
+        fn ok(stdout: &str) -> Self {
+            Self::answering(0, stdout, "")
+        }
+
+        fn backend(&self) -> KeychainBackend {
+            KeychainBackend::with_bin("svc", self.dir.path().join("security"))
+        }
+
+        fn argv(&self) -> Vec<String> {
+            std::fs::read_to_string(self.dir.path().join("argv"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    fn test_path(ns: u32) -> SecretPath {
+        SecretPath::parse(&format!("trg-test-{}-{ns}", std::process::id())).expect("parse")
     }
 
     fn map_of(pairs: &[(&str, &str)]) -> SecretMap {
@@ -232,20 +293,161 @@ mod tests {
         map
     }
 
+    const NOT_FOUND: &str =
+        "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.";
+
     #[tokio::test]
-    async fn get_fresh_returns_none() {
-        let path = test_path(1);
-        let backend = backend();
-        assert!(backend.get(&path).await.expect("get").is_none());
-        let _ = backend.delete(&path).await;
+    async fn get_asks_for_the_password_of_this_service_and_account() {
+        let stub = StubSecurity::ok("{\"credentials\":\"{}\"}\n");
+        let map = stub
+            .backend()
+            .get(&SecretPath::parse("github").unwrap())
+            .await
+            .expect("get")
+            .expect("some");
+
+        assert_eq!(
+            map.get(&SecretKey::parse("credentials").unwrap())
+                .map(|v| v.expose_secret()),
+            Some("{}")
+        );
+        assert_eq!(
+            stub.argv(),
+            ["find-generic-password", "-s", "svc", "-a", "github", "-w"]
+        );
     }
 
     #[tokio::test]
-    async fn set_get_roundtrip() {
-        let path = test_path(2);
-        let backend = backend();
+    async fn get_of_an_absent_item_is_a_miss_not_an_error() {
+        let stub = StubSecurity::answering(44, "", NOT_FOUND);
+        assert!(stub
+            .backend()
+            .get(&SecretPath::parse("github").unwrap())
+            .await
+            .expect("get")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_blocked_prompt_is_reported_as_a_permission_problem() {
+        let stub = StubSecurity::answering(
+            36,
+            "",
+            "security: SecKeychainSearchCopyNext: User interaction is not allowed.",
+        );
+        let err = stub
+            .backend()
+            .get(&SecretPath::parse("github").unwrap())
+            .await
+            .expect_err("should fail");
+
+        assert!(matches!(err, SecretsError::PermissionDenied(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unrecognised_failure_stays_a_transport_error() {
+        let stub = StubSecurity::answering(1, "", "security: the keychain is locked");
+        let err = stub
+            .backend()
+            .get(&SecretPath::parse("github").unwrap())
+            .await
+            .expect_err("should fail");
+
+        assert!(matches!(err, SecretsError::Transport(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_payload_that_is_not_a_secret_map_is_malformed() {
+        let stub = StubSecurity::ok("not json\n");
+        let path = SecretPath::parse("github").unwrap();
+        let err = stub.backend().get(&path).await.expect_err("should fail");
+
+        assert!(matches!(err, SecretsError::Malformed { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn set_creates_the_item_with_an_empty_trusted_application_list() {
+        let stub = StubSecurity::ok("");
+        stub.backend()
+            .set(&SecretPath::parse("github").unwrap(), &map_of(&[("k", "v")]))
+            .await
+            .expect("set");
+
+        assert_eq!(
+            stub.argv(),
+            [
+                "add-generic-password",
+                "-U",
+                "-A",
+                "-s",
+                "svc",
+                "-a",
+                "github",
+                "-w",
+                "{\"k\":\"v\"}"
+            ],
+            "`-U -A` is what keeps a rebuilt binary from re-prompting"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_of_an_absent_item_is_idempotent() {
+        let stub = StubSecurity::answering(44, "", NOT_FOUND);
+        stub.backend()
+            .delete(&SecretPath::parse("github").unwrap())
+            .await
+            .expect("delete");
+
+        assert_eq!(stub.argv(), ["delete-generic-password", "-s", "svc", "-a", "github"]);
+    }
+
+    #[tokio::test]
+    async fn a_failing_delete_that_is_not_a_miss_is_reported() {
+        let stub = StubSecurity::answering(1, "", "security: the keychain is locked");
+        let err = stub
+            .backend()
+            .delete(&SecretPath::parse("github").unwrap())
+            .await
+            .expect_err("should fail");
+
+        assert!(matches!(err, SecretsError::Transport(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unspawnable_security_binary_is_a_transport_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = KeychainBackend::with_bin("svc", dir.path().join("absent"));
+        let err = backend
+            .get(&SecretPath::parse("github").unwrap())
+            .await
+            .expect_err("should fail");
+
+        assert!(matches!(err, SecretsError::Transport(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn list_is_unsupported() {
+        let stub = StubSecurity::ok("");
+        assert!(matches!(
+            stub.backend().list(None).await,
+            Err(SecretsError::Unsupported { op: "list", .. })
+        ));
+    }
+
+    /// Round-trips against the real login keychain.
+    ///
+    /// Ignored by default: the legacy file-based keychain serialises poorly
+    /// under the parallelism of the full test binary, and a lost write there
+    /// says nothing about this crate. Run with
+    /// `cargo test -p trg --lib keychain::tests::live -- --ignored --test-threads=1`.
+    #[tokio::test]
+    #[ignore = "writes to the developer's real login keychain"]
+    async fn live_set_get_delete_roundtrip() {
+        let path = test_path(1);
+        let backend = KeychainBackend::with_default_service();
+
         backend
-            .set(&path, &map_of(&[("credentials", "{\"a\":1}"), ("other", "x")]))
+            .set(&path, &map_of(&[("credentials", "{\"a\":1}")]))
             .await
             .expect("set");
 
@@ -256,88 +458,16 @@ mod tests {
                 .map(|v| v.expose_secret()),
             Some("{\"a\":1}")
         );
-        assert_eq!(
-            loaded
-                .get(&SecretKey::parse("other").unwrap())
-                .map(|v| v.expose_secret()),
-            Some("x")
-        );
 
-        backend.delete(&path).await.expect("delete");
-    }
-
-    #[tokio::test]
-    async fn set_twice_overwrites() {
-        let path = test_path(3);
-        let backend = backend();
-        backend.set(&path, &map_of(&[("k", "first")])).await.expect("first");
-        backend.set(&path, &map_of(&[("k", "second")])).await.expect("second");
-
+        backend
+            .set(&path, &map_of(&[("credentials", "{\"a\":2}")]))
+            .await
+            .expect("overwrite");
         let loaded = backend.get(&path).await.expect("get").expect("some");
         assert_eq!(loaded.len(), 1);
-        assert_eq!(
-            loaded.get(&SecretKey::parse("k").unwrap()).map(|v| v.expose_secret()),
-            Some("second")
-        );
 
-        backend.delete(&path).await.expect("delete");
-    }
-
-    #[tokio::test]
-    async fn delete_then_get_none() {
-        let path = test_path(4);
-        let backend = backend();
-        backend.set(&path, &map_of(&[("k", "v")])).await.expect("set");
         backend.delete(&path).await.expect("delete");
         assert!(backend.get(&path).await.expect("get").is_none());
-    }
-
-    #[tokio::test]
-    async fn delete_is_idempotent() {
-        let path = test_path(5);
-        let backend = backend();
-        backend.delete(&path).await.expect("delete empty");
         backend.delete(&path).await.expect("delete again");
-    }
-
-    #[tokio::test]
-    async fn malformed_payload_is_reported_as_malformed() {
-        let path = test_path(6);
-        let backend = backend();
-        let out = backend
-            .run(&[
-                "add-generic-password",
-                "-U",
-                "-A",
-                "-s",
-                backend.service(),
-                "-a",
-                path.as_str(),
-                "-w",
-                "not json",
-            ])
-            .await
-            .expect("spawn");
-        assert!(out.status.success(), "seed the item");
-
-        let err = backend.get(&path).await.expect_err("should be malformed");
-        assert!(matches!(err, SecretsError::Malformed { .. }), "{err:?}");
-
-        backend.delete(&path).await.expect("delete");
-    }
-
-    #[tokio::test]
-    async fn list_is_unsupported() {
-        let err = backend().list(None).await.expect_err("unsupported");
-        assert!(
-            matches!(
-                err,
-                SecretsError::Unsupported {
-                    kind: "keychain",
-                    op: "list"
-                }
-            ),
-            "{err:?}"
-        );
     }
 }
