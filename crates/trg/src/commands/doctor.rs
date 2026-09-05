@@ -376,10 +376,35 @@ pub async fn diagnose_all(registry: &Registry, only: Option<&str>) -> Result<Dia
 
     let mut backends = Vec::with_capacity(names.len());
     for name in names {
-        let backend = registry.resolve(&name)?;
-        backends.push(diagnose(&name, &backend).await);
+        match registry.resolve(&name) {
+            Ok(backend) => backends.push(diagnose(&name, &backend).await),
+            // Naming a backend that was never declared is a mistake in the
+            // command, not a finding about a backend.
+            Err(e @ (BackendError::Unknown { .. } | BackendError::NoneDeclared { .. })) => return Err(e),
+            // Everything else is this backend's own config being wrong, which
+            // is the first thing to report about it rather than a reason to
+            // stop looking at the others.
+            Err(e) => backends.push(unbuildable(&name, registry.kind_of(&name), &e)),
+        }
     }
     Ok(Diagnosis { backends })
+}
+
+/// A backend that could not be built at all still gets a report, so one broken
+/// entry does not hide the state of every entry after it.
+fn unbuildable(name: &str, kind: Option<&'static str>, e: &BackendError) -> Report {
+    Report {
+        backend: name.to_string(),
+        kind: kind.unwrap_or("unknown"),
+        target: "nowhere: the backend could not be built from its config".to_string(),
+        checks: vec![Check::new(
+            "config",
+            Outcome::failed(
+                e.to_string(),
+                "fix the declaration this names, then run `trg doctor` again",
+            ),
+        )],
+    }
 }
 
 pub async fn run(registry: &Registry, args: &DoctorArgs) -> i32 {
@@ -663,6 +688,58 @@ mod tests {
         assert_eq!(diagnosis.backends[0].backend, IMPLICIT);
         assert_eq!(diagnosis.backends[0].kind, "keychain");
         assert_eq!(diagnosis.is_healthy(), cfg!(target_os = "macos"));
+    }
+
+    /// The whole point of checking every backend at once is lost if the first
+    /// broken one hides the rest, and a backend too broken to build is the most
+    /// likely one to be first.
+    #[tokio::test]
+    async fn one_backend_that_will_not_build_does_not_hide_the_others() {
+        let toml = r#"
+            [secrets.backends.aaa]
+            kind = "openbao"
+            addr = { env = "A_VAR_THAT_IS_NOT_SET_ANYWHERE" }
+            mount = "secret"
+            path_prefix = "trg"
+            token = "irrelevant"
+
+            [secrets.backends.zzz]
+            kind = "keychain"
+            service = "whatever"
+        "#;
+        let section: crate::secrets::SecretsSection = toml::from_str::<toml::Value>(toml)
+            .expect("valid toml")
+            .get("secrets")
+            .expect("a secrets table")
+            .clone()
+            .try_into()
+            .expect("a secrets section");
+
+        let diagnosis = diagnose_all(&Registry::new(section), None)
+            .await
+            .expect("both declared");
+
+        assert_eq!(diagnosis.backends.len(), 2, "{:?}", diagnosis.backends);
+        assert_eq!(diagnosis.backends[0].backend, "aaa");
+        assert_eq!(
+            diagnosis.backends[0].kind, "openbao",
+            "the declared kind survives a failed build"
+        );
+        assert!(matches!(
+            diagnosis.backends[0].checks[0].outcome,
+            Outcome::Failed { .. }
+        ));
+        assert_eq!(diagnosis.backends[1].backend, "zzz");
+        assert_eq!(diagnosis.backends[1].kind, "keychain");
+    }
+
+    #[tokio::test]
+    async fn naming_a_backend_that_does_not_exist_is_still_an_error_rather_than_a_report() {
+        let empty = Registry::new(crate::secrets::SecretsSection::default());
+        let err = diagnose_all(&empty, Some("nosuch"))
+            .await
+            .expect_err("nothing declared");
+        assert!(err.to_string().contains("nosuch"), "{err}");
     }
 
     fn report(backend: &str, checks: Vec<Check>) -> Report {

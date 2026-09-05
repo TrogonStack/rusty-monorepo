@@ -125,6 +125,11 @@ impl Registry {
         self.declared.is_empty()
     }
 
+    /// The `kind` a declared backend was given, whether or not it builds.
+    pub fn kind_of(&self, name: &str) -> Option<&'static str> {
+        self.declared.get(name).map(BackendConfig::kind)
+    }
+
     /// Declared backend names, sorted.
     pub fn declared(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self.declared.keys().map(String::as_str).collect();
