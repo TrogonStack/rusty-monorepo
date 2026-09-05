@@ -244,11 +244,17 @@ with a `chmod 600` message rather than used.
 | Backend    | Where one server's credentials live                             |
 | ---------- | ---------------------------------------------------------------- |
 | `keychain` | Service = the backend's `service`, account = the server name.     |
-| `openbao`  | `<mount>/data/<path_prefix>/<owner>/mcp/[<machine_id>/]<server-name>` |
+| `openbao`  | `<mount>/data/[<path_prefix>/]<owner>/mcp/[<machine_id>/]<server-name>` |
 
-`machine_id` is the only optional segment, so the full form is
-`<mount>/data/<path_prefix>/<owner>/mcp/<machine_id>/<server-name>` and the bare
-form is `<mount>/data/<path_prefix>/<owner>/mcp/<server-name>`.
+Two segments are conditional and `<owner>` is not, so the full form is
+`<mount>/data/<path_prefix>/<owner>/mcp/<machine_id>/<server-name>` and the
+bare form is `<mount>/data/<owner>/mcp/<server-name>`.
+
+`<machine_id>/` appears only when `machine_id` is declared. `<path_prefix>/` is
+dropped when `path_prefix` is empty, which is allowed and leaves `<owner>` as
+the first segment under the mount rather than leaving an empty one behind. A
+mount dedicated to `trg` is the case for it; anywhere else the prefix is what
+keeps these keys out of the way of whatever else lives on the mount.
 
 `owner` sits before `mcp/` so that a policy granting a person their subtree
 covers everything `trg` stores for them, not just MCP credentials. Declaring
