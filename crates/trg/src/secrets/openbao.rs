@@ -112,6 +112,12 @@ pub enum OpenBaoBuildError {
         #[source]
         cause: reqwest::Error,
     },
+
+    #[error(
+        "`ca_cert_file` at `{path}` holds no PEM certificate: pinning to it would trust nothing,          and every request would fail the handshake"
+    )]
+    CaCertEmpty { path: PathBuf },
+
     #[error("could not build an HTTP client for the openbao backend: {0}")]
     Client(#[source] reqwest::Error),
 
@@ -532,6 +538,15 @@ fn trusting_only(
         path: path.to_path_buf(),
         cause,
     })?;
+    // Anything without a PEM frame parses as a bundle of nothing rather than
+    // as an error, so a `ca_cert_file` naming the wrong file would otherwise
+    // build a client that trusts no root at all and fails only at the
+    // handshake, far from the setting that caused it.
+    if certs.is_empty() {
+        return Err(OpenBaoBuildError::CaCertEmpty {
+            path: path.to_path_buf(),
+        });
+    }
     Ok(builder.tls_certs_only(certs))
 }
 
@@ -1101,6 +1116,48 @@ mod tests {
                 .expect("an io error, not a string")
                 .kind(),
             std::io::ErrorKind::NotFound
+        );
+    }
+
+    /// `from_pem_bundle` reads anything without a PEM frame as a bundle of
+    /// nothing rather than as an error, so this is the only thing standing
+    /// between a mistyped path and a client that trusts no root at all.
+    #[test]
+    fn a_ca_cert_file_holding_no_certificate_is_refused_rather_than_pinned_to_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pem = dir.path().join("not-a-bundle.pem");
+        std::fs::write(&pem, b"this is not a certificate").expect("write");
+
+        let mut s = settings("https://bao.example.com:8200");
+        s.ca_cert_file = Some(pem);
+
+        let err = OpenBaoBackend::new(s).map(|_| ()).expect_err("should refuse");
+
+        assert!(matches!(err, OpenBaoBuildError::CaCertEmpty { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_pem_frame_keeps_the_parse_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pem = dir.path().join("broken.pem");
+        std::fs::write(
+            &pem,
+            b"-----BEGIN CERTIFICATE-----\nnot!base64!\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write");
+
+        let mut s = settings("https://bao.example.com:8200");
+        s.ca_cert_file = Some(pem);
+
+        let err = OpenBaoBackend::new(s).map(|_| ()).expect_err("should refuse");
+
+        assert!(err.to_string().contains("not a PEM certificate"), "{err}");
+        assert!(
+            std::error::Error::source(&err)
+                .expect("the reqwest error is kept")
+                .downcast_ref::<reqwest::Error>()
+                .is_some(),
+            "{err}"
         );
     }
 
