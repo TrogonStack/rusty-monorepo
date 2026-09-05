@@ -16,8 +16,7 @@ use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
 use super::openbao::{
-    expand_tilde, is_addressable_segment, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource,
-    DEFAULT_TIMEOUT_MS,
+    expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
 };
 use super::Backend;
 use crate::config::{VarResolveError, VarSource};
@@ -97,16 +96,6 @@ pub enum BackendError {
 
     #[error("`[secrets.backends.{name}]`: {cause}")]
     Build { name: String, cause: OpenBaoBuildError },
-
-    #[error(
-        "`[secrets.backends.{name}]`: `{field}` must match [A-Za-z0-9._-] and be neither empty, \
-         `.`, nor `..`, got `{value}`"
-    )]
-    Token1Segment {
-        name: String,
-        field: &'static str,
-        value: String,
-    },
 }
 
 /// The declared backends, resolved by name on demand.
@@ -229,29 +218,10 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
             // matters only where a provider rotates refresh tokens and treats
             // a reused one as replay. One person on two machines is one owner
             // and two holders, so neither substitutes for the other.
-            if let Some(owner) = owner {
-                check_segment(name, "owner", owner)?;
-            }
-            if let Some(id) = machine_id {
-                check_segment(name, "machine_id", id)?;
-            }
-            check_segment(name, "mount", mount)?;
-
-            // Trimmed before checking, so a leading or trailing slash is a
-            // spelling of the same prefix, but an interior empty segment is
-            // not: it would otherwise pass here and fail on the first secret
-            // operation instead, when the config is no longer in view.
-            let path_prefix = path_prefix.trim_matches('/');
-            if !path_prefix.is_empty() {
-                for segment in path_prefix.split('/') {
-                    check_segment(name, "path_prefix", segment)?;
-                }
-            }
-
             let settings = OpenBaoSettings {
                 addr,
                 mount: mount.clone(),
-                path_prefix: path_prefix.to_string(),
+                path_prefix: path_prefix.clone(),
                 owner: owner.clone(),
                 machine_id: machine_id.clone(),
                 token,
@@ -266,18 +236,6 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                     cause,
                 })
         }
-    }
-}
-
-fn check_segment(backend: &str, field: &'static str, value: &str) -> Result<(), BackendError> {
-    if is_addressable_segment(value) {
-        Ok(())
-    } else {
-        Err(BackendError::Token1Segment {
-            name: backend.to_string(),
-            field,
-            value: value.to_string(),
-        })
     }
 }
 
@@ -455,8 +413,11 @@ mod tests {
             assert!(
                 matches!(
                     build("work", &s.backends["work"]),
-                    Err(BackendError::Token1Segment {
-                        field: "path_prefix",
+                    Err(BackendError::Build {
+                        cause: OpenBaoBuildError::Segment {
+                            field: "path_prefix",
+                            ..
+                        },
                         ..
                     })
                 ),
@@ -521,8 +482,11 @@ mod tests {
 
         assert!(matches!(
             build("work", &s.backends["work"]),
-            Err(BackendError::Token1Segment {
-                field: "machine_id",
+            Err(BackendError::Build {
+                cause: OpenBaoBuildError::Segment {
+                    field: "machine_id",
+                    ..
+                },
                 ..
             })
         ));
@@ -597,29 +561,6 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("secrets.backends.work"), "{rendered}");
         assert!(rendered.contains("addr"), "{rendered}");
-    }
-
-    #[test]
-    fn a_machine_id_that_cannot_address_openbao_is_refused() {
-        let s = section(
-            r#"
-            [backends.work]
-            kind = "openbao"
-            addr = "https://bao:8200"
-            mount = "secret"
-            path_prefix = "trg"
-            machine_id = "my laptop"
-            token_file = "~/.vault-token"
-            "#,
-        )
-        .expect("parse");
-        assert!(matches!(
-            build("work", &s.backends["work"]),
-            Err(BackendError::Token1Segment {
-                field: "machine_id",
-                ..
-            })
-        ));
     }
 
     #[test]

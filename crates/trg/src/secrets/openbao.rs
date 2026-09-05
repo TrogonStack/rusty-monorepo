@@ -57,10 +57,11 @@ pub enum TokenSource {
     Var(VarSource),
 }
 
-/// Everything the backend needs, already validated.
+/// Everything the backend needs.
 ///
-/// Constructed by [`crate::secrets::config`] from `[secrets.backends.<name>]`
-/// so that failures name a config key rather than surfacing at first use.
+/// Whatever ends up in a URL is checked by [`OpenBaoBackend::new`], so a value
+/// that cannot address anything is refused while the config that spelled it is
+/// still in view rather than at the first secret operation.
 pub struct OpenBaoSettings {
     pub addr: String,
     pub mount: String,
@@ -94,6 +95,9 @@ pub enum OpenBaoBuildError {
 
     #[error("could not build an HTTP client for the openbao backend: {0}")]
     Client(String),
+
+    #[error("`{field}` must match [A-Za-z0-9._-] and be neither empty, `.`, nor `..`, got `{value}`")]
+    Segment { field: &'static str, value: String },
 }
 
 #[derive(Clone)]
@@ -116,6 +120,25 @@ impl OpenBaoBackend {
         let parsed = reqwest::Url::parse(&addr).map_err(|_| OpenBaoBuildError::Scheme(settings.addr.clone()))?;
         if !carries_a_token_safely(&parsed) {
             return Err(OpenBaoBuildError::Insecure(settings.addr));
+        }
+
+        // These are what a URL is built out of, so they are checked here
+        // rather than at the first secret operation, when the config that
+        // spelled them is no longer in view.
+        check_segment("mount", &settings.mount)?;
+        if let Some(owner) = &settings.owner {
+            check_segment("owner", owner)?;
+        }
+        if let Some(id) = &settings.machine_id {
+            check_segment("machine_id", id)?;
+        }
+        // Trimmed before checking, so a leading or trailing slash is a
+        // spelling of the same prefix, but an interior empty segment is not.
+        let path_prefix = settings.path_prefix.trim_matches('/').to_string();
+        if !path_prefix.is_empty() {
+            for segment in path_prefix.split('/') {
+                check_segment("path_prefix", segment)?;
+            }
         }
 
         // Both budgets are explicit: an unreachable backend inside a headless
@@ -162,7 +185,7 @@ impl OpenBaoBackend {
             client,
             addr,
             mount: settings.mount,
-            path_prefix: settings.path_prefix,
+            path_prefix,
             owner: settings.owner,
             machine_id: settings.machine_id,
             token: settings.token,
@@ -284,7 +307,7 @@ impl OpenBaoBackend {
     pub async fn list(&self, prefix: Option<&SecretPath>) -> Result<Vec<String>, SecretsError> {
         let full = match prefix {
             Some(p) => self.full_path(p)?,
-            None => self.checked_prefix()?,
+            None => self.storage_prefix(),
         };
         let url = format!("{}/v1/{}/metadata/{full}", self.addr, self.mount);
         let anchor = prefix.cloned().unwrap_or_else(|| {
@@ -328,19 +351,6 @@ impl OpenBaoBackend {
             self.mount,
             self.full_path(path)?
         ))
-    }
-
-    /// The bare prefix, which reaches the URL without passing through
-    /// [`Self::full_path`] when `list` is given nothing to scope to.
-    fn checked_prefix(&self) -> Result<String, SecretsError> {
-        let prefix = self.storage_prefix();
-        if prefix.split('/').filter(|s| !s.is_empty()).all(is_addressable_segment) {
-            return Ok(prefix);
-        }
-        Err(SecretsError::Unavailable(format!(
-            "`{prefix}` is not addressable in OpenBao: each segment of `path_prefix` and \
-             `owner` must match [A-Za-z0-9._-] and be neither `.` nor `..`"
-        )))
     }
 
     /// The prefix-joined path, checked against what is safe to put in a URL.
@@ -479,8 +489,19 @@ fn is_path_byte(b: u8) -> bool {
 /// `.` and `..` are spelled with bytes [`is_path_byte`] allows, but the URL
 /// parser resolves them before the request goes out, so a segment naming a
 /// server would silently address a different secret.
-pub(crate) fn is_addressable_segment(segment: &str) -> bool {
+fn is_addressable_segment(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".." && segment.bytes().all(is_path_byte)
+}
+
+fn check_segment(field: &'static str, value: &str) -> Result<(), OpenBaoBuildError> {
+    if is_addressable_segment(value) {
+        Ok(())
+    } else {
+        Err(OpenBaoBuildError::Segment {
+            field,
+            value: value.to_string(),
+        })
+    }
 }
 
 /// Whether `X-Vault-Token` may be sent to this URL in the clear.
@@ -974,28 +995,42 @@ mod tests {
     }
 
     /// `SecretPath` already refuses a dot segment, so the prefix is the only
-    /// way one can reach the joined path that becomes a URL.
+    /// way one can reach the joined path that becomes a URL. It never gets
+    /// that far: the backend refuses to exist with one.
     #[test]
     fn a_dot_segment_in_the_prefix_cannot_walk_out_of_it() {
-        for prefix in ["trg/..", "..", "trg/."] {
+        for prefix in ["trg/..", "..", "trg/.", "trg//mcp", "trg/ mcp"] {
             let mut s = settings("https://bao.example.com:8200");
             s.path_prefix = prefix.to_string();
-            let b = OpenBaoBackend::new(s).expect("build");
 
             assert!(
-                matches!(b.full_path(&path("github")), Err(SecretsError::Unauthorized { .. })),
+                matches!(
+                    OpenBaoBackend::new(s),
+                    Err(OpenBaoBuildError::Segment {
+                        field: "path_prefix",
+                        ..
+                    })
+                ),
                 "should refuse the prefix {prefix:?}"
             );
         }
     }
 
     #[test]
-    fn a_prefix_with_a_dot_segment_is_refused_when_list_has_nothing_to_scope_to() {
-        let mut s = settings("https://bao.example.com:8200");
-        s.path_prefix = "trg/..".to_string();
-        let b = OpenBaoBackend::new(s).expect("build");
+    fn a_mount_an_owner_and_a_machine_id_are_each_refused_before_the_backend_exists() {
+        for field in ["mount", "owner", "machine_id"] {
+            let mut s = settings("https://bao.example.com:8200");
+            match field {
+                "mount" => s.mount = "sec ret".to_string(),
+                "owner" => s.owner = Some("a/b".to_string()),
+                _ => s.machine_id = Some("..".to_string()),
+            }
 
-        assert!(matches!(b.checked_prefix(), Err(SecretsError::Unavailable(_))));
+            match OpenBaoBackend::new(s).map(|_| ()) {
+                Err(OpenBaoBuildError::Segment { field: got, .. }) => assert_eq!(got, field),
+                other => panic!("{field} should be refused at construction, got {other:?}"),
+            }
+        }
     }
 
     #[test]
