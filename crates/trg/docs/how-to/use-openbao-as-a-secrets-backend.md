@@ -115,10 +115,14 @@ server enforces the boundary rather than trusting every config to stay in its
 own lane.
 
 Template on the caller's *alias* name, which for `userpass` is the username.
-It needs the auth mount's accessor, which differs per instance:
+It needs the auth mount's accessor, which differs per instance. Set
+`AUTH_MOUNT` to the mount your operators actually log in through; the example
+assumes `userpass` at its default path, and `jq -e` fails rather than writing a
+policy that grants nothing if that mount is not there:
 
 ```sh
-ACCESSOR=$(bao auth list -format=json | jq -r '."userpass/".accessor')
+AUTH_MOUNT=userpass/
+ACCESSOR=$(bao auth list -format=json | jq -er --arg m "$AUTH_MOUNT" '.[$m].accessor')
 
 cat > trg-mcp.hcl <<EOF
 path "secret/data/trg/{{identity.entity.aliases.$ACCESSOR.name}}/*" {

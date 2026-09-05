@@ -44,7 +44,13 @@ pub struct ListPayload {
 }
 
 /// What a read reports about the version it returned.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Every field defaults, because nothing outside the fixtures reads any of
+/// them: they are here to pin the wire shape. A response that omits one still
+/// carries the credential in `data`, so refusing to parse it would lose a
+/// secret over a field this crate never looks at.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VersionMetadata {
     pub version: u64,
     pub created_time: String,

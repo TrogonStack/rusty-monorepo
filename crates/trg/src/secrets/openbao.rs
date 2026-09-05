@@ -114,7 +114,8 @@ pub enum OpenBaoBuildError {
     },
 
     #[error(
-        "`ca_cert_file` at `{path}` holds no PEM certificate: pinning to it would trust nothing,          and every request would fail the handshake"
+        "`ca_cert_file` at `{path}` holds no PEM certificate: pinning to it would trust nothing, \
+         and every request would fail the handshake"
     )]
     CaCertEmpty { path: PathBuf },
 
@@ -1220,6 +1221,30 @@ mod tests {
         assert!(matches!(err, OpenBaoBuildError::CaCertEmpty { .. }), "{err}");
     }
 
+    /// A `\` continuation that loses its backslash still compiles, and the run
+    /// of indentation it was hiding then reaches the operator mid-sentence.
+    #[test]
+    fn no_build_error_reads_as_though_it_were_still_indented() {
+        let path = PathBuf::from("/etc/bao/ca.pem");
+        let messages = [
+            OpenBaoBuildError::CaCertEmpty { path: path.clone() }.to_string(),
+            OpenBaoBuildError::CaCertRead {
+                path,
+                cause: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }
+            .to_string(),
+            OpenBaoBuildError::Segment {
+                field: "mount",
+                value: "..".to_string(),
+            }
+            .to_string(),
+        ];
+
+        for message in messages {
+            assert!(!message.contains("  "), "reads as indented: {message}");
+        }
+    }
+
     #[test]
     fn a_malformed_pem_frame_keeps_the_parse_error() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1552,6 +1577,30 @@ mod tests {
 
         assert!(matches!(err, SecretsError::Unavailable(_)), "{err}");
         assert!(err.to_string().contains("nothing was stored"), "{err}");
+    }
+
+    /// `metadata` exists to pin the wire shape and nothing reads it, so a
+    /// response that spells it differently must still hand back the credential
+    /// rather than being refused as malformed.
+    #[tokio::test]
+    async fn a_read_still_yields_the_credential_when_the_metadata_is_partial() {
+        let stub = StubBao::start(vec![Reply {
+            status: 200,
+            body: r#"{"data":{"data":{"credentials":"v"},"metadata":{"version":3}}}"#.to_string(),
+        }]);
+
+        let got = stub
+            .backend()
+            .get(&path("mcp/laptop/github"))
+            .await
+            .expect("a partial metadata block is not a malformed read")
+            .expect("a hit");
+
+        assert_eq!(
+            got.get(&SecretKey::parse("credentials").unwrap())
+                .map(|v| v.expose_secret()),
+            Some("v")
+        );
     }
 
     /// Deleting what is already absent leaves the caller where it wanted to be.
