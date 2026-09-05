@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::io::IsTerminal;
 
 use http::HeaderValue;
 use rmcp::{
+    model::{ErrorCode, ErrorData, JsonRpcMessage},
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
         async_rw::AsyncRwTransport,
@@ -60,6 +62,7 @@ pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
         Ok(o) => o,
         Err(e) => {
             error!(server = server_name, error = %e, "ensure_credentials failed");
+            refuse_over_stdio(&e.to_string()).await;
             return Err(e.into());
         }
     };
@@ -83,6 +86,45 @@ pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
         Err(e) => warn!(server = server_name, error = %e, "bridge exited with error"),
     }
     result
+}
+
+/// Answer the host over the protocol instead of dying before one exists.
+///
+/// Credentials are ensured before any bridge is built, so an auth failure used
+/// to leave stdout empty and the reason on a stderr an editor discards: the
+/// host could report only that its MCP server had exited. Every request gets
+/// the reason back instead, starting with `initialize`, which is the one an
+/// editor puts in front of the person who has to renew the token.
+///
+/// Skipped when stdin is a terminal, where there is no host to answer and
+/// waiting for a request that will never be typed would hang a `trg mcp proxy`
+/// run by hand.
+async fn refuse_over_stdio(reason: &str) {
+    if std::io::stdin().is_terminal() {
+        return;
+    }
+
+    let (stdin, stdout) = stdio();
+    let mut local = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
+
+    while let Some(msg) = local.receive().await {
+        // A notification expects no answer, and replying to one with an id it
+        // never carried is worse than staying quiet.
+        let JsonRpcMessage::Request(request) = msg else {
+            continue;
+        };
+
+        let refusal = JsonRpcMessage::error(
+            ErrorData::new(ErrorCode::INTERNAL_ERROR, reason.to_string(), None),
+            Some(request.id),
+        );
+        if let Err(e) = local.send(refusal).await {
+            warn!(error = %e, "refusal: local send failed");
+            break;
+        }
+    }
+
+    let _ = local.close().await;
 }
 
 async fn bridge_stdio_to_remote<C>(mut remote: StreamableHttpClientTransport<C>) -> Result<(), ProxyError>

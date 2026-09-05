@@ -252,6 +252,10 @@ bao kv get secret/trg/alice/mcp/internal
 another terminal fixes a running `trg mcp proxy` without restarting the editor
 that spawned it.
 
+An editor surfaces this one itself. A proxy that cannot reach its credentials
+answers the host with the message over MCP rather than exiting quietly, so it
+appears wherever that editor shows an MCP server's errors.
+
 **`` `addr` must use `https://` for a remote OpenBao ``**
 
 The token travels in a header, so `trg` sends it in the clear only to a
