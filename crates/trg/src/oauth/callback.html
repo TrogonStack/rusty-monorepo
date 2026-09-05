@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{TITLE}} &middot; trg</title>
+<style>
+:root {
+  --bg:#f6f7f9; --card:#fff; --line:#e4e7eb; --fg:#11151b; --muted:#5b6672;
+  --chip:rgba(17,21,27,.06); --ok:#1a7f37; --bad:#b3261e;
+  --shadow:0 1px 2px rgba(17,21,27,.05),0 10px 30px rgba(17,21,27,.08);
+}
+@media (prefers-color-scheme:dark) {
+  :root {
+    --bg:#0b0d10; --card:#14171c; --line:#232831; --fg:#e6e9ed; --muted:#98a1ad;
+    --chip:rgba(230,233,237,.08); --ok:#3fb950; --bad:#f85149;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; display:grid; place-items:center; padding:24px;
+  background:var(--bg); color:var(--fg);
+  font:15px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.card{
+  width:100%; max-width:27rem; text-align:center;
+  background:var(--card); border:1px solid var(--line); border-radius:14px;
+  box-shadow:var(--shadow); padding:34px 32px 18px;
+}
+.mark{width:44px;height:44px}
+h1{margin:18px 0 10px;font-size:1.2rem;font-weight:600;letter-spacing:-.01em}
+p{margin:0;color:var(--muted)}
+.subject{margin:0 0 12px}
+.subject code{font-size:13.5px;padding:.28em .6em}
+code{
+  font:13px/1.4 ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  background:var(--chip); border-radius:5px; padding:.12em .4em;
+}
+footer{
+  margin-top:28px; padding-top:16px; border-top:1px solid var(--line);
+  display:flex; align-items:center; justify-content:center; gap:8px;
+  font-size:12.5px; color:var(--muted);
+}
+footer a{color:inherit;text-decoration:none}
+footer a:hover{color:var(--fg);text-decoration:underline}
+.wordmark{font-weight:600;color:var(--fg)}
+.sep{opacity:.45}
+</style>
+</head>
+<body>
+<main class="card">
+{{MARK}}
+<h1>{{HEADING}}</h1>
+{{BODY}}
+<footer>
+<span class="wordmark">TrogonStack</span>
+<span class="sep">&middot;</span>
+<a href="https://github.com/TrogonStack">github.com/TrogonStack</a>
+</footer>
+</main>
+</body>
+</html>

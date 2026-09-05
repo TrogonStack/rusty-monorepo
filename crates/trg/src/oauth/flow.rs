@@ -107,7 +107,8 @@ pub async fn run_authorization(
         let server = server.clone();
         let timeout = config.callback_timeout;
         let expected_state = expected_state.clone();
-        tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state))
+        let server_name = server_name.to_string();
+        tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state, server_name))
             .await
             .map_err(|e| AuthError::InternalError(format!("OAuth callback task failed to run: {e}")))?
     };
@@ -239,7 +240,12 @@ impl Drop for UnblockServer {
     }
 }
 
-fn wait_for_callback(server: Arc<Server>, overall_timeout: Duration, expected_state: String) -> CallbackWait {
+fn wait_for_callback(
+    server: Arc<Server>,
+    overall_timeout: Duration,
+    expected_state: String,
+    server_name: String,
+) -> CallbackWait {
     let _cleanup = UnblockServer(server.clone());
     let start = Instant::now();
 
@@ -258,7 +264,7 @@ fn wait_for_callback(server: Arc<Server>, overall_timeout: Duration, expected_st
         let url_str = request.url();
         match parse_oauth_callback_url(url_str) {
             Ok(ParsedOAuthCallback::Success { code, state }) if state == expected_state => {
-                let _ = request.respond(success_response());
+                let _ = request.respond(success_response(&server_name));
                 return CallbackWait::Success { code, state };
             }
             Ok(ParsedOAuthCallback::Success { state, .. }) => {
@@ -282,14 +288,93 @@ fn wait_for_callback(server: Arc<Server>, overall_timeout: Duration, expected_st
     }
 }
 
-fn success_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = "<html><body>Authentication complete. You can close this tab.</body></html>";
-    html_response(body)
+/// The page shown once the provider redirects back with a matching state.
+///
+/// It cannot say the credential was stored, because at this point none exists:
+/// the code has not been exchanged yet, and the write to the secrets backend
+/// happens two calls further out in [`crate::oauth::ensure_credentials_for`].
+/// Either can still fail, and an expired OpenBao token makes that routine, so
+/// a page claiming storage here would contradict the terminal on the failure
+/// this whole flow is most likely to hit.
+fn success_response(server_name: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    html_response(&page(
+        "Authorized",
+        Mark::Ok,
+        "Authorized",
+        &format!(
+            "<p class=\"subject\"><code>{}</code></p>\n<p><code>trg</code> is finishing in your terminal. You can close this tab.</p>",
+            escape_html(server_name)
+        ),
+    ))
 }
 
 fn provider_error_response() -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = "<html><body>Authentication failed. You can close this tab.</body></html>";
-    html_response(body)
+    html_response(&page(
+        "Authorization failed",
+        Mark::Bad,
+        "Authorization failed",
+        "<p>Nothing was stored. Your terminal has the reason. You can close this tab.</p>",
+    ))
+}
+
+enum Mark {
+    Ok,
+    Bad,
+}
+
+impl Mark {
+    fn svg(&self) -> &'static str {
+        match self {
+            Mark::Ok => {
+                r##"<svg class="mark" viewBox="0 0 44 44" fill="none" aria-hidden="true"><circle cx="22" cy="22" r="20" stroke="var(--ok)" stroke-width="2" opacity=".3"/><path d="M14 22.5l5.5 5.5L30 17" stroke="var(--ok)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+            }
+            Mark::Bad => {
+                r##"<svg class="mark" viewBox="0 0 44 44" fill="none" aria-hidden="true"><circle cx="22" cy="22" r="20" stroke="var(--bad)" stroke-width="2" opacity=".3"/><path d="M16.5 16.5l11 11M27.5 16.5l-11 11" stroke="var(--bad)" stroke-width="2.5" stroke-linecap="round"/></svg>"##
+            }
+        }
+    }
+}
+
+/// The page a browser lands on when the flow ends.
+///
+/// The markup is a file rather than a string literal so the CSS keeps its own
+/// braces and an editor can highlight it. `include_str!` reads it at compile
+/// time, so the binary still ships alone.
+///
+/// Everything in it is inline: no fonts, no scripts, no images fetched. A page
+/// served by this crate that reached off the machine would turn every login
+/// into a request some third party could count, and it would break on the
+/// air-gapped hosts that are the reason `token` exists alongside `token_file`.
+///
+/// `body` is substituted as markup, so anything from outside this function has
+/// to go through [`escape_html`] before it gets here.
+fn page(title: &str, mark: Mark, heading: &str, body: &str) -> String {
+    TEMPLATE
+        .replace("{{TITLE}}", title)
+        .replace("{{MARK}}", mark.svg())
+        .replace("{{HEADING}}", heading)
+        .replace("{{BODY}}", body)
+}
+
+const TEMPLATE: &str = include_str!("callback.html");
+
+/// Escape text for interpolation into [`page`].
+///
+/// A server name reaches this page, and the Keychain backend accepts any name
+/// at all, so one containing markup would otherwise be rendered as markup.
+fn escape_html(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn html_response(body: &str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -326,6 +411,110 @@ fn boxed_error_to_io(err: Box<dyn std::error::Error + Send + Sync>) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Keychain backend accepts any server name, so one carrying markup
+    /// reaches this page. It has to arrive as text.
+    #[test]
+    fn a_server_name_is_escaped_into_the_page() {
+        let body = read_body(success_response("<script>alert(1)</script>"));
+
+        assert!(!body.contains("<script>"), "{body}");
+        assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{body}");
+    }
+
+    /// This page is served the instant the callback arrives, before the code
+    /// is exchanged and before anything reaches the secrets backend. Claiming
+    /// otherwise would have the browser contradict the terminal whenever the
+    /// exchange or the write then fails.
+    #[test]
+    fn the_success_page_does_not_claim_a_credential_was_stored() {
+        let body = read_body(success_response("linear"));
+
+        assert!(!body.contains("stored"), "{body}");
+        assert!(body.contains("finishing in your terminal"), "{body}");
+    }
+
+    #[test]
+    fn the_success_page_names_the_server_that_was_authorized() {
+        let body = read_body(success_response("linear"));
+
+        assert!(body.contains("Authorized"), "{body}");
+        assert!(body.contains("<code>linear</code>"), "{body}");
+    }
+
+    /// A page served off a loopback port during a login must not turn that
+    /// login into a request anyone else can observe, and must render on a host
+    /// with no route out.
+    #[test]
+    fn the_pages_fetch_nothing_but_the_one_link_they_offer() {
+        for body in [
+            read_body(success_response("linear")),
+            read_body(provider_error_response()),
+        ] {
+            assert!(!body.contains("<script"), "{body}");
+            for attr in ["src=", "@import", "url("] {
+                assert!(!body.contains(attr), "found {attr} in {body}");
+            }
+            assert_eq!(body.matches("https://").count(), 1, "{body}");
+            assert!(body.contains("https://github.com/TrogonStack"), "{body}");
+        }
+    }
+
+    #[test]
+    fn the_failure_page_says_nothing_was_kept() {
+        let body = read_body(provider_error_response());
+
+        assert!(body.contains("Authorization failed"), "{body}");
+        assert!(body.contains("Nothing was stored"), "{body}");
+    }
+
+    /// A placeholder the template spells differently from [`page`] would ship
+    /// as literal text on a page nothing else renders in CI.
+    #[test]
+    fn every_placeholder_in_the_template_is_substituted() {
+        let body = read_body(success_response("linear"));
+
+        assert!(!body.contains("{{"), "unsubstituted placeholder in {body}");
+    }
+
+    /// Write both pages out and print where, so they can be opened in a real
+    /// browser. This is the only way to look at them: the flow they belong to
+    /// needs a terminal and a provider round trip.
+    ///
+    /// Ignored because it asserts nothing.
+    ///
+    /// ```sh
+    /// cargo test -p trg --lib flow::tests::preview -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes files to look at by hand"]
+    fn preview() {
+        let dir = std::env::temp_dir().join("trg-callback-preview");
+        std::fs::create_dir_all(&dir).expect("create");
+
+        for (name, response) in [
+            ("authorized.html", success_response("linear")),
+            ("failed.html", provider_error_response()),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, read_body(response)).expect("write");
+            println!("{}", path.display());
+        }
+    }
+
+    /// The body a browser would render, taken from the bytes actually served
+    /// rather than from `page` directly, so the headers are on the wire too.
+    fn read_body(response: Response<std::io::Cursor<Vec<u8>>>) -> String {
+        let mut out = Vec::new();
+        response
+            .raw_print(&mut out, (1, 1).into(), &[], false, None)
+            .expect("render");
+        let served = String::from_utf8(out).expect("utf-8");
+
+        let (headers, body) = served.split_once("\r\n\r\n").expect("a header/body break");
+        assert!(headers.contains("Content-Type: text/html"), "{headers}");
+        body.to_string()
+    }
 
     #[test]
     fn flow_config_default_callback_timeout_is_300_seconds() {
