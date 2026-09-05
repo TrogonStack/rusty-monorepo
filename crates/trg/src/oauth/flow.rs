@@ -288,13 +288,21 @@ fn wait_for_callback(
     }
 }
 
+/// The page shown once the provider redirects back with a matching state.
+///
+/// It cannot say the credential was stored, because at this point none exists:
+/// the code has not been exchanged yet, and the write to the secrets backend
+/// happens two calls further out in [`crate::oauth::ensure_credentials_for`].
+/// Either can still fail, and an expired OpenBao token makes that routine, so
+/// a page claiming storage here would contradict the terminal on the failure
+/// this whole flow is most likely to hit.
 fn success_response(server_name: &str) -> Response<std::io::Cursor<Vec<u8>>> {
     html_response(&page(
         "Authorized",
         Mark::Ok,
         "Authorized",
         &format!(
-            "<p class=\"subject\"><code>{}</code></p>\n<p><code>trg</code> stored the credential. You can close this tab.</p>",
+            "<p class=\"subject\"><code>{}</code></p>\n<p><code>trg</code> is finishing in your terminal. You can close this tab.</p>",
             escape_html(server_name)
         ),
     ))
@@ -412,6 +420,18 @@ mod tests {
 
         assert!(!body.contains("<script>"), "{body}");
         assert!(body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{body}");
+    }
+
+    /// This page is served the instant the callback arrives, before the code
+    /// is exchanged and before anything reaches the secrets backend. Claiming
+    /// otherwise would have the browser contradict the terminal whenever the
+    /// exchange or the write then fails.
+    #[test]
+    fn the_success_page_does_not_claim_a_credential_was_stored() {
+        let body = read_body(success_response("linear"));
+
+        assert!(!body.contains("stored"), "{body}");
+        assert!(body.contains("finishing in your terminal"), "{body}");
     }
 
     #[test]
