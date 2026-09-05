@@ -107,6 +107,53 @@ Every machine reading that path now uses the same credential. To give this
 machine its own instead, add `machine_id = "laptop"` to the backend and log in
 again; the entry moves to `secret/trg/mcp/laptop/internal`.
 
+## Giving each user their own subtree
+
+The policy in step 1 grants everyone holding it the same `trg/*` subtree. On a
+shared instance, template the path on the caller's identity instead, so the
+server enforces the boundary rather than trusting every config to stay in its
+own lane.
+
+Template on the caller's *alias* name, which for `userpass` is the username.
+It needs the auth mount's accessor, which differs per instance:
+
+```sh
+ACCESSOR=$(bao auth list -format=json | jq -r '."userpass/".accessor')
+
+cat > trg-mcp.hcl <<EOF
+path "secret/data/trg/{{identity.entity.aliases.$ACCESSOR.name}}/*" {
+  capabilities = ["create", "read", "update", "patch", "delete"]
+}
+
+path "secret/metadata/trg/{{identity.entity.aliases.$ACCESSOR.name}}/*" {
+  capabilities = ["read", "list", "delete"]
+}
+EOF
+
+bao policy write trg-mcp trg-mcp.hcl
+```
+
+Each user then names their own subtree in `path_prefix`:
+
+```toml
+[secrets.backends.work]
+kind = "openbao"
+addr = { env = "BAO_ADDR" }
+mount = "secret"
+path_prefix = "trg/alice"
+token_file = "~/.vault-token"
+```
+
+`path_prefix` is a literal and expands nothing, so each user's config carries
+their own name. Getting it wrong is not a way to read someone else's
+credential: the policy answers `permission denied` for any subtree but the
+caller's.
+
+> Do not reach for `{{identity.entity.name}}` here. Unless an operator has
+> set one, OpenBao generates that name itself, so it comes out as something
+> like `entity_1a2b3c4d.root` rather than the username. The alias name is the
+> one a person can type into `path_prefix`.
+
 ## Using a private CA
 
 Point `ca_cert_file` at the PEM bundle:

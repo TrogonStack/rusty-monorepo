@@ -6,6 +6,10 @@
 //! ```sh
 //! BAO_MOUNT=kv cargo test -p trg --test openbao_live -- --ignored --nocapture
 //! ```
+//!
+//! `BAO_PREFIX` picks the subtree, so an instance whose policy templates the
+//! path on the caller's identity can be exercised at the subtree that policy
+//! actually grants.
 use std::time::Duration;
 
 use secrecy::ExposeSecret;
@@ -20,13 +24,17 @@ fn live() -> OpenBaoBackend {
     OpenBaoBackend::new(OpenBaoSettings {
         addr,
         mount,
-        path_prefix: "trg-adapter-check".to_string(),
+        path_prefix: prefix(),
         machine_id: None,
         token: TokenSource::File(dirs_home().join(".vault-token")),
         ca_cert_file: None,
         timeout: Duration::from_secs(10),
     })
     .expect("build")
+}
+
+fn prefix() -> String {
+    std::env::var("BAO_PREFIX").unwrap_or_else(|_| "trg-adapter-check".to_string())
 }
 
 fn dirs_home() -> std::path::PathBuf {
@@ -69,7 +77,7 @@ async fn a_bad_mount_is_reported_as_a_configuration_error() {
     let bao = OpenBaoBackend::new(OpenBaoSettings {
         addr,
         mount: "definitely-not-a-mount".to_string(),
-        path_prefix: "trg-adapter-check".to_string(),
+        path_prefix: prefix(),
         machine_id: None,
         token: TokenSource::File(dirs_home().join(".vault-token")),
         ca_cert_file: None,
@@ -90,7 +98,7 @@ async fn a_rejected_token_is_reported_as_unauthorized() {
     let bao = OpenBaoBackend::new(OpenBaoSettings {
         addr,
         mount,
-        path_prefix: "trg-adapter-check".to_string(),
+        path_prefix: prefix(),
         machine_id: None,
         token: TokenSource::Var(VarSource::Literal("definitely-not-a-token".to_string())),
         ca_cert_file: None,

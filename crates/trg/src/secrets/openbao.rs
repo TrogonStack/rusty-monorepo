@@ -1283,6 +1283,23 @@ mod tests {
         assert_eq!(seen.url, "/v1/secret/metadata/trg/mcp/laptop/github");
     }
 
+    /// A per-user subtree is spelled as a multi-segment `path_prefix`, which
+    /// has to reach the wire with its segments intact for a templated ACL
+    /// path to match it.
+    #[tokio::test]
+    async fn a_multi_segment_path_prefix_keeps_its_segments() {
+        let stub = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
+        let mut s = settings(&stub.addr);
+        s.path_prefix = "trg/alice".to_string();
+        s.machine_id = None;
+        s.timeout = Duration::from_secs(2);
+        let backend = OpenBaoBackend::new(s).expect("build");
+
+        backend.get(&path("mcp/internal")).await.expect("get").expect("some");
+
+        assert_eq!(stub.only_request().url, "/v1/secret/data/trg/alice/mcp/internal");
+    }
+
     #[tokio::test]
     async fn list_sorts_the_keys_it_is_given() {
         let stub = StubBao::start(vec![Reply::listed(&["zeta", "alpha", "mid/"])]);

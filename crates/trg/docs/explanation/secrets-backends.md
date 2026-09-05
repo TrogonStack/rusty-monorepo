@@ -77,6 +77,25 @@ both rotates refresh tokens and treats a reused one as replay, which revokes
 the whole grant family. Declaring `machine_id` is how you avoid that, and the
 cost you accept for it is one login per machine per server.
 
+## `path_prefix` names a location, it does not enforce one
+
+On a shared instance the natural next question is how one user is kept out of
+another's credentials. The answer is the policy, not the config.
+
+`path_prefix` is a literal. It does not expand `{{identity.entity...}}` or
+anything else, because `trg` has no idea who the token belongs to. The token
+is opaque to it: `trg` reads a file and sets a header, and never calls
+`lookup-self` or touches `auth/` at all. Resolving an identity in order to
+build a path would add a round trip before every operation, and a bootstrap
+dependency on the very thing the path is supposed to address.
+
+It would also be the wrong place for it. A boundary that the client computes
+is a boundary the client can be edited out of. OpenBao already templates ACL
+paths on the caller's identity, and that check runs on the server whatever the
+config says, so a wrong `path_prefix` is a `permission denied` rather than a
+read of someone else's secret. Duplicating the rule in `trg` would buy nothing
+and give two places for it to be wrong.
+
 ## Why the OpenBao client is not a client crate
 
 The backend speaks the KV v2 HTTP API directly through `reqwest`. The surface
