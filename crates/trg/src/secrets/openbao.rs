@@ -409,7 +409,7 @@ impl OpenBaoBackend {
         if e.is_connect() {
             return SecretsError::Unavailable(format!("could not connect to OpenBao at {}", self.addr));
         }
-        SecretsError::Transport(format!("OpenBao at {}: {e}", self.addr))
+        SecretsError::Transport(format!("OpenBao at {}: {}", self.addr, with_causes(e)))
     }
 
     /// Classify the response. `Ok(None)` is the "no such secret" case, which
@@ -498,7 +498,8 @@ fn is_addressable_segment(segment: &str) -> bool {
     !segment.is_empty() && segment != "." && segment != ".." && segment.bytes().all(is_path_byte)
 }
 
-/// The configured instance is the only origin allowed to receive the token.
+/// The configured instance is the only origin allowed to receive the token,
+/// and only a redirect that leaves the request intact is worth following.
 ///
 /// reqwest strips only the headers it knows are sensitive, and `X-Vault-Token`
 /// is not one of them, so a followed redirect re-sends the token verbatim. A
@@ -507,14 +508,53 @@ fn is_addressable_segment(segment: &str) -> bool {
 fn only_this_origin(addr: &reqwest::Url) -> reqwest::redirect::Policy {
     let origin = addr.origin();
     reqwest::redirect::Policy::custom(move |attempt| {
+        let status = attempt.status();
         if attempt.url().origin() != origin {
             attempt.stop()
+        } else if !preserves_the_request(status) {
+            attempt.error(format!(
+                "answered {status} within its own origin, which would resend the request as a \
+                 bodyless GET, so a write would store nothing"
+            ))
         } else if attempt.previous().len() > MAX_REDIRECTS {
             attempt.error("too many redirects")
         } else {
             attempt.follow()
         }
     })
+}
+
+/// The error and everything under it, joined.
+///
+/// `SecretsError::Transport` carries prose rather than a source chain, and
+/// reqwest puts the useful part underneath: a refused redirect displays as
+/// "error following redirect for url (...)" and keeps the reason it was refused
+/// one level down. Stopping at the top would report that something went wrong
+/// without saying what.
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(next) = cause {
+        out.push_str(": ");
+        out.push_str(&next.to_string());
+        cause = next.source();
+    }
+    out
+}
+
+/// Whether following the redirect would leave the request as it was sent.
+///
+/// `301`, `302` and `303` are defined to become a bodyless `GET`, and reqwest
+/// implements that. A `set` answered with one would come back as the read of an
+/// untouched path, so the caller would be told a credential was stored when
+/// nothing had been written. `307` and `308` keep the method and the body, and
+/// are what OpenBao answers to send a standby to the active node, so refusing
+/// the rewriting three costs nothing the cluster relies on.
+fn preserves_the_request(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::TEMPORARY_REDIRECT | reqwest::StatusCode::PERMANENT_REDIRECT
+    )
 }
 
 /// The roots this backend trusts, which are the OS roots until a
@@ -894,13 +934,18 @@ mod tests {
         }
     }
 
-    fn serve_one_redirect_then_hits(server: Arc<tiny_http::Server>, seen: Arc<Mutex<Vec<Seen>>>, location: String) {
+    fn serve_one_redirect_then_hits(
+        server: Arc<tiny_http::Server>,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        status: u16,
+        location: String,
+    ) {
         let mut first = true;
         while let Ok(request) = server.recv() {
             seen.lock().expect("stub lock").push(seen_from(&request, String::new()));
 
             if std::mem::take(&mut first) {
-                let redirect = tiny_http::Response::empty(307).with_header(
+                let redirect = tiny_http::Response::empty(status).with_header(
                     tiny_http::Header::from_bytes(&b"Location"[..], location.as_bytes()).expect("a location header"),
                 );
                 let _ = request.respond(redirect);
@@ -922,16 +967,16 @@ mod tests {
             Self { addr, seen, server }
         }
 
-        /// Answers the first request with a 307 to `location` and every later
-        /// one with a hit, recording each so a test can see whether the token
-        /// travelled and where.
-        fn start_redirecting_once_to(location: String) -> Self {
+        /// Answers the first request with `status` to `location` and every
+        /// later one with a hit, recording each so a test can see whether the
+        /// token travelled and where.
+        fn start_redirecting_once_to(status: u16, location: String) -> Self {
             let (server, addr) = bind_loopback();
             let seen = Arc::new(Mutex::new(Vec::new()));
 
             let worker = Arc::clone(&server);
             let recorder = Arc::clone(&seen);
-            std::thread::spawn(move || serve_one_redirect_then_hits(worker, recorder, location));
+            std::thread::spawn(move || serve_one_redirect_then_hits(worker, recorder, status, location));
 
             Self { addr, seen, server }
         }
@@ -1013,7 +1058,8 @@ mod tests {
     #[tokio::test]
     async fn a_redirect_to_another_origin_never_carries_the_token() {
         let elsewhere = StubBao::start(vec![Reply::hit(&[("k", "v")])]);
-        let bao = StubBao::start_redirecting_once_to(format!("{}/v1/secret/data/trg/mcp/laptop/x", elsewhere.addr));
+        let bao =
+            StubBao::start_redirecting_once_to(307, format!("{}/v1/secret/data/trg/mcp/laptop/x", elsewhere.addr));
 
         let err = bao
             .backend()
@@ -1037,7 +1083,7 @@ mod tests {
     /// the token is already its own.
     #[tokio::test]
     async fn a_redirect_within_the_configured_origin_is_followed() {
-        let bao = StubBao::start_redirecting_once_to("/v1/secret/data/trg/elsewhere".to_string());
+        let bao = StubBao::start_redirecting_once_to(307, "/v1/secret/data/trg/elsewhere".to_string());
 
         let hit = bao.backend().get(&path("mcp/laptop/x")).await.expect("followed");
 
@@ -1046,6 +1092,44 @@ mod tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert_eq!(seen[1].url, "/v1/secret/data/trg/elsewhere");
         assert_eq!(seen[1].token.as_deref(), Some("t"));
+    }
+
+    /// A `302` is a rewrite, not a detour. Following it would resend the `POST`
+    /// as a bodyless `GET`, which reads the path instead of writing it, and a
+    /// `200` from that read is indistinguishable from a stored credential.
+    #[tokio::test]
+    async fn a_write_is_never_redirected_into_a_read_that_stores_nothing() {
+        let stub = StubBao::start_redirecting_once_to(302, "/v1/secret/data/trg/elsewhere".to_string());
+        let mut map = SecretMap::new();
+        map.insert(
+            SecretKey::parse("credentials").unwrap(),
+            SecretString::from("v".to_string()),
+        );
+
+        let err = stub
+            .backend()
+            .set(&path("mcp/laptop/github"), &map)
+            .await
+            .expect_err("a rewritten write did not store anything");
+
+        assert!(err.to_string().contains("302"), "{err}");
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 1, "the redirect must not be followed: {seen:?}");
+        assert_eq!(seen[0].method, "POST");
+    }
+
+    /// The reason the three rewriting statuses can be refused outright: the one
+    /// OpenBao actually uses to point at the active node is not among them.
+    #[test]
+    fn only_the_redirects_that_keep_the_request_are_worth_following() {
+        for status in [307u16, 308] {
+            let status = reqwest::StatusCode::from_u16(status).expect("a redirect status");
+            assert!(preserves_the_request(status), "{status} keeps the request");
+        }
+        for status in [301u16, 302, 303] {
+            let status = reqwest::StatusCode::from_u16(status).expect("a redirect status");
+            assert!(!preserves_the_request(status), "{status} rewrites the request");
+        }
     }
 
     #[test]
