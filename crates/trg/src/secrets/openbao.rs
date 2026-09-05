@@ -228,7 +228,9 @@ impl OpenBaoBackend {
                 cause: "response has no `data.data` object".to_string(),
             })?;
 
-        // A soft-deleted KV v2 version answers 200 with `data.data: null`.
+        // Defensive. A soft-deleted version answers 404 with a `data.data` of
+        // null and no `errors`, which `read_body` already turns into a miss,
+        // so this only catches a 200 shaped the same way.
         if data.is_null() {
             return Ok(None);
         }
@@ -1067,7 +1069,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_mount_is_a_configuration_error_not_a_miss() {
-        let stub = StubBao::start(vec![(404, r#"{"errors":["no handler for route \"nope/data/x\""]}"#)]);
+        let stub = StubBao::start(vec![(
+            404,
+            r#"{"errors":["no handler for route \"nope/data/x\". route entry not found."]}"#,
+        )]);
         let err = stub.backend().get(&path("x")).await.expect_err("should fail");
 
         assert!(matches!(err, SecretsError::Unavailable(_)), "{err:?}");
@@ -1076,6 +1081,19 @@ mod tests {
 
     #[tokio::test]
     async fn a_soft_deleted_version_reads_as_a_miss() {
+        // Status and shape captured from a live OpenBao 2.5.5 after
+        // `DELETE /v1/<mount>/data/<path>`. The status is 404, and the body
+        // carries `data` but no `errors`. Request id replaced.
+        let stub = StubBao::start(vec![(
+            404,
+            r#"{"request_id":"00000000-0000-0000-0000-000000000000","lease_id":"","renewable":false,"lease_duration":0,"data":{"data":null,"metadata":{"created_time":"2026-09-05T00:40:09.009570287Z","custom_metadata":null,"deletion_time":"2026-09-05T00:40:25.107479352Z","destroyed":false,"version":1}},"wrap_info":null,"warnings":null,"auth":null}"#,
+        )]);
+        assert!(stub.backend().get(&path("x")).await.expect("get").is_none());
+    }
+
+    /// The guard in `get`, which no observed OpenBao response reaches.
+    #[tokio::test]
+    async fn a_success_carrying_a_null_data_object_is_also_a_miss() {
         let stub = StubBao::start(vec![(200, r#"{"data":{"data":null,"metadata":{"version":4}}}"#)]);
         assert!(stub.backend().get(&path("x")).await.expect("get").is_none());
     }
@@ -1117,7 +1135,10 @@ mod tests {
 
     #[tokio::test]
     async fn set_wraps_the_map_in_the_kv_v2_data_envelope() {
-        let stub = StubBao::start(vec![(200, r#"{"data":{"version":1}}"#)]);
+        let stub = StubBao::start(vec![(
+            200,
+            r#"{"request_id":"00000000-0000-0000-0000-000000000000","lease_id":"","renewable":false,"lease_duration":0,"data":{"created_time":"2026-09-05T00:40:09.009570287Z","custom_metadata":null,"deletion_time":"","destroyed":false,"version":1},"wrap_info":null,"warnings":null,"auth":null}"#,
+        )]);
         let mut map = SecretMap::new();
         map.insert(
             SecretKey::parse("credentials").unwrap(),
