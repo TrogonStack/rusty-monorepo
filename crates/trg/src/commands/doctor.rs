@@ -203,7 +203,12 @@ fn token_check(bao: &OpenBaoBackend) -> Check {
         Err(e) => Check::new(
             "token",
             Outcome::failed(
-                format!("{source}: {e}"),
+                match bao.token_source() {
+                    // Every way a token file can fail already names the file,
+                    // so prefixing with the source prints the path twice.
+                    TokenSource::File(_) => e.to_string(),
+                    TokenSource::Var(_) => format!("{source}: {e}"),
+                },
                 match bao.token_source() {
                     TokenSource::File(_) => "run `bao login` to write one",
                     TokenSource::Var(_) => "set the variable the config names",
@@ -254,8 +259,13 @@ async fn subtree_checks(bao: &OpenBaoBackend) -> Vec<Check> {
             ),
         ],
         // A policy scoped to one subtree denies before the mount is looked up,
-        // so a refusal here says nothing about whether the mount is there.
-        Err(e @ (SecretsError::Unauthorized { .. } | SecretsError::PermissionDenied(_))) => vec![
+        // and a token that could not be read never reaches it either, so
+        // neither says anything about whether the mount is there.
+        Err(
+            e @ (SecretsError::Unauthorized { .. }
+            | SecretsError::Unauthenticated(_)
+            | SecretsError::PermissionDenied(_)),
+        ) => vec![
             Check::new(
                 "mount",
                 Outcome::skipped("the probe was refused before the mount was reached"),

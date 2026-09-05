@@ -467,10 +467,7 @@ impl OpenBaoBackend {
             TokenSource::Var(source) => source
                 .resolve()
                 .map(|v| SecretString::from(v.trim().to_string()))
-                .map_err(|e| SecretsError::Unauthorized {
-                    path: SecretPath::parse("token").expect("static path is valid"),
-                    cause: e.to_string(),
-                }),
+                .map_err(|e| SecretsError::Unauthenticated(e.to_string())),
             TokenSource::File(path) => read_token_file(path),
         }
     }
@@ -754,12 +751,11 @@ fn map_from_json(object: &Map<String, Value>, path: &SecretPath) -> Result<Secre
 fn read_token_file(path: &Path) -> Result<SecretString, SecretsError> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let meta = std::fs::metadata(path).map_err(|e| SecretsError::Unauthorized {
-        path: SecretPath::parse("token").expect("static path is valid"),
-        cause: format!(
+    let meta = std::fs::metadata(path).map_err(|e| {
+        SecretsError::Unauthenticated(format!(
             "could not read the token file at `{}`: {e}; run `bao login` first",
             path.display()
-        ),
+        ))
     })?;
 
     let mode = meta.permissions().mode() & 0o777;
@@ -771,20 +767,16 @@ fn read_token_file(path: &Path) -> Result<SecretString, SecretsError> {
         )));
     }
 
-    let raw = std::fs::read_to_string(path).map_err(|e| SecretsError::Unauthorized {
-        path: SecretPath::parse("token").expect("static path is valid"),
-        cause: format!("could not read the token file at `{}`: {e}", path.display()),
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        SecretsError::Unauthenticated(format!("could not read the token file at `{}`: {e}", path.display()))
     })?;
 
     let token = raw.trim();
     if token.is_empty() {
-        return Err(SecretsError::Unauthorized {
-            path: SecretPath::parse("token").expect("static path is valid"),
-            cause: format!(
-                "the token file at `{}` is empty; run `bao login` and retry",
-                path.display()
-            ),
-        });
+        return Err(SecretsError::Unauthenticated(format!(
+            "the token file at `{}` is empty; run `bao login` and retry",
+            path.display()
+        )));
     }
     Ok(SecretString::from(token.to_string()))
 }
@@ -1530,6 +1522,21 @@ mod tests {
         assert_eq!(read_token_file(&path).expect("read").expose_secret(), "s.abc");
     }
 
+    /// A token file that is missing or unreadable is not a denied read of a
+    /// secret, and a message shaped like one sends the reader after a path
+    /// that was never involved.
+    #[test]
+    fn a_token_that_could_not_be_read_names_no_secret_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = read_token_file(&dir.path().join("absent")).expect_err("should refuse");
+
+        assert!(matches!(err, SecretsError::Unauthenticated(_)), "{err:?}");
+        let message = err.to_string();
+        assert!(!message.contains("not authorized to read"), "{message}");
+        assert!(message.starts_with("could not read the token file"), "{message}");
+        assert!(message.contains("bao login"), "{message}");
+    }
+
     #[test]
     fn an_empty_token_file_names_the_recovery_command() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1540,6 +1547,8 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
 
         let err = read_token_file(&path).expect_err("should refuse");
+        assert!(matches!(err, SecretsError::Unauthenticated(_)), "{err:?}");
+        assert!(err.to_string().starts_with("the token file at"), "{err}");
         assert!(err.to_string().contains("bao login"), "{err}");
     }
 

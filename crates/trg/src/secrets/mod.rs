@@ -31,6 +31,15 @@ pub enum SecretsError {
     #[error("not authorized to read `{path}`: {cause}")]
     Unauthorized { path: SecretPath, cause: String },
 
+    /// No credential to present, as opposed to one the backend refused.
+    ///
+    /// Carries no path because none is involved: nothing was addressed and
+    /// nothing was denied. Reporting these as [`SecretsError::Unauthorized`]
+    /// meant naming a path anyway, and the placeholder that went in sent the
+    /// reader looking for a secret that does not exist.
+    #[error("{0}")]
+    Unauthenticated(String),
+
     #[error("secrets backend unavailable: {0}")]
     Unavailable(String),
 
