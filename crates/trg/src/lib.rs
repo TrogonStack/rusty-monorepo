@@ -8,3 +8,4 @@ pub mod fs;
 pub mod oauth;
 pub mod secrets;
 pub mod telemetry;
+pub mod term;
