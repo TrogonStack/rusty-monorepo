@@ -60,15 +60,19 @@ pub enum TokenSource {
 
 /// The part of `sys/health` this crate reads.
 ///
-/// Every field defaults for the same reason the version metadata does: a
-/// deployment that spells one of them differently should still be reportable
-/// rather than refused.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
+/// The three flags are required, unlike the version metadata elsewhere, because
+/// they are what makes a body a health report at all. Defaulting them lets any
+/// JSON object parse as one, so an `addr` pointed at something that is not
+/// OpenBao reads back as an OpenBao that was never initialized, and the report
+/// then tells the operator to initialize whatever is actually listening there.
+/// `version` only decorates the summary, so a deployment that omits it is still
+/// worth reporting on.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Health {
     pub initialized: bool,
     pub sealed: bool,
     pub standby: bool,
+    #[serde(default)]
     pub version: String,
 }
 

@@ -229,16 +229,9 @@ async fn subtree_checks(bao: &OpenBaoBackend) -> Vec<Check> {
                 }),
             ),
         ],
-        Err(e @ SecretsError::Unavailable(_)) => vec![
-            Check::new(
-                "mount",
-                Outcome::failed(e.to_string(), format!("check `mount` against `bao secrets list`, which lists what this instance actually serves; `{mount}` was not among them")),
-            ),
-            Check::new("subtree", Outcome::skipped("the mount did not answer")),
-        ],
         // A policy scoped to one subtree denies before the mount is looked up,
         // so a refusal here says nothing about whether the mount is there.
-        Err(e) => vec![
+        Err(e @ (SecretsError::Unauthorized { .. } | SecretsError::PermissionDenied(_))) => vec![
             Check::new(
                 "mount",
                 Outcome::skipped("the probe was refused before the mount was reached"),
@@ -251,6 +244,28 @@ async fn subtree_checks(bao: &OpenBaoBackend) -> Vec<Check> {
                 ),
             ),
         ],
+        // Everything else stopped at the mount rather than inside the subtree,
+        // so the subtree was never in question and has nothing to report.
+        Err(e) => {
+            let remedy = mount_remedy(&e, mount);
+            vec![
+                Check::new("mount", Outcome::failed(e.to_string(), remedy)),
+                Check::new("subtree", Outcome::skipped("the mount did not answer")),
+            ]
+        }
+    }
+}
+
+/// `Unavailable` covers a missing mount, a sealed instance, and a request that
+/// never arrived, so a remedy naming only the first would send an operator to
+/// check a mount name that a timeout says nothing about.
+fn mount_remedy(e: &SecretsError, mount: &str) -> String {
+    match e {
+        SecretsError::Unavailable(_) => format!(
+            "check `mount` against `bao secrets list`, which lists what this instance actually \
+             serves, and that it stayed reachable and unsealed; `{mount}` did not answer"
+        ),
+        _ => "check that `addr` names OpenBao itself rather than something standing in front of it".to_string(),
     }
 }
 
@@ -406,6 +421,46 @@ mod tests {
             assert!(matches!(outcome(&report, name), Outcome::Skipped { .. }), "{name}");
         }
         assert_eq!(report.exit_code(), 1);
+    }
+
+    /// An `addr` pointed at something that answers JSON but is not OpenBao
+    /// must not read back as an OpenBao that was never initialized, because the
+    /// remedy for that is to initialize whatever is actually listening there.
+    #[tokio::test]
+    async fn a_body_that_is_not_a_health_report_is_not_read_as_an_uninitialized_instance() {
+        let stub = Stub::start((200, r#"{"errors":["missing client token"]}"#), (200, TWO_KEYS));
+        let report = openbao("live", &stub.backend(literal())).await;
+
+        let Outcome::Failed { detail, remedy } = outcome(&report, "instance") else {
+            panic!("expected a failure, got {:?}", outcome(&report, "instance"));
+        };
+        assert!(!detail.contains("uninitialized"), "{detail}");
+        assert!(!remedy.contains("init"), "{remedy}");
+        assert!(remedy.contains("`addr`"), "{remedy}");
+    }
+
+    /// Only a refusal says the request reached the subtree. Anything else
+    /// stopped at the mount, and blaming the policy for it sends an operator to
+    /// rewrite a policy that was never consulted.
+    #[tokio::test]
+    async fn a_mount_that_answers_nonsense_is_not_blamed_on_the_policy() {
+        let stub = Stub::start((200, SERVING), (200, "not json at all"));
+        let report = openbao("live", &stub.backend(literal())).await;
+
+        let Outcome::Failed { remedy, .. } = outcome(&report, "mount") else {
+            panic!("expected a failure, got {:?}", outcome(&report, "mount"));
+        };
+        assert!(remedy.contains("`addr`"), "{remedy}");
+        assert!(matches!(outcome(&report, "subtree"), Outcome::Skipped { .. }));
+    }
+
+    /// A timeout and a missing mount arrive as the same error, so the remedy
+    /// has to hold for both rather than assert the mount name is wrong.
+    #[test]
+    fn the_remedy_for_a_mount_that_did_not_answer_covers_more_than_a_wrong_name() {
+        let remedy = mount_remedy(&SecretsError::Unavailable("timed out".to_string()), "secret");
+        assert!(remedy.contains("bao secrets list"), "{remedy}");
+        assert!(remedy.contains("reachable"), "{remedy}");
     }
 
     #[tokio::test]
