@@ -90,7 +90,41 @@ secrets = "work"
 Servers that do not name a `secrets` backend keep using the Keychain, so you
 can migrate one server at a time.
 
-## 5. Log in to the MCP server
+## 5. Check the backend before logging in
+
+```sh
+trg doctor --backend work
+```
+
+```text
+backend  work (openbao)
+target   https://bao.internal.example.com:8200 (mount `secret`, subtree `trg`)
+
+  ok       token          file `/home/alice/.vault-token`
+  ok       instance       unsealed, active (OpenBao 2.6.2)
+  ok       mount          `secret` answers as KV v2
+  ok       subtree        listable, nothing stored yet
+```
+
+Each failing check carries what to do about it on the line below it, and the
+command exits non-zero if any failed. It only reads, so it is safe to run
+against a production instance.
+
+The mount and subtree are probed with the same list `trg` itself issues rather
+than with `sys/mounts`, so a correctly scoped token is enough. That also means a
+token whose policy stops at its own subtree is denied before OpenBao looks the
+mount up, and the mount check reports `skipped` rather than claiming a mount it
+never reached.
+
+Run it without `--backend` to check every declared backend at once.
+
+For a script, `--format json` prints the same report:
+
+```sh
+trg doctor --backend work --format json
+```
+
+## 6. Log in to the MCP server
 
 ```sh
 trg mcp auth login --server internal
@@ -202,6 +236,10 @@ token = { env = "BAO_TOKEN" }
 Exactly one of `token_file` or `token` may be declared.
 
 ## Troubleshooting
+
+Start with `trg doctor`, which narrows most of the below to a single failing
+check. It takes `--backend work` to look at one backend rather than every
+declared one.
 
 **`OpenBao rejected the token (permission denied); run bao login and retry`**
 

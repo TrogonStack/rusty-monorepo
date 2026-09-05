@@ -1,9 +1,11 @@
 pub mod ai;
+pub mod doctor;
 pub mod mcp;
 
 use clap::Subcommand;
 
 use ai::AiCommands;
+use doctor::DoctorArgs;
 use mcp::McpCommands;
 
 #[derive(Subcommand)]
@@ -19,4 +21,6 @@ pub enum Commands {
         #[command(subcommand)]
         command: McpCommands,
     },
+    /// Check that the configured secrets backends are reachable and usable
+    Doctor(DoctorArgs),
 }

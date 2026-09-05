@@ -254,6 +254,23 @@ own entry to authorize separately.
 A server stored in OpenBao must be named with `[A-Za-z0-9._-]`, since the name
 becomes a path segment. The Keychain accepts any name.
 
+### Checking a backend
+
+```sh
+trg doctor
+```
+
+Checks every declared backend, or one named with `--backend work`. Reports
+whether the token can be read, the instance is serving, the mount answers, and
+the subtree lists. It only reads, and exits non-zero if any check failed.
+`--format json` prints the same report for a script to consume.
+
+The mount and subtree checks issue the same list `trg` itself issues, so the
+command never needs more privilege than the tool it is diagnosing. A token
+scoped to one subtree is denied before OpenBao looks the mount up, so a refusal
+leaves the mount check reported as skipped rather than claiming a mount that was
+never reached.
+
 ## Validation
 
 - `url` must resolve to a non-empty, non-whitespace string.

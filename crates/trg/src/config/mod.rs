@@ -29,6 +29,9 @@ pub enum ConfigError {
     #[error("config file not found at `{0}`")]
     NotFound(PathBuf),
 
+    #[error("config file at `{path}` could not be read: {cause}")]
+    Unreadable { path: PathBuf, cause: String },
+
     #[error("no `[mcp.servers]` section in config")]
     NoMcpServers,
 
@@ -128,14 +131,37 @@ pub fn load_mcp(selected_name: &str) -> Result<LoadedMcp, ConfigError> {
     load_mcp_at(&trg_config_path(), selected_name)
 }
 
+/// The `[secrets]` section on its own.
+///
+/// `load_mcp` refuses a config without `[mcp.servers]`, which is the right
+/// answer for a command that is about to talk to an MCP server and the wrong
+/// one for a command that only inspects a backend. Declaring a backend before
+/// declaring anything that uses it is an ordinary order to do things in.
+pub fn load_secrets() -> Result<SecretsSection, ConfigError> {
+    load_secrets_at(&trg_config_path())
+}
+
+fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
+    let root: FileRoot = toml::from_str(&text)?;
+    Ok(root.secrets.unwrap_or_default())
+}
+
+/// A config that exists but cannot be read is a different problem from one that
+/// was never written, and reporting the second for the first sends someone off
+/// to create a file that is already there.
+fn read_error(path: &Path, e: &std::io::Error) -> ConfigError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        return ConfigError::NotFound(path.to_path_buf());
+    }
+    ConfigError::Unreadable {
+        path: path.to_path_buf(),
+        cause: e.to_string(),
+    }
+}
+
 fn load_mcp_at(path: &Path, selected_name: &str) -> Result<LoadedMcp, ConfigError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ConfigError::NotFound(path.to_path_buf()));
-        }
-        Err(_) => return Err(ConfigError::NotFound(path.to_path_buf())),
-    };
+    let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
 
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
@@ -220,6 +246,26 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+
+    /// A config that exists but will not open must not be reported as one that
+    /// was never written, since the two have opposite remedies.
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_reported_as_missing() {
+        let dir = tempdir().unwrap();
+
+        let missing = read_error(
+            &dir.path().join("never-written.toml"),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        assert!(matches!(missing, ConfigError::NotFound(_)), "{missing}");
+
+        // A directory opens and then fails to read, which is the shape of every
+        // non-`NotFound` failure here.
+        let unreadable = std::fs::read_to_string(dir.path()).expect_err("a directory is not readable");
+        let err = read_error(dir.path(), &unreadable);
+        assert!(matches!(err, ConfigError::Unreadable { .. }), "{err}");
+        assert!(err.to_string().contains("could not be read"), "{err}");
+    }
 
     static INTEG_TEST_ENV_SEQ: AtomicU64 = AtomicU64::new(0);
 
