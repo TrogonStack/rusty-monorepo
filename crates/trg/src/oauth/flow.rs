@@ -329,85 +329,26 @@ impl Mark {
 
 /// The page a browser lands on when the flow ends.
 ///
-/// Everything is inline: no fonts, no scripts, no images fetched. A page served
-/// by this crate that reached off the machine would turn every login into a
-/// request some third party could count, and it would break on the air-gapped
-/// hosts that are the reason `token` exists alongside `token_file`.
+/// The markup is a file rather than a string literal so the CSS keeps its own
+/// braces and an editor can highlight it. `include_str!` reads it at compile
+/// time, so the binary still ships alone.
 ///
-/// `body` is interpolated as markup, so anything from outside this function has
+/// Everything in it is inline: no fonts, no scripts, no images fetched. A page
+/// served by this crate that reached off the machine would turn every login
+/// into a request some third party could count, and it would break on the
+/// air-gapped hosts that are the reason `token` exists alongside `token_file`.
+///
+/// `body` is substituted as markup, so anything from outside this function has
 /// to go through [`escape_html`] before it gets here.
 fn page(title: &str, mark: Mark, heading: &str, body: &str) -> String {
-    let mark = mark.svg();
-    format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light dark">
-<title>{title} &middot; trg</title>
-<style>
-:root {{
-  --bg:#f6f7f9; --card:#fff; --line:#e4e7eb; --fg:#11151b; --muted:#5b6672;
-  --chip:rgba(17,21,27,.06); --ok:#1a7f37; --bad:#b3261e;
-  --shadow:0 1px 2px rgba(17,21,27,.05),0 10px 30px rgba(17,21,27,.08);
-}}
-@media (prefers-color-scheme:dark) {{
-  :root {{
-    --bg:#0b0d10; --card:#14171c; --line:#232831; --fg:#e6e9ed; --muted:#98a1ad;
-    --chip:rgba(230,233,237,.08); --ok:#3fb950; --bad:#f85149;
-    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
-  }}
-}}
-*{{box-sizing:border-box}}
-html,body{{height:100%}}
-body{{
-  margin:0; display:grid; place-items:center; padding:24px;
-  background:var(--bg); color:var(--fg);
-  font:15px/1.55 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-  -webkit-font-smoothing:antialiased;
-}}
-.card{{
-  width:100%; max-width:27rem; text-align:center;
-  background:var(--card); border:1px solid var(--line); border-radius:14px;
-  box-shadow:var(--shadow); padding:34px 32px 18px;
-}}
-.mark{{width:44px;height:44px}}
-h1{{margin:18px 0 10px;font-size:1.2rem;font-weight:600;letter-spacing:-.01em}}
-p{{margin:0;color:var(--muted)}}
-.subject{{margin:0 0 12px}}
-.subject code{{font-size:13.5px;padding:.28em .6em}}
-code{{
-  font:13px/1.4 ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
-  background:var(--chip); border-radius:5px; padding:.12em .4em;
-}}
-footer{{
-  margin-top:28px; padding-top:16px; border-top:1px solid var(--line);
-  display:flex; align-items:center; justify-content:center; gap:8px;
-  font-size:12.5px; color:var(--muted);
-}}
-footer a{{color:inherit;text-decoration:none}}
-footer a:hover{{color:var(--fg);text-decoration:underline}}
-.wordmark{{font-weight:600;color:var(--fg)}}
-.sep{{opacity:.45}}
-</style>
-</head>
-<body>
-<main class="card">
-{mark}
-<h1>{heading}</h1>
-{body}
-<footer>
-<span class="wordmark">TrogonStack</span>
-<span class="sep">&middot;</span>
-<a href="https://github.com/TrogonStack">github.com/TrogonStack</a>
-</footer>
-</main>
-</body>
-</html>
-"##
-    )
+    TEMPLATE
+        .replace("{{TITLE}}", title)
+        .replace("{{MARK}}", mark.svg())
+        .replace("{{HEADING}}", heading)
+        .replace("{{BODY}}", body)
 }
+
+const TEMPLATE: &str = include_str!("callback.html");
 
 /// Escape text for interpolation into [`page`].
 ///
@@ -507,12 +448,52 @@ mod tests {
         assert!(body.contains("Nothing was stored"), "{body}");
     }
 
+    /// A placeholder the template spells differently from [`page`] would ship
+    /// as literal text on a page nothing else renders in CI.
+    #[test]
+    fn every_placeholder_in_the_template_is_substituted() {
+        let body = read_body(success_response("linear"));
+
+        assert!(!body.contains("{{"), "unsubstituted placeholder in {body}");
+    }
+
+    /// Write both pages out and print where, so they can be opened in a real
+    /// browser. This is the only way to look at them: the flow they belong to
+    /// needs a terminal and a provider round trip.
+    ///
+    /// Ignored because it asserts nothing.
+    ///
+    /// ```sh
+    /// cargo test -p trg --lib flow::tests::preview -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "writes files to look at by hand"]
+    fn preview() {
+        let dir = std::env::temp_dir().join("trg-callback-preview");
+        std::fs::create_dir_all(&dir).expect("create");
+
+        for (name, response) in [
+            ("authorized.html", success_response("linear")),
+            ("failed.html", provider_error_response()),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, read_body(response)).expect("write");
+            println!("{}", path.display());
+        }
+    }
+
+    /// The body a browser would render, taken from the bytes actually served
+    /// rather than from `page` directly, so the headers are on the wire too.
     fn read_body(response: Response<std::io::Cursor<Vec<u8>>>) -> String {
         let mut out = Vec::new();
         response
             .raw_print(&mut out, (1, 1).into(), &[], false, None)
             .expect("render");
-        String::from_utf8(out).expect("utf-8")
+        let served = String::from_utf8(out).expect("utf-8");
+
+        let (headers, body) = served.split_once("\r\n\r\n").expect("a header/body break");
+        assert!(headers.contains("Content-Type: text/html"), "{headers}");
+        body.to_string()
     }
 
     #[test]
