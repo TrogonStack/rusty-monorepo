@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.4.2...trg@v0.5.0) (2026-09-05)
+
+
+### Features
+
+* **trg:** Add a doctor for the configured secrets backends ([#79](https://github.com/TrogonStack/rusty-monorepo/issues/79)) ([64bc370](https://github.com/TrogonStack/rusty-monorepo/commit/64bc37090342857040a88fc1f714e928a016eda2))
+* **trg:** Decouple credential storage from the macOS Keychain ([#73](https://github.com/TrogonStack/rusty-monorepo/issues/73)) ([3f1c015](https://github.com/TrogonStack/rusty-monorepo/commit/3f1c0158cb109f4140981256b6fd811af18091a3))
+* **trg:** Give the OAuth callback a real landing page ([#84](https://github.com/TrogonStack/rusty-monorepo/issues/84)) ([be71788](https://github.com/TrogonStack/rusty-monorepo/commit/be71788be8f5361a3a6a3fdd166640ff8723a7fc))
+* **trg:** Set the result of a login apart from the flow that produced it ([#80](https://github.com/TrogonStack/rusty-monorepo/issues/80)) ([f4a482a](https://github.com/TrogonStack/rusty-monorepo/commit/f4a482ac682e3ffef4848c47e842977b2abec5f4))
+* **trg:** Store MCP OAuth credentials outside the macOS Keychain ([#77](https://github.com/TrogonStack/rusty-monorepo/issues/77)) ([884f8e8](https://github.com/TrogonStack/rusty-monorepo/commit/884f8e895d3e72958e2b9108a6393349cc776eec))
+
+
+### Bug Fixes
+
+* **trg:** Let the MCP host see why the proxy could not start ([#82](https://github.com/TrogonStack/rusty-monorepo/issues/82)) ([52e0da2](https://github.com/TrogonStack/rusty-monorepo/commit/52e0da22917eb42ef452858a39869a183d18089b))
+* **trg:** Require an owner rather than defaulting everyone into one subtree ([#81](https://github.com/TrogonStack/rusty-monorepo/issues/81)) ([30d68f2](https://github.com/TrogonStack/rusty-monorepo/commit/30d68f25495cd9e1261af780319185702f9c2dd4))
+* **trg:** Stop reporting an unreadable token as a denied secret read ([#83](https://github.com/TrogonStack/rusty-monorepo/issues/83)) ([f17e8a5](https://github.com/TrogonStack/rusty-monorepo/commit/f17e8a5461492ba24d04791e1199ce5ffca57de3))
+
 ## [0.4.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.4.1...trg@v0.4.2) (2026-09-02)
 
 

@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "trg"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "assert_cmd",
  "async-trait",
