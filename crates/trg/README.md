@@ -13,6 +13,7 @@
 
 - [Add an OAuth-protected MCP server](docs/how-to/add-oauth-protected-mcp-server.md)
 - [Store MCP OAuth credentials in OpenBao](docs/how-to/use-openbao-as-a-secrets-backend.md)
+- [Read a config value from a secrets backend](docs/how-to/read-a-config-value-from-a-secrets-backend.md)
 - [Run an eval in CI](docs/how-to/run-in-ci.md)
 - [Run the current skill only](docs/how-to/run-current-skill-only.md)
 - [Run with a skill vs without a skill](docs/how-to/run-with-skill-vs-without-skill.md)

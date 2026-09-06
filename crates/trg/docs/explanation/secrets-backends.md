@@ -155,3 +155,4 @@ command.
 
 - [Config reference: `[secrets.backends.<name>]`](../reference/config.md#secretsbackendsname)
 - [Store MCP OAuth credentials in OpenBao](../how-to/use-openbao-as-a-secrets-backend.md)
+- [Read a config value from a secrets backend](../how-to/read-a-config-value-from-a-secrets-backend.md)

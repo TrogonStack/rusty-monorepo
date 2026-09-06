@@ -37,7 +37,7 @@ use serde_json::{Map, Value};
 
 use super::kv_v2::{Envelope, ErrorBody, ListPayload, ReadPayload};
 use super::{SecretKey, SecretMap, SecretPath, SecretsError};
-use crate::config::{VarResolveError, VarSource};
+use crate::config::{FetchedSecrets, VarResolveError, VarSource};
 
 /// Total request budget when the backend does not override it.
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
@@ -520,7 +520,9 @@ impl OpenBaoBackend {
     /// Read the token afresh, so `bao login` recovers a running process.
     fn read_token(&self) -> Result<SecretString, TokenError> {
         match &self.token {
-            TokenSource::Var(source) => Ok(SecretString::from(source.resolve()?.trim().to_string())),
+            TokenSource::Var(source) => Ok(SecretString::from(
+                source.resolve(&FetchedSecrets::new())?.trim().to_string(),
+            )),
             TokenSource::File(path) => read_token_file(path),
         }
     }

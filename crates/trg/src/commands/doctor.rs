@@ -196,6 +196,10 @@ fn token_check(bao: &OpenBaoBackend) -> Check {
         TokenSource::File(path) => format!("file `{}`", path.display()),
         TokenSource::Var(crate::config::VarSource::Env { env, .. }) => format!("env `{env}`"),
         TokenSource::Var(crate::config::VarSource::Literal(_)) => "a literal in the config file".to_string(),
+        // Building the backend rejects this, so no `OpenBaoBackend` reaches
+        // here holding one. Reported rather than panicked over, because a
+        // report that dies is worse than one that names something odd.
+        TokenSource::Var(crate::config::VarSource::Secret(v)) => format!("{v}"),
     };
 
     match bao.token_is_readable() {

@@ -28,6 +28,7 @@ secrets = "<backend-name>"         # optional
 
 [mcp.servers.<name>.vars]
 <var-name> = "<literal>"           # or { env = "...", default = "..." }
+                                   # or { backend = "...", path = "...", key = "..." }
 
 [mcp.servers.<name>.headers]
 <HeaderName> = "<value>"
@@ -65,10 +66,33 @@ Each entry is one of:
   variable fails loading with `environment variable <NAME> is required but
   unset`.
 
-Unknown keys in an env table (e.g. `{ env = "X", typo = true }`) are
-rejected at parse time.
+- An inline secret table (`VarSource`):
+
+    ```toml
+    token = { backend = "homelab", path = "mcp/prod", key = "token" }
+    ```
+
+  The value is read from the named `[secrets.backends.<name>]` entry at
+  load time. All three fields are required; the declaration is the secret's
+  whole identity and says nothing about which server reads it, so the same
+  inline table can be pasted into as many servers as need that value.
+
+  Vars naming the same `backend` and `path` are read together. A KV v2 read
+  answers with the whole entry at a path, so four vars pointing at one path
+  cost one round trip between them, not four.
+
+Unknown keys in an env or secret table (e.g. `{ env = "X", typo = true }`)
+are rejected at parse time. The two shapes are told apart by their fields, so
+mixing them (`{ env = "X", key = "y" }`) is also rejected.
 
 `vars` is optional — omit it if your server uses only literal values.
+
+Reading a secret var needs a working backend, which reading it through
+`trg mcp proxy` will attempt. Use `trg secret get` to check one by hand:
+
+```console
+$ trg secret get --backend homelab --path mcp/prod --key token
+```
 
 ## `[mcp.servers.<name>]`
 
@@ -160,7 +184,10 @@ that cannot reach the OpenBao instance declared here can still use every
 server that names a different backend.
 
 The fields typed `VarSource` below (`addr` and `token`) accept a literal string
-or `{ env = "...", default = "..." }`. Every other field is a literal. No
+or `{ env = "...", default = "..." }`. They may not take
+`{ backend = "...", ... }`, because a backend cannot be told how to reach
+itself. That is rejected with `` `addr` cannot come from a secrets backend, because it
+is what reaching one requires ``. Every other field is a literal. No
 backend field accepts `{ secret = "..." }`: nothing needed to reach the secret
 store may itself live in the secret store.
 
@@ -382,6 +409,31 @@ Authorization = { var = "token" }
 X-Tenant      = "acme"
 ```
 
+### Token read straight from a secrets backend
+
+```toml
+[secrets.backends.homelab]
+kind = "openbao"
+addr = { env = "BAO_ADDR" }
+mount = "kv"
+path_prefix = "trg"
+owner = "alice"
+token_file = "~/.vault-token"
+
+[mcp.servers.memorizer]
+url = "https://mcp.example.com/mcp"
+
+[mcp.servers.memorizer.vars]
+token = { backend = "homelab", path = "mcp/memorizer", key = "token" }
+
+[mcp.servers.memorizer.headers]
+Authorization = ["Bearer ", { var = "token" }]
+```
+
+Nothing has to be exported into the environment first. Write the value once
+with `trg secret put --backend homelab --path mcp/memorizer --key token` and
+every server naming that declaration reads the same value.
+
 ### URL composed from static + env-sourced pieces
 
 ```toml
@@ -454,6 +506,9 @@ keeps using the macOS Keychain exactly as it did before `[secrets]` existed.
 | `could not decode header <name>: ...`             | Resolved header value is empty/whitespace or not a valid value. |
 | `duplicate header <name> collides with <existing> after canonicalization` | Two header keys map to the same canonical name (e.g. `Authorization` and `authorization`). |
 | `environment variable <NAME> is required but unset` | A `vars` entry's env had no `default` and the env var was missing. |
+| `var ... found nothing at that path` | A secret var's `path` has never been written. The message names the `trg secret put` that writes it. |
+| `var ... found no such key there` | The path exists but holds different keys. The message lists the keys that are there, never their values. |
+| `` `<field>` cannot come from a secrets backend `` | A `[secrets.backends.*]` `addr` or `token` used `{ backend = ... }`. |
 | `undefined variable <NAME> referenced; declare it in [mcp.servers.<name>.vars]` | `{ var = "..." }` references a name not present in `vars`. |
 | TOML parse errors                                 | Unknown fields, malformed TOML, or `{ env = "..." }` used directly in `url`/headers (must go through `vars`). |
 | `<name> is not a declared secrets backend; declared: ...` | A server's `secrets` field names a backend with no `[secrets.backends.<name>]` entry. |

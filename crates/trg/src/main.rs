@@ -4,7 +4,7 @@ use trg::commands::ai::AiCommands;
 use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
-use trg::secrets::{CredentialPathError, Registry, ServerBackendError};
+use trg::secrets::{vars, CredentialPathError, Registry, ServerBackendError, VarFetchError};
 
 #[derive(Parser)]
 #[command(name = "trg")]
@@ -24,14 +24,26 @@ enum WireError {
 
     #[error("{0}")]
     CredentialPath(#[from] CredentialPathError),
+
+    #[error("{0}")]
+    VarFetch(#[from] VarFetchError),
 }
 
 /// Resolve everything `trg mcp` depends on. This is the only place that reads
 /// config or picks a secrets backend.
-fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
+///
+/// The config is read in two steps with the backend reads in between, so the
+/// file is parsed and validated before anything needs to be reachable, and
+/// only a server that actually declares a `{ backend = ... }` var pays for one.
+async fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
     let server_name = command.server_name().to_string();
-    let loaded = config::load_mcp(&server_name).map_err(WireError::from)?;
-    let registry = Registry::new(loaded.secrets);
+    let pending = config::load_mcp(&server_name).map_err(WireError::from)?;
+    let registry = Registry::new(pending.secrets.clone());
+
+    let fetched = vars::fetch(&registry, &pending.secret_vars())
+        .await
+        .map_err(WireError::from)?;
+    let loaded = pending.finish(&fetched).map_err(WireError::from)?;
 
     let backend = registry
         .for_server(&server_name, loaded.server.secrets.as_deref())
@@ -66,9 +78,16 @@ async fn main() {
         Commands::Ai { command } => match command {
             AiCommands::Skills { command } => command.handle(&fs),
         },
-        Commands::Mcp { command } => match wire_mcp(&command) {
+        Commands::Mcp { command } => match wire_mcp(&command).await {
             Ok(ctx) => command.handle(&ctx).await,
             Err(e) => report_startup_failure(&command, &e).await,
+        },
+        Commands::Secret { command } => match wire_secrets() {
+            Ok(registry) => command.handle(&registry).await,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
         },
         Commands::Doctor(args) => match wire_secrets() {
             Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
