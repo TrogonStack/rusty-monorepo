@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::oauth::flow::quote_for_shell;
 use crate::secrets::{Backend, SecretKey, SecretMap, SecretPath, SecretsError};
+use crate::shell::quote_for_shell;
 
 /// The key under which a server's OAuth credentials live.
 pub const CREDENTIALS_KEY: &str = "credentials";

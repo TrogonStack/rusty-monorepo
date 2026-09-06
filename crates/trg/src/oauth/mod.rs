@@ -40,6 +40,12 @@ pub enum EnsureError {
 
     #[error("OAuth completed but credentials are missing from the secrets backend, refusing to start")]
     MissingAfterFlow,
+
+    /// The commands that only read or delete stored credentials never reach the
+    /// endpoint, so no endpoint is resolved for them. Reaching this means a
+    /// command that does reach one was wired as though it did not.
+    #[error("no endpoint was resolved for `{0}`")]
+    NoEndpoint(String),
 }
 
 /// Prefer what the credential store recorded over what rmcp made of it.

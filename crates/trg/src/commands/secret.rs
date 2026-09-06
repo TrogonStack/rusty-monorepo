@@ -76,7 +76,7 @@ async fn put(registry: &Registry, args: &SecretArgs) -> Result<(), String> {
 
     let verb = if existed { "replaced" } else { "wrote" };
     eprintln!("{verb} `{}` at `{}` in `{}`", args.key, args.path, args.backend);
-    eprintln!("declare it with: {}", declaration(&args.var()));
+    eprintln!("declare it with: {}", args.var().declaration());
     Ok(())
 }
 
@@ -139,15 +139,6 @@ async fn write_key(
     Ok(existed)
 }
 
-/// The line to paste into a server's `vars` table, so the address that was just
-/// written and the address that will be read cannot be spelled differently.
-fn declaration(var: &SecretVar) -> String {
-    format!(
-        "{{ backend = \"{}\", path = \"{}\", key = \"{}\" }}",
-        var.backend, var.path, var.key
-    )
-}
-
 type Address = (crate::secrets::Backend, SecretPath, SecretKey);
 
 fn address(registry: &Registry, args: &SecretArgs) -> Result<Address, String> {
@@ -173,9 +164,7 @@ fn read_value() -> Result<SecretString, String> {
         .read_to_string(&mut buf)
         .map_err(|e| format!("could not read the value from stdin: {e}"))?;
 
-    // One trailing newline is the shell's, not the secret's. Anything beyond
-    // that was deliberate and is left alone.
-    let value = buf.strip_suffix('\n').unwrap_or(&buf);
+    let value = strip_one_line_ending(&buf);
 
     if value.is_empty() {
         return Err("refusing to write an empty value; \
@@ -184,6 +173,15 @@ fn read_value() -> Result<SecretString, String> {
     }
 
     Ok(SecretString::from(value.to_string()))
+}
+
+/// One trailing line ending is the shell's, not the secret's, and a CRLF is one
+/// line ending rather than a newline with a stray carriage return in front of
+/// it. Anything beyond that was deliberate and is left alone.
+fn strip_one_line_ending(buf: &str) -> &str {
+    buf.strip_suffix("\r\n")
+        .or_else(|| buf.strip_suffix('\n'))
+        .unwrap_or(buf)
 }
 
 /// Print the value raw, so it can be piped, with a newline only where a person
@@ -285,7 +283,22 @@ mod tests {
 
     #[test]
     fn a_declaration_can_be_pasted_into_a_vars_table() {
-        let line = declaration(&args("token").var());
+        let line = args("token").var().declaration();
         assert_eq!(line, r#"{ backend = "fake", path = "mcp/demo", key = "token" }"#);
+    }
+
+    #[test]
+    fn one_line_ending_comes_off_and_no_more() {
+        assert_eq!(strip_one_line_ending("secret\n"), "secret");
+        assert_eq!(strip_one_line_ending("secret\r\n"), "secret");
+        assert_eq!(strip_one_line_ending("secret"), "secret");
+        assert_eq!(strip_one_line_ending("secret\n\n"), "secret\n");
+        assert_eq!(strip_one_line_ending("a\nb\n"), "a\nb");
+    }
+
+    /// A carriage return that is not part of a line ending was in the value.
+    #[test]
+    fn a_lone_carriage_return_is_left_where_it_is() {
+        assert_eq!(strip_one_line_ending("secret\r"), "secret\r");
     }
 }

@@ -35,28 +35,37 @@ enum WireError {
 /// The config is read in two steps with the backend reads in between, so the
 /// file is parsed and validated before anything needs to be reachable, and
 /// only a server that actually declares a `{ backend = ... }` var pays for one.
+///
+/// Where the endpoint sits behind such a var, resolving it is a network read,
+/// and `auth logout` is the documented way out of a credential that will not
+/// load. So the commands that only touch stored credentials stop before the
+/// fetch: an unreachable backend takes the proxy down without also taking down
+/// the command that recovers from it.
 async fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
     let server_name = command.server_name().to_string();
     let pending = config::load_mcp(&server_name).map_err(WireError::from)?;
     let registry = Registry::new(pending.secrets.clone());
+
+    let backend = registry
+        .for_server(&server_name, pending.server_secrets())
+        .map_err(WireError::from)?;
+    let cred_path = backend.credential_path(&server_name).map_err(WireError::from)?;
+
+    if !command.needs_endpoint() {
+        return Ok(McpContext::credentials_only(server_name, backend, cred_path));
+    }
 
     let fetched = vars::fetch(&registry, &pending.secret_vars())
         .await
         .map_err(WireError::from)?;
     let loaded = pending.finish(&fetched).map_err(WireError::from)?;
 
-    let backend = registry
-        .for_server(&server_name, loaded.server.secrets.as_deref())
-        .map_err(WireError::from)?;
-
-    let cred_path = backend.credential_path(&server_name).map_err(WireError::from)?;
-
-    Ok(McpContext {
+    Ok(McpContext::with_endpoint(
         server_name,
-        profile: loaded.server,
         backend,
         cred_path,
-    })
+        loaded.server,
+    ))
 }
 
 /// `trg doctor` reads the config for the backends alone, since a config that

@@ -147,6 +147,14 @@ pub struct PendingMcp {
 }
 
 impl PendingMcp {
+    /// The `[secrets.backends]` entry this server names for its own OAuth
+    /// credentials, readable before anything is fetched because it is a plain
+    /// string rather than a var. Commands that only touch stored credentials
+    /// need this and nothing else from the entry.
+    pub fn server_secrets(&self) -> Option<&str> {
+        self.raw.secrets.as_deref()
+    }
+
     /// Every distinct secret this server's vars name.
     ///
     /// Deduplicated, because two vars pointing at the same coordinates are one

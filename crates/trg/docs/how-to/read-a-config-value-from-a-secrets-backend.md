@@ -39,13 +39,17 @@ One trailing newline is stripped, because that one is the shell's rather than
 the secret's. An empty value is refused, since a command that failed upstream
 is the usual reason for one.
 
-To type the value in instead of piping it, use a heredoc, which keeps it out of
-the history in most shells:
+Piping from a password manager is the safe form. A heredoc is not: bash records
+heredoc bodies in `HISTFILE` like any other input, so typing the value inline
+puts it in the history file. If you have no manager to pipe from, turn history
+off for the duration:
 
 ```sh
+set +o history
 trg secret put --backend local --path mcp/memorizer --key token <<'EOF'
 the-token
 EOF
+set -o history
 ```
 
 ## 2. Declare it in the server
@@ -127,6 +131,13 @@ not two. `put` preserves the keys it did not write, so the second command above
 leaves `client_id` alone.
 
 ## Troubleshooting
+
+**The backend is down and I need to reset a server's credentials**
+
+`trg mcp auth status` and `trg mcp auth logout` do not resolve the endpoint, so
+they never read a var. They keep working when the backend a var names is
+unreachable. `trg mcp proxy` and `trg mcp auth login` do need the endpoint and
+will report the var they could not read.
 
 **``var ... found nothing at that path``**
 

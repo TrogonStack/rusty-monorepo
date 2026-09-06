@@ -74,6 +74,28 @@ where
         groups.entry((&var.backend, &var.path)).or_default().push(var);
     }
 
+    // Every coordinate is checked before the first read, so a var that could
+    // never resolve is named as the config error it is rather than surfacing as
+    // whatever the network happened to answer first. A misspelled key is the
+    // same mistake whether or not the backend is up.
+    let mut paths: HashMap<&str, SecretPath> = HashMap::new();
+    for ((_, path_str), vars) in &groups {
+        let path = SecretPath::parse(path_str).map_err(|cause| VarFetchError::Path {
+            var: vars[0].clone(),
+            cause,
+        })?;
+        paths.insert(path_str, path);
+    }
+
+    let mut keys: HashMap<&SecretVar, SecretKey> = HashMap::new();
+    for var in wanted {
+        let key = SecretKey::parse(&var.key).map_err(|cause| VarFetchError::Key {
+            var: var.clone(),
+            cause,
+        })?;
+        keys.insert(var, key);
+    }
+
     // A backend is built once per process even when several paths address it.
     let mut built: HashMap<&str, Backend> = HashMap::new();
 
@@ -89,13 +111,10 @@ where
         }
         let backend = &built[backend_name];
 
-        let path = SecretPath::parse(path_str).map_err(|cause| VarFetchError::Path {
-            var: representative.clone(),
-            cause,
-        })?;
+        let path = &paths[path_str];
 
         let map = backend
-            .get(&path)
+            .get(path)
             .await
             .map_err(|cause| VarFetchError::Read {
                 var: representative.clone(),
@@ -107,14 +126,11 @@ where
             })?;
 
         for var in vars {
-            let key = SecretKey::parse(&var.key).map_err(|cause| VarFetchError::Key {
-                var: var.clone(),
-                cause,
-            })?;
+            let key = &keys[var];
 
             // Key names are not secret; the values behind them are, and none
             // of them is named here.
-            let value = map.get(&key).ok_or_else(|| VarFetchError::MissingKey {
+            let value = map.get(key).ok_or_else(|| VarFetchError::MissingKey {
                 var: var.clone(),
                 present: map
                     .sorted_keys()
@@ -208,6 +224,35 @@ mod tests {
 
         assert_eq!(fetched.len(), 1);
         assert_eq!(fake.get_count(), 1);
+    }
+
+    /// A key that could never parse is a config mistake, so it should not cost
+    /// a round trip to find out, and should not hide behind whatever the
+    /// network answers first.
+    #[tokio::test]
+    async fn an_unparseable_key_is_refused_before_anything_is_read() {
+        let fake = seeded(&[("agentgateway", &[("token", "t")])]).await;
+        let backend = Backend::Fake(fake.clone());
+
+        let wanted = vec![var("homelab", "agentgateway", "")];
+        let err = fetch_with(|_| Ok(backend.clone()), &wanted).await.expect_err("bad key");
+
+        assert!(matches!(err, VarFetchError::Key { .. }), "{err}");
+        assert_eq!(fake.get_count(), 0, "nothing was read");
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_path_is_refused_before_anything_is_read() {
+        let fake = seeded(&[("agentgateway", &[("token", "t")])]).await;
+        let backend = Backend::Fake(fake.clone());
+
+        let wanted = vec![var("homelab", "a#b", "token")];
+        let err = fetch_with(|_| Ok(backend.clone()), &wanted)
+            .await
+            .expect_err("bad path");
+
+        assert!(matches!(err, VarFetchError::Path { .. }), "{err}");
+        assert_eq!(fake.get_count(), 0, "nothing was read");
     }
 
     #[tokio::test]

@@ -27,12 +27,52 @@ pub struct SecretVar {
 impl SecretVar {
     /// The `trg secret put` invocation that would write this var, so an error
     /// about a missing one can hand back the fix rather than describe it.
+    ///
+    /// Quoted, because a path is allowed a space and a command offered as the
+    /// fix has to survive being pasted.
     pub fn put_command(&self) -> String {
+        let q = crate::shell::quote_for_shell;
         format!(
             "trg secret put --backend {} --path {} --key {}",
-            self.backend, self.path, self.key
+            q(&self.backend),
+            q(&self.path),
+            q(&self.key)
         )
     }
+
+    /// The inline table that declares this var in a server's `vars`, so the
+    /// address just written and the address that will be read cannot be
+    /// spelled differently.
+    ///
+    /// Escaped for the same reason `put_command` is quoted: a path may hold a
+    /// character that would otherwise end the TOML string early.
+    pub fn declaration(&self) -> String {
+        format!(
+            "{{ backend = {}, path = {}, key = {} }}",
+            toml_basic_string(&self.backend),
+            toml_basic_string(&self.path),
+            toml_basic_string(&self.key)
+        )
+    }
+}
+
+/// A TOML basic string, always on one line, because an inline table is.
+fn toml_basic_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 impl std::fmt::Display for SecretVar {
@@ -400,5 +440,60 @@ b = { backend = "homelab", path = "agentgateway", key = "token" }
             msg.contains("did not match") || msg.contains("unknown field"),
             "got: {msg}"
         );
+    }
+
+    /// A path may hold a space, so a command offered as the fix has to survive
+    /// being pasted into a shell.
+    #[test]
+    fn a_put_command_quotes_what_a_shell_would_otherwise_split() {
+        let var = SecretVar {
+            backend: "home lab".to_string(),
+            path: "mcp/a b".to_string(),
+            key: "token".to_string(),
+        };
+        assert_eq!(
+            var.put_command(),
+            "trg secret put --backend 'home lab' --path 'mcp/a b' --key token"
+        );
+    }
+
+    #[test]
+    fn a_plain_put_command_is_left_unquoted() {
+        let var = SecretVar {
+            backend: "homelab".to_string(),
+            path: "mcp/memorizer".to_string(),
+            key: "token".to_string(),
+        };
+        assert_eq!(
+            var.put_command(),
+            "trg secret put --backend homelab --path mcp/memorizer --key token"
+        );
+    }
+
+    /// The declaration is meant to be pasted back into `vars`, so it has to
+    /// parse as the table it claims to be.
+    #[test]
+    fn a_declaration_survives_a_quote_in_a_path() {
+        let var = SecretVar {
+            backend: "homelab".to_string(),
+            path: r#"mcp/a"b\c"#.to_string(),
+            key: "token".to_string(),
+        };
+        let toml_text = format!("[vars]\ntoken = {}\n", var.declaration());
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("declaration must parse");
+        assert_eq!(parsed["vars"]["token"]["path"].as_str().unwrap(), r#"mcp/a"b\c"#);
+    }
+
+    #[test]
+    fn a_declaration_keeps_a_newline_on_one_line() {
+        let var = SecretVar {
+            backend: "homelab".to_string(),
+            path: "a\nb".to_string(),
+            key: "token".to_string(),
+        };
+        let line = var.declaration();
+        assert!(!line.contains('\n'), "{line}");
+        let parsed: toml::Value = toml::from_str(&format!("[vars]\ntoken = {line}\n")).expect("parse");
+        assert_eq!(parsed["vars"]["token"]["path"].as_str().unwrap(), "a\nb");
     }
 }
