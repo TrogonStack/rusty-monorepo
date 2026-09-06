@@ -30,11 +30,19 @@
 //! already exist, not a place `trg` writes to.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use secrecy::SecretString;
 use tokio::process::Command;
 
 use super::{SecretKey, SecretMap, SecretPath, SecretsError};
+
+/// How long an `op` invocation gets before it is treated as hung.
+///
+/// `op` normally answers in well under a second, but a stalled 1Password
+/// desktop app or a Touch ID prompt nothing is watching for can otherwise
+/// block `get`/`whoami` — and, through `whoami`, `trg doctor` — forever.
+const OP_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct OnePasswordBackend {
@@ -42,6 +50,9 @@ pub struct OnePasswordBackend {
     /// The `op` executable to drive. Held as data rather than hardcoded at the
     /// call site so tests can drive a scripted one and pin the exact argv.
     bin: PathBuf,
+    /// How long one `op` invocation gets; overridden in tests so a hung
+    /// stub doesn't cost the suite real wall-clock time.
+    timeout: Duration,
 }
 
 impl OnePasswordBackend {
@@ -49,6 +60,7 @@ impl OnePasswordBackend {
         Self {
             account,
             bin: PathBuf::from("op"),
+            timeout: OP_TIMEOUT,
         }
     }
 
@@ -57,7 +69,14 @@ impl OnePasswordBackend {
         Self {
             account,
             bin: bin.as_ref().to_path_buf(),
+            timeout: OP_TIMEOUT,
         }
+    }
+
+    #[cfg(test)]
+    fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     pub fn account(&self) -> Option<&str> {
@@ -176,11 +195,23 @@ impl OnePasswordBackend {
     }
 
     async fn run(&self, args: &[&str]) -> Result<std::process::Output, SecretsError> {
-        Command::new(&self.bin)
+        let child = Command::new(&self.bin)
             .args(args)
-            .output()
-            .await
-            .map_err(|e| SecretsError::Transport(format!("op {}: {e}", args.join(" "))))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| SecretsError::Transport(format!("op {}: {e}", args.join(" "))))?;
+
+        match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
+            Ok(result) => result.map_err(|e| SecretsError::Transport(format!("op {}: {e}", args.join(" ")))),
+            Err(_) => Err(SecretsError::Transport(format!(
+                "op {} timed out after {:?} — is the 1Password app unlocked?",
+                args.join(" "),
+                self.timeout
+            ))),
+        }
     }
 }
 
@@ -235,6 +266,20 @@ mod tests {
 
         fn ok(stdout: &str) -> Self {
             Self::answering(0, stdout, "")
+        }
+
+        /// A stand-in that never returns on its own, for exercising the
+        /// timeout — as if `op` were blocked on an unlock prompt no one is
+        /// watching for.
+        fn hanging() -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let bin = dir.path().join("op");
+            std::fs::write(&bin, "#!/bin/sh\nsleep 300\n").expect("write stub");
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+
+            Self { dir }
         }
 
         fn backend(&self, account: Option<&str>) -> OnePasswordBackend {
@@ -391,6 +436,21 @@ mod tests {
         let stub = StubOp::answering(1, "", "[ERROR] you are not currently signed in");
         let err = stub.backend(None).whoami().await.expect_err("should fail");
         assert!(matches!(err, SecretsError::Unavailable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_hung_op_is_reported_as_timed_out_rather_than_waited_on_forever() {
+        let stub = StubOp::hanging();
+        let backend = stub.backend(None).with_timeout(Duration::from_millis(50));
+
+        let started = std::time::Instant::now();
+        let err = backend.whoami().await.expect_err("should time out");
+
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "should not wait anywhere near the stub's 300s sleep"
+        );
     }
 
     #[tokio::test]
