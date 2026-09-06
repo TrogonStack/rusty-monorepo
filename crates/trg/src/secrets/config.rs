@@ -19,7 +19,7 @@ use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
 };
 use super::Backend;
-use crate::config::{VarResolveError, VarSource};
+use crate::config::{FetchedSecrets, VarResolveError, VarSource};
 
 /// The `[secrets]` table.
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -102,6 +102,15 @@ pub enum BackendError {
         #[source]
         cause: VarResolveError,
     },
+
+    /// A backend reaching a backend to learn how to reach a backend.
+    ///
+    /// `addr` and `token` are what a read needs before it can happen, so a
+    /// `{ backend = ... }` there would have to be resolved by the very backend
+    /// it is describing. Refused while the config is being read, rather than
+    /// left to fail as a cycle at the first use.
+    #[error("`[secrets.backends.{name}]`: `{field}` cannot come from a secrets backend, because it is what reaching one requires")]
+    SecretVar { name: String, field: &'static str },
 
     #[error("`[secrets.backends.{name}]`: {cause}")]
     Build {
@@ -212,11 +221,22 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                 ca_cert_file,
                 timeout_ms,
             } = openbao.as_ref();
-            let addr = addr.resolve().map_err(|cause| BackendError::Resolve {
-                name: name.to_string(),
-                field: "addr",
-                cause,
-            })?;
+            for (field, source) in [("addr", Some(addr)), ("token", token.as_ref())] {
+                if source.is_some_and(|s| s.secret().is_some()) {
+                    return Err(BackendError::SecretVar {
+                        name: name.to_string(),
+                        field,
+                    });
+                }
+            }
+
+            let addr = addr
+                .resolve(&FetchedSecrets::new())
+                .map_err(|cause| BackendError::Resolve {
+                    name: name.to_string(),
+                    field: "addr",
+                    cause,
+                })?;
 
             let token = match (token_file, token) {
                 (Some(file), None) => TokenSource::File(expand_tilde(file)),
@@ -269,6 +289,48 @@ mod tests {
 
     fn section(toml_text: &str) -> Result<SecretsSection, toml::de::Error> {
         toml::from_str(toml_text)
+    }
+
+    /// A backend cannot be reached in order to learn how to reach it, and the
+    /// refusal belongs where the config is read rather than at the first use,
+    /// where it would surface as a cycle instead of a mistake.
+    #[test]
+    fn a_backend_cannot_take_its_own_address_from_a_backend() {
+        let section: SecretsSection = toml::from_str(
+            r#"
+            [backends.homelab]
+            kind = "openbao"
+            addr = { backend = "homelab", path = "self", key = "addr" }
+            mount = "kv"
+            path_prefix = "trg"
+            owner = "yordis"
+            token_file = "~/.vault-token"
+            "#,
+        )
+        .unwrap();
+
+        let err = Registry::new(section).resolve("homelab").unwrap_err();
+        assert!(matches!(err, BackendError::SecretVar { field: "addr", .. }), "{err}");
+    }
+
+    #[test]
+    fn a_backend_cannot_take_its_own_token_from_a_backend() {
+        let section: SecretsSection = toml::from_str(
+            r#"
+            [backends.homelab]
+            kind = "openbao"
+            addr = "https://bao.example.com"
+            mount = "kv"
+            path_prefix = "trg"
+            owner = "yordis"
+            token = { backend = "homelab", path = "self", key = "token" }
+            "#,
+        )
+        .unwrap();
+
+        let err = Registry::new(section).resolve("homelab").unwrap_err();
+        assert!(matches!(err, BackendError::SecretVar { field: "token", .. }), "{err}");
+        assert!(err.to_string().contains("cannot come from a secrets backend"), "{err}");
     }
 
     #[test]

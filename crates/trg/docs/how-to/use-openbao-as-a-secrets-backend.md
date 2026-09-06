@@ -293,4 +293,5 @@ server, or leave it on the Keychain, which accepts any name.
 ## See also
 
 - [Config reference: `[secrets.backends.<name>]`](../reference/config.md#secretsbackendsname)
+- [Read a config value from a secrets backend](read-a-config-value-from-a-secrets-backend.md)
 - [Why secrets backends are addressed, not searched](../explanation/secrets-backends.md)

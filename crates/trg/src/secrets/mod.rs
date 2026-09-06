@@ -13,6 +13,7 @@ pub mod config;
 pub mod keychain;
 pub mod kv_v2;
 pub mod openbao;
+pub mod vars;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -22,6 +23,7 @@ use secrecy::{ExposeSecret, SecretString};
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::KeychainBackend;
 pub use openbao::{OpenBaoBackend, TokenError};
+pub use vars::VarFetchError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretsError {
@@ -446,11 +448,18 @@ pub mod fake {
     pub struct FakeBackend {
         entries: Arc<Mutex<HashMap<SecretPath, SecretMap>>>,
         get_failure: Arc<Mutex<Option<FakeFailure>>>,
+        gets: Arc<Mutex<usize>>,
     }
 
     impl FakeBackend {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// How many reads have been issued, so a caller that claims to batch
+        /// can be held to it.
+        pub fn get_count(&self) -> usize {
+            *self.gets.lock().expect("fake backend lock")
         }
 
         /// Make every subsequent `get` fail until cleared with `None`.
@@ -459,6 +468,7 @@ pub mod fake {
         }
 
         pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
+            *self.gets.lock().expect("fake backend lock") += 1;
             match *self.get_failure.lock().expect("fake backend lock") {
                 Some(FakeFailure::Transport) => return Err(SecretsError::Transport("injected".to_string())),
                 Some(FakeFailure::Malformed) => {

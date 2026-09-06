@@ -1,15 +1,127 @@
 use std::collections::HashMap;
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+
+/// Where in a secrets backend one value lives.
+///
+/// The three coordinates are spelled out rather than packed into one string,
+/// because a `<path>#<key>` form would have to be split, escaped and rejected
+/// at every boundary it crosses, and because a named field is what the rest of
+/// this table already looks like.
+///
+/// A declaration is the secret's whole identity and names nothing about who
+/// reads it, so the same inline table can be pasted into as many servers as
+/// need that value.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct SecretVar {
+    /// The `[secrets.backends.<name>]` entry to read from, named here rather
+    /// than inherited from the server, so a var says where it comes from
+    /// without the reader tracing it through anything.
+    pub backend: String,
+    pub path: String,
+    pub key: String,
+}
+
+impl SecretVar {
+    /// The `trg secret put` invocation that would write this var, so an error
+    /// about a missing one can hand back the fix rather than describe it.
+    ///
+    /// Quoted, because a path is allowed a space and a command offered as the
+    /// fix has to survive being pasted.
+    pub fn put_command(&self) -> String {
+        let q = crate::shell::quote_for_shell;
+        format!(
+            "trg secret put --backend {} --path {} --key {}",
+            q(&self.backend),
+            q(&self.path),
+            q(&self.key)
+        )
+    }
+
+    /// The inline table that declares this var in a server's `vars`, so the
+    /// address just written and the address that will be read cannot be
+    /// spelled differently.
+    ///
+    /// Escaped for the same reason `put_command` is quoted: a path may hold a
+    /// character that would otherwise end the TOML string early.
+    pub fn declaration(&self) -> String {
+        format!(
+            "{{ backend = {}, path = {}, key = {} }}",
+            toml_basic_string(&self.backend),
+            toml_basic_string(&self.path),
+            toml_basic_string(&self.key)
+        )
+    }
+}
+
+/// A TOML basic string, always on one line, because an inline table is.
+fn toml_basic_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for c in raw.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+impl std::fmt::Display for SecretVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}` from backend `{}` at `{}`", self.key, self.backend, self.path)
+    }
+}
+
+/// Secret var values already read out of their backends.
+///
+/// Resolution is split in two because a backend read is a network call that
+/// wants a token and can be refused, while [`VarSource::Env`] is a memory
+/// lookup. Fetching first, in one batch, keeps the number of round trips to
+/// one per distinct path no matter how many vars reference it.
+#[derive(Debug, Default)]
+pub struct FetchedSecrets(HashMap<SecretVar, SecretString>);
+
+impl FetchedSecrets {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, var: SecretVar, value: SecretString) {
+        self.0.insert(var, value);
+    }
+
+    pub fn get(&self, var: &SecretVar) -> Option<&SecretString> {
+        self.0.get(var)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// A value source for `[mcp.servers.<name>.vars]` entries.
 ///
-/// `Literal` is a bare TOML string; `Env` is an inline `{ env, default? }` table.
+/// `Literal` is a bare TOML string; `Env` is an inline `{ env, default? }`
+/// table; `Secret` is an inline `{ backend, path, key }` table.
 /// `VarSource` is intentionally accepted only inside a `vars` table — never directly
 /// in `url` or header values.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged, deny_unknown_fields)]
-#[serde(expecting = "a string, or an inline table `{ env = \"NAME\", default = \"...\" }`")]
+#[serde(expecting = "a string, or an inline table `{ env = \"NAME\", default = \"...\" }` \
+                     or `{ backend = \"NAME\", path = \"...\", key = \"...\" }`")]
 pub enum VarSource {
     Literal(String),
     Env {
@@ -17,16 +129,31 @@ pub enum VarSource {
         #[serde(default)]
         default: Option<String>,
     },
+    Secret(SecretVar),
 }
 
 impl VarSource {
-    pub fn resolve(&self) -> Result<String, VarResolveError> {
+    /// The backend read this source needs before it can resolve, if any.
+    pub fn secret(&self) -> Option<&SecretVar> {
+        match self {
+            VarSource::Secret(v) => Some(v),
+            VarSource::Literal(_) | VarSource::Env { .. } => None,
+        }
+    }
+
+    pub fn resolve(&self, fetched: &FetchedSecrets) -> Result<String, VarResolveError> {
         match self {
             VarSource::Literal(s) => Ok(s.clone()),
             VarSource::Env { env, default } => match std::env::var(env) {
                 Ok(v) => Ok(v),
                 Err(_) => default.clone().ok_or_else(|| VarResolveError::MissingEnv(env.clone())),
             },
+            // Absent here means the caller resolved without fetching first,
+            // which is a wiring mistake rather than anything the config said.
+            VarSource::Secret(v) => fetched
+                .get(v)
+                .map(|s| s.expose_secret().to_string())
+                .ok_or_else(|| VarResolveError::SecretNotFetched(v.clone())),
         }
     }
 }
@@ -38,6 +165,9 @@ pub enum VarResolveError {
 
     #[error("undefined variable `{0}` referenced; declare it in `[mcp.servers.<name>.vars]`")]
     UndefinedVar(String),
+
+    #[error("secret {0} was resolved before it was read")]
+    SecretNotFetched(SecretVar),
 }
 
 /// A reference to a named entry in the server's `vars` table.
@@ -107,7 +237,10 @@ mod tests {
 
     #[test]
     fn varsource_literal_resolves() {
-        assert_eq!(VarSource::Literal("x".into()).resolve().unwrap(), "x");
+        assert_eq!(
+            VarSource::Literal("x".into()).resolve(&FetchedSecrets::new()).unwrap(),
+            "x"
+        );
     }
 
     #[test]
@@ -118,7 +251,7 @@ mod tests {
             env: name.clone(),
             default: None,
         };
-        assert_eq!(e.resolve().unwrap(), "hi");
+        assert_eq!(e.resolve(&FetchedSecrets::new()).unwrap(), "hi");
         std::env::remove_var(&name);
     }
 
@@ -130,7 +263,7 @@ mod tests {
             env: name,
             default: Some("d".into()),
         };
-        assert_eq!(e.resolve().unwrap(), "d");
+        assert_eq!(e.resolve(&FetchedSecrets::new()).unwrap(), "d");
     }
 
     #[test]
@@ -141,7 +274,7 @@ mod tests {
             env: name.clone(),
             default: None,
         };
-        let err = e.resolve().unwrap_err();
+        let err = e.resolve(&FetchedSecrets::new()).unwrap_err();
         assert!(matches!(err, VarResolveError::MissingEnv(ref n) if n == &name));
     }
 
@@ -158,6 +291,65 @@ c = { env = "REQ" }
         assert!(matches!(m.remove("a").unwrap(), VarSource::Literal(_)));
         assert!(matches!(m.remove("b").unwrap(), VarSource::Env { .. }));
         assert!(matches!(m.remove("c").unwrap(), VarSource::Env { .. }));
+    }
+
+    #[test]
+    fn varsource_deserializes_a_secret_table() {
+        let m: HashMap<String, VarSource> =
+            toml::from_str(r#"t = { backend = "homelab", path = "agentgateway", key = "token" }"#).unwrap();
+        let want = SecretVar {
+            backend: "homelab".into(),
+            path: "agentgateway".into(),
+            key: "token".into(),
+        };
+        assert_eq!(m["t"].secret(), Some(&want));
+    }
+
+    /// The address is the secret's whole identity, so two declarations of the
+    /// same secret are the same key no matter which server wrote them.
+    #[test]
+    fn two_declarations_of_one_address_are_one_key() {
+        let m: HashMap<String, VarSource> = toml::from_str(
+            r#"
+a = { backend = "homelab", path = "agentgateway", key = "token" }
+b = { backend = "homelab", path = "agentgateway", key = "token" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(m["a"].secret(), m["b"].secret());
+    }
+
+    #[test]
+    fn varsource_secret_resolves_from_what_was_fetched() {
+        let var = SecretVar {
+            backend: "homelab".into(),
+            path: "agentgateway".into(),
+            key: "token".into(),
+        };
+        let mut fetched = FetchedSecrets::new();
+        fetched.insert(var.clone(), SecretString::from("t".to_string()));
+
+        assert_eq!(VarSource::Secret(var).resolve(&fetched).unwrap(), "t");
+    }
+
+    /// Resolving before fetching is the caller's mistake, and the message has
+    /// to say so rather than blaming the config for a value it declared fine.
+    #[test]
+    fn varsource_secret_without_a_fetch_is_reported_as_such() {
+        let var = SecretVar {
+            backend: "homelab".into(),
+            path: "agentgateway".into(),
+            key: "token".into(),
+        };
+        let err = VarSource::Secret(var).resolve(&FetchedSecrets::new()).unwrap_err();
+        assert!(matches!(err, VarResolveError::SecretNotFetched(_)), "{err}");
+    }
+
+    #[test]
+    fn varsource_rejects_a_half_spelled_secret() {
+        let err = toml::from_str::<HashMap<String, VarSource>>(r#"t = { backend = "homelab", path = "agentgateway" }"#)
+            .unwrap_err();
+        assert!(format!("{err}").contains("backend"), "{err}");
     }
 
     #[test]
@@ -248,5 +440,60 @@ c = { env = "REQ" }
             msg.contains("did not match") || msg.contains("unknown field"),
             "got: {msg}"
         );
+    }
+
+    /// A path may hold a space, so a command offered as the fix has to survive
+    /// being pasted into a shell.
+    #[test]
+    fn a_put_command_quotes_what_a_shell_would_otherwise_split() {
+        let var = SecretVar {
+            backend: "home lab".to_string(),
+            path: "mcp/a b".to_string(),
+            key: "token".to_string(),
+        };
+        assert_eq!(
+            var.put_command(),
+            "trg secret put --backend 'home lab' --path 'mcp/a b' --key token"
+        );
+    }
+
+    #[test]
+    fn a_plain_put_command_is_left_unquoted() {
+        let var = SecretVar {
+            backend: "homelab".to_string(),
+            path: "mcp/memorizer".to_string(),
+            key: "token".to_string(),
+        };
+        assert_eq!(
+            var.put_command(),
+            "trg secret put --backend homelab --path mcp/memorizer --key token"
+        );
+    }
+
+    /// The declaration is meant to be pasted back into `vars`, so it has to
+    /// parse as the table it claims to be.
+    #[test]
+    fn a_declaration_survives_a_quote_in_a_path() {
+        let var = SecretVar {
+            backend: "homelab".to_string(),
+            path: r#"mcp/a"b\c"#.to_string(),
+            key: "token".to_string(),
+        };
+        let toml_text = format!("[vars]\ntoken = {}\n", var.declaration());
+        let parsed: toml::Value = toml::from_str(&toml_text).expect("declaration must parse");
+        assert_eq!(parsed["vars"]["token"]["path"].as_str().unwrap(), r#"mcp/a"b\c"#);
+    }
+
+    #[test]
+    fn a_declaration_keeps_a_newline_on_one_line() {
+        let var = SecretVar {
+            backend: "homelab".to_string(),
+            path: "a\nb".to_string(),
+            key: "token".to_string(),
+        };
+        let line = var.declaration();
+        assert!(!line.contains('\n'), "{line}");
+        let parsed: toml::Value = toml::from_str(&format!("[vars]\ntoken = {line}\n")).expect("parse");
+        assert_eq!(parsed["vars"]["token"]["path"].as_str().unwrap(), "a\nb");
     }
 }

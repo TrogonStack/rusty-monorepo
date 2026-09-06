@@ -49,7 +49,7 @@ pub enum ProxyError {
 
 pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
     let server_name = ctx.server_name.as_str();
-    let resolved = &ctx.profile;
+    let resolved = ctx.endpoint()?;
     info!(
         server = server_name,
         pid = std::process::id(),

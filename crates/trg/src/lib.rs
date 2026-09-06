@@ -7,5 +7,6 @@ pub mod config;
 pub mod fs;
 pub mod oauth;
 pub mod secrets;
+pub mod shell;
 pub mod telemetry;
 pub mod term;

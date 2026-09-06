@@ -151,6 +151,16 @@ impl AuthCommands {
         }
     }
 
+    /// `status` and `logout` read and delete what is already stored, so they
+    /// never reach the endpoint and must keep working when resolving one would
+    /// not.
+    pub fn needs_endpoint(&self) -> bool {
+        match self {
+            AuthCommands::Login(_) => true,
+            AuthCommands::Status(_) | AuthCommands::Logout(_) => false,
+        }
+    }
+
     pub async fn handle(self, ctx: &McpContext) -> i32 {
         match self {
             AuthCommands::Login(_) => match login(ctx).await {
@@ -180,7 +190,7 @@ fn emit<E: std::fmt::Display>(e: E) -> i32 {
 async fn login(ctx: &McpContext) -> Result<(), AuthError> {
     let server = ctx.server_name.as_str();
     let where_stored = ctx.backend.describe();
-    match ensure_credentials_for(&ctx.profile, server, &ctx.backend, &ctx.cred_path).await? {
+    match ensure_credentials_for(ctx.endpoint()?, server, &ctx.backend, &ctx.cred_path).await? {
         EnsureOutcome::NoAuthRequired => {
             println!(
                 "`{server}` does not require OAuth (no discovery support, or static \

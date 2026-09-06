@@ -10,6 +10,8 @@ use rmcp::transport::auth::{
 };
 use tiny_http::{Header, Response, Server};
 
+use crate::shell::quote_for_shell;
+
 #[derive(Debug, thiserror::Error)]
 pub enum FlowError {
     #[error(
@@ -45,19 +47,6 @@ pub enum FlowError {
 /// Render a server name for the recovery command so it survives a copy-paste into
 /// a shell. Config keys are arbitrary strings, so a name can carry spaces or shell
 /// metacharacters that would otherwise split it into several arguments.
-pub(crate) fn quote_for_shell(name: &str) -> String {
-    let is_bare = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '+' | '=' | ','));
-
-    if is_bare {
-        name.to_string()
-    } else {
-        format!("'{}'", name.replace('\'', r"'\''"))
-    }
-}
-
 pub struct FlowConfig {
     /// Default 5 minutes. Override for tests.
     pub callback_timeout: std::time::Duration,
@@ -569,20 +558,6 @@ mod tests {
             "stdin/stderr is not a TTY; OAuth requires an interactive browser session\n\
              run `trg mcp auth login --server 'my server'` once from a terminal, then try again"
         );
-    }
-
-    #[test]
-    fn quote_for_shell_leaves_bare_names_alone() {
-        assert_eq!(quote_for_shell("exa"), "exa");
-        assert_eq!(quote_for_shell("my-server_2.0"), "my-server_2.0");
-    }
-
-    #[test]
-    fn quote_for_shell_wraps_names_needing_it() {
-        assert_eq!(quote_for_shell(""), "''");
-        assert_eq!(quote_for_shell("my server"), "'my server'");
-        assert_eq!(quote_for_shell("a;rm -rf /"), "'a;rm -rf /'");
-        assert_eq!(quote_for_shell("it's"), r"'it'\''s'");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! `~/.config/trg/config.toml` loader for `trg mcp *` (and future subcommands).
 //!
 //! Env-backed inputs are declared once in `[mcp.servers.<name>.vars]` as
-//! `VarSource` entries (literal string or `{ env, default? }` table). The
+//! `VarSource` entries (literal string, `{ env, default? }` table, or
+//! `{ backend, path, key }` table naming a secrets backend). The
 //! server's `url` and each header value (`VarTemplate`) accept three shapes:
 //!   - a TOML string (literal),
 //!   - a `{ var = "<name>" }` reference to a `vars` entry,
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use http::HeaderName;
 pub use secrecy::SecretString;
 use serde::Deserialize;
-pub use var::{Segment, VarRef, VarResolveError, VarSource, VarTemplate};
+pub use var::{FetchedSecrets, SecretVar, Segment, VarRef, VarResolveError, VarSource, VarTemplate};
 
 use crate::secrets::SecretsSection;
 
@@ -127,7 +128,53 @@ pub struct LoadedMcp {
     pub secrets: SecretsSection,
 }
 
-pub fn load_mcp(selected_name: &str) -> Result<LoadedMcp, ConfigError> {
+/// A config that has been read and validated as far as it can be without
+/// talking to anything.
+///
+/// The file is parsed, the server is selected, and its declarations are known.
+/// What is left is the values behind any `{ backend = ... }` vars, which is a
+/// network read and so is not something a config loader should be doing on its
+/// own. The caller builds a [`crate::secrets::Registry`] out of
+/// [`PendingMcp::secrets`], fetches those, and calls [`PendingMcp::finish`].
+///
+/// Nothing before that point needs a reachable backend, so a config with a
+/// syntax error is still reported as a syntax error on a machine that is
+/// offline or holding an expired token.
+#[derive(Debug)]
+pub struct PendingMcp {
+    raw: McpServerEntryRaw,
+    pub secrets: SecretsSection,
+}
+
+impl PendingMcp {
+    /// The `[secrets.backends]` entry this server names for its own OAuth
+    /// credentials, readable before anything is fetched because it is a plain
+    /// string rather than a var. Commands that only touch stored credentials
+    /// need this and nothing else from the entry.
+    pub fn server_secrets(&self) -> Option<&str> {
+        self.raw.secrets.as_deref()
+    }
+
+    /// Every distinct secret this server's vars name.
+    ///
+    /// Deduplicated, because two vars pointing at the same coordinates are one
+    /// read, and sorted so the order a caller sees does not depend on hashing.
+    pub fn secret_vars(&self) -> Vec<SecretVar> {
+        let Some(vars) = &self.raw.vars else {
+            return Vec::new();
+        };
+        let mut out: Vec<SecretVar> = vars.values().filter_map(|v| v.secret().cloned()).collect();
+        out.sort_by(|a, b| (&a.backend, &a.path, &a.key).cmp(&(&b.backend, &b.path, &b.key)));
+        out.dedup();
+        out
+    }
+
+    pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedMcp, ConfigError> {
+        finish_mcp(self, fetched)
+    }
+}
+
+pub fn load_mcp(selected_name: &str) -> Result<PendingMcp, ConfigError> {
     load_mcp_at(&trg_config_path(), selected_name)
 }
 
@@ -160,17 +207,17 @@ fn read_error(path: &Path, e: &std::io::Error) -> ConfigError {
     }
 }
 
-fn load_mcp_at(path: &Path, selected_name: &str) -> Result<LoadedMcp, ConfigError> {
+fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
 
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
-    let servers = root
+    let mut servers = root
         .mcp
         .and_then(|m| (!m.servers.is_empty()).then_some(m.servers))
         .ok_or(ConfigError::NoMcpServers)?;
 
-    let Some(raw) = servers.get(selected_name) else {
+    let Some(raw) = servers.remove(selected_name) else {
         let names: Vec<_> = servers.keys().cloned().collect();
         return Err(ConfigError::UnknownServer {
             name: selected_name.to_owned(),
@@ -178,12 +225,18 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<LoadedMcp, ConfigErro
         });
     };
 
+    Ok(PendingMcp { raw, secrets })
+}
+
+fn finish_mcp(pending: PendingMcp, fetched: &FetchedSecrets) -> Result<LoadedMcp, ConfigError> {
+    let PendingMcp { raw, secrets } = pending;
+
     let resolved_vars: HashMap<String, String> = match &raw.vars {
         None => HashMap::new(),
         Some(table) => {
             let mut m = HashMap::with_capacity(table.len());
             for (k, v) in table {
-                m.insert(k.clone(), v.resolve()?);
+                m.insert(k.clone(), v.resolve(fetched)?);
             }
             m
         }
@@ -224,12 +277,12 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<LoadedMcp, ConfigErro
 
     Ok(LoadedMcp {
         server: ResolvedMcpServer {
-            secrets: raw.secrets.clone(),
+            secrets: raw.secrets,
             url: SecretString::new(url_string.into_boxed_str()),
-            transport: raw.transport.clone(),
+            transport: raw.transport,
             max_disconnected_time: raw.max_disconnected_time,
             initial_retry_interval: raw.initial_retry_interval,
-            override_protocol_version: raw.override_protocol_version.clone(),
+            override_protocol_version: raw.override_protocol_version,
             http_headers,
         },
         secrets,
@@ -286,7 +339,11 @@ mod tests {
     }
 
     fn load_at(path: &Path, server: &str) -> Result<ResolvedMcpServer, ConfigError> {
-        load_mcp_at(path, server).map(|loaded| loaded.server)
+        load_full(path, server).map(|loaded| loaded.server)
+    }
+
+    fn load_full(path: &Path, server: &str) -> Result<LoadedMcp, ConfigError> {
+        load_mcp_at(path, server)?.finish(&FetchedSecrets::new())
     }
 
     #[test]
@@ -314,16 +371,107 @@ mod tests {
             "#,
         );
 
-        let loaded = load_mcp_at(&path, "s1").unwrap();
+        let loaded = load_full(&path, "s1").unwrap();
         assert_eq!(loaded.server.secrets.as_deref(), Some("work"));
         assert!(loaded.secrets.backends.contains_key("work"));
 
-        let loaded = load_mcp_at(&path, "s2").unwrap();
+        let loaded = load_full(&path, "s2").unwrap();
         assert_eq!(loaded.server.secrets, None);
         assert!(
             loaded.secrets.backends.contains_key("work"),
             "the section travels with every server, so `[mcp]` and `[secrets]` cannot drift"
         );
+    }
+
+    /// Parsing must not depend on a reachable backend: a config with a syntax
+    /// error has to read as one on a machine that is offline or holding an
+    /// expired token, which is exactly when someone is editing it.
+    #[test]
+    fn a_secret_var_is_declared_at_parse_time_and_read_later() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+
+            [mcp.servers.s1.headers]
+            Authorization = { var = "token" }
+
+            [mcp.servers.s1.vars]
+            token = { backend = "homelab", path = "agentgateway", key = "token" }
+            "#,
+        );
+
+        let pending = load_mcp_at(&path, "s1").expect("parses without reaching anything");
+        assert_eq!(
+            pending.secret_vars(),
+            vec![SecretVar {
+                backend: "homelab".into(),
+                path: "agentgateway".into(),
+                key: "token".into(),
+            }]
+        );
+
+        let mut fetched = FetchedSecrets::new();
+        fetched.insert(pending.secret_vars()[0].clone(), SecretString::from("t".to_string()));
+
+        let loaded = pending.finish(&fetched).unwrap();
+        assert_eq!(
+            loaded.server.http_headers[&HeaderName::from_static("authorization")].expose_secret(),
+            "t"
+        );
+    }
+
+    #[test]
+    fn one_entry_read_by_two_vars_is_named_once() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+
+            [mcp.servers.s1.vars]
+            a = { backend = "homelab", path = "agentgateway", key = "token" }
+            b = { backend = "homelab", path = "agentgateway", key = "token" }
+            c = { backend = "homelab", path = "agentgateway", key = "principal" }
+            d = "literal"
+            "#,
+        );
+
+        let wanted = load_mcp_at(&path, "s1").unwrap().secret_vars();
+
+        assert_eq!(
+            wanted.len(),
+            2,
+            "the duplicate collapses and the literal is not a backend read: {wanted:?}"
+        );
+        assert_eq!(
+            wanted[0].key, "principal",
+            "sorted, so the order does not depend on hashing"
+        );
+        assert_eq!(wanted[1].key, "token");
+    }
+
+    #[test]
+    fn a_server_declaring_no_secret_vars_wants_nothing_read() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+
+            [mcp.servers.s1.vars]
+            a = "literal"
+            "#,
+        );
+
+        assert!(load_mcp_at(&path, "s1").unwrap().secret_vars().is_empty());
     }
 
     #[test]
