@@ -119,7 +119,7 @@ printf '%s' "$ID"     | trg secret put --backend local --path mcp/memorizer --ke
 printf '%s' "$SECRET" | trg secret put --backend local --path mcp/memorizer --key client_secret
 ```
 
-```toml
+```toml trg-example=fragment
 [mcp.servers.memorizer.vars]
 client_id     = { backend = "local", path = "mcp/memorizer", key = "client_id" }
 client_secret = { backend = "local", path = "mcp/memorizer", key = "client_secret" }

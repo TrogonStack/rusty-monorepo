@@ -10,6 +10,8 @@
 //!
 //! Inline `{ env = "..." }` is rejected outside the `vars` table.
 
+#[cfg(test)]
+mod doc_examples;
 mod var;
 
 use std::collections::HashMap;

@@ -18,7 +18,7 @@ with a clear `config file not found at <path>` error.
 
 ## File layout
 
-```toml
+```toml trg-example=skip
 [secrets.backends.<backend-name>]
 kind = "keychain"                  # or "openbao"
 
@@ -480,6 +480,7 @@ kind = "openbao"
 addr = { env = "BAO_ADDR", default = "http://127.0.0.1:8200" }
 mount = "secret"
 path_prefix = "trg"
+owner = "alice"
 token_file = "~/.vault-token"
 
 [mcp.servers.internal]
