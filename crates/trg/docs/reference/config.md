@@ -18,8 +18,7 @@ with a clear `config file not found at <path>` error.
 
 ## File layout
 
-<!-- trg-example: skip -->
-```toml
+```toml trg-example=skip
 [secrets.backends.<backend-name>]
 kind = "keychain"                  # or "openbao"
 

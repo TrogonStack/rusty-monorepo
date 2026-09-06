@@ -9,15 +9,20 @@
 //! A block carrying a table header claims to be a config and is loaded as one.
 //! A block without one is showing the shape of a single value, and is held to
 //! TOML syntax alone. An excerpt that has a header but still leans on a sibling
-//! block for the rest of itself says so on the line above its fence:
+//! block for the rest of itself says so on its own fence:
 //!
-//! ```markdown
-//! <!-- trg-example: fragment -->
-//! <!-- trg-example: skip -->
-//! ```
+//! ````markdown
+//! ```toml trg-example=fragment
+//! ```toml trg-example=skip
+//! ````
 //!
 //! `skip` is for a block that is a shape rather than a config, with
 //! `<placeholder>` where the values go, and is held to nothing.
+//!
+//! The marker rides on the fence rather than on a comment above it so that it
+//! cannot be separated from the block it describes. GitHub takes the language
+//! from the first word of an info string and drops the rest, so highlighting is
+//! unaffected and the marker never renders.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -34,11 +39,11 @@ enum Mode {
 }
 
 impl Mode {
-    fn parse(directive: &str) -> Option<Self> {
-        match directive {
-            "fragment" => Some(Self::Fragment),
-            "skip" => Some(Self::Skip),
-            _ => None,
+    fn parse(value: &str, at: &str) -> Self {
+        match value {
+            "fragment" => Self::Fragment,
+            "skip" => Self::Skip,
+            other => panic!("{at}: unknown `trg-example` value `{other}`; expected `fragment` or `skip`"),
         }
     }
 }
@@ -93,14 +98,15 @@ fn extract_blocks(file: &Path) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].trim_start() != "```toml" {
+        let Some(attributes) = toml_fence(lines[i]) else {
             i += 1;
             continue;
-        }
-
-        let declared_mode = i.checked_sub(1).and_then(|prev| directive(lines[prev]));
+        };
 
         let fence_line = i + 1;
+        let at = format!("{}:{fence_line}", file.display());
+        let declared_mode = declared_mode(&attributes, &at);
+
         let mut body = String::new();
         i += 1;
         while i < lines.len() && !lines[i].trim_start().starts_with("```") {
@@ -137,9 +143,20 @@ fn has_table_header(body: &str) -> bool {
     })
 }
 
-fn directive(line: &str) -> Option<Mode> {
-    let rest = line.trim().strip_prefix("<!-- trg-example:")?;
-    Mode::parse(rest.strip_suffix("-->")?.trim())
+/// The info string past the language, for a fence that opens a TOML block.
+///
+/// `None` for any other line, including a fence in another language and one
+/// whose language merely starts with `toml`.
+fn toml_fence(line: &str) -> Option<Vec<&str>> {
+    let info = line.trim_start().strip_prefix("```")?;
+    let mut words = info.split_whitespace();
+    (words.next()? == "toml").then(|| words.collect())
+}
+
+fn declared_mode(attributes: &[&str], at: &str) -> Option<Mode> {
+    attributes
+        .iter()
+        .find_map(|a| a.strip_prefix("trg-example=").map(|value| Mode::parse(value, at)))
 }
 
 /// The `[secrets.backends]` keys a block declares.
@@ -248,7 +265,7 @@ fn check_parses_as_config(block: &Block) {
     if let Err(e) = toml::from_str::<FileRoot>(&block.body) {
         panic!(
             "{}: this example does not load as a config: {e}\n\
-             If it is a deliberate excerpt, mark it `<!-- trg-example: fragment -->`.\n\
+             If it is a deliberate excerpt, open its fence with: ```toml trg-example=fragment\n\
              ---\n{}---",
             block.where_(),
             block.body
