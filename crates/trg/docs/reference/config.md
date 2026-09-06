@@ -384,6 +384,43 @@ status if there is no matching item; scripts should account for that.
   the same server start at the same instant with an empty Keychain entry,
   two browser tabs may open. Subsequent invocations are silent.
 
+## `[exec.<name>]`
+
+An entry names a command `trg exec <name>` execs into, with its own `env`
+resolved the same way a server's `vars` are — literal, `{ env = ... }`, or
+`{ backend = ..., path = ..., key = ... }`.
+
+```toml trg-example=skip
+[exec.<name>]
+command = "<program>"
+args    = ["<arg>", "..."]      # optional
+unset   = ["<ENV_NAME>", "..."] # optional
+
+[exec.<name>.env]
+<VAR-NAME> = "<literal>"        # or { env = "...", default = "..." }
+                                 # or { backend = "...", path = "...", key = "..." }
+```
+
+| Field     | Type                  | Required | Notes                                                                 |
+| --------- | --------------------- | -------- | ---------------------------------------------------------------------- |
+| `command` | string                | yes      | Program to exec into. Looked up on `PATH` the same as a shell would.  |
+| `args`    | array of strings      | no       | Passed before anything typed on the `trg exec` command line meant for the launched command. |
+| `unset`   | array of strings      | no       | Names removed from the inherited environment before `env` is applied. |
+| `env`     | table of `VarSource`  | no       | Resolved into the child's environment; see [Variables](#variables-mcpserversnamevars) for the accepted shapes. |
+
+`[exec]` must contain at least one entry — an empty or missing table fails
+with `no [exec] entries in config`. Unknown fields inside an entry are
+rejected (`deny_unknown_fields`).
+
+The launched command replaces the `trg` process (`exec(2)`): same pid, no
+supervisor left to forward a signal through or catch a crash. Only a failure
+to start is reported back, in `--output-format text` or `json`.
+
+`--env KEY=VALUE` on the command line is for a one-off literal like `DEBUG=1`,
+applied after the entry's own `env`. It is not a place for a secret: like
+every other flag it lands in `argv` and shell history. A secret belongs in the
+entry's `env` table as a `{ backend = ..., path = ..., key = ... }`.
+
 ## Examples
 
 ### Minimal — literal endpoint, no auth, no vars
@@ -495,6 +532,30 @@ url = "https://api.githubcopilot.com/mcp/"
 `secret/data/trg/mcp/<hostname>/internal`. `github` names no backend, so it
 keeps using the macOS Keychain exactly as it did before `[secrets]` existed.
 
+### An exec entry with a token from a secrets backend
+
+```toml
+[secrets.backends.homelab]
+kind = "openbao"
+addr = { env = "BAO_ADDR" }
+mount = "kv"
+path_prefix = "trg"
+owner = "alice"
+token_file = "~/.vault-token"
+
+[exec.claude]
+command = "claude"
+args    = ["--dangerously-skip-permissions"]
+unset   = ["ANTHROPIC_API_KEY"]
+
+[exec.claude.env]
+ANTHROPIC_AUTH_TOKEN = { backend = "homelab", path = "exec/claude", key = "token" }
+```
+
+```sh
+trg exec claude -- --resume
+```
+
 ## Error reference
 
 | Error                                             | Meaning                                                         |
@@ -519,3 +580,5 @@ keeps using the macOS Keychain exactly as it did before `[secrets]` existed.
 | `OpenBao at <addr> has no <mount> mount, or it is not a KV v2 mount` | The mount name is wrong, or the mount is KV v1. |
 | `OpenBao rejected the token (...); run bao login and retry` | The token is absent, expired, or lacks a policy for the path. |
 | `OpenBao at <addr> redirected <status> to a different origin` | The instance answered a redirect leaving the `addr` origin, meaning any change of scheme, host, or port. The token is not followed there. Point `addr` at the active node or a load balancer. |
+| `no [exec] entries in config`                     | `[exec]` is missing or empty.                                   |
+| `unknown exec entry <name> — known: ...`          | The name given to `trg exec` does not match any `[exec.<name>]` key. |

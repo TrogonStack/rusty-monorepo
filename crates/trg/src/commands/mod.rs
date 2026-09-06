@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod doctor;
+pub mod exec;
 pub mod mcp;
 pub mod secret;
 
@@ -7,6 +8,7 @@ use clap::Subcommand;
 
 use ai::AiCommands;
 use doctor::DoctorArgs;
+use exec::ExecArgs;
 use mcp::McpCommands;
 use secret::SecretCommands;
 
@@ -30,4 +32,6 @@ pub enum Commands {
     },
     /// Check that the configured secrets backends are reachable and usable
     Doctor(DoctorArgs),
+    /// Exec-replace into a configured `[exec.<name>]` entry
+    Exec(ExecArgs),
 }
