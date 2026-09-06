@@ -1,18 +1,11 @@
 use clap::Parser;
 
+use trg::cli::Cli;
 use trg::commands::ai::AiCommands;
 use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
 use trg::secrets::{vars, CredentialPathError, Registry, ServerBackendError, VarFetchError};
-
-#[derive(Parser)]
-#[command(name = "trg")]
-#[command(about = "TrogonStack tools and utilities")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
 
 #[derive(Debug, thiserror::Error)]
 enum WireError {
