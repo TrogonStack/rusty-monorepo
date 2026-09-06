@@ -12,6 +12,7 @@
 pub mod config;
 pub mod keychain;
 pub mod kv_v2;
+pub mod onepassword;
 pub mod openbao;
 pub mod vars;
 
@@ -22,6 +23,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::KeychainBackend;
+pub use onepassword::OnePasswordBackend;
 pub use openbao::{OpenBaoBackend, TokenError};
 pub use vars::VarFetchError;
 
@@ -332,6 +334,7 @@ impl fmt::Debug for SecretMap {
 pub enum Backend {
     Keychain(KeychainBackend),
     OpenBao(OpenBaoBackend),
+    OnePassword(OnePasswordBackend),
     #[cfg(test)]
     Fake(fake::FakeBackend),
 }
@@ -341,6 +344,7 @@ impl Backend {
         match self {
             Self::Keychain(_) => "keychain",
             Self::OpenBao(_) => "openbao",
+            Self::OnePassword(_) => "onepassword",
             #[cfg(test)]
             Self::Fake(_) => "fake",
         }
@@ -352,6 +356,10 @@ impl Backend {
         match self {
             Self::Keychain(b) => format!("the macOS Keychain (service `{}`)", b.service()),
             Self::OpenBao(b) => format!("OpenBao at {} (mount `{}`)", b.addr(), b.mount()),
+            Self::OnePassword(b) => match b.account() {
+                Some(account) => format!("1Password via `op` (account `{account}`)"),
+                None => "1Password via `op`".to_string(),
+            },
             #[cfg(test)]
             Self::Fake(_) => "an in-memory fake".to_string(),
         }
@@ -375,6 +383,14 @@ impl Backend {
                 Ok(SecretPath::parse(&b.credential_path(server))?)
             }
             Self::Keychain(_) => Ok(SecretPath::parse(server)?),
+            // A bare server name has no vault to live in, and guessing one
+            // would silently address the wrong item. There is no derivable
+            // default the way OpenBao derives a path from a machine id.
+            Self::OnePassword(_) => Err(CredentialPathError::Name {
+                name: server.to_string(),
+                kind: "onepassword",
+                reason: "a 1Password path needs a vault, which a bare server name does not carry".to_string(),
+            }),
             #[cfg(test)]
             Self::Fake(_) => Ok(SecretPath::parse(server)?),
         }
@@ -384,6 +400,7 @@ impl Backend {
         match self {
             Self::Keychain(b) => b.get(path).await,
             Self::OpenBao(b) => b.get(path).await,
+            Self::OnePassword(b) => b.get(path).await,
             #[cfg(test)]
             Self::Fake(b) => b.get(path).await,
         }
@@ -393,6 +410,7 @@ impl Backend {
         match self {
             Self::Keychain(b) => b.set(path, map).await,
             Self::OpenBao(b) => b.set(path, map).await,
+            Self::OnePassword(b) => b.set(path, map).await,
             #[cfg(test)]
             Self::Fake(b) => b.set(path, map).await,
         }
@@ -402,6 +420,7 @@ impl Backend {
         match self {
             Self::Keychain(b) => b.delete(path).await,
             Self::OpenBao(b) => b.delete(path).await,
+            Self::OnePassword(b) => b.delete(path).await,
             #[cfg(test)]
             Self::Fake(b) => b.delete(path).await,
         }
@@ -411,6 +430,7 @@ impl Backend {
         match self {
             Self::Keychain(b) => b.list(prefix).await,
             Self::OpenBao(b) => b.list(prefix).await,
+            Self::OnePassword(b) => b.list(prefix).await,
             #[cfg(test)]
             Self::Fake(b) => b.list(prefix).await,
         }
@@ -627,6 +647,22 @@ mod tests {
 
         let err = backend.credential_path("my server").expect_err("should refuse");
         assert!(err.to_string().contains("openbao"), "{err}");
+    }
+
+    #[test]
+    fn a_onepassword_credential_path_is_refused_for_lack_of_a_vault() {
+        let backend = Backend::OnePassword(OnePasswordBackend::new(None));
+        let err = backend.credential_path("github").expect_err("should refuse");
+        assert!(
+            matches!(
+                err,
+                CredentialPathError::Name {
+                    kind: "onepassword",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[tokio::test]
