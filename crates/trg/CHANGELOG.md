@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.5.0...trg@v0.6.0) (2026-09-06)
+
+
+### Features
+
+* **trg:** Give every command the same --output-format text|json ([#88](https://github.com/TrogonStack/rusty-monorepo/issues/88)) ([7c15dac](https://github.com/TrogonStack/rusty-monorepo/commit/7c15dacafa0961ce81f4dd98ffba89ab01ce3d47))
+* **trg:** Read config vars straight from a secrets backend ([#85](https://github.com/TrogonStack/rusty-monorepo/issues/85)) ([c4b388d](https://github.com/TrogonStack/rusty-monorepo/commit/c4b388d436c1ab864a912f34788dbd261dd4a337))
+
+
+### Bug Fixes
+
+* **trg:** Repair the documented examples and report a version ([#87](https://github.com/TrogonStack/rusty-monorepo/issues/87)) ([df9c79a](https://github.com/TrogonStack/rusty-monorepo/commit/df9c79a9739d26f9abb3f40f79e0792c72672638))
+
 ## [0.5.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.4.2...trg@v0.5.0) (2026-09-05)
 
 
