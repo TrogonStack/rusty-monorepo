@@ -8,6 +8,7 @@ looks the way it does.
 
 A server names exactly one backend:
 
+<!-- trg-example: fragment -->
 ```toml
 [mcp.servers.internal]
 secrets = "work"
