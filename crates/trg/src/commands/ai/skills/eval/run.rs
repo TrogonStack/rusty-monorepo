@@ -18,12 +18,13 @@ use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
 };
 use crate::fs::FileSystem;
+use crate::output::{print_json, OutputFormat};
 use clap::Args;
 
 use super::benchmark::benchmark_report_dir_with_document;
 use super::ci_args::EvalCiArgs;
 use super::finish_eval_output;
-use super::grade::grade_report_dir_with_report;
+use super::grade::{grade_report_dir_with_report, GradeJsonOutput};
 use crate::agentskills::benchmark::BenchmarkOptions;
 use crate::agentskills::grading::{GradeOptions, GraderMode};
 
@@ -140,9 +141,11 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Emit machine-readable JSON for the final pipeline stage to stdout (benchmark if --benchmark, else grade if --grade, else run CI summary). Intermediate stages are not emitted"
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the final pipeline stage as a human summary or as a machine-readable document (benchmark if --benchmark, else grade if --grade, else run CI summary). Intermediate stages are not emitted"
     )]
-    pub json: bool,
+    pub output_format: OutputFormat,
 
     #[arg(long, help = "Fail when any eval case has an empty assertions array")]
     pub require_assertions: bool,
@@ -335,75 +338,52 @@ impl RunArgs {
         };
 
         if self.grade {
-            let (code, grade_report) = grade_report_dir_with_report(&report_dir, grade_options);
-            if code != 0 {
-                if self.json && !self.benchmark {
-                    emit_chained_grade_json(&report_dir, code, grade_report.as_ref());
+            let (code, grade_report) = grade_report_dir_with_report(&report_dir, grade_options, self.output_format);
+            let last_stage = code != 0 || !self.benchmark;
+            if last_stage {
+                if self.output_format.is_json() {
+                    return print_json(&GradeJsonOutput::new(&report_dir, code, grade_report.as_ref()), code);
                 }
-                return code;
-            }
-            if self.json && !self.benchmark {
-                emit_chained_grade_json(&report_dir, code, grade_report.as_ref());
                 return code;
             }
         }
 
         if self.benchmark {
             let (code, benchmark_doc) = benchmark_report_dir_with_document(&report_dir, BenchmarkOptions::default());
-            if self.json {
+            if self.output_format.is_json() {
                 if let Some(document) = benchmark_doc {
-                    emit_chained_benchmark_json(&report_dir, code, &document);
+                    return print_json(&BenchmarkJsonOutput::new(&report_dir, code, &document), code);
                 }
             }
             return code;
         }
 
-        finish_eval_output(&report_dir, self.json, self.ci.policy(), &self.ci.thresholds(), None)
+        finish_eval_output(
+            &report_dir,
+            self.output_format,
+            self.ci.policy(),
+            &self.ci.thresholds(),
+            None,
+        )
     }
 }
 
-fn emit_chained_grade_json(
-    report_dir: &Path,
+/// The chained-benchmark shape, alongside the chained-grade shape that
+/// `grade` and `run --grade` share.
+#[derive(serde::Serialize)]
+struct BenchmarkJsonOutput<'a> {
+    report_dir: String,
     exit_code: i32,
-    grade_report: Option<&crate::agentskills::grading::GradeReport>,
-) {
-    #[derive(serde::Serialize)]
-    struct GradeJsonOutput<'a> {
-        report_dir: String,
-        exit_code: i32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        grade: Option<&'a crate::agentskills::grading::GradeReport>,
-    }
-    let output = GradeJsonOutput {
-        report_dir: report_dir.display().to_string(),
-        exit_code,
-        grade: grade_report,
-    };
-    match serde_json::to_string_pretty(&output) {
-        Ok(json) => println!("{json}"),
-        Err(error) => eprintln!("Failed to serialize grade output: {error}"),
-    }
+    benchmark: &'a crate::agentskills::benchmark::BenchmarkDocument,
 }
 
-fn emit_chained_benchmark_json(
-    report_dir: &Path,
-    exit_code: i32,
-    document: &crate::agentskills::benchmark::BenchmarkDocument,
-) {
-    #[derive(serde::Serialize)]
-    struct BenchmarkJsonOutput<'a> {
-        report_dir: String,
-        exit_code: i32,
-        benchmark: &'a crate::agentskills::benchmark::BenchmarkDocument,
-    }
-    let output = BenchmarkJsonOutput {
-        report_dir: report_dir.display().to_string(),
-        exit_code,
-        benchmark: document,
-    };
-    match serde_json::to_string_pretty(&output) {
-        Ok(json) => println!("{json}"),
-        Err(error) => eprintln!("Failed to serialize benchmark output: {error}"),
+impl<'a> BenchmarkJsonOutput<'a> {
+    fn new(report_dir: &Path, exit_code: i32, benchmark: &'a crate::agentskills::benchmark::BenchmarkDocument) -> Self {
+        Self {
+            report_dir: report_dir.display().to_string(),
+            exit_code,
+            benchmark,
+        }
     }
 }
 
@@ -890,7 +870,7 @@ mod tests {
             attempts: 1,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
 
@@ -1024,7 +1004,7 @@ mod tests {
             attempts: 1,
             old_skill_dir: Some(old_skill_dir),
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
 
@@ -1062,7 +1042,7 @@ mod tests {
             attempts: 1,
             old_skill_dir: Some(old_skill_dir),
             allow_skill_name_mismatch: true,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
 
@@ -1116,7 +1096,7 @@ mod tests {
             attempts: 1,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
 
@@ -1217,7 +1197,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1263,7 +1243,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1309,7 +1289,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1347,7 +1327,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1384,7 +1364,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1409,7 +1389,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1481,7 +1461,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1544,7 +1524,7 @@ mod tests {
             iteration: None,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
             require_assertions: false,
@@ -1630,7 +1610,7 @@ mod tests {
             attempts: 1,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: true,
             benchmark: true,
             require_assertions: false,
@@ -1667,7 +1647,7 @@ mod tests {
                 attempts: 1,
                 old_skill_dir: None,
                 allow_skill_name_mismatch: false,
-                json: false,
+                output_format: OutputFormat::Text,
                 grade: false,
                 benchmark: false,
                 require_assertions: false,
@@ -1689,7 +1669,7 @@ mod tests {
 
         let report_before = std::fs::read_to_string(report_dir.join("report.json")).expect("report.json");
 
-        let status = crate::commands::ai::skills::eval::grade::grade_report_dir(
+        let (status, _) = grade_report_dir_with_report(
             &report_dir,
             GradeOptions {
                 grader: GraderMode::Script,
@@ -1697,6 +1677,7 @@ mod tests {
                 grader_command: Some("/nonexistent/grader-binary".into()),
                 strict: false,
             },
+            OutputFormat::Text,
         );
 
         assert_ne!(status, 0);
@@ -1727,7 +1708,7 @@ mod tests {
             attempts: 1,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: true,
             benchmark: false,
             require_assertions: false,
@@ -1769,7 +1750,7 @@ mod tests {
             attempts: 1,
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
-            json: false,
+            output_format: OutputFormat::Text,
             grade: false,
             benchmark: true,
             require_assertions: false,

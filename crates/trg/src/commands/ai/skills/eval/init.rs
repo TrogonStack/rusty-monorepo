@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use crate::agentskills::evals::{check_eval_suite, write_eval_manifest_scaffold, EvalCheckOptions};
 use crate::fs::FileSystem;
+use crate::output::{print_json, OutputFormat};
 use clap::Args;
+use serde_json::json;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -25,6 +27,14 @@ pub struct InitArgs {
 
     #[arg(long, help = "Overwrite an existing evals/evals.json")]
     pub force: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl InitArgs {
@@ -69,6 +79,15 @@ impl InitArgs {
             return 1;
         }
 
+        if self.output_format.is_json() {
+            let document = json!({
+                "skill_dir": self.skill_dir.display().to_string(),
+                "evals_path": evals_path.display().to_string(),
+                "created": true,
+            });
+            return print_json(&document, 0);
+        }
+
         println!("Created {}", evals_path.display());
         0
     }
@@ -100,6 +119,7 @@ mod tests {
         let status = InitArgs {
             skill_dir: skill_dir.clone(),
             force: false,
+            output_format: crate::output::OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
         assert_eq!(status, 0);
@@ -123,6 +143,7 @@ mod tests {
         let status = InitArgs {
             skill_dir,
             force: false,
+            output_format: crate::output::OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
         assert_eq!(status, 1);
@@ -136,6 +157,7 @@ mod tests {
         let init_status = InitArgs {
             skill_dir: skill_dir.clone(),
             force: false,
+            output_format: crate::output::OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
         assert_eq!(init_status, 0);
@@ -145,7 +167,7 @@ mod tests {
             skill_dir: Some(skill_dir),
             mode: VerifyMode::Strict,
             require_assertions: false,
-            json: false,
+            output_format: crate::output::OutputFormat::Text,
             ci: Default::default(),
         }
         .handle(&crate::fs::RealFS);

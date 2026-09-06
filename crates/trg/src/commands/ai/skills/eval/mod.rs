@@ -20,6 +20,7 @@ use crate::agentskills::ci::{
 };
 use crate::agentskills::evals::WorkspaceCheckReport;
 use crate::fs::FileSystem;
+use crate::output::OutputFormat;
 use clap::{Args, Subcommand};
 
 pub use benchmark::BenchmarkArgs;
@@ -78,7 +79,7 @@ impl EvalArgs {
 
 pub(crate) fn finish_eval_output(
     report_dir: &Path,
-    json: bool,
+    format: OutputFormat,
     policy: crate::agentskills::ci::CiPolicy,
     thresholds: &crate::agentskills::ci::ThresholdConfig,
     workspace: Option<WorkspaceCheckReport>,
@@ -97,7 +98,7 @@ pub(crate) fn finish_eval_output(
     emit_github_annotations(&check.violations);
 
     let exit_code = if check.passed { 0 } else { 1 };
-    if json {
+    if format.is_json() {
         let output = EvalCommandJsonOutput {
             report_dir: report_dir.display().to_string(),
             exit_code,
@@ -165,7 +166,7 @@ mod help_tests {
         let help = long_help::<IterationSummaryArgs>("iteration-summary", "Summarize assertion stability and outliers");
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
         assert!(help.contains("--previous"));
-        assert!(help.contains("--json"));
+        assert!(help.contains("--output-format"));
     }
 
     #[test]

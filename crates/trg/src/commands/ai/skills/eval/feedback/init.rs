@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use crate::agentskills::feedback::init_feedback;
 use crate::agentskills::report::sync_human_feedback;
+use crate::output::{print_json, OutputFormat};
 use clap::Args;
+use serde_json::json;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -22,6 +24,14 @@ pub struct FeedbackInitArgs {
         help = "Reviewer identity recorded in feedback.json (defaults to git user.email)"
     )]
     pub reviewer: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl FeedbackInitArgs {
@@ -37,6 +47,15 @@ impl FeedbackInitArgs {
         if let Err(e) = sync_human_feedback(&self.report_dir) {
             eprintln!("Failed to sync feedback summary into report.json: {}", e);
             return 1;
+        }
+
+        if self.output_format.is_json() {
+            let document = json!({
+                "report_dir": self.report_dir.display().to_string(),
+                "created": report.created,
+                "skipped": report.skipped,
+            });
+            return print_json(&document, 0);
         }
 
         println!(
@@ -61,6 +80,7 @@ mod tests {
         let status = FeedbackInitArgs {
             report_dir: report_dir.clone(),
             reviewer: Some("reviewer@example.com".to_string()),
+            output_format: OutputFormat::Text,
         }
         .handle();
         assert_eq!(status, 0);

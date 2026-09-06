@@ -5,6 +5,7 @@ use crate::agentskills::iteration_summary::{
     build_iteration_summary_document, print_human_summary, write_iteration_summary, IterationSummaryOptions,
 };
 use crate::fs::FileSystem;
+use crate::output::OutputFormat;
 use clap::Args;
 
 use super::print_report_dir;
@@ -17,7 +18,7 @@ Examples:
 
   $ trg ai skills eval iteration-summary ./report --previous ./artifacts/my-skill/prior-report
 
-  $ trg ai skills eval iteration-summary ./report --json --failed-runs exclude
+  $ trg ai skills eval iteration-summary ./report --output-format json --failed-runs exclude
 ")]
 pub struct IterationSummaryArgs {
     #[arg(help = "Path to the report directory containing report.json")]
@@ -40,9 +41,11 @@ pub struct IterationSummaryArgs {
 
     #[arg(
         long,
-        help = "Emit iteration-summary.json to stdout instead of a human-readable table"
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human-readable table or as the iteration-summary.json document on stdout"
     )]
-    pub json: bool,
+    pub output_format: OutputFormat,
 }
 
 impl IterationSummaryArgs {
@@ -65,7 +68,7 @@ impl IterationSummaryArgs {
             return 1;
         }
 
-        if self.json {
+        if self.output_format.is_json() {
             match serde_json::to_string_pretty(&document) {
                 Ok(json) => println!("{json}"),
                 Err(error) => {

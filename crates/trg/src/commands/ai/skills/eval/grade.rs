@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 
-use crate::agentskills::grading::{grade_report_bundle, GradeOptions, GraderMode};
+use crate::agentskills::grading::{grade_report_bundle, GradeOptions, GradeReport, GraderMode};
 use crate::fs::FileSystem;
+use crate::output::{print_json, OutputFormat};
 use clap::Args;
+use serde::Serialize;
 
 use super::print_report_dir;
 
@@ -35,6 +37,14 @@ pub struct GradeArgs {
 
     #[arg(long, help = "Fail when evidence is missing or assertions require LLM grading")]
     pub strict: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl GradeArgs {
@@ -45,26 +55,54 @@ impl GradeArgs {
             grader_command: self.grader_command,
             strict: self.strict,
         };
-        grade_report_dir(&self.report_dir, options)
+        let (code, report) = grade_report_dir_with_report(&self.report_dir, options, self.output_format);
+        if self.output_format.is_json() {
+            return print_json(&GradeJsonOutput::new(&self.report_dir, code, report.as_ref()), code);
+        }
+        code
     }
 }
 
-pub(crate) fn grade_report_dir(report_dir: &Path, options: GradeOptions) -> i32 {
-    grade_report_dir_with_report(report_dir, options).0
+/// What `grade` reports, and what `run --grade` reports for the stage it just
+/// ran. One shape, because a caller reading the grade out of a chained run and
+/// out of a standalone `grade` is reading the same thing.
+#[derive(Serialize)]
+pub(crate) struct GradeJsonOutput<'a> {
+    report_dir: String,
+    exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grade: Option<&'a GradeReport>,
 }
 
+impl<'a> GradeJsonOutput<'a> {
+    pub(crate) fn new(report_dir: &Path, exit_code: i32, grade: Option<&'a GradeReport>) -> Self {
+        Self {
+            report_dir: report_dir.display().to_string(),
+            exit_code,
+            grade,
+        }
+    }
+}
+
+/// Grades, and prints the human summary only when that is what was asked for.
+///
+/// Under `json` it prints nothing at all: the caller owns the one document on
+/// stdout, and a chained `run` has a later stage that may own it instead.
 pub(crate) fn grade_report_dir_with_report(
     report_dir: &Path,
     options: GradeOptions,
-) -> (i32, Option<crate::agentskills::grading::GradeReport>) {
+    format: OutputFormat,
+) -> (i32, Option<GradeReport>) {
     let strict = options.strict;
     match grade_report_bundle(report_dir, options) {
         Ok(report) => {
-            print_report_dir(report_dir);
-            println!("Graded {} run(s)", report.runs_graded);
-            println!("  assertions: {}/{} passed", report.passed, report.assertions_graded);
-            if report.needs_llm > 0 {
-                println!("  needs LLM: {}", report.needs_llm);
+            if !format.is_json() {
+                print_report_dir(report_dir);
+                println!("Graded {} run(s)", report.runs_graded);
+                println!("  assertions: {}/{} passed", report.passed, report.assertions_graded);
+                if report.needs_llm > 0 {
+                    println!("  needs LLM: {}", report.needs_llm);
+                }
             }
             let exit_code = if report.failed > 0 || (strict && report.needs_llm > 0) {
                 1
@@ -158,6 +196,7 @@ mod tests {
             grader_model: None,
             grader_command: None,
             strict: false,
+            output_format: OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
 
@@ -232,6 +271,7 @@ echo '{"passed": true, "evidence": "script confirmed custom check", "rationale":
             grader_model: None,
             grader_command: Some(script.to_string_lossy().into_owned()),
             strict: false,
+            output_format: OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
 

@@ -10,6 +10,7 @@ use crate::agentskills::eval_suite_drift::{
 };
 use crate::agentskills::iteration_summary::detect_previous_report_dir;
 use crate::fs::FileSystem;
+use crate::output::OutputFormat;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum CompareJudge {
@@ -46,7 +47,7 @@ Examples:
 
   $ trg ai skills eval compare ./report --pair with_skill:old_skill --emit-comparison-json
 
-  $ trg ai skills eval compare ./report --previous ./artifacts/my-skill/prior-report --json
+  $ trg ai skills eval compare ./report --previous ./artifacts/my-skill/prior-report --output-format json
 ")]
 pub struct CompareArgs {
     #[arg(help = "Path to a generated eval report directory containing report.json")]
@@ -88,8 +89,13 @@ pub struct CompareArgs {
     )]
     pub allow_eval_suite_drift: bool,
 
-    #[arg(long, help = "Emit comparison results as JSON to stdout")]
-    pub json: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl CompareArgs {
@@ -130,7 +136,7 @@ impl CompareArgs {
             },
         ) {
             Ok(records) => {
-                if self.json {
+                if self.output_format.is_json() {
                     let output = CompareJsonOutput {
                         report_dir: self.report_dir.display().to_string(),
                         comparisons: records,
@@ -284,7 +290,8 @@ mod tests {
                 "--previous",
                 previous.to_str().unwrap(),
                 "--allow-eval-suite-drift",
-                "--json",
+                "--output-format",
+                "json",
             ])
             .output()
             .unwrap();

@@ -17,9 +17,10 @@
 //! demands more privilege than the tool it diagnoses reports healthy setups as
 //! broken.
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use serde::Serialize;
 
+use crate::output::OutputFormat;
 use crate::secrets::openbao::{Health, TokenSource};
 use crate::secrets::{Backend, BackendError, KeychainBackend, OpenBaoBackend, Registry, SecretsError};
 
@@ -31,14 +32,8 @@ pub struct DoctorArgs {
     pub backend: Option<String>,
 
     /// Output format. Neither format emits a secret value.
-    #[arg(long, value_enum, default_value_t = DoctorFormat::Text)]
-    pub format: DoctorFormat,
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub enum DoctorFormat {
-    Text,
-    Json,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
 }
 
 /// What one check established.
@@ -418,9 +413,9 @@ pub async fn run(registry: &Registry, args: &DoctorArgs) -> i32 {
         }
     };
 
-    match args.format {
-        DoctorFormat::Text => print!("{}", diagnosis.to_text()),
-        DoctorFormat::Json => match serde_json::to_string_pretty(&diagnosis) {
+    match args.output_format {
+        OutputFormat::Text => print!("{}", diagnosis.to_text()),
+        OutputFormat::Json => match serde_json::to_string_pretty(&diagnosis) {
             Ok(json) => println!("{json}"),
             Err(e) => {
                 eprintln!("could not render the report: {e}");

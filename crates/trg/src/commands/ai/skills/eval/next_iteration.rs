@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use crate::agentskills::improvement_bundle::{write_improvement_bundle, NextIterationOptions};
 use crate::fs::FileSystem;
+use crate::output::{print_json, OutputFormat};
 use clap::Args;
+use serde_json::json;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -40,6 +42,14 @@ pub struct NextIterationArgs {
         help = "Suppress the warning when the current evals/evals.json hash differs from the prior iteration"
     )]
     pub allow_eval_suite_drift: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl NextIterationArgs {
@@ -66,6 +76,15 @@ impl NextIterationArgs {
             }
         };
 
+        if self.output_format.is_json() {
+            let document = json!({
+                "output_dir": output.output_dir.display().to_string(),
+                "markdown_path": output.markdown_path.display().to_string(),
+                "json_path": output.json_path.display().to_string(),
+            });
+            return print_json(&document, 0);
+        }
+
         println!("Improvement bundle written to {}", output.output_dir.display());
         println!("  {}", output.markdown_path.display());
         println!("  {}", output.json_path.display());
@@ -90,6 +109,7 @@ mod tests {
             from: None,
             skill_dir: Some(skill_root),
             allow_eval_suite_drift: false,
+            output_format: OutputFormat::Text,
         }
         .handle(&crate::fs::testutil::MemFS::new());
         assert_eq!(status, 0);

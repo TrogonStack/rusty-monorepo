@@ -32,7 +32,7 @@ fn config_home_declaring_nothing() -> tempfile::TempDir {
 #[test]
 fn json_is_json_even_when_no_backend_was_declared() {
     let home = config_home_declaring_nothing();
-    let out = doctor(home.path(), &["--format", "json"]);
+    let out = doctor(home.path(), &["--output-format", "json"]);
 
     let stdout = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value =

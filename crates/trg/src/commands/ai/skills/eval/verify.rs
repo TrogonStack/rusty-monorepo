@@ -10,6 +10,7 @@ use crate::agentskills::evals::{
 };
 use crate::agentskills::schemas::validate_report_bundle_schemas;
 use crate::fs::FileSystem;
+use crate::output::OutputFormat;
 use clap::{Args, ValueEnum};
 
 use super::ci_args::EvalCiArgs;
@@ -50,7 +51,7 @@ Examples:
 
   $ trg ai skills eval verify ./workspace --mode strict
 
-  $ trg ai skills eval verify \"./path/with spaces/.../workspace\" --json
+  $ trg ai skills eval verify \"./path/with spaces/.../workspace\" --output-format json
 ")]
 pub struct VerifyArgs {
     #[arg(help = "Path to the workspace directory containing grading.json / timing.json")]
@@ -69,8 +70,13 @@ pub struct VerifyArgs {
     #[arg(long, help = "Fail when any eval case has an empty assertions array")]
     pub require_assertions: bool,
 
-    #[arg(long, help = "Emit machine-readable JSON output")]
-    pub json: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 
     #[command(flatten)]
     pub ci: EvalCiArgs,
@@ -151,7 +157,7 @@ impl VerifyArgs {
         emit_github_annotations(&check.violations);
 
         let exit_code = if check.passed { 0 } else { 1 };
-        if self.json {
+        if self.output_format.is_json() {
             let output = EvalCommandJsonOutput {
                 report_dir: report_dir.display().to_string(),
                 exit_code,

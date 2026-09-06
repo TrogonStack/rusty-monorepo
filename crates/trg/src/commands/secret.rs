@@ -11,7 +11,9 @@ use clap::{Args, Subcommand};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::config::SecretVar;
+use crate::output::{print_json, OutputFormat};
 use crate::secrets::{Registry, SecretKey, SecretMap, SecretPath};
+use serde_json::json;
 
 #[derive(Subcommand)]
 pub enum SecretCommands {
@@ -34,6 +36,12 @@ pub struct SecretArgs {
     /// The field within that entry
     #[arg(long)]
     pub key: String,
+
+    /// Output format. `get` is the command whose result is the secret itself,
+    /// so `json` carries it in the document exactly as `text` writes it to
+    /// stdout; neither is the safer one to log.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
 }
 
 impl SecretArgs {
@@ -54,7 +62,7 @@ impl SecretCommands {
         };
 
         match result {
-            Ok(()) => 0,
+            Ok(code) => code,
             Err(message) => {
                 eprintln!("{message}");
                 1
@@ -63,21 +71,47 @@ impl SecretCommands {
     }
 }
 
-async fn get(registry: &Registry, args: &SecretArgs) -> Result<(), String> {
+async fn get(registry: &Registry, args: &SecretArgs) -> Result<i32, String> {
     let (backend, path, key) = address(registry, args)?;
     let value = read_key(&backend, &path, &key, args).await?;
-    write_value(&value)
+
+    if args.output_format.is_json() {
+        let document = json!({
+            "backend": args.backend,
+            "path": args.path,
+            "key": args.key,
+            "value": value.expose_secret(),
+        });
+        return Ok(print_json(&document, 0));
+    }
+
+    write_value(&value)?;
+    Ok(0)
 }
 
-async fn put(registry: &Registry, args: &SecretArgs) -> Result<(), String> {
+async fn put(registry: &Registry, args: &SecretArgs) -> Result<i32, String> {
     let value = read_value()?;
     let (backend, path, key) = address(registry, args)?;
     let existed = write_key(&backend, &path, key, value, args).await?;
 
+    // The confirmation is on stderr under `text` so a `put` in a pipeline
+    // leaves stdout empty. Under `json` it is the result, and moves to stdout
+    // with everything else a caller parses.
+    if args.output_format.is_json() {
+        let document = json!({
+            "backend": args.backend,
+            "path": args.path,
+            "key": args.key,
+            "replaced": existed,
+            "declaration": args.var().declaration(),
+        });
+        return Ok(print_json(&document, 0));
+    }
+
     let verb = if existed { "replaced" } else { "wrote" };
     eprintln!("{verb} `{}` at `{}` in `{}`", args.key, args.path, args.backend);
     eprintln!("declare it with: {}", args.var().declaration());
-    Ok(())
+    Ok(0)
 }
 
 async fn read_key(
@@ -204,6 +238,7 @@ mod tests {
             backend: "fake".to_string(),
             path: "mcp/demo".to_string(),
             key: key.to_string(),
+            output_format: OutputFormat::Text,
         }
     }
 

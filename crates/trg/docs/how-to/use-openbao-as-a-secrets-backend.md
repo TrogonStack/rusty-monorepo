@@ -125,10 +125,10 @@ never reached.
 
 Run it without `--backend` to check every declared backend at once.
 
-For a script, `--format json` prints the same report:
+For a script, `--output-format json` prints the same report:
 
 ```sh
-trg doctor --backend work --format json
+trg doctor --backend work --output-format json
 ```
 
 ## 6. Log in to the MCP server
