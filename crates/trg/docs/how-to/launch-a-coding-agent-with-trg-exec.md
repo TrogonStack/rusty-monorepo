@@ -60,6 +60,11 @@ ANTHROPIC_AUTH_TOKEN  = { backend = "homelab", path = "exec/claude", key = "toke
 - `{ backend = "...", path = "...", key = "..." }` reads it from a
   `[secrets.backends.<name>]` entry at load time, same as
   [Read a config value from a secrets backend](read-a-config-value-from-a-secrets-backend.md).
+- An array of any of those concatenates them in order, e.g.
+  `dir = [{ env = "HOME" }, "/app/state"]` resolves to
+  `<value of $HOME>/app/state`. This composition is available only for
+  `env` — see
+  [Config reference: Composition in `[exec.<name>.env]`](../reference/config.md#composition-in-execnameenv).
 
 `unset` removes an inherited variable before `env` is applied — use it for a
 credential the entry's own auth should own instead, such as an API key the
@@ -94,9 +99,16 @@ are.
 
 Everything the entry's `env` table can express is documented in
 [Config reference: `[exec.<name>]`](../reference/config.md#execname).
-If a value needs to be composed from several pieces (a URL, say), that shape
-is `VarTemplate`, which `env` does not accept — set it directly in the
-entry's own `args` instead, or resolve it upstream of `trg`.
+If a value needs to be composed from several pieces (a directory under
+`$HOME`, say), declare it as an array and each piece concatenates in order:
+
+```toml
+CLAUDE_SECURESTORAGE_CONFIG_DIR = [{ env = "HOME" }, "/app/state"]
+```
+
+See
+[Config reference: Composition in `[exec.<name>.env]`](../reference/config.md#composition-in-execnameenv)
+for the full rules.
 
 ## See also
 

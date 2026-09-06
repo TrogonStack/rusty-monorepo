@@ -170,6 +170,44 @@ pub enum VarResolveError {
     SecretNotFetched(SecretVar),
 }
 
+/// A value for `[exec.<name>.env]`: either one `VarSource`, or an array of
+/// them concatenated in order.
+///
+/// Unlike `VarTemplate` (used for `url`/headers), each array element may be a
+/// full `VarSource` — including `{ env = ... }` and
+/// `{ backend = ..., path = ..., key = ... }` — because an exec entry's `env`
+/// table has no separate `vars` table to route an indirect reference
+/// through; it is already the one place these bindings live.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(untagged)]
+pub enum EnvValue {
+    Scalar(VarSource),
+    Composed(Vec<VarSource>),
+}
+
+impl EnvValue {
+    /// Every backend read this value needs before it can resolve.
+    pub fn secrets(&self) -> Vec<&SecretVar> {
+        match self {
+            EnvValue::Scalar(v) => v.secret().into_iter().collect(),
+            EnvValue::Composed(segs) => segs.iter().filter_map(|s| s.secret()).collect(),
+        }
+    }
+
+    pub fn resolve(&self, fetched: &FetchedSecrets) -> Result<String, VarResolveError> {
+        match self {
+            EnvValue::Scalar(v) => v.resolve(fetched),
+            EnvValue::Composed(segs) => {
+                let mut out = String::new();
+                for s in segs {
+                    out.push_str(&s.resolve(fetched)?);
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
 /// A reference to a named entry in the server's `vars` table.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -399,6 +437,80 @@ b = { backend = "homelab", path = "agentgateway", key = "token" }
         }
         let w: W = toml::from_str("v = []").unwrap();
         assert_eq!(w.v.resolve(&HashMap::new()).unwrap(), "");
+    }
+
+    #[test]
+    fn envvalue_composed_literal_and_env_segments_concatenate() {
+        let name = format!("TRG_ENVVALUE_ENV_{}", std::process::id());
+        std::env::set_var(&name, "/home/tester");
+        #[derive(Deserialize)]
+        struct W {
+            v: EnvValue,
+        }
+        let w: W = toml::from_str(&format!(r#"v = [{{ env = "{name}" }}, "/app/state"]"#)).unwrap();
+        assert_eq!(w.v.resolve(&FetchedSecrets::new()).unwrap(), "/home/tester/app/state");
+        std::env::remove_var(&name);
+    }
+
+    #[test]
+    fn envvalue_composed_secret_segment_is_collected_and_resolved() {
+        #[derive(Deserialize)]
+        struct W {
+            v: EnvValue,
+        }
+        let w: W =
+            toml::from_str(r#"v = ["prefix-", { backend = "onepassword", path = "Ops/deploy-keys", key = "TOKEN" }]"#)
+                .unwrap();
+        let want = SecretVar {
+            backend: "onepassword".into(),
+            path: "Ops/deploy-keys".into(),
+            key: "TOKEN".into(),
+        };
+        assert_eq!(w.v.secrets(), vec![&want]);
+
+        let mut fetched = FetchedSecrets::new();
+        fetched.insert(want, SecretString::from("secretvalue".to_string()));
+        assert_eq!(w.v.resolve(&fetched).unwrap(), "prefix-secretvalue");
+    }
+
+    #[test]
+    fn envvalue_empty_composed_resolves_to_empty_string() {
+        #[derive(Deserialize)]
+        struct W {
+            v: EnvValue,
+        }
+        let w: W = toml::from_str("v = []").unwrap();
+        assert_eq!(w.v.resolve(&FetchedSecrets::new()).unwrap(), "");
+    }
+
+    #[test]
+    fn envvalue_scalar_behaves_like_a_bare_varsource() {
+        #[derive(Deserialize)]
+        struct W {
+            v: EnvValue,
+        }
+
+        let w: W = toml::from_str(r#"v = "plain""#).unwrap();
+        assert!(w.v.secrets().is_empty());
+        assert_eq!(w.v.resolve(&FetchedSecrets::new()).unwrap(), "plain");
+
+        let name = format!("TRG_ENVVALUE_SCALAR_ENV_{}", std::process::id());
+        std::env::set_var(&name, "hi");
+        let w: W = toml::from_str(&format!(r#"v = {{ env = "{name}" }}"#)).unwrap();
+        assert_eq!(w.v.resolve(&FetchedSecrets::new()).unwrap(), "hi");
+        std::env::remove_var(&name);
+
+        let w: W =
+            toml::from_str(r#"v = { backend = "onepassword", path = "Ops/deploy-keys", key = "TOKEN" }"#).unwrap();
+        let want = SecretVar {
+            backend: "onepassword".into(),
+            path: "Ops/deploy-keys".into(),
+            key: "TOKEN".into(),
+        };
+        assert_eq!(w.v.secrets(), vec![&want]);
+        let mut fetched = FetchedSecrets::new();
+        fetched.insert(want, SecretString::from("s".to_string()));
+        assert_eq!(w.v.resolve(&fetched).unwrap(), "s");
     }
 
     #[test]

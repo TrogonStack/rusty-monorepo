@@ -9,6 +9,11 @@
 //!   - a TOML array mixing the above two, concatenated in order.
 //!
 //! Inline `{ env = "..." }` is rejected outside the `vars` table.
+//!
+//! `[exec.<name>.env]` has no separate `vars` table to indirect through, so
+//! each value (`EnvValue`) accepts a `VarSource` directly, or a TOML array of
+//! them concatenated in order — inline `{ env = "..." }` and
+//! `{ backend, path, key }` are both allowed inside that array.
 
 #[cfg(test)]
 mod doc_examples;
@@ -20,7 +25,7 @@ use std::path::{Path, PathBuf};
 use http::HeaderName;
 pub use secrecy::SecretString;
 use serde::Deserialize;
-pub use var::{FetchedSecrets, SecretVar, Segment, VarRef, VarResolveError, VarSource, VarTemplate};
+pub use var::{EnvValue, FetchedSecrets, SecretVar, Segment, VarRef, VarResolveError, VarSource, VarTemplate};
 
 use crate::secrets::SecretsSection;
 
@@ -112,7 +117,7 @@ struct ExecEntryRaw {
     #[serde(default)]
     unset: Vec<String>,
     #[serde(default)]
-    env: HashMap<String, VarSource>,
+    env: HashMap<String, EnvValue>,
 }
 
 /// Resolved server profile for MCP `proxy`.
@@ -221,7 +226,7 @@ impl PendingExec {
     /// Every distinct secret this entry's `env` names, deduplicated and
     /// sorted for the same reason [`PendingMcp::secret_vars`] is.
     pub fn secret_vars(&self) -> Vec<SecretVar> {
-        let mut out: Vec<SecretVar> = self.raw.env.values().filter_map(|v| v.secret().cloned()).collect();
+        let mut out: Vec<SecretVar> = self.raw.env.values().flat_map(|v| v.secrets()).cloned().collect();
         out.sort_by(|a, b| (&a.backend, &a.path, &a.key).cmp(&(&b.backend, &b.path, &b.key)));
         out.dedup();
         out
@@ -1274,5 +1279,31 @@ api  = "v1"
         assert_eq!(loaded.env["MODE"], "prod");
         assert_eq!(loaded.env["TOKEN"], "t");
         assert_eq!(loaded.env["TOKEN_AGAIN"], "t");
+    }
+
+    #[test]
+    fn a_exec_entry_resolves_a_composed_array_env_value() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let key = unique_integration_env("TRG_EXEC_COMPOSED");
+        std::env::set_var(&key, "/home/tester");
+
+        write_secure_config(
+            &path,
+            &format!(
+                r#"
+            [exec.p]
+            command = "claude"
+
+            [exec.p.env]
+            DIR = [{{ env = "{key}" }}, "/app/state"]
+            "#,
+            ),
+        );
+
+        let loaded = load_exec_full(&path, "p").unwrap();
+        assert_eq!(loaded.env["DIR"], "/home/tester/app/state");
+
+        std::env::remove_var(&key);
     }
 }
