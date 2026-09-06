@@ -112,29 +112,55 @@ trg ai skills eval verify <WORKSPACE> [OPTIONS]
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--mode` | enum | `lenient` | `lenient` — tolerate missing grading files and failed assertions; `strict` — require at least one `grading.json` and fail on failed assertions |
-| `--format` | enum | `text` | Output format: `text` or `json` |
+| `--json` | flag | off | Emit machine-readable JSON instead of the human summary |
 
 ### Example (text)
 
 ```shell
 $ trg ai skills eval verify ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
-Bundle verified
+./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+assertions: 3/3 passed (100.00%)
+ci checks: passed
+workspace: ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
   grading files: 1
   timing files: 1
-  assertion results: 3/3 passed (100.00%)
 ```
 
 ### Example (JSON)
 
 ```shell
-$ trg ai skills eval verify ./report/runs/run-001/workspace --format json
+$ trg ai skills eval verify ./report/runs/run-001/workspace --json
 {
-  "grading_files": 1,
-  "timing_files": 1,
-  "assertion_results": 3,
-  "passed_assertions": 3,
-  "failed_assertions": 0,
-  "pass_rate": 1.0
+  "report_dir": "./report",
+  "exit_code": 0,
+  "check": {
+    "passed": true,
+    "violations": [],
+    "metrics": {
+      "total_runs": 0,
+      "failed_runs": 0,
+      "skipped_runs": 0,
+      "completed_runs": 0,
+      "grading_files": 1,
+      "assertion_results": 3,
+      "passed_assertions": 3,
+      "failed_assertions": 0,
+      "pass_rate": 1.0,
+      "total_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "max_duration_ms": 0,
+      "total_duration_ms": 0
+    }
+  },
+  "workspace": {
+    "grading_files": 1,
+    "timing_files": 1,
+    "assertion_results": 3,
+    "passed_assertions": 3,
+    "failed_assertions": 0,
+    "pass_rate": 1.0
+  }
 }
 ```
 

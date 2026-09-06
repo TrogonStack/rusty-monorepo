@@ -60,7 +60,12 @@ mod doc_commands {
 
     const SHELL_FENCES: [&str; 4] = ["```sh", "```bash", "```shell", "```console"];
 
-    /// Shell lines, with a trailing `\` folded into the line it continues.
+    /// Commands from the shell fences, with a trailing `\` folded into the line
+    /// it continues.
+    ///
+    /// A fence that prompts with `$` is a transcript, so only the prompted
+    /// lines are commands and the rest is output. A fence without a prompt is a
+    /// script, where every line is.
     fn shell_lines(file: &Path) -> Vec<(usize, String)> {
         let text = std::fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
         let lines: Vec<&str> = text.lines().collect();
@@ -75,13 +80,22 @@ mod doc_commands {
             }
             i += 1;
 
-            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+            let body_start = i;
+            let mut end = i;
+            while end < lines.len() && !lines[end].trim_start().starts_with("```") {
+                end += 1;
+            }
+            let prompted = lines[body_start..end].iter().any(|l| is_prompt(l));
+
+            while i < end {
                 let start = i + 1;
+                let is_command = !prompted || is_prompt(lines[i]);
+
                 let mut joined = String::new();
                 loop {
-                    let line = lines[i].trim();
+                    let line = strip_prompt(lines[i].trim());
                     match line.strip_suffix('\\') {
-                        Some(head) if i + 1 < lines.len() => {
+                        Some(head) if i + 1 < end => {
                             joined.push_str(head.trim_end());
                             joined.push(' ');
                             i += 1;
@@ -93,11 +107,23 @@ mod doc_commands {
                         }
                     }
                 }
-                out.push((start, joined));
+
+                if is_command {
+                    out.push((start, joined));
+                }
             }
-            i += 1;
+            i = end + 1;
         }
         out
+    }
+
+    fn is_prompt(line: &str) -> bool {
+        let line = line.trim_start();
+        line == "$" || line.starts_with("$ ")
+    }
+
+    fn strip_prompt(line: &str) -> &str {
+        line.strip_prefix("$ ").map_or(line, str::trim_start)
     }
 
     /// Split on whitespace, honouring quotes, and drop what the shell would
@@ -229,7 +255,7 @@ mod doc_commands {
         }
 
         assert!(
-            checked >= 20,
+            checked >= 44,
             "expected the docs to still hold `trg` invocations, found {checked}"
         );
     }
