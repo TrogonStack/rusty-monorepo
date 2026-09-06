@@ -136,7 +136,7 @@ Until then, parse JSON output in your workflow:
 ```yaml
 - name: Check pass rate
   run: |
-    RATE=$(trg ai skills eval verify "$WS" --format json | jq '.pass_rate')
+    RATE=$(trg ai skills eval verify "$WS" --output-format json | jq '.pass_rate')
     python3 -c "import sys; sys.exit(0 if float('$RATE') >= 0.9 else 1)"
 ```
 

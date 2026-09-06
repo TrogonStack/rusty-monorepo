@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::agentskills::benchmark::{build_benchmark, write_benchmark, BenchmarkOptions, FailedRunsMode};
 use crate::fs::FileSystem;
+use crate::output::OutputFormat;
 use clap::Args;
 
 use super::print_report_dir;
@@ -14,7 +15,7 @@ Examples:
 
   $ trg ai skills eval benchmark ./report --failed-runs exclude
 
-  $ trg ai skills eval benchmark ./report --previous ./artifacts/my-skill/prior-report --json
+  $ trg ai skills eval benchmark ./report --previous ./artifacts/my-skill/prior-report --output-format json
 
   $ trg ai skills eval benchmark /absolute/path/to/report
 ")]
@@ -43,8 +44,13 @@ pub struct BenchmarkArgs {
     )]
     pub allow_eval_suite_drift: bool,
 
-    #[arg(long, help = "Emit benchmark.json contents as JSON to stdout")]
-    pub json: bool,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as the benchmark.json document on stdout"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl BenchmarkArgs {
@@ -60,7 +66,7 @@ impl BenchmarkArgs {
             return code;
         }
 
-        if self.json {
+        if self.output_format.is_json() {
             if let Some(document) = document {
                 match serde_json::to_string_pretty(&document) {
                     Ok(json) => println!("{json}"),
@@ -198,7 +204,8 @@ mod tests {
                 "--previous",
                 previous.to_str().unwrap(),
                 "--allow-eval-suite-drift",
-                "--json",
+                "--output-format",
+                "json",
             ])
             .output()
             .unwrap();

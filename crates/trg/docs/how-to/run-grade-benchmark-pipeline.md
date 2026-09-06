@@ -40,7 +40,8 @@ separate `eval grade` / `eval benchmark` commands when you need that control.
 
 ## JSON output
 
-`--json` on `run` prints machine-readable output for the **final** stage only:
+`--output-format json` on `run` prints machine-readable output for the
+**final** stage only:
 
 - `--benchmark` → benchmark document wrapper
 - `--grade` only → grade summary wrapper

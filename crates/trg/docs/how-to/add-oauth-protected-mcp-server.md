@@ -74,7 +74,7 @@ It names the backend, and prints expiry and granted scopes. Tokens are never
 printed. For a machine-readable summary:
 
 ```sh
-trg mcp auth status --server linear --format json
+trg mcp auth status --server linear --output-format json
 ```
 
 For a Keychain-backed server you can also look directly:

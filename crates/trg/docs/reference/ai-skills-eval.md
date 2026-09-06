@@ -36,6 +36,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--runner` | enum | *(unset)* | Agent CLI to execute each (eval × scenario). When unset, runs are scaffolded with `status: skipped` |
 | `--runner-model` | string | *(unset)* | Model identifier forwarded to the runner CLI (`--model` / `-m`). When unset, the runner picks its own default |
 | `--force` | bool | `false` | Overwrite an existing report directory if it already exists |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 
 ### Runner values
 
@@ -49,7 +50,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | Success. Prints the report directory path on stdout |
+| `0` | Success. Under `text` prints the report directory path on stdout; under `json` prints the document for the final stage that ran |
 | `1` | Skill validation, eval-suite validation, bundle write, or runner failure |
 
 ### Example (scaffold only)
@@ -112,7 +113,7 @@ trg ai skills eval verify <WORKSPACE> [OPTIONS]
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--mode` | enum | `lenient` | `lenient` — tolerate missing grading files and failed assertions; `strict` — require at least one `grading.json` and fail on failed assertions |
-| `--json` | flag | off | Emit machine-readable JSON instead of the human summary |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
 
 ### Example (text)
 
@@ -129,7 +130,7 @@ workspace: ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
 ### Example (JSON)
 
 ```shell
-$ trg ai skills eval verify ./report/runs/run-001/workspace --json
+$ trg ai skills eval verify ./report/runs/run-001/workspace --output-format json
 {
   "report_dir": "./report",
   "exit_code": 0,

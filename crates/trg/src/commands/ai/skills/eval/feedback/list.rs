@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use crate::agentskills::feedback::list_runs_needing_review;
+use crate::output::{print_json, OutputFormat};
 use clap::Args;
+use serde_json::json;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -14,6 +16,14 @@ Examples:
 pub struct FeedbackListArgs {
     #[arg(help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl FeedbackListArgs {
@@ -25,6 +35,14 @@ impl FeedbackListArgs {
                 return 1;
             }
         };
+
+        if self.output_format.is_json() {
+            let document = json!({
+                "report_dir": self.report_dir.display().to_string(),
+                "pending": pending,
+            });
+            return print_json(&document, 0);
+        }
 
         if pending.is_empty() {
             println!("All runs have feedback.json");
@@ -52,12 +70,17 @@ mod tests {
 
         let status = FeedbackListArgs {
             report_dir: report_dir.clone(),
+            output_format: OutputFormat::Text,
         }
         .handle();
         assert_eq!(status, 0);
 
         init_feedback(&report_dir, Some("reviewer@example.com")).unwrap();
-        let status = FeedbackListArgs { report_dir }.handle();
+        let status = FeedbackListArgs {
+            report_dir,
+            output_format: OutputFormat::Text,
+        }
+        .handle();
         assert_eq!(status, 0);
     }
 }

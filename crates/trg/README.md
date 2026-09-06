@@ -8,6 +8,7 @@
 
 - [Config file reference](docs/reference/config.md)
 - [AI skills eval](docs/reference/ai-skills-eval.md)
+- [Output format](docs/reference/output-format.md)
 
 ### How-to
 

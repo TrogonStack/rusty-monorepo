@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use crate::agentskills::feedback::validate_feedback;
 use crate::agentskills::report::sync_human_feedback;
+use crate::output::{print_json, OutputFormat};
 use clap::Args;
+use serde_json::json;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -15,6 +17,14 @@ Examples:
 pub struct FeedbackValidateArgs {
     #[arg(help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = OutputFormat::Text,
+        help = "Render the result as a human summary or as a machine-readable document"
+    )]
+    pub output_format: OutputFormat,
 }
 
 impl FeedbackValidateArgs {
@@ -27,16 +37,32 @@ impl FeedbackValidateArgs {
             }
         };
 
-        if !report.errors.is_empty() {
+        let failed = !report.errors.is_empty();
+
+        if !failed {
+            if let Err(e) = sync_human_feedback(&self.report_dir) {
+                eprintln!("Failed to sync feedback summary into report.json: {}", e);
+                return 1;
+            }
+        }
+
+        // A feedback file that does not validate is the verdict, not a
+        // breakdown, so under `json` it rides in the document rather than on
+        // stderr where a parser will not see it.
+        if self.output_format.is_json() {
+            let document = json!({
+                "report_dir": self.report_dir.display().to_string(),
+                "validated": report.validated,
+                "errors": report.errors,
+            });
+            return print_json(&document, i32::from(failed));
+        }
+
+        if failed {
             eprintln!("Feedback validation failed:");
             for error in &report.errors {
                 eprintln!("  {error}");
             }
-            return 1;
-        }
-
-        if let Err(e) = sync_human_feedback(&self.report_dir) {
-            eprintln!("Failed to sync feedback summary into report.json: {}", e);
             return 1;
         }
 
@@ -57,7 +83,11 @@ mod tests {
         let report_dir = sample_report_dir(&temp);
         init_feedback(&report_dir, Some("reviewer@example.com")).unwrap();
 
-        let status = FeedbackValidateArgs { report_dir }.handle();
+        let status = FeedbackValidateArgs {
+            report_dir,
+            output_format: OutputFormat::Text,
+        }
+        .handle();
         assert_eq!(status, 0);
     }
 
@@ -77,7 +107,11 @@ mod tests {
         )
         .unwrap();
 
-        let status = FeedbackValidateArgs { report_dir }.handle();
+        let status = FeedbackValidateArgs {
+            report_dir,
+            output_format: OutputFormat::Text,
+        }
+        .handle();
         assert_eq!(status, 1);
     }
 }
