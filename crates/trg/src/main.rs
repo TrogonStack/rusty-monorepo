@@ -69,6 +69,18 @@ fn wire_secrets() -> Result<Registry, Box<WireError>> {
     Ok(Registry::new(section))
 }
 
+/// Resolve one `[exec.<name>]` entry, the same two-step shape as `wire_mcp`:
+/// the config is parsed and the entry located before a secrets backend needs
+/// to be reachable.
+async fn wire_exec(name: &str) -> Result<config::LoadedExec, Box<WireError>> {
+    let pending = config::load_exec(name).map_err(WireError::from)?;
+    let registry = Registry::new(pending.secrets.clone());
+    let fetched = vars::fetch(&registry, &pending.secret_vars())
+        .await
+        .map_err(WireError::from)?;
+    pending.finish(&fetched).map_err(|e| Box::new(WireError::from(e)))
+}
+
 #[tokio::main]
 async fn main() {
     trg::telemetry::init();
@@ -93,6 +105,13 @@ async fn main() {
         },
         Commands::Doctor(args) => match wire_secrets() {
             Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        Commands::Exec(args) => match wire_exec(&args.name).await {
+            Ok(loaded) => trg::commands::exec::run(loaded, &args),
             Err(e) => {
                 eprintln!("{e}");
                 1

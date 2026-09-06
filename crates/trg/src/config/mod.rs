@@ -55,6 +55,12 @@ pub enum ConfigError {
 
     #[error("duplicate header `{name}` collides with `{existing}` after canonicalization")]
     DuplicateHeader { name: String, existing: String },
+
+    #[error("no `[exec]` entries in config")]
+    NoExecEntries,
+
+    #[error("unknown exec entry `{name}` — known: {available}")]
+    UnknownExecEntry { name: String, available: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +70,8 @@ struct FileRoot {
     mcp: Option<McpSection>,
     #[serde(default)]
     secrets: Option<SecretsSection>,
+    #[serde(default)]
+    exec: Option<HashMap<String, ExecEntryRaw>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +99,20 @@ struct McpServerEntryRaw {
     vars: Option<HashMap<String, VarSource>>,
     #[serde(default)]
     secrets: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct ExecEntryRaw {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    /// Inherited variables to drop before `env` is applied, for a name the
+    /// launched command must not see even though this process has it.
+    #[serde(default)]
+    unset: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, VarSource>,
 }
 
 /// Resolved server profile for MCP `proxy`.
@@ -176,8 +198,46 @@ impl PendingMcp {
     }
 }
 
+/// A launch target for `trg exec`, its `env` fully resolved.
+#[derive(Debug, Clone)]
+pub struct LoadedExec {
+    pub command: String,
+    pub args: Vec<String>,
+    pub unset: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
+/// An exec entry that has been read and validated, with its secret vars
+/// still unread — the same split [`PendingMcp`] makes, for the same reason:
+/// a config with a syntax error should read as one whether or not a backend
+/// it names is reachable.
+#[derive(Debug)]
+pub struct PendingExec {
+    raw: ExecEntryRaw,
+    pub secrets: SecretsSection,
+}
+
+impl PendingExec {
+    /// Every distinct secret this entry's `env` names, deduplicated and
+    /// sorted for the same reason [`PendingMcp::secret_vars`] is.
+    pub fn secret_vars(&self) -> Vec<SecretVar> {
+        let mut out: Vec<SecretVar> = self.raw.env.values().filter_map(|v| v.secret().cloned()).collect();
+        out.sort_by(|a, b| (&a.backend, &a.path, &a.key).cmp(&(&b.backend, &b.path, &b.key)));
+        out.dedup();
+        out
+    }
+
+    pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedExec, ConfigError> {
+        finish_exec(self, fetched)
+    }
+}
+
 pub fn load_mcp(selected_name: &str) -> Result<PendingMcp, ConfigError> {
     load_mcp_at(&trg_config_path(), selected_name)
+}
+
+pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
+    load_exec_at(&trg_config_path(), name)
 }
 
 /// The `[secrets]` section on its own.
@@ -228,6 +288,43 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigErr
     };
 
     Ok(PendingMcp { raw, secrets })
+}
+
+fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
+
+    let root: FileRoot = toml::from_str(&text)?;
+    let secrets = root.secrets.unwrap_or_default();
+    let mut entries = root
+        .exec
+        .and_then(|e| (!e.is_empty()).then_some(e))
+        .ok_or(ConfigError::NoExecEntries)?;
+
+    let Some(raw) = entries.remove(name) else {
+        let names: Vec<_> = entries.keys().cloned().collect();
+        return Err(ConfigError::UnknownExecEntry {
+            name: name.to_owned(),
+            available: names.join(", "),
+        });
+    };
+
+    Ok(PendingExec { raw, secrets })
+}
+
+fn finish_exec(pending: PendingExec, fetched: &FetchedSecrets) -> Result<LoadedExec, ConfigError> {
+    let PendingExec { raw, secrets: _ } = pending;
+
+    let mut env = HashMap::with_capacity(raw.env.len());
+    for (k, v) in &raw.env {
+        env.insert(k.clone(), v.resolve(fetched)?);
+    }
+
+    Ok(LoadedExec {
+        command: raw.command,
+        args: raw.args,
+        unset: raw.unset,
+        env,
+    })
 }
 
 fn finish_mcp(pending: PendingMcp, fetched: &FetchedSecrets) -> Result<LoadedMcp, ConfigError> {
@@ -1072,5 +1169,110 @@ api  = "v1"
         let r = load_at(&path, "both").unwrap();
         assert_eq!(r.url.expose_secret(), "https://h.example/v1/stream");
         std::env::remove_var(&host);
+    }
+
+    fn load_exec_full(path: &Path, name: &str) -> Result<LoadedExec, ConfigError> {
+        load_exec_at(path, name)?.finish(&FetchedSecrets::new())
+    }
+
+    #[test]
+    fn a_exec_entry_carries_its_command_args_and_secrets_section() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [secrets.backends.work]
+            kind = "openbao"
+            addr = "https://bao.example.com:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            owner = "yordis"
+            token = "irrelevant"
+
+            [exec.claude]
+            command = "claude"
+            args = ["--dangerously-skip-permissions"]
+            "#,
+        );
+
+        let loaded = load_exec_full(&path, "claude").unwrap();
+        assert_eq!(loaded.command, "claude");
+        assert_eq!(loaded.args, vec!["--dangerously-skip-permissions".to_string()]);
+        assert!(loaded.env.is_empty());
+        assert!(loaded.unset.is_empty());
+
+        let pending = load_exec_at(&path, "claude").unwrap();
+        assert!(
+            pending.secrets.backends.contains_key("work"),
+            "the section travels with every entry, same as it does for mcp servers"
+        );
+    }
+
+    #[test]
+    fn an_unknown_exec_entry_lists_the_ones_that_are_declared() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [exec.zebra]
+            command = "z"
+
+            [exec.alpha]
+            command = "a"
+            "#,
+        );
+
+        let err = load_exec_at(&path, "missing").unwrap_err();
+        let ConfigError::UnknownExecEntry { name, available } = err else {
+            panic!("expected UnknownExecEntry, got {err:?}");
+        };
+        assert_eq!(name, "missing");
+        let listed: HashSet<&str> = available.split(", ").collect();
+        assert_eq!(listed, HashSet::from(["alpha", "zebra"]));
+    }
+
+    #[test]
+    fn a_config_without_an_exec_table_yields_no_exec_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(&path, "");
+        assert!(matches!(
+            load_exec_at(&path, "x").unwrap_err(),
+            ConfigError::NoExecEntries
+        ));
+    }
+
+    #[test]
+    fn a_exec_entry_resolves_secret_and_literal_env_and_dedups_the_vars_it_wants() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [exec.p]
+            command = "claude"
+            unset = ["ANTHROPIC_API_KEY"]
+
+            [exec.p.env]
+            MODE = "prod"
+            TOKEN = { backend = "homelab", path = "agentgateway", key = "token" }
+            TOKEN_AGAIN = { backend = "homelab", path = "agentgateway", key = "token" }
+            "#,
+        );
+
+        let pending = load_exec_at(&path, "p").unwrap();
+        let wanted = pending.secret_vars();
+        assert_eq!(wanted.len(), 1, "two vars at the same address are one read: {wanted:?}");
+
+        let mut fetched = FetchedSecrets::new();
+        fetched.insert(wanted[0].clone(), SecretString::from("t".to_string()));
+
+        let loaded = pending.finish(&fetched).unwrap();
+        assert_eq!(loaded.unset, vec!["ANTHROPIC_API_KEY".to_string()]);
+        assert_eq!(loaded.env["MODE"], "prod");
+        assert_eq!(loaded.env["TOKEN"], "t");
+        assert_eq!(loaded.env["TOKEN_AGAIN"], "t");
     }
 }
