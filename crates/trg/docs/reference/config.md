@@ -87,6 +87,33 @@ mixing them (`{ env = "X", key = "y" }`) is also rejected.
 
 `vars` is optional — omit it if your server uses only literal values.
 
+### Composition in `[exec.<name>.env]`
+
+An `[exec.<name>.env]` entry has no separate `vars` table to indirect
+through — `env` is already the one place these bindings live. So, in
+addition to the single shapes above, an `env` value may also be a TOML array
+of them, concatenated in order:
+
+```toml
+[exec.myagent]
+command = "myagent"
+
+[exec.myagent.env]
+dir = [{ env = "HOME" }, "/app/state"]
+```
+
+This resolves to `<value of $HOME>/app/state`. Each array element is a full
+`VarSource` — a literal, `{ env = ... }`, or `{ backend = ..., path = ...,
+key = ... }` — and a plain scalar value (as shown above for `vars`) still
+works exactly as before.
+
+This composition is available only for `env`. `vars`, `url`, and header
+values still accept only a single `VarSource` (for `vars`) or `VarTemplate`
+(for `url`/headers, see below) — `VarTemplate`'s own array-of-segments
+mechanism does not accept inline `{ env = ... }`, only a literal or a
+`{ var = "name" }` reference into `vars`. The two composition mechanisms are
+separate.
+
 Reading a secret var needs a working backend, which reading it through
 `trg mcp proxy` will attempt. Use `trg secret get` to check one by hand:
 
@@ -442,7 +469,7 @@ unset   = ["<ENV_NAME>", "..."] # optional
 | `command` | string                | yes      | Program to exec into. Looked up on `PATH` the same as a shell would.  |
 | `args`    | array of strings      | no       | Passed before anything typed on the `trg exec` command line meant for the launched command. |
 | `unset`   | array of strings      | no       | Names removed from the inherited environment before `env` is applied. |
-| `env`     | table of `VarSource`  | no       | Resolved into the child's environment; see [Variables](#variables-mcpserversnamevars) for the accepted shapes. |
+| `env`     | table of `VarSource`, or an array of them | no       | Resolved into the child's environment; see [Variables](#variables-mcpserversnamevars) and its [Composition in `[exec.<name>.env]`](#composition-in-execnameenv) subsection for the accepted shapes. |
 
 `[exec]` must contain at least one entry — an empty or missing table fails
 with `no [exec] entries in config`. Unknown fields inside an entry are
