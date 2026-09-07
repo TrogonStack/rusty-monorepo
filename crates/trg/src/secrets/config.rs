@@ -15,6 +15,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
+use super::onepassword::OnePasswordBackend;
 use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
 };
@@ -38,6 +39,7 @@ pub struct SecretsSection {
 pub enum BackendConfig {
     Keychain(KeychainConfig),
     Openbao(Box<OpenbaoConfig>),
+    Onepassword(OnepasswordConfig),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -45,6 +47,15 @@ pub enum BackendConfig {
 pub struct KeychainConfig {
     #[serde(default)]
     pub service: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct OnepasswordConfig {
+    /// Which signed-in `op` account to use. Omit it when only one signed-in
+    /// account holds the vault a path names — `op` resolves that on its own.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -80,6 +91,7 @@ impl BackendConfig {
         match self {
             Self::Keychain(_) => "keychain",
             Self::Openbao(_) => "openbao",
+            Self::Onepassword(_) => "onepassword",
         }
     }
 }
@@ -280,6 +292,9 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                     cause,
                 })
         }
+        BackendConfig::Onepassword(OnepasswordConfig { account }) => {
+            Ok(Backend::OnePassword(OnePasswordBackend::new(account.clone())))
+        }
     }
 }
 
@@ -348,6 +363,41 @@ mod tests {
         .expect("parse");
         assert_eq!(s.backends.len(), 2);
         assert_eq!(s.backends["local"].kind(), "keychain");
+    }
+
+    #[test]
+    fn onepassword_backend_parses_with_and_without_an_account() {
+        let s = section(
+            r#"
+            [backends.local]
+            kind = "onepassword"
+
+            [backends.named]
+            kind = "onepassword"
+            account = "my.1password.com"
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(s.backends.len(), 2);
+        assert_eq!(s.backends["local"].kind(), "onepassword");
+
+        let Backend::OnePassword(b) = build("named", &s.backends["named"]).expect("build") else {
+            panic!("expected a onepassword backend")
+        };
+        assert_eq!(b.account(), Some("my.1password.com"));
+    }
+
+    #[test]
+    fn onepassword_rejects_an_unknown_field() {
+        let err = section(
+            r#"
+            [backends.work]
+            kind = "onepassword"
+            vault = "Ops"
+            "#,
+        )
+        .expect_err("should reject");
+        assert!(err.to_string().contains("vault"), "{err}");
     }
 
     #[test]

@@ -20,7 +20,7 @@ with a clear `config file not found at <path>` error.
 
 ```toml trg-example=skip
 [secrets.backends.<backend-name>]
-kind = "keychain"                  # or "openbao"
+kind = "keychain"                  # or "openbao", "onepassword"
 
 [mcp.servers.<name>]
 url = "<value>"
@@ -266,12 +266,41 @@ any terminal recovers a long-running `trg mcp proxy` without restarting the
 editor that spawned it. A token file that any other user can read is refused
 with a `chmod 600` message rather than used.
 
+### `kind = "onepassword"`
+
+Reads through an already-authenticated [`op` CLI](https://developer.1password.com/docs/cli/) —
+there is no token or Connect server to configure, because the CLI's own signed-in
+session (from the 1Password app, or a prior `op signin`) is what answers every
+read.
+
+| Field     | Type   | Required | Notes                                                                 |
+| --------- | ------ | -------- | ---------------------------------------------------------------------- |
+| `account` | string | no       | Which signed-in `op` account to use. Omit it when only one signed-in account holds the vault a path names. |
+
+A path here is `<vault>/<item>`, e.g. `Ops/deploy-keys` for an item named
+`deploy-keys` in the `Ops` vault, and each key is that item's field label. One
+`get` reads every field on the item, same as a single OpenBao or Keychain read
+yields every key stored at a path.
+
+This backend is read-only: `set`, `delete`, and `list` — bare or scoped by a
+prefix, it makes no difference — all fail with `` `put`/`delete`/`list` is
+not supported by the `onepassword` backend ``. The items it reads are
+managed by hand, through the 1Password app or `op` CLI directly, not through
+`trg secret put/delete/list`.
+
+It also cannot store an MCP server's OAuth credentials: a bare server name
+carries no vault to address, and there is no default vault to guess at the way
+OpenBao derives a path from a machine id. Addressing this backend directly by
+path — as an `[exec.<name>.env]` entry's `{ backend = "...", path = "...", key = "..." }`
+does — works as usual; only the OAuth credential-storage path is closed to it.
+
 ### Credential layout
 
-| Backend    | Where one server's credentials live                             |
-| ---------- | ---------------------------------------------------------------- |
-| `keychain` | Service = the backend's `service`, account = the server name.     |
-| `openbao`  | `<mount>/data/[<path_prefix>/]<owner>/mcp/[<machine_id>/]<server-name>` |
+| Backend       | Where one server's credentials live                             |
+| ------------- | ---------------------------------------------------------------- |
+| `keychain`    | Service = the backend's `service`, account = the server name.     |
+| `openbao`     | `<mount>/data/[<path_prefix>/]<owner>/mcp/[<machine_id>/]<server-name>` |
+| `onepassword` | Not usable for this — a bare server name carries no vault to address. |
 
 Two segments are conditional and `<owner>` is not, so the full form is
 `<mount>/data/<path_prefix>/<owner>/mcp/<machine_id>/<server-name>` and the
@@ -297,13 +326,20 @@ becomes a path segment. The Keychain accepts any name.
 trg doctor
 ```
 
-Checks every declared backend, or one named with `--backend work`. Reports
-whether the token can be read, the instance is serving, the mount answers, and
-the subtree lists. It only reads, and exits non-zero if any check failed.
-`--output-format json` prints the same report for a script to consume.
+Checks every declared backend, or one named with `--backend work`. It only
+reads, and exits non-zero if any check failed. `--output-format json` prints
+the same report for a script to consume. What gets checked is backend-specific:
 
-The mount and subtree checks issue the same list `trg` itself issues, so the
-command never needs more privilege than the tool it is diagnosing. A token
+- `openbao` reports whether the token can be read, the instance is serving,
+  the mount answers, and the subtree lists.
+- `keychain` reports whether it's running on macOS, the only platform the
+  Keychain is available on.
+- `onepassword` reports only whether `op` is signed in — there is no
+  subtree to enumerate without already naming an item, so that check is
+  reported as skipped rather than run.
+
+OpenBao's mount and subtree checks issue the same list `trg` itself issues, so
+the command never needs more privilege than the tool it is diagnosing. A token
 scoped to one subtree is denied before OpenBao looks the mount up, so a refusal
 leaves the mount check reported as skipped rather than claiming a mount that was
 never reached.

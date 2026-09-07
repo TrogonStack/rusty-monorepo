@@ -22,7 +22,9 @@ use serde::Serialize;
 
 use crate::output::OutputFormat;
 use crate::secrets::openbao::{Health, TokenSource};
-use crate::secrets::{Backend, BackendError, KeychainBackend, OpenBaoBackend, Registry, SecretsError};
+use crate::secrets::{
+    Backend, BackendError, KeychainBackend, OnePasswordBackend, OpenBaoBackend, Registry, SecretsError,
+};
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -133,6 +135,7 @@ pub async fn diagnose(name: &str, backend: &Backend) -> Report {
     match backend {
         Backend::OpenBao(bao) => openbao(name, bao).await,
         Backend::Keychain(kc) => keychain(name, kc),
+        Backend::OnePassword(op) => onepassword(name, op).await,
         #[cfg(test)]
         Backend::Fake(_) => Report {
             backend: name.to_string(),
@@ -311,6 +314,32 @@ fn keychain(name: &str, kc: &KeychainBackend) -> Report {
             Check::new(
                 "subtree",
                 Outcome::skipped("the keychain does not support listing, so there is nothing to enumerate"),
+            ),
+        ],
+    }
+}
+
+async fn onepassword(name: &str, op: &OnePasswordBackend) -> Report {
+    let auth = match op.whoami().await {
+        Ok(detail) => Outcome::passed(detail),
+        Err(err) => Outcome::failed(
+            err.to_string(),
+            "run `op signin` (or open the 1Password app) to authenticate the `op` CLI",
+        ),
+    };
+
+    Report {
+        backend: name.to_string(),
+        kind: "onepassword",
+        target: match op.account() {
+            Some(account) => format!("1Password via `op` (account `{account}`)"),
+            None => "1Password via `op`".to_string(),
+        },
+        checks: vec![
+            Check::new("auth", auth),
+            Check::new(
+                "subtree",
+                Outcome::skipped("1Password items are managed by hand, so there is nothing to enumerate"),
             ),
         ],
     }
