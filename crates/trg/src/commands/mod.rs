@@ -8,7 +8,7 @@ use clap::Subcommand;
 
 use ai::AiCommands;
 use doctor::DoctorArgs;
-use exec::ExecArgs;
+use exec::ExecCommands;
 use mcp::McpCommands;
 use secret::SecretCommands;
 
@@ -32,6 +32,10 @@ pub enum Commands {
     },
     /// Check that the configured secrets backends are reachable and usable
     Doctor(DoctorArgs),
-    /// Exec-replace into a configured `[exec.<name>]` entry
-    Exec(ExecArgs),
+    /// Exec-replace into a configured `[exec.<name>]` entry (`run`), or list
+    /// the entries declared (`list`)
+    Exec {
+        #[command(subcommand)]
+        command: ExecCommands,
+    },
 }

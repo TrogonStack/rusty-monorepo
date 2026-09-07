@@ -1,7 +1,17 @@
-//! `trg exec` — exec-replace into any command with its `env` resolved the
-//! same way `trg mcp proxy` resolves a server's vars.
+//! `trg exec run` — exec-replace into any command with its `env` resolved
+//! the same way `trg mcp proxy` resolves a server's vars — and
+//! `trg exec list`, which names the entries `run` will accept.
 //!
-//! This never supervises what it launches. `exec(2)` replaces the current
+//! `run` and `list` are subcommands rather than `list` living as a flag on
+//! `run`'s own arguments, because `run`'s target is a bare positional
+//! (`trg exec run <name>`) drawn from a namespace an operator controls
+//! (`[exec.<name>]`). A reserved flag can never collide with that namespace;
+//! a reserved word can — a config that ever declares `[exec.list]` would make
+//! `trg exec list` permanently ambiguous between the entry and the listing.
+//! Nesting the free-form name under `run` keeps `list` reserved only at the
+//! top level, where no config places a name.
+//!
+//! `run` never supervises what it launches. `exec(2)` replaces the current
 //! process image in place, so the launched command inherits this process's
 //! pid, becomes the session's foreground job, and answers signals directly —
 //! there is no `trg` left afterward to get in the way of, or to forward a
@@ -9,11 +19,19 @@
 
 use std::collections::HashMap;
 
-use clap::Args;
+use clap::{Args, Subcommand};
 use serde_json::json;
 
-use crate::config::LoadedExec;
+use crate::config::{self, LoadedExec};
 use crate::output::{print_json, OutputFormat};
+
+#[derive(Subcommand)]
+pub enum ExecCommands {
+    /// Exec-replace into a configured `[exec.<name>]` entry
+    Run(ExecArgs),
+    /// List the `[exec.<name>]` entries `run` will accept
+    List(ExecListArgs),
+}
 
 #[derive(Args)]
 pub struct ExecArgs {
@@ -56,6 +74,39 @@ fn parse_env_pair(raw: &str) -> Result<(String, String), String> {
         return Err(format!("`{raw}` has an empty key"));
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+#[derive(Args)]
+pub struct ExecListArgs {
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
+}
+
+/// `trg exec list` — a plain config read, no secrets backend involved: the
+/// names are declared in the clear, only the values behind an entry's `env`
+/// are ever resolved through one.
+pub fn list(args: &ExecListArgs) -> i32 {
+    match config::list_exec_names() {
+        Ok(names) => report_names(&names, args.output_format),
+        Err(e) => report_failure(&e.to_string(), args.output_format),
+    }
+}
+
+fn report_names(names: &[String], format: OutputFormat) -> i32 {
+    if format.is_json() {
+        let document = json!({ "entries": names });
+        return print_json(&document, 0);
+    }
+
+    if names.is_empty() {
+        eprintln!("no [exec] entries configured");
+        return 0;
+    }
+    for name in names {
+        println!("{name}");
+    }
+    0
 }
 
 pub fn run(loaded: LoadedExec, args: &ExecArgs) -> i32 {
@@ -138,11 +189,14 @@ mod tests {
 
     fn parse(argv: &[&str]) -> ExecArgs {
         use clap::Parser;
-        let mut full = vec!["trg", "exec"];
+        let mut full = vec!["trg", "exec", "run"];
         full.extend_from_slice(argv);
         let cli = crate::cli::Cli::try_parse_from(full).expect("parses");
-        let crate::commands::Commands::Exec(args) = cli.command else {
+        let crate::commands::Commands::Exec { command } = cli.command else {
             panic!("expected Exec");
+        };
+        let ExecCommands::Run(args) = command else {
+            panic!("expected Run");
         };
         args
     }
@@ -155,12 +209,12 @@ mod tests {
     }
 
     /// Without `--`, a token meant for the launched command has no way to
-    /// tell itself apart from a misspelled flag of `trg exec`'s own — so
+    /// tell itself apart from a misspelled flag of `trg exec run`'s own — so
     /// clap refuses to parse it at all rather than guess.
     #[test]
     fn extra_args_without_a_dashdash_fail_to_parse() {
         use clap::Parser;
-        let full = vec!["trg", "exec", "demo", "--resume"];
+        let full = vec!["trg", "exec", "run", "demo", "--resume"];
         assert!(crate::cli::Cli::try_parse_from(full).is_err());
     }
 
@@ -170,7 +224,7 @@ mod tests {
     #[test]
     fn an_unrecognized_flag_before_dashdash_fails_to_parse() {
         use clap::Parser;
-        let full = vec!["trg", "exec", "--evn", "DEBUG=1", "demo", "--", "--resume"];
+        let full = vec!["trg", "exec", "run", "--evn", "DEBUG=1", "demo", "--", "--resume"];
         assert!(crate::cli::Cli::try_parse_from(full).is_err());
     }
 
@@ -180,6 +234,25 @@ mod tests {
         assert_eq!(args.env, vec![("A".to_string(), "B".to_string())]);
         assert_eq!(args.name, "demo");
         assert_eq!(args.extra_args, vec!["--resume".to_string()]);
+    }
+
+    /// A name that collides with the `list` subcommand is still reachable —
+    /// this is the whole reason `list` sits beside `run` rather than beside
+    /// `<name>` directly.
+    #[test]
+    fn an_entry_named_list_is_still_reachable_through_run() {
+        let args = parse(&["list"]);
+        assert_eq!(args.name, "list");
+    }
+
+    #[test]
+    fn list_offers_the_output_choice_and_nothing_else() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from(["trg", "exec", "list"]).expect("parses");
+        let crate::commands::Commands::Exec { command } = cli.command else {
+            panic!("expected Exec");
+        };
+        assert!(matches!(command, ExecCommands::List(_)));
     }
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -275,5 +348,15 @@ mod tests {
         // takes; the rendering itself is exercised by hand against `--output-format json`.
         assert_eq!(report_failure("boom", OutputFormat::Json), 1);
         assert_eq!(report_failure("boom", OutputFormat::Text), 1);
+    }
+
+    #[test]
+    fn reporting_names_succeeds_under_either_format_even_with_none_to_show() {
+        assert_eq!(report_names(&[], OutputFormat::Text), 0);
+        assert_eq!(report_names(&[], OutputFormat::Json), 0);
+        assert_eq!(
+            report_names(&["alpha".to_string(), "zebra".to_string()], OutputFormat::Text),
+            0
+        );
     }
 }

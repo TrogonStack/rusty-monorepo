@@ -449,9 +449,10 @@ status if there is no matching item; scripts should account for that.
 
 ## `[exec.<name>]`
 
-An entry names a command `trg exec <name>` execs into, with its own `env`
+An entry names a command `trg exec run <name>` execs into, with its own `env`
 resolved the same way a server's `vars` are — literal, `{ env = ... }`, or
-`{ backend = ..., path = ..., key = ... }`.
+`{ backend = ..., path = ..., key = ... }`. `trg exec list` prints every
+declared name.
 
 ```toml trg-example=skip
 [exec.<name>]
@@ -467,7 +468,7 @@ unset   = ["<ENV_NAME>", "..."] # optional
 | Field     | Type                  | Required | Notes                                                                 |
 | --------- | --------------------- | -------- | ---------------------------------------------------------------------- |
 | `command` | string                | yes      | Program to exec into. Looked up on `PATH` the same as a shell would.  |
-| `args`    | array of strings      | no       | Passed before anything typed on the `trg exec` command line meant for the launched command. |
+| `args`    | array of strings      | no       | Passed before anything typed on the `trg exec run` command line meant for the launched command. |
 | `unset`   | array of strings      | no       | Names removed from the inherited environment before `env` is applied. |
 | `env`     | table of `VarSource`, or an array of them | no       | Resolved into the child's environment; see [Variables](#variables-mcpserversnamevars) and its [Composition in `[exec.<name>.env]`](#composition-in-execnameenv) subsection for the accepted shapes. |
 
@@ -616,7 +617,7 @@ ANTHROPIC_AUTH_TOKEN = { backend = "homelab", path = "exec/claude", key = "token
 ```
 
 ```sh
-trg exec claude -- --resume
+trg exec run claude -- --resume
 ```
 
 ## Error reference
@@ -644,4 +645,4 @@ trg exec claude -- --resume
 | `OpenBao rejected the token (...); run bao login and retry` | The token is absent, expired, or lacks a policy for the path. |
 | `OpenBao at <addr> redirected <status> to a different origin` | The instance answered a redirect leaving the `addr` origin, meaning any change of scheme, host, or port. The token is not followed there. Point `addr` at the active node or a load balancer. |
 | `no [exec] entries in config`                     | `[exec]` is missing or empty.                                   |
-| `unknown exec entry <name> — known: ...`          | The name given to `trg exec` does not match any `[exec.<name>]` key. |
+| `unknown exec entry <name> — known: ...`          | The name given to `trg exec run` does not match any `[exec.<name>]` key. |

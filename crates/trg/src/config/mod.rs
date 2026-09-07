@@ -245,6 +245,25 @@ pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
     load_exec_at(&trg_config_path(), name)
 }
 
+/// Every `[exec.<name>]` name declared in the config, sorted.
+///
+/// An empty or missing `[exec]` table is a plain empty list here rather than
+/// [`ConfigError::NoExecEntries`]: that error exists to stop a launch that has
+/// nothing to launch, and listing a config that declares nothing yet is not
+/// that — it is the ordinary state of a config nobody has written an entry
+/// into.
+pub fn list_exec_names() -> Result<Vec<String>, ConfigError> {
+    list_exec_names_at(&trg_config_path())
+}
+
+fn list_exec_names_at(path: &Path) -> Result<Vec<String>, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
+    let root: FileRoot = toml::from_str(&text)?;
+    let mut names: Vec<String> = root.exec.unwrap_or_default().into_keys().collect();
+    names.sort();
+    Ok(names)
+}
+
 /// The `[secrets]` section on its own.
 ///
 /// `load_mcp` refuses a config without `[mcp.servers]`, which is the right
@@ -1279,6 +1298,33 @@ api  = "v1"
         assert_eq!(loaded.env["MODE"], "prod");
         assert_eq!(loaded.env["TOKEN"], "t");
         assert_eq!(loaded.env["TOKEN_AGAIN"], "t");
+    }
+
+    #[test]
+    fn listing_exec_names_sorts_them() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [exec.zebra]
+            command = "z"
+
+            [exec.alpha]
+            command = "a"
+            "#,
+        );
+
+        assert_eq!(list_exec_names_at(&path).unwrap(), vec!["alpha", "zebra"]);
+    }
+
+    #[test]
+    fn listing_exec_names_on_a_config_without_an_exec_table_is_an_empty_list_not_an_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(&path, "");
+
+        assert_eq!(list_exec_names_at(&path).unwrap(), Vec::<String>::new());
     }
 
     #[test]

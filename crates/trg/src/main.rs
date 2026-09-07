@@ -2,6 +2,7 @@ use clap::Parser;
 
 use trg::cli::Cli;
 use trg::commands::ai::AiCommands;
+use trg::commands::exec::ExecCommands;
 use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
@@ -110,12 +111,15 @@ async fn main() {
                 1
             }
         },
-        Commands::Exec(args) => match wire_exec(&args.name).await {
-            Ok(loaded) => trg::commands::exec::run(loaded, &args),
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
+        Commands::Exec { command } => match command {
+            ExecCommands::Run(args) => match wire_exec(&args.name).await {
+                Ok(loaded) => trg::commands::exec::run(loaded, &args),
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+            ExecCommands::List(args) => trg::commands::exec::list(&args),
         },
     };
 
