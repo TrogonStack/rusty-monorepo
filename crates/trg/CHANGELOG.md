@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.6.0...trg@v0.7.0) (2026-09-07)
+
+
+### Features
+
+* **trg:** Add a 1Password secrets backend ([#92](https://github.com/TrogonStack/rusty-monorepo/issues/92)) ([9f17427](https://github.com/TrogonStack/rusty-monorepo/commit/9f17427b4d0409c474954403109f466cdc6924f7))
+* **trg:** Add trg exec to hand off to any command with resolved secrets ([#90](https://github.com/TrogonStack/rusty-monorepo/issues/90)) ([299396e](https://github.com/TrogonStack/rusty-monorepo/commit/299396ee06f781d5fa0514955cbfac10ab7bfcbe))
+* **trg:** Compose exec env values from several sources ([#93](https://github.com/TrogonStack/rusty-monorepo/issues/93)) ([6ac946e](https://github.com/TrogonStack/rusty-monorepo/commit/6ac946e486bedd59536bee1925de15edcec75460))
+
 ## [0.6.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.5.0...trg@v0.6.0) (2026-09-06)
 
 
