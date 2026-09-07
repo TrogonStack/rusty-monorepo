@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.7.0...trg@v0.8.0) (2026-09-07)
+
+
+### Features
+
+* **trg:** Add trg exec list and move the launch verb to trg exec run ([#95](https://github.com/TrogonStack/rusty-monorepo/issues/95)) ([572337b](https://github.com/TrogonStack/rusty-monorepo/commit/572337b40b01940cbea7cc43061f5352355b7f27))
+
 ## [0.7.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.6.0...trg@v0.7.0) (2026-09-07)
 
 
