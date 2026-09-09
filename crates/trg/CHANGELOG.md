@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.8.0...trg@v0.8.1) (2026-09-09)
+
+
+### Bug Fixes
+
+* **trg:** Require an explicit 1Password account ([#98](https://github.com/TrogonStack/rusty-monorepo/issues/98)) ([c716cdb](https://github.com/TrogonStack/rusty-monorepo/commit/c716cdbf032ca2d1d6ac2844139bd52ebe7c43d5))
+
 ## [0.8.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.7.0...trg@v0.8.0) (2026-09-07)
 
 
