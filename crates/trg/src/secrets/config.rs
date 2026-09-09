@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
-use super::onepassword::OnePasswordBackend;
+use super::onepassword::{OnePasswordBackend, OpAccount};
 use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
 };
@@ -52,10 +52,12 @@ pub struct KeychainConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OnepasswordConfig {
-    /// Which signed-in `op` account to use. Omit it when only one signed-in
-    /// account holds the vault a path names — `op` resolves that on its own.
-    #[serde(default)]
-    pub account: Option<String>,
+    /// Which signed-in `op` account this backend reads from.
+    ///
+    /// Required, because a vault name is unique only within an account and
+    /// `op`'s own default is machine-local state rather than something this
+    /// config says. See the module docs on [`super::onepassword`].
+    pub account: OpAccount,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -366,25 +368,49 @@ mod tests {
     }
 
     #[test]
-    fn onepassword_backend_parses_with_and_without_an_account() {
+    fn onepassword_backend_carries_the_account_it_declares() {
         let s = section(
             r#"
-            [backends.local]
-            kind = "onepassword"
-
             [backends.named]
             kind = "onepassword"
             account = "my.1password.com"
             "#,
         )
         .expect("parse");
-        assert_eq!(s.backends.len(), 2);
-        assert_eq!(s.backends["local"].kind(), "onepassword");
+        assert_eq!(s.backends["named"].kind(), "onepassword");
 
         let Backend::OnePassword(b) = build("named", &s.backends["named"]).expect("build") else {
             panic!("expected a onepassword backend")
         };
-        assert_eq!(b.account(), Some("my.1password.com"));
+        assert_eq!(b.account().as_str(), "my.1password.com");
+    }
+
+    /// Without one, `op` resolves a vault name against whichever account it
+    /// considers the default, so the same config addresses different vaults on
+    /// different machines.
+    #[test]
+    fn onepassword_without_an_account_is_refused() {
+        let err = section(
+            r#"
+            [backends.local]
+            kind = "onepassword"
+            "#,
+        )
+        .expect_err("should refuse");
+        assert!(err.to_string().contains("account"), "{err}");
+    }
+
+    #[test]
+    fn onepassword_rejects_an_account_that_would_read_as_a_flag() {
+        let err = section(
+            r#"
+            [backends.local]
+            kind = "onepassword"
+            account = "--account"
+            "#,
+        )
+        .expect_err("should refuse");
+        assert!(err.to_string().contains("must not start with `-`"), "{err}");
     }
 
     #[test]

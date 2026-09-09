@@ -22,6 +22,28 @@
 //! call yields the whole [`SecretMap`] for an item, same as a single OpenBao
 //! or Keychain read yields every key stored at a path.
 //!
+//! # Why the account is required
+//!
+//! A vault name is only unique *within* an account, and `op` will happily sign
+//! a developer into several at once. Left to itself it resolves a bare
+//! `--vault Ops` against whichever account it considers the default, which
+//! is machine-local state — not something the config says — so the same
+//! `[secrets.backends.<name>]` on two machines can address two different
+//! vaults, and a personal account shadowing a work vault name is a silent
+//! misread rather than an error. [`OpAccount`] is therefore mandatory and
+//! every invocation carries `--account`: which account a path resolves against
+//! is part of the address, and addresses belong in the config.
+//!
+//! # Why `op whoami` is not the health probe
+//!
+//! `op whoami` answers only for a session `op signin` (or a service account)
+//! established. Under the desktop-app integration this backend is built
+//! around it reports `account is not signed in` while every real read
+//! succeeds, which made `trg doctor` call a perfectly healthy backend broken.
+//! [`OnePasswordBackend::current_account`] asks `op account get` instead: it
+//! needs the same live session an `item get` needs, so it fails exactly when
+//! reads would.
+//!
 //! # What this does not do
 //!
 //! `set`/`delete`/`list` are unsupported: the items this backend reads are
@@ -29,10 +51,12 @@
 //! `trg secret put/delete/list`. This is a read path onto secrets that
 //! already exist, not a place `trg` writes to.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use secrecy::SecretString;
+use serde::Deserialize;
 use tokio::process::Command;
 
 use super::{SecretKey, SecretMap, SecretPath, SecretsError};
@@ -41,12 +65,123 @@ use super::{SecretKey, SecretMap, SecretPath, SecretsError};
 ///
 /// `op` normally answers in well under a second, but a stalled 1Password
 /// desktop app or a Touch ID prompt nothing is watching for can otherwise
-/// block `get`/`whoami` — and, through `whoami`, `trg doctor` — forever.
+/// block `get`/`current_account` — and, through the latter, `trg doctor` —
+/// forever.
 const OP_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, thiserror::Error)]
+pub enum AccountError {
+    #[error("1Password account must not be empty")]
+    Empty,
+
+    /// `op` would read this as a flag rather than as the account to use, and
+    /// report something about an unknown option instead of about the config.
+    #[error("1Password account `{0}` must not start with `-`")]
+    Dash(String),
+}
+
+/// Which signed-in `op` account a backend addresses.
+///
+/// Structurally validated only: `op --account` accepts a sign-in address, an
+/// email, a user UUID or an account UUID, and which of those a value is can
+/// only be settled by asking `op` (see [`OnePasswordBackend::accounts`]), not
+/// by looking at the string.
+#[derive(Clone, PartialEq, Eq, Hash, Deserialize)]
+#[serde(try_from = "String")]
+pub struct OpAccount(String);
+
+impl OpAccount {
+    pub fn parse(raw: &str) -> Result<Self, AccountError> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err(AccountError::Empty);
+        }
+        if raw.starts_with('-') {
+            return Err(AccountError::Dash(raw.to_string()));
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `signed_in` is the account this addresses.
+    ///
+    /// Matched over every form `op --account` accepts, because the config may
+    /// legitimately carry any of them and refusing to recognise the one a
+    /// developer chose would report a correct config as pointing nowhere.
+    fn addresses(&self, signed_in: &SignedInAccount) -> bool {
+        let want = self.0.as_str();
+        [
+            &signed_in.url,
+            &signed_in.email,
+            &signed_in.user_uuid,
+            &signed_in.account_uuid,
+        ]
+        .into_iter()
+        .any(|form| form.eq_ignore_ascii_case(want))
+    }
+}
+
+impl TryFrom<String> for OpAccount {
+    type Error = AccountError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::parse(&raw)
+    }
+}
+
+impl fmt::Display for OpAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl fmt::Debug for OpAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "OpAccount({:?})", self.0)
+    }
+}
+
+/// One row of `op account list` — an account `op` on this machine can reach.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SignedInAccount {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub user_uuid: String,
+    #[serde(default)]
+    pub account_uuid: String,
+}
+
+impl fmt::Display for SignedInAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.email.as_str(), self.url.as_str()) {
+            ("", "") => f.write_str(&self.account_uuid),
+            ("", url) => f.write_str(url),
+            (email, "") => f.write_str(email),
+            (email, url) => write!(f, "{email} ({url})"),
+        }
+    }
+}
+
+/// `op account get` — what the addressed account looks like to a live session.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CurrentAccount {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub state: String,
+}
 
 #[derive(Clone)]
 pub struct OnePasswordBackend {
-    account: Option<String>,
+    account: OpAccount,
     /// The `op` executable to drive. Held as data rather than hardcoded at the
     /// call site so tests can drive a scripted one and pin the exact argv.
     bin: PathBuf,
@@ -56,7 +191,7 @@ pub struct OnePasswordBackend {
 }
 
 impl OnePasswordBackend {
-    pub fn new(account: Option<String>) -> Self {
+    pub fn new(account: OpAccount) -> Self {
         Self {
             account,
             bin: PathBuf::from("op"),
@@ -65,9 +200,9 @@ impl OnePasswordBackend {
     }
 
     #[cfg(test)]
-    fn with_bin(account: Option<String>, bin: impl AsRef<std::path::Path>) -> Self {
+    fn with_bin(account: &str, bin: impl AsRef<std::path::Path>) -> Self {
         Self {
-            account,
+            account: OpAccount::parse(account).expect("test account"),
             bin: bin.as_ref().to_path_buf(),
             timeout: OP_TIMEOUT,
         }
@@ -79,29 +214,43 @@ impl OnePasswordBackend {
         self
     }
 
-    pub fn account(&self) -> Option<&str> {
-        self.account.as_deref()
+    pub fn account(&self) -> &OpAccount {
+        &self.account
     }
 
     pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
         let (vault, item) = split(path)?;
 
-        let mut args = vec!["item", "get", item, "--vault", vault, "--format", "json"];
-        if let Some(account) = &self.account {
-            args.push("--account");
-            args.push(account);
-        }
-        let out = self.run(&args).await?;
+        let out = self
+            .run(&[
+                "item",
+                "get",
+                item,
+                "--vault",
+                vault,
+                "--format",
+                "json",
+                "--account",
+                self.account.as_str(),
+            ])
+            .await?;
 
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.trim();
             if stderr.contains("isn't an item in the") {
                 return Ok(None);
             }
-            return Err(SecretsError::Unavailable(format!(
-                "op item get failed: {}",
-                stderr.trim()
-            )));
+            // `op` names neither the account it used nor the vaults that
+            // account does have, so an address aimed at the wrong one of
+            // several signed-in accounts otherwise reads as the vault having
+            // vanished.
+            let hint = if stderr.contains("isn't a vault in this account") {
+                format!(" (account `{}`)", self.account)
+            } else {
+                String::new()
+            };
+            return Err(SecretsError::Unavailable(format!("op item get failed: {stderr}{hint}")));
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -136,35 +285,48 @@ impl OnePasswordBackend {
         Ok(Some(map))
     }
 
-    /// Confirm `op` is reachable and signed in, for `trg doctor`.
+    /// Every account `op` on this machine can reach, for `trg doctor` to
+    /// resolve the configured [`OpAccount`] against.
     ///
-    /// There is no read this backend performs, such as OpenBao's health
-    /// endpoint, that is meaningful without already naming an item — so this
-    /// asks `op` about its own session instead, the same session every real
-    /// `get` will ride on.
-    pub async fn whoami(&self) -> Result<String, SecretsError> {
-        let mut args = vec!["whoami", "--format", "json"];
-        if let Some(account) = &self.account {
-            args.push("--account");
-            args.push(account);
-        }
-        let out = self.run(&args).await?;
+    /// Reads local `op` state, so it answers whether or not anything is
+    /// unlocked — which is the point: "you named an account `op` has never
+    /// heard of" and "that account is locked" are different problems with
+    /// different remedies, and conflating them sends people to `op signin`
+    /// for a typo.
+    pub async fn accounts(&self) -> Result<Vec<SignedInAccount>, SecretsError> {
+        let out = self.run(&["account", "list", "--format", "json"]).await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(SecretsError::Unavailable(format!(
-                "op whoami failed: {}",
+                "op account list failed: {}",
                 stderr.trim()
             )));
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let value: serde_json::Value = serde_json::from_str(&stdout)
-            .map_err(|e| SecretsError::Unavailable(format!("op whoami did not return valid JSON: {e}")))?;
-        let email = value.get("email").and_then(|v| v.as_str()).unwrap_or("unknown account");
-        match value.get("url").and_then(|v| v.as_str()) {
-            Some(url) if !url.is_empty() => Ok(format!("signed in as {email} ({url})")),
-            _ => Ok(format!("signed in as {email}")),
+        serde_json::from_str(&stdout)
+            .map_err(|e| SecretsError::Unavailable(format!("op account list did not return valid JSON: {e}")))
+    }
+
+    /// Confirm the addressed account has a session that can actually read.
+    ///
+    /// See the module docs on why this is `op account get` and not
+    /// `op whoami`.
+    pub async fn current_account(&self) -> Result<CurrentAccount, SecretsError> {
+        let out = self
+            .run(&["account", "get", "--format", "json", "--account", self.account.as_str()])
+            .await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(SecretsError::Unavailable(format!(
+                "op account get failed: {}",
+                stderr.trim()
+            )));
         }
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        serde_json::from_str(&stdout)
+            .map_err(|e| SecretsError::Unavailable(format!("op account get did not return valid JSON: {e}")))
     }
 
     /// 1Password items are managed via the app or `op` CLI directly; `trg`
@@ -215,6 +377,11 @@ impl OnePasswordBackend {
     }
 }
 
+/// The account `filter` addresses, if `op` knows it.
+pub fn resolve<'a>(filter: &OpAccount, known: &'a [SignedInAccount]) -> Option<&'a SignedInAccount> {
+    known.iter().find(|a| filter.addresses(a))
+}
+
 fn split(path: &SecretPath) -> Result<(&str, &str), SecretsError> {
     match path.as_str().split_once('/') {
         Some((vault, item)) if !vault.is_empty() && !item.is_empty() => Ok((vault, item)),
@@ -247,25 +414,46 @@ mod tests {
 
     impl StubOp {
         fn answering(exit: i32, stdout: &str, stderr: &str) -> Self {
+            Self::scripted(&format!(
+                "printf '%s' {stdout}\nprintf '%s' {stderr} >&2\nexit {exit}\n",
+                stdout = sh_quote(stdout),
+                stderr = sh_quote(stderr),
+            ))
+        }
+
+        fn ok(stdout: &str) -> Self {
+            Self::answering(0, stdout, "")
+        }
+
+        /// A stand-in that answers per `op` subcommand, for the probes that
+        /// make more than one call.
+        fn routing(routes: &[(&str, i32, &str)]) -> Self {
+            let mut body = String::from("case \"$1 $2\" in\n");
+            for (subcommand, exit, stdout) in routes {
+                body.push_str(&format!(
+                    "  {subcommand}) printf '%s' {stdout}; exit {exit};;\n",
+                    subcommand = sh_quote(subcommand),
+                    stdout = sh_quote(stdout),
+                ));
+            }
+            body.push_str("  *) printf 'unrouted: %s\\n' \"$*\" >&2; exit 127;;\nesac\n");
+            Self::scripted(&body)
+        }
+
+        fn scripted(body: &str) -> Self {
             use std::os::unix::fs::PermissionsExt as _;
 
             let dir = tempfile::tempdir().expect("tempdir");
             let bin = dir.path().join("op");
             let argv = dir.path().join("argv");
             let script = format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {argv}; done\nprintf '%s' {stdout}\nprintf '%s' {stderr} >&2\nexit {exit}\n",
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {argv}; done\n{body}",
                 argv = sh_quote(&argv.display().to_string()),
-                stdout = sh_quote(stdout),
-                stderr = sh_quote(stderr),
             );
             std::fs::write(&bin, script).expect("write stub");
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("chmod");
 
             Self { dir }
-        }
-
-        fn ok(stdout: &str) -> Self {
-            Self::answering(0, stdout, "")
         }
 
         /// A stand-in that never returns on its own, for exercising the
@@ -282,8 +470,8 @@ mod tests {
             Self { dir }
         }
 
-        fn backend(&self, account: Option<&str>) -> OnePasswordBackend {
-            OnePasswordBackend::with_bin(account.map(str::to_string), self.dir.path().join("op"))
+        fn backend(&self) -> OnePasswordBackend {
+            OnePasswordBackend::with_bin(ACCOUNT, self.dir.path().join("op"))
         }
 
         fn argv(&self) -> Vec<String> {
@@ -294,6 +482,8 @@ mod tests {
                 .collect()
         }
     }
+
+    const ACCOUNT: &str = "my.1password.com";
 
     const ITEM_JSON: &str = r#"{
         "title": "deploy-keys",
@@ -306,15 +496,47 @@ mod tests {
         ]
     }"#;
 
+    const ACCOUNTS_JSON: &str = r#"[
+        { "url": "my.1password.com", "email": "someone@example.com", "user_uuid": "U1", "account_uuid": "A1" },
+        { "url": "team-acme.1password.com", "email": "someone@acme.test", "user_uuid": "U2", "account_uuid": "A2" }
+    ]"#;
+
+    const CURRENT_JSON: &str = r#"{ "id": "A1", "name": "Someone's Family", "domain": "my", "state": "ACTIVE" }"#;
+
     const NOT_AN_ITEM: &str =
         "[ERROR] \"missing\" isn't an item in the \"Ops\" vault. Specify the item with its UUID, name, or domain.";
     const NOT_A_VAULT: &str = "[ERROR] \"Ops\" isn't a vault in this account. Specify the vault with its ID or name.";
+
+    #[test]
+    fn an_account_is_rejected_when_it_is_empty_or_would_read_as_a_flag() {
+        assert!(matches!(OpAccount::parse(""), Err(AccountError::Empty)));
+        assert!(matches!(OpAccount::parse("   "), Err(AccountError::Empty)));
+        assert!(matches!(OpAccount::parse("--account"), Err(AccountError::Dash(_))));
+        assert_eq!(OpAccount::parse("  my.1password.com ").unwrap().as_str(), ACCOUNT);
+    }
+
+    #[test]
+    fn an_account_resolves_by_any_form_op_itself_accepts() {
+        let known: Vec<SignedInAccount> = serde_json::from_str(ACCOUNTS_JSON).unwrap();
+
+        for form in [
+            "my.1password.com",
+            "MY.1Password.com",
+            "someone@example.com",
+            "U1",
+            "A1",
+        ] {
+            let found = resolve(&OpAccount::parse(form).unwrap(), &known);
+            assert_eq!(found.map(|a| a.account_uuid.as_str()), Some("A1"), "{form}");
+        }
+        assert!(resolve(&OpAccount::parse("nope.1password.com").unwrap(), &known).is_none());
+    }
 
     #[tokio::test]
     async fn get_returns_every_field_but_the_note_body() {
         let stub = StubOp::ok(ITEM_JSON);
         let map = stub
-            .backend(None)
+            .backend()
             .get(&SecretPath::parse("Ops/deploy-keys").unwrap())
             .await
             .expect("get")
@@ -327,16 +549,12 @@ mod tests {
             Some("sk-ant-fake-value")
         );
         assert!(!map.contains_key(&SecretKey::parse("notesPlain").unwrap()));
-        assert_eq!(
-            stub.argv(),
-            ["item", "get", "deploy-keys", "--vault", "Ops", "--format", "json"]
-        );
     }
 
     #[tokio::test]
-    async fn an_account_is_passed_through_when_configured() {
+    async fn every_read_carries_the_configured_account() {
         let stub = StubOp::ok(ITEM_JSON);
-        stub.backend(Some("my.1password.com"))
+        stub.backend()
             .get(&SecretPath::parse("Ops/deploy-keys").unwrap())
             .await
             .expect("get");
@@ -352,7 +570,7 @@ mod tests {
                 "--format",
                 "json",
                 "--account",
-                "my.1password.com"
+                ACCOUNT
             ]
         );
     }
@@ -361,7 +579,7 @@ mod tests {
     async fn get_of_a_missing_item_is_a_miss_not_an_error() {
         let stub = StubOp::answering(1, "", NOT_AN_ITEM);
         assert!(stub
-            .backend(None)
+            .backend()
             .get(&SecretPath::parse("Ops/missing").unwrap())
             .await
             .expect("get")
@@ -369,21 +587,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_against_a_vault_that_does_not_exist_is_an_error() {
+    async fn a_vault_missing_from_the_account_names_the_account_that_was_asked() {
         let stub = StubOp::answering(1, "", NOT_A_VAULT);
         let err = stub
-            .backend(None)
+            .backend()
             .get(&SecretPath::parse("Ops/deploy-keys").unwrap())
             .await
             .expect_err("should fail");
+
         assert!(matches!(err, SecretsError::Unavailable(_)), "{err:?}");
+        assert!(err.to_string().contains(ACCOUNT), "{err}");
     }
 
     #[tokio::test]
     async fn a_payload_that_is_not_valid_json_is_malformed() {
         let stub = StubOp::ok("not json");
         let err = stub
-            .backend(None)
+            .backend()
             .get(&SecretPath::parse("Ops/deploy-keys").unwrap())
             .await
             .expect_err("should fail");
@@ -394,7 +614,7 @@ mod tests {
     async fn a_path_without_a_vault_and_item_is_rejected_before_spawning_anything() {
         let stub = StubOp::ok(ITEM_JSON);
         let err = stub
-            .backend(None)
+            .backend()
             .get(&SecretPath::parse("no-slash-here").unwrap())
             .await
             .expect_err("should fail");
@@ -405,7 +625,7 @@ mod tests {
     #[tokio::test]
     async fn set_delete_and_list_are_unsupported_and_spawn_nothing() {
         let stub = StubOp::ok(ITEM_JSON);
-        let backend = stub.backend(None);
+        let backend = stub.backend();
         let path = SecretPath::parse("Ops/deploy-keys").unwrap();
 
         assert!(matches!(
@@ -424,27 +644,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whoami_reports_the_signed_in_account() {
-        let stub = StubOp::ok(r#"{"url":"my.1password.com","email":"someone@example.com"}"#);
-        let detail = stub.backend(None).whoami().await.expect("whoami");
-        assert_eq!(detail, "signed in as someone@example.com (my.1password.com)");
-        assert_eq!(stub.argv(), ["whoami", "--format", "json"]);
+    async fn accounts_lists_what_op_can_reach_without_naming_one() {
+        let stub = StubOp::routing(&[("account list", 0, ACCOUNTS_JSON)]);
+        let known = stub.backend().accounts().await.expect("accounts");
+
+        assert_eq!(known.len(), 2);
+        assert_eq!(known[0].email, "someone@example.com");
+        assert_eq!(stub.argv(), ["account", "list", "--format", "json"]);
     }
 
     #[tokio::test]
-    async fn whoami_when_signed_out_is_an_error() {
-        let stub = StubOp::answering(1, "", "[ERROR] you are not currently signed in");
-        let err = stub.backend(None).whoami().await.expect_err("should fail");
+    async fn the_session_probe_asks_op_about_the_configured_account() {
+        let stub = StubOp::routing(&[("account get", 0, CURRENT_JSON)]);
+        let current = stub.backend().current_account().await.expect("current");
+
+        assert_eq!(current.id, "A1");
+        assert_eq!(current.state, "ACTIVE");
+        assert_eq!(
+            stub.argv(),
+            ["account", "get", "--format", "json", "--account", ACCOUNT]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_locked_or_signed_out_account_makes_the_session_probe_fail() {
+        let stub = StubOp::answering(1, "", "[ERROR] account is not signed in");
+        let err = stub.backend().current_account().await.expect_err("should fail");
         assert!(matches!(err, SecretsError::Unavailable(_)), "{err:?}");
     }
 
     #[tokio::test]
     async fn a_hung_op_is_reported_as_timed_out_rather_than_waited_on_forever() {
         let stub = StubOp::hanging();
-        let backend = stub.backend(None).with_timeout(Duration::from_millis(50));
+        let backend = stub.backend().with_timeout(Duration::from_millis(50));
 
         let started = std::time::Instant::now();
-        let err = backend.whoami().await.expect_err("should time out");
+        let err = backend.current_account().await.expect_err("should time out");
 
         assert!(err.to_string().contains("timed out"), "{err}");
         assert!(
@@ -456,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn an_unspawnable_op_binary_is_a_transport_error() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let backend = OnePasswordBackend::with_bin(None, dir.path().join("absent"));
+        let backend = OnePasswordBackend::with_bin(ACCOUNT, dir.path().join("absent"));
         let err = backend
             .get(&SecretPath::parse("Ops/deploy-keys").unwrap())
             .await

@@ -23,7 +23,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::KeychainBackend;
-pub use onepassword::OnePasswordBackend;
+pub use onepassword::{OnePasswordBackend, OpAccount};
 pub use openbao::{OpenBaoBackend, TokenError};
 pub use vars::VarFetchError;
 
@@ -356,10 +356,7 @@ impl Backend {
         match self {
             Self::Keychain(b) => format!("the macOS Keychain (service `{}`)", b.service()),
             Self::OpenBao(b) => format!("OpenBao at {} (mount `{}`)", b.addr(), b.mount()),
-            Self::OnePassword(b) => match b.account() {
-                Some(account) => format!("1Password via `op` (account `{account}`)"),
-                None => "1Password via `op`".to_string(),
-            },
+            Self::OnePassword(b) => format!("1Password via `op` (account `{}`)", b.account()),
             #[cfg(test)]
             Self::Fake(_) => "an in-memory fake".to_string(),
         }
@@ -651,7 +648,9 @@ mod tests {
 
     #[test]
     fn a_onepassword_credential_path_is_refused_for_lack_of_a_vault() {
-        let backend = Backend::OnePassword(OnePasswordBackend::new(None));
+        let backend = Backend::OnePassword(OnePasswordBackend::new(
+            OpAccount::parse("my.1password.com").expect("account"),
+        ));
         let err = backend.credential_path("github").expect_err("should refuse");
         assert!(
             matches!(

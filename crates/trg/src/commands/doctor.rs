@@ -21,6 +21,7 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::output::OutputFormat;
+use crate::secrets::onepassword;
 use crate::secrets::openbao::{Health, TokenSource};
 use crate::secrets::{
     Backend, BackendError, KeychainBackend, OnePasswordBackend, OpenBaoBackend, Registry, SecretsError,
@@ -319,30 +320,91 @@ fn keychain(name: &str, kc: &KeychainBackend) -> Report {
     }
 }
 
-async fn onepassword(name: &str, op: &OnePasswordBackend) -> Report {
-    let auth = match op.whoami().await {
-        Ok(detail) => Outcome::passed(detail),
-        Err(err) => Outcome::failed(
-            err.to_string(),
-            "run `op signin` (or open the 1Password app) to authenticate the `op` CLI",
-        ),
-    };
+const OP_SUBTREE_SKIP: &str = "1Password items are managed by hand, so there is nothing to enumerate";
 
-    Report {
+/// Two questions, in the order that keeps their remedies apart: does `op` know
+/// the account this backend names, and does that account have a session that
+/// can read?
+///
+/// `op` conflates them — a filter it cannot match and an account it cannot
+/// unlock both surface as a failed read — and the fixes are a config edit and
+/// an unlock prompt respectively, so a typo would otherwise send someone to
+/// `op signin` over and over.
+async fn onepassword(name: &str, op: &OnePasswordBackend) -> Report {
+    let account_ref = op.account();
+    let report = |checks| Report {
         backend: name.to_string(),
         kind: "onepassword",
-        target: match op.account() {
-            Some(account) => format!("1Password via `op` (account `{account}`)"),
-            None => "1Password via `op`".to_string(),
-        },
-        checks: vec![
-            Check::new("auth", auth),
+        target: format!("1Password via `op` (account `{account_ref}`)"),
+        checks,
+    };
+
+    let known = match op.accounts().await {
+        Ok(known) => known,
+        Err(err) => {
+            return report(vec![
+                Check::new(
+                    "account",
+                    Outcome::failed(
+                        err.to_string(),
+                        "install the 1Password CLI and add an account, so `op account list` answers",
+                    ),
+                ),
+                Check::new(
+                    "session",
+                    Outcome::skipped("`op` could not be asked which accounts it knows"),
+                ),
+                Check::new("subtree", Outcome::skipped(OP_SUBTREE_SKIP)),
+            ]);
+        }
+    };
+
+    let Some(addressed) = onepassword::resolve(account_ref, &known) else {
+        let detail = if known.is_empty() {
+            format!("`{account_ref}` is not known to `op`, which has no accounts added")
+        } else {
+            let names: Vec<String> = known.iter().map(ToString::to_string).collect();
+            format!(
+                "`{account_ref}` is not one of the accounts `op` knows: {}",
+                names.join(", ")
+            )
+        };
+        return report(vec![
             Check::new(
-                "subtree",
-                Outcome::skipped("1Password items are managed by hand, so there is nothing to enumerate"),
+                "account",
+                Outcome::failed(
+                    detail,
+                    format!(
+                        "point `account` under `[secrets.backends.{name}]` at one of those, \
+                         or add the account with `op account add`"
+                    ),
+                ),
             ),
-        ],
-    }
+            Check::new(
+                "session",
+                Outcome::skipped("there is no account to hold a session, so it was not asked for"),
+            ),
+            Check::new("subtree", Outcome::skipped(OP_SUBTREE_SKIP)),
+        ]);
+    };
+
+    let session = match op.current_account().await {
+        Err(err) => Outcome::failed(
+            err.to_string(),
+            format!("unlock the 1Password app, or run `op signin --account {account_ref}`, so the `op` CLI has a session for it"),
+        ),
+        Ok(current) if !current.state.eq_ignore_ascii_case("ACTIVE") => Outcome::failed(
+            format!("`{}` is {}, not ACTIVE", current.name, current.state),
+            "reactivate the account in 1Password, or point `account` at one that is active",
+        ),
+        Ok(current) => Outcome::passed(format!("reads go to `{}`", current.name)),
+    };
+
+    report(vec![
+        Check::new("account", Outcome::passed(format!("`{account_ref}` is {addressed}"))),
+        Check::new("session", session),
+        Check::new("subtree", Outcome::skipped(OP_SUBTREE_SKIP)),
+    ])
 }
 
 /// Every subject one `doctor` run looked at.
