@@ -360,6 +360,28 @@ impl OpenBaoBackend {
     /// Keychain at all. Isolation is the opt-in: a provider that rotates
     /// refresh tokens and detects replay will revoke the whole grant when two
     /// machines refresh the same one, and `machine_id` is how you avoid that.
+    ///
+    /// TODO: turning `machine_id` on or off relocates every credential this
+    /// backend holds, and nothing reads the layout a payload was written
+    /// under, so the credentials go quiet rather than moving. The new path
+    /// misses, the old payload is still sitting there, and every server asks
+    /// for a fresh login. That is the breakage `credentials.v2` removed for
+    /// the payload shape, still present for the path.
+    ///
+    /// Fixing it does not need a version segment in the path, and should not
+    /// use one. A version invites an open-ended ladder, one probe per layout
+    /// that ever existed, and leaves a miss indistinguishable from a
+    /// first-time login. Only two layouts are reachable here, so reading the
+    /// machine-scoped path and falling back to the shared one closes the set
+    /// for good.
+    ///
+    /// That fallback has to stay read-only. Copying the shared credential
+    /// into the machine-scoped path would leave the shared one readable, so
+    /// both machines would go on refreshing the same grant, which is the
+    /// replay `machine_id` was set to prevent; moving it would break the
+    /// machine that did not run the migration. Reading it and saying so
+    /// leaves the person to re-authorize once when it suits them, rather than
+    /// at the moment they edited their config.
     pub fn credential_path(&self, server: &str) -> String {
         match &self.machine_id {
             Some(id) => format!("mcp/{id}/{server}"),
