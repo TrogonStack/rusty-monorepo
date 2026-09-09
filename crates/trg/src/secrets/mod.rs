@@ -59,7 +59,16 @@ pub enum SecretsError {
     Transport(String),
 
     #[error("malformed payload at `{path}`: {cause}")]
-    Malformed { path: SecretPath, cause: String },
+    Malformed {
+        path: SecretPath,
+        cause: String,
+        /// The exact text that failed to decode, when the backend has it
+        /// handy. Lets a caller retry interpreting it under a different,
+        /// older shape without a second round trip to the backend; `None`
+        /// when the failure has no such text, such as failing to encode on
+        /// write.
+        raw: Option<String>,
+    },
 
     #[error("permission denied: {0}")]
     PermissionDenied(String),
@@ -450,10 +459,14 @@ pub mod fake {
 
     /// Read failures a test can inject, so that callers which must distinguish
     /// "unreadable" from "unreachable" can be exercised.
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Debug)]
     pub enum FakeFailure {
         Transport,
         Malformed,
+        /// Like `Malformed`, but as if the backend had the exact bytes that
+        /// failed to decode handy, for exercising a caller's fallback onto an
+        /// older shape.
+        MalformedWithRaw(String),
     }
 
     /// In-memory backend for unit tests.
@@ -465,6 +478,7 @@ pub mod fake {
     pub struct FakeBackend {
         entries: Arc<Mutex<HashMap<SecretPath, SecretMap>>>,
         get_failure: Arc<Mutex<Option<FakeFailure>>>,
+        set_failure: Arc<Mutex<bool>>,
         gets: Arc<Mutex<usize>>,
     }
 
@@ -484,14 +498,29 @@ pub mod fake {
             *self.get_failure.lock().expect("fake backend lock") = failure;
         }
 
+        /// Make every subsequent `set` fail until cleared, for exercising a
+        /// caller that must tolerate a write it issued along the way (such as
+        /// a migration) failing without failing the call that triggered it.
+        pub fn set_set_failure(&self, fail: bool) {
+            *self.set_failure.lock().expect("fake backend lock") = fail;
+        }
+
         pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
             *self.gets.lock().expect("fake backend lock") += 1;
-            match *self.get_failure.lock().expect("fake backend lock") {
+            match &*self.get_failure.lock().expect("fake backend lock") {
                 Some(FakeFailure::Transport) => return Err(SecretsError::Transport("injected".to_string())),
                 Some(FakeFailure::Malformed) => {
                     return Err(SecretsError::Malformed {
                         path: path.clone(),
                         cause: "injected".to_string(),
+                        raw: None,
+                    })
+                }
+                Some(FakeFailure::MalformedWithRaw(raw)) => {
+                    return Err(SecretsError::Malformed {
+                        path: path.clone(),
+                        cause: "injected".to_string(),
+                        raw: Some(raw.clone()),
                     })
                 }
                 None => {}
@@ -500,6 +529,9 @@ pub mod fake {
         }
 
         pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {
+            if *self.set_failure.lock().expect("fake backend lock") {
+                return Err(SecretsError::Transport("injected".to_string()));
+            }
             self.entries
                 .lock()
                 .expect("fake backend lock")

@@ -135,12 +135,13 @@ impl KeychainBackend {
         }
 
         let payload = String::from_utf8_lossy(&out.stdout);
-        let payload = payload.trim_end_matches('\n');
-        SecretMap::from_json(payload)
+        let payload = payload.trim_end_matches('\n').to_string();
+        SecretMap::from_json(&payload)
             .map(Some)
             .map_err(|e| SecretsError::Malformed {
                 path: path.clone(),
                 cause: e.to_string(),
+                raw: Some(payload),
             })
     }
 
@@ -149,6 +150,7 @@ impl KeychainBackend {
         let payload = map.to_json().map_err(|e| SecretsError::Malformed {
             path: path.clone(),
             cause: e.to_string(),
+            raw: None,
         })?;
 
         let out = self
