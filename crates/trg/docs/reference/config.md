@@ -302,7 +302,7 @@ read.
 
 | Field     | Type   | Required | Notes                                                                 |
 | --------- | ------ | -------- | ---------------------------------------------------------------------- |
-| `account` | string | yes      | Which `op` account to read from: its sign-in address, email, user UUID or account UUID — any form `op --account` accepts. |
+| `account` | string | yes      | Which `op` account to read from: its sign-in address, the bare subdomain of that address, email, user UUID or account UUID — any form `op --account` accepts. |
 
 A path here is `<vault>/<item>`, e.g. `Ops/deploy-keys` for an item named
 `deploy-keys` in the `Ops` vault, and each key is that item's field label. One

@@ -111,16 +111,21 @@ impl OpAccount {
     /// Matched over every form `op --account` accepts, because the config may
     /// legitimately carry any of them and refusing to recognise the one a
     /// developer chose would report a correct config as pointing nowhere.
+    ///
+    /// That includes the sign-in subdomain on its own — `my` for
+    /// `my.1password.com` — which `op` accepts and which its own docs use, but
+    /// which `op account list` never prints as a field of its own.
     fn addresses(&self, signed_in: &SignedInAccount) -> bool {
         let want = self.0.as_str();
         [
-            &signed_in.url,
-            &signed_in.email,
-            &signed_in.user_uuid,
-            &signed_in.account_uuid,
+            signed_in.url.as_str(),
+            signed_in.subdomain(),
+            signed_in.email.as_str(),
+            signed_in.user_uuid.as_str(),
+            signed_in.account_uuid.as_str(),
         ]
         .into_iter()
-        .any(|form| form.eq_ignore_ascii_case(want))
+        .any(|form| !form.is_empty() && form.eq_ignore_ascii_case(want))
     }
 }
 
@@ -155,6 +160,16 @@ pub struct SignedInAccount {
     pub user_uuid: String,
     #[serde(default)]
     pub account_uuid: String,
+}
+
+impl SignedInAccount {
+    /// The sign-in subdomain, `my` out of `my.1password.com`.
+    ///
+    /// Derived rather than read: `op account list` reports the full `url` and
+    /// no separate field for this, though `--account` takes it.
+    fn subdomain(&self) -> &str {
+        self.url.split('.').next().unwrap_or_default()
+    }
 }
 
 impl fmt::Display for SignedInAccount {
@@ -530,6 +545,37 @@ mod tests {
             assert_eq!(found.map(|a| a.account_uuid.as_str()), Some("A1"), "{form}");
         }
         assert!(resolve(&OpAccount::parse("nope.1password.com").unwrap(), &known).is_none());
+    }
+
+    /// `op --account my` reads fine, so a config saying `my` is correct and
+    /// must not be reported as naming an account `op` has never heard of.
+    #[test]
+    fn an_account_resolves_by_the_bare_sign_in_subdomain() {
+        let known: Vec<SignedInAccount> = serde_json::from_str(ACCOUNTS_JSON).unwrap();
+
+        for (form, want) in [("my", "A1"), ("MY", "A1"), ("team-acme", "A2")] {
+            let found = resolve(&OpAccount::parse(form).unwrap(), &known);
+            assert_eq!(found.map(|a| a.account_uuid.as_str()), Some(want), "{form}");
+        }
+        assert!(resolve(&OpAccount::parse("team-other").unwrap(), &known).is_none());
+    }
+
+    /// An account row missing a field must not turn every lookup into a match
+    /// on the empty string.
+    #[test]
+    fn an_account_with_blank_fields_matches_only_what_it_does_carry() {
+        let known = vec![SignedInAccount {
+            url: String::new(),
+            email: String::new(),
+            user_uuid: String::new(),
+            account_uuid: "A9".to_string(),
+        }];
+
+        assert!(resolve(&OpAccount::parse("my.1password.com").unwrap(), &known).is_none());
+        assert_eq!(
+            resolve(&OpAccount::parse("A9").unwrap(), &known).map(|a| a.account_uuid.as_str()),
+            Some("A9")
+        );
     }
 
     #[tokio::test]

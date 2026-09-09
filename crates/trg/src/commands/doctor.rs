@@ -397,6 +397,19 @@ async fn onepassword(name: &str, op: &OnePasswordBackend) -> Report {
             format!("`{}` is {}, not ACTIVE", current.name, current.state),
             "reactivate the account in 1Password, or point `account` at one that is active",
         ),
+        // A bare sign-in subdomain can name more than one account, and the
+        // one listed above is only the first that matched. `op` resolved the
+        // same filter itself, so disagreeing ids mean reads land somewhere
+        // other than where this report just said they would.
+        Ok(current) if !current.id.is_empty() && !addressed.account_uuid.is_empty() && current.id != addressed.account_uuid => {
+            Outcome::failed(
+                format!(
+                    "`op` resolved `{account_ref}` to `{}`, not to {addressed}",
+                    current.name
+                ),
+                "name the account by its full sign-in address or its UUID, since a bare subdomain can match more than one",
+            )
+        }
         Ok(current) => Outcome::passed(format!("reads go to `{}`", current.name)),
     };
 
