@@ -272,6 +272,7 @@ impl OnePasswordBackend {
         let value: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| SecretsError::Malformed {
             path: path.clone(),
             cause: format!("op item get did not return valid JSON: {e}"),
+            raw: None,
         })?;
         let fields = value
             .get("fields")
@@ -279,6 +280,7 @@ impl OnePasswordBackend {
             .ok_or_else(|| SecretsError::Malformed {
                 path: path.clone(),
                 cause: "op item get response has no `fields` array".to_string(),
+                raw: None,
             })?;
 
         let mut map = SecretMap::new();
@@ -403,6 +405,7 @@ fn split(path: &SecretPath) -> Result<(&str, &str), SecretsError> {
         _ => Err(SecretsError::Malformed {
             path: path.clone(),
             cause: "a 1Password path needs `<vault>/<item>`, e.g. `Ops/deploy-keys`".to_string(),
+            raw: None,
         }),
     }
 }

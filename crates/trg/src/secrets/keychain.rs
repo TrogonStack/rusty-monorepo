@@ -78,6 +78,7 @@
 
 use std::path::PathBuf;
 
+use secrecy::SecretString;
 use tokio::process::Command;
 
 use super::{SecretMap, SecretPath, SecretsError};
@@ -135,12 +136,13 @@ impl KeychainBackend {
         }
 
         let payload = String::from_utf8_lossy(&out.stdout);
-        let payload = payload.trim_end_matches('\n');
-        SecretMap::from_json(payload)
+        let payload = payload.trim_end_matches('\n').to_string();
+        SecretMap::from_json(&payload)
             .map(Some)
             .map_err(|e| SecretsError::Malformed {
                 path: path.clone(),
                 cause: e.to_string(),
+                raw: Some(SecretString::from(payload)),
             })
     }
 
@@ -149,6 +151,7 @@ impl KeychainBackend {
         let payload = map.to_json().map_err(|e| SecretsError::Malformed {
             path: path.clone(),
             cause: e.to_string(),
+            raw: None,
         })?;
 
         let out = self
