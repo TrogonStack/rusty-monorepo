@@ -302,12 +302,40 @@ read.
 
 | Field     | Type   | Required | Notes                                                                 |
 | --------- | ------ | -------- | ---------------------------------------------------------------------- |
-| `account` | string | no       | Which signed-in `op` account to use. Omit it when only one signed-in account holds the vault a path names. |
+| `account` | string | yes      | Which `op` account to read from: its sign-in address, the bare subdomain of that address, email, user UUID or account UUID — any form `op --account` accepts. |
 
 A path here is `<vault>/<item>`, e.g. `Ops/deploy-keys` for an item named
 `deploy-keys` in the `Ops` vault, and each key is that item's field label. One
 `get` reads every field on the item, same as a single OpenBao or Keychain read
 yields every key stored at a path.
+
+```toml
+[secrets.backends.personal]
+kind    = "onepassword"
+account = "my.1password.com"
+```
+
+`account` is required rather than optional. A vault name is unique only within
+an account, and `op` will sign a developer into several at once; left to pick
+for itself it resolves `--vault Ops` against whichever account is the
+machine-local default, so the same config can address a different vault on a
+different machine, and a personal account shadowing a work vault name reads as
+a missing item rather than an error. To address two accounts, declare two
+backends:
+
+```toml
+[secrets.backends.personal]
+kind    = "onepassword"
+account = "my.1password.com"
+
+[secrets.backends.work]
+kind    = "onepassword"
+account = "team-acme.1password.com"
+```
+
+`op account list` prints every account this machine can name here.
+`trg doctor` resolves the configured one against that list and reports the
+account reads will actually go to.
 
 This backend is read-only: `set`, `delete`, and `list` — bare or scoped by a
 prefix, it makes no difference — all fail with `` `put`/`delete`/`list` is
