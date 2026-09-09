@@ -67,7 +67,15 @@ pub enum SecretsError {
         /// older shape without a second round trip to the backend; `None`
         /// when the failure has no such text, such as failing to encode on
         /// write.
-        raw: Option<String>,
+        ///
+        /// Secret-wrapped because this is the payload itself, not a
+        /// description of it: for a credential path it holds live tokens, and
+        /// for any other path it holds that secret's values. `Display` for
+        /// this error never renders it, but the derived `Debug` would, and
+        /// this type reaches `Debug` through `VarFetchError` and `WireError`,
+        /// as well as through `unwrap` and `expect` on any `Result` carrying
+        /// it. [`SecretString`] keeps all of those redacted.
+        raw: Option<SecretString>,
     },
 
     #[error("permission denied: {0}")]
@@ -520,7 +528,7 @@ pub mod fake {
                     return Err(SecretsError::Malformed {
                         path: path.clone(),
                         cause: "injected".to_string(),
-                        raw: Some(raw.clone()),
+                        raw: Some(SecretString::from(raw.clone())),
                     })
                 }
                 None => {}
@@ -625,6 +633,25 @@ mod tests {
         assert!(!rendered.contains("s3cret"), "leaked a value: {rendered}");
         assert!(rendered.contains("token"), "should name keys: {rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    /// `Malformed.raw` is the payload itself, and for a credential path that
+    /// is live tokens. Nothing here renders it through `Display`, but the
+    /// derived `Debug` would if this field were a plain `String`; this pins
+    /// [`secrecy::SecretString`] as the reason it does not.
+    #[test]
+    fn malformed_debug_redacts_the_raw_payload() {
+        let err = SecretsError::Malformed {
+            path: SecretPath::parse("github").unwrap(),
+            cause: "injected".to_string(),
+            raw: Some(SecretString::from("hunter2-access-token".to_string())),
+        };
+
+        let rendered = format!("{err:?}");
+        assert!(
+            !rendered.contains("hunter2-access-token"),
+            "leaked the payload: {rendered}"
+        );
     }
 
     #[test]

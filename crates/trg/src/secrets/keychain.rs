@@ -78,6 +78,7 @@
 
 use std::path::PathBuf;
 
+use secrecy::SecretString;
 use tokio::process::Command;
 
 use super::{SecretMap, SecretPath, SecretsError};
@@ -141,7 +142,7 @@ impl KeychainBackend {
             .map_err(|e| SecretsError::Malformed {
                 path: path.clone(),
                 cause: e.to_string(),
-                raw: Some(payload),
+                raw: Some(SecretString::from(payload)),
             })
     }
 

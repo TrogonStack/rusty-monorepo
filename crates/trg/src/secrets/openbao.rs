@@ -789,20 +789,21 @@ fn join_or(errors: &[String], fallback: &str) -> String {
 /// so a non-string is reported against the key that carries it instead of as a
 /// serde error against the whole response.
 fn map_from_json(object: &Map<String, Value>, path: &SecretPath) -> Result<SecretMap, SecretsError> {
-    // The whole object, reserialized, so a caller can retry it under an older
-    // shape (a pre-map single JSON blob would fail exactly this way).
-    let raw = serde_json::to_string(object).ok();
+    // No `raw`: OpenBao credential storage arrived in #77, after #73 had
+    // already moved credentials into a keyed map, so no path here has ever
+    // held a pre-map blob for a caller to retry. Carrying the payload would
+    // only put secret values somewhere they are not needed.
     let mut map = SecretMap::new();
     for (name, value) in object {
         let text = value.as_str().ok_or_else(|| SecretsError::Malformed {
             path: path.clone(),
             cause: format!("key `{name}` is not a string; `trg` stores only string values"),
-            raw: raw.clone(),
+            raw: None,
         })?;
         let key = SecretKey::parse(name).map_err(|e| SecretsError::Malformed {
             path: path.clone(),
             cause: e.to_string(),
-            raw: raw.clone(),
+            raw: None,
         })?;
         map.insert(key, SecretString::from(text.to_string()));
     }

@@ -214,19 +214,20 @@ impl OAuthCredentialStore {
     }
 
     /// Case 3: the outer map would not decode at all. `raw` carries the
-    /// backend's exact bytes when it has them; a backend that never held
-    /// pre-map data (everything but the Keychain) answers `None` and this
-    /// goes straight to reporting corruption.
-    async fn load_legacy_v1(&self, raw: Option<String>) -> Result<Option<StoredCredentials>, AuthError> {
+    /// backend's exact bytes when it has them, which only the Keychain does:
+    /// it is the one backend that stored credentials before #73 moved them
+    /// into a keyed map. Every other backend answers `None` and this goes
+    /// straight to reporting corruption.
+    async fn load_legacy_v1(&self, raw: Option<SecretString>) -> Result<Option<StoredCredentials>, AuthError> {
         let Some(raw) = raw else {
             return Err(self.credential_read_error(CredentialReadError::Corrupt {
                 path: self.path.clone(),
             }));
         };
-        let credentials = self.decode_or_corrupt(&raw)?;
+        let credentials = self.decode_or_corrupt(raw.expose_secret())?;
 
         let mut map = SecretMap::new();
-        map.insert(Self::key_v2(), SecretString::from(raw));
+        map.insert(Self::key_v2(), raw);
         if let Err(err) = self.backend.set(&self.path, &map).await {
             tracing::warn!(
                 path = %self.path,
@@ -312,8 +313,19 @@ fn newer_version_key(map: &SecretMap) -> Option<String> {
     })
 }
 
+/// A pre-#73 payload as it actually reads in the wild: `token_response`
+/// populated rather than `null`, `granted_scopes` non-empty, and `issuer`
+/// missing entirely rather than present and `null`, since that field did not
+/// exist yet when this shape was written. Token values are obviously fake.
+/// Shared by the unit tests below and by `legacy_payload_tests`, the latter
+/// of which seeds a real keychain item with it.
+#[cfg(test)]
+const LEGACY_RAW_PAYLOAD: &str = r#"{"client_id":"legacy-client","token_response":{"access_token":"fake-access-token","token_type":"bearer","expires_in":3600,"refresh_token":"fake-refresh-token","scope":"read write"},"granted_scopes":["read","write"],"token_received_at":1700000000}"#;
+
 #[cfg(test)]
 mod tests {
+    use oauth2::TokenResponse;
+
     use super::*;
     use crate::secrets::{fake::FakeBackend, FakeFailure};
 
@@ -603,16 +615,23 @@ mod tests {
     }
 
     /// Case 3: the pre-#73 shape, a bare `StoredCredentials` blob with no
-    /// wrapping map at all. Real items like this still exist in the wild.
+    /// wrapping map at all. Real items like this still exist in the wild,
+    /// with a populated `token_response` and a non-empty `granted_scopes`
+    /// rather than the placeholder values a hand-written fixture would reach
+    /// for; `issuer` is genuinely absent on one, since it predates that field.
     #[tokio::test]
     async fn load_migrates_a_raw_pre_versioning_legacy_payload_to_v2() {
         let (backend, store) = store();
         let path = SecretPath::parse("github").expect("parse");
-        let legacy_raw = r#"{"client_id":"legacy","token_response":null,"granted_scopes":[]}"#.to_string();
+        let legacy_raw = LEGACY_RAW_PAYLOAD.to_string();
         fake(&backend).set_get_failure(Some(FakeFailure::MalformedWithRaw(legacy_raw.clone())));
 
         let loaded = store.load().await.expect("load").expect("some");
-        assert_eq!(loaded.client_id, "legacy");
+        assert_eq!(loaded.client_id, "legacy-client");
+        assert_eq!(
+            loaded.token_response.expect("token_response").access_token().secret(),
+            "fake-access-token"
+        );
 
         fake(&backend).set_get_failure(None);
         let map = backend.get(&path).await.expect("get").expect("migrated");
@@ -777,7 +796,7 @@ mod legacy_payload_tests {
                 "-a",
                 path.as_str(),
                 "-w",
-                r#"{"client_id":"legacy","token_response":null,"granted_scopes":[]}"#,
+                LEGACY_RAW_PAYLOAD,
             ])
             .status()
             .expect("spawn security");
@@ -799,7 +818,7 @@ mod legacy_payload_tests {
             .await
             .expect("a legacy payload should migrate silently")
             .expect("some");
-        assert_eq!(loaded.client_id, "legacy");
+        assert_eq!(loaded.client_id, "legacy-client");
 
         let map = keychain.get(&path).await.expect("get").expect("migrated");
         assert!(map.contains_key(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap()));
