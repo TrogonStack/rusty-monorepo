@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.8.1...trg@v0.8.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* **trg:** Migrate legacy oauth credential payloads instead of failing to read them ([#101](https://github.com/TrogonStack/rusty-monorepo/issues/101)) ([6858492](https://github.com/TrogonStack/rusty-monorepo/commit/68584926ceeb553252d99ffc6ebbdadd976d6895))
+
 ## [0.8.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.8.0...trg@v0.8.1) (2026-09-09)
 
 
