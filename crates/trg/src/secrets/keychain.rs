@@ -81,10 +81,39 @@ use std::path::PathBuf;
 use secrecy::SecretString;
 use tokio::process::Command;
 
-use super::{SecretMap, SecretPath, SecretsError};
+use super::{SecretKey, SecretMap, SecretPath, SecretsError};
 
 /// The keychain service attribute every item written by `trg` carries.
 pub const DEFAULT_SERVICE: &str = "trg MCP Credentials";
+
+/// How a config var addresses one value in this backend.
+///
+/// A path names the keychain item, whose account attribute it becomes, and a
+/// key names one field of the [`SecretMap`] that item's payload encodes.
+///
+/// A distinct type from [`super::OpenbaoReference`] even though both are
+/// path-and-key shaped: the path lands on a service and account pair here and
+/// on a mount, prefix and owner there, so they are the same spelling of two
+/// different things.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct KeychainReference {
+    path: SecretPath,
+    key: SecretKey,
+}
+
+impl KeychainReference {
+    pub fn new(path: SecretPath, key: SecretKey) -> Self {
+        Self { path, key }
+    }
+
+    pub fn path(&self) -> &SecretPath {
+        &self.path
+    }
+
+    pub fn key(&self) -> &SecretKey {
+        &self.key
+    }
+}
 
 const SECURITY_BIN: &str = "/usr/bin/security";
 

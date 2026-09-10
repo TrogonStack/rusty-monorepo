@@ -24,7 +24,7 @@ use crate::output::OutputFormat;
 use crate::secrets::onepassword;
 use crate::secrets::openbao::{Health, TokenSource};
 use crate::secrets::{
-    Backend, BackendError, KeychainBackend, OnePasswordBackend, OpenBaoBackend, Registry, SecretsError,
+    Backend, BackendError, BackendKind, KeychainBackend, OnePasswordBackend, OpenBaoBackend, Registry, SecretsError,
 };
 
 #[derive(Args, Debug, Clone)]
@@ -485,7 +485,7 @@ pub async fn diagnose_all(registry: &Registry, only: Option<&str>) -> Result<Dia
             // Everything else is this backend's own config being wrong, which
             // is the first thing to report about it rather than a reason to
             // stop looking at the others.
-            Err(e) => backends.push(unbuildable(&name, registry.kind_of(&name), &e)),
+            Err(e) => backends.push(unbuildable(&name, registry.kind_of(&name).map(BackendKind::as_str), &e)),
         }
     }
     Ok(Diagnosis { backends })

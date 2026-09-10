@@ -42,7 +42,7 @@ pub struct ExecArgs {
     ///
     /// For a literal like `DEBUG=1`, never a secret: this lands in argv and
     /// shell history like any other flag. A secret belongs in the entry's
-    /// `env` table as a `{ backend = ..., path = ..., key = ... }`, resolved
+    /// `env` table, named the way its backend addresses secrets and resolved
     /// the same way `trg secret get` reads one.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair)]
     pub env: Vec<(String, String)>,

@@ -4,7 +4,7 @@
 //! backend and that is the one used; there is no ordered list, no probing, and
 //! no fallback to a second backend when the first fails.
 //!
-//! Backend declarations resolve through [`VarSource`] only, so a backend can
+//! Backend declarations resolve through [`RawVarSource`] only, so a backend can
 //! read `{ env = "BAO_ADDR" }` but cannot read `{ secret = "..." }`. That keeps
 //! bootstrap acyclic: nothing needed to reach a secret store may itself live in
 //! a secret store.
@@ -19,8 +19,8 @@ use super::onepassword::{OnePasswordBackend, OpAccount};
 use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
 };
-use super::Backend;
-use crate::config::{FetchedSecrets, VarResolveError, VarSource};
+use super::{Backend, BackendKind};
+use crate::config::{FetchedSecrets, RawVarSource, VarResolveError};
 
 /// The `[secrets]` table.
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -28,6 +28,22 @@ use crate::config::{FetchedSecrets, VarResolveError, VarSource};
 pub struct SecretsSection {
     #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
+}
+
+impl SecretsSection {
+    /// The kind a name was declared with, for the second config phase to
+    /// decide how a var naming it must be addressed.
+    pub fn kind_of(&self, name: &str) -> Option<BackendKind> {
+        self.backends.get(name).map(BackendConfig::kind)
+    }
+
+    /// Every declared name, sorted, so an error about an undeclared one can
+    /// show what was on offer instead.
+    pub fn declared_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.backends.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 /// One `[secrets.backends.<name>]` entry.
@@ -39,7 +55,11 @@ pub struct SecretsSection {
 pub enum BackendConfig {
     Keychain(KeychainConfig),
     Openbao(Box<OpenbaoConfig>),
-    Onepassword(OnepasswordConfig),
+    /// Renamed because the product is spelled `1Password`, so the Rust
+    /// identifier follows it; the `kind = "onepassword"` a config file writes
+    /// is unchanged.
+    #[serde(rename = "onepassword")]
+    OnePassword(OnePasswordConfig),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -51,7 +71,7 @@ pub struct KeychainConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct OnepasswordConfig {
+pub struct OnePasswordConfig {
     /// Which signed-in `op` account this backend reads from.
     ///
     /// Required, because a vault name is unique only within an account and
@@ -63,7 +83,7 @@ pub struct OnepasswordConfig {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OpenbaoConfig {
-    pub addr: VarSource,
+    pub addr: RawVarSource,
     pub mount: String,
     pub path_prefix: String,
     /// Required, unlike every other segment field.
@@ -81,7 +101,7 @@ pub struct OpenbaoConfig {
     #[serde(default)]
     pub token_file: Option<String>,
     #[serde(default)]
-    pub token: Option<VarSource>,
+    pub token: Option<RawVarSource>,
     #[serde(default)]
     pub ca_cert_file: Option<String>,
     #[serde(default)]
@@ -89,11 +109,11 @@ pub struct OpenbaoConfig {
 }
 
 impl BackendConfig {
-    pub fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> BackendKind {
         match self {
-            Self::Keychain(_) => "keychain",
-            Self::Openbao(_) => "openbao",
-            Self::Onepassword(_) => "onepassword",
+            Self::Keychain(_) => BackendKind::Keychain,
+            Self::Openbao(_) => BackendKind::Openbao,
+            Self::OnePassword(_) => BackendKind::OnePassword,
         }
     }
 }
@@ -114,7 +134,7 @@ pub enum BackendError {
         name: String,
         field: &'static str,
         #[source]
-        cause: VarResolveError,
+        cause: Box<VarResolveError>,
     },
 
     /// A backend reaching a backend to learn how to reach a backend.
@@ -157,7 +177,7 @@ impl Registry {
     }
 
     /// The `kind` a declared backend was given, whether or not it builds.
-    pub fn kind_of(&self, name: &str) -> Option<&'static str> {
+    pub fn kind_of(&self, name: &str) -> Option<BackendKind> {
         self.declared.get(name).map(BackendConfig::kind)
     }
 
@@ -245,11 +265,11 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
             }
 
             let addr = addr
-                .resolve(&FetchedSecrets::new())
+                .resolve_bootstrap(&FetchedSecrets::new())
                 .map_err(|cause| BackendError::Resolve {
                     name: name.to_string(),
                     field: "addr",
-                    cause,
+                    cause: Box::new(cause),
                 })?;
 
             let token = match (token_file, token) {
@@ -294,7 +314,7 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                     cause,
                 })
         }
-        BackendConfig::Onepassword(OnepasswordConfig { account }) => {
+        BackendConfig::OnePassword(OnePasswordConfig { account }) => {
             Ok(Backend::OnePassword(OnePasswordBackend::new(account.clone())))
         }
     }
@@ -364,7 +384,7 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(s.backends.len(), 2);
-        assert_eq!(s.backends["local"].kind(), "keychain");
+        assert_eq!(s.backends["local"].kind(), BackendKind::Keychain);
     }
 
     #[test]
@@ -377,10 +397,10 @@ mod tests {
             "#,
         )
         .expect("parse");
-        assert_eq!(s.backends["named"].kind(), "onepassword");
+        assert_eq!(s.backends["named"].kind(), BackendKind::OnePassword);
 
         let Backend::OnePassword(b) = build("named", &s.backends["named"]).expect("build") else {
-            panic!("expected a onepassword backend")
+            panic!("expected a 1Password backend")
         };
         assert_eq!(b.account().as_str(), "my.1password.com");
     }
@@ -440,7 +460,7 @@ mod tests {
             "#,
         )
         .expect("parse");
-        assert_eq!(s.backends["work"].kind(), "openbao");
+        assert_eq!(s.backends["work"].kind(), BackendKind::Openbao);
     }
 
     #[test]

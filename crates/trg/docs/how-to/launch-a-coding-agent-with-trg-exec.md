@@ -52,8 +52,7 @@ validation at all.
 
 ## Resolving env
 
-An entry's `env` table accepts the same three shapes as an MCP server's
-`vars` — see
+An entry's `env` table accepts the same shapes an MCP server's `vars` do, see
 [Config reference: Variables](../reference/config.md#variables-mcpserversnamevars)
 for the full rules:
 
@@ -70,8 +69,14 @@ ANTHROPIC_AUTH_TOKEN  = { backend = "homelab", path = "exec/claude", key = "toke
 - A literal string is used as-is.
 - `{ env = "NAME", default = "..." }` reads it from `trg`'s own environment.
 - `{ backend = "...", path = "...", key = "..." }` reads it from a
-  `[secrets.backends.<name>]` entry at load time, same as
+  `keychain` or `openbao` `[secrets.backends.<name>]` entry at load time, same
+  as
   [Read a config value from a secrets backend](read-a-config-value-from-a-secrets-backend.md).
+- `{ backend = "...", ref = "op://<vault>/<item>/<field>" }` reads it from a
+  `onepassword` entry, addressed by the reference that item's `Copy Secret
+  Reference` button yields. Each kind takes only its own spelling: `path` and
+  `key` against a `onepassword` backend, or a `ref` against either of the
+  others, fails to load.
 - An array of any of those concatenates them in order, e.g.
   `dir = [{ env = "HOME" }, "/app/state"]` resolves to
   `<value of $HOME>/app/state`. This composition is available only for

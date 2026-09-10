@@ -9,6 +9,7 @@
 //! through a vtable. Adding a kind is a variant plus an arm, and the compiler
 //! then names every site that needs updating.
 
+pub mod address;
 pub mod config;
 pub mod keychain;
 pub mod kv_v2;
@@ -21,11 +22,55 @@ use std::fmt;
 
 use secrecy::{ExposeSecret, SecretString};
 
+pub use address::SecretAddress;
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
-pub use keychain::KeychainBackend;
-pub use onepassword::{OnePasswordBackend, OpAccount};
-pub use openbao::{OpenBaoBackend, TokenError};
+pub use keychain::{KeychainBackend, KeychainReference};
+pub use onepassword::{
+    OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpReferenceError,
+    OpReferencePart,
+};
+pub use openbao::{OpenBaoBackend, OpenbaoReference, TokenError};
 pub use vars::VarFetchError;
+
+/// The kinds of backend that exist, as a closed set.
+///
+/// Named as a type rather than passed around as `&'static str` because the
+/// kind is what decides how a var is addressed, and a dispatch on a string
+/// would let a new backend slip through every match arm that has to change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BackendKind {
+    Keychain,
+    Openbao,
+    OnePassword,
+}
+
+impl BackendKind {
+    /// The `kind = "..."` spelling this is written with in the config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keychain => "keychain",
+            Self::Openbao => "openbao",
+            Self::OnePassword => "onepassword",
+        }
+    }
+
+    /// Whether `trg` can write to a backend of this kind.
+    ///
+    /// 1Password items are managed in 1Password, so an error about a missing
+    /// value there must not offer a `trg secret put` that would only fail.
+    pub fn is_writable(self) -> bool {
+        match self {
+            Self::Keychain | Self::Openbao => true,
+            Self::OnePassword => false,
+        }
+    }
+}
+
+impl fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SecretsError {
@@ -76,6 +121,31 @@ pub enum SecretsError {
         /// as well as through `unwrap` and `expect` on any `Result` carrying
         /// it. [`SecretString`] keeps all of those redacted.
         raw: Option<SecretString>,
+    },
+
+    /// A 1Password item is addressed by vault and title rather than by a
+    /// [`SecretPath`], so a bad answer about one cannot be reported as
+    /// [`SecretsError::Malformed`] without inventing a path to blame.
+    #[error("malformed response for 1Password item `{item}`: {cause}")]
+    MalformedItem { item: OnePasswordItem, cause: String },
+
+    /// A [`OnePasswordReference`] matched more than one field of that name in
+    /// the item. 1Password does not require a field label to be unique,
+    /// either within one section or across an item's sections, so this can
+    /// happen with two fields sharing a section, two reachable through
+    /// different sections that both satisfy what the reference names (or
+    /// names none of), or two unsectioned fields sharing a label. Picking one
+    /// arbitrarily risks silently returning the wrong secret, so this is
+    /// surfaced instead. `candidates` lists the matches by address
+    /// (`<section>/<field>`, or bare `<field>` when unsectioned) and never
+    /// carries a value.
+    #[error(
+        "`{field}` in 1Password item `{item}` is ambiguous: {candidates}; name a section, or address the field by its id, to pick one"
+    )]
+    AmbiguousField {
+        item: OnePasswordItem,
+        field: String,
+        candidates: String,
     },
 
     #[error("permission denied: {0}")]
@@ -143,7 +213,7 @@ pub enum RefError {
 /// Character-set restrictions belong at the backend boundary that needs them:
 /// the Keychain takes an arbitrary opaque account string, so anything the user
 /// can name a server is legal here.
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SecretPath(String);
 
 impl SecretPath {
@@ -410,13 +480,41 @@ impl Backend {
         }
     }
 
+    /// Read one 1Password item, the unit that backend answers in.
+    ///
+    /// Deliberately not folded into [`Self::get`]: no other backend has
+    /// items, and a kind that cannot answer says so rather than pretending
+    /// the address means something to it. Config load already refuses a var
+    /// addressed for the wrong kind, so this arm is the belt to that braces.
+    pub async fn get_item(&self, item: &OnePasswordItem) -> Result<Option<OnePasswordItemFields>, SecretsError> {
+        match self {
+            Self::OnePassword(b) => b.get_item(item).await,
+            #[cfg(test)]
+            Self::Fake(b) => b.get_item(item).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "item get",
+            }),
+        }
+    }
+
+    /// Read the map of values at one path.
+    ///
+    /// 1Password is not addressed this way and has no arm here: an item is
+    /// read through [`Self::get_item`], and the OAuth credential store, the
+    /// only caller that reaches a backend by a path it derived rather than one
+    /// a var spelled, is already closed to that kind by
+    /// [`Self::credential_path`].
     pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
         match self {
             Self::Keychain(b) => b.get(path).await,
             Self::OpenBao(b) => b.get(path).await,
-            Self::OnePassword(b) => b.get(path).await,
             #[cfg(test)]
             Self::Fake(b) => b.get(path).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "get by path",
+            }),
         }
     }
 
@@ -534,6 +632,20 @@ pub mod fake {
                 None => {}
             }
             Ok(self.entries.lock().expect("fake backend lock").get(path).cloned())
+        }
+
+        /// Stand in for a 1Password item read, over the same
+        /// `"<vault>/<title>"` entry `get` uses, so a caller that claims to
+        /// spend one read per item can be held to it without an `op` binary.
+        pub async fn get_item(&self, item: &OnePasswordItem) -> Result<Option<OnePasswordItemFields>, SecretsError> {
+            let path = SecretPath::parse(&item.to_string()).map_err(|cause| SecretsError::MalformedItem {
+                item: item.clone(),
+                cause: cause.to_string(),
+            })?;
+            Ok(self
+                .get(&path)
+                .await?
+                .map(|map| OnePasswordItemFields::from_secret_map(item, &map)))
         }
 
         pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {
