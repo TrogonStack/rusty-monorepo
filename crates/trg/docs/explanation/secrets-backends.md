@@ -55,6 +55,27 @@ value or `{ env = "..." }`, never `{ secret = "..." }`; every other field is a
 literal. Nothing needed to reach the secret store may itself live in the secret
 store.
 
+## A var is written in its backend's own vocabulary
+
+The credentials `trg` stores are addressed by a layout `trg` chose (below). A
+value someone else put in a backend is not. It already has an address, and
+that address is whatever the product holding it uses.
+
+So there is no single `{ path, key }` spelling imposed on every kind. A
+`keychain` or `openbao` var is a path and a key, because that is what those
+stores are. A `onepassword` var is a secret reference,
+`op://<vault>/<item>/<field>`, because that is what 1Password's own
+`Copy Secret Reference` button puts on the clipboard. Pasting it in unchanged
+is both less to get wrong and the only spelling that can reach a field inside
+a section at all, which a vault-and-item path plus a field label could not
+express.
+
+The cost is that the two are not interchangeable: a var written in the wrong
+one fails to load rather than being translated. Translating would mean
+inventing a vocabulary native to no backend, and would make a config's address
+something you cannot look up in the documentation of the product the secret
+lives in.
+
 ## Each backend owns its own path layout
 
 | Backend    | Where one server's credentials live                       |

@@ -37,10 +37,35 @@ use serde_json::{Map, Value};
 
 use super::kv_v2::{Envelope, ErrorBody, ListPayload, ReadPayload};
 use super::{SecretKey, SecretMap, SecretPath, SecretsError};
-use crate::config::{FetchedSecrets, VarResolveError, VarSource};
+use crate::config::{FetchedSecrets, RawVarSource, VarResolveError};
 
 /// Total request budget when the backend does not override it.
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
+
+/// How a config var addresses one value in this backend.
+///
+/// The path is relative to the backend's mount, prefix and owner, which is
+/// why it is not the same type as [`super::KeychainReference`] despite being
+/// spelled the same way: the two are joined onto entirely different things.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OpenbaoReference {
+    path: SecretPath,
+    key: SecretKey,
+}
+
+impl OpenbaoReference {
+    pub fn new(path: SecretPath, key: SecretKey) -> Self {
+        Self { path, key }
+    }
+
+    pub fn path(&self) -> &SecretPath {
+        &self.path
+    }
+
+    pub fn key(&self) -> &SecretKey {
+        &self.key
+    }
+}
 
 /// Connect budget, capped by the total so a tight `timeout_ms` stays honest.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
@@ -55,7 +80,7 @@ pub enum TokenSource {
     /// A file written by `bao login`, tilde-expanded at construction.
     File(PathBuf),
     /// A literal or `{ env = "..." }` declaration.
-    Var(VarSource),
+    Var(RawVarSource),
 }
 
 /// Why no token could be presented.
@@ -547,7 +572,7 @@ impl OpenBaoBackend {
     fn read_token(&self) -> Result<SecretString, TokenError> {
         match &self.token {
             TokenSource::Var(source) => Ok(SecretString::from(
-                source.resolve(&FetchedSecrets::new())?.trim().to_string(),
+                source.resolve_bootstrap(&FetchedSecrets::new())?.trim().to_string(),
             )),
             TokenSource::File(path) => read_token_file(path),
         }
@@ -1186,7 +1211,7 @@ mod tests {
             path_prefix: "trg".to_string(),
             owner: "yordis".to_string(),
             machine_id: Some("laptop".to_string()),
-            token: TokenSource::Var(VarSource::Literal("t".to_string())),
+            token: TokenSource::Var(RawVarSource::Literal("t".to_string())),
             ca_cert_file: None,
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
         }

@@ -26,7 +26,7 @@ anything else on the machine could read it out of `ps`, and out of the shell
 history:
 
 ```sh
-op read "op://Private/memorizer/token" | trg secret put \
+op read --account my.1password.com "op://Private/memorizer/token" | trg secret put \
   --backend local --path mcp/memorizer --key token
 ```
 
@@ -38,6 +38,10 @@ declare it with: { backend = "local", path = "mcp/memorizer", key = "token" }
 One trailing newline is stripped, because that one is the shell's rather than
 the secret's. An empty value is refused, since a command that failed upstream
 is the usual reason for one.
+
+A value that already lives in 1Password does not have to be copied like this
+at all: see
+[If the value already lives in 1Password](#if-the-value-already-lives-in-1password).
 
 Piping from a password manager is the safe form. A heredoc is not: bash records
 heredoc bodies in `HISTFILE` like any other input, so typing the value inline
@@ -67,7 +71,7 @@ token = { backend = "local", path = "mcp/memorizer", key = "token" }
 Authorization = ["Bearer ", { var = "token" }]
 ```
 
-The three coordinates are the secret's whole identity. They name nothing about
+The declaration is the secret's whole identity. It names nothing about
 which server reads it, so the same inline table can be pasted into as many
 servers as need that value, and a server that names a `secrets` backend for its
 own OAuth credentials can still read vars from a different one.
@@ -130,6 +134,45 @@ with the whole entry at a path, so those two cost one round trip between them,
 not two. `put` preserves the keys it did not write, so the second command above
 leaves `client_id` alone.
 
+## If the value already lives in 1Password
+
+Steps 1 to 3 copy a value into a backend `trg` can write to. A `onepassword`
+backend skips the copy: `trg` reads the item where it already is, so there is
+nothing to write and nothing to keep in sync afterwards.
+
+```toml
+[secrets.backends.personal]
+kind    = "onepassword"
+account = "my.1password.com"
+```
+
+Address the value with the reference the item's `Copy Secret Reference` button
+puts on your clipboard, as a var's `ref`:
+
+```toml trg-example=fragment
+[mcp.servers.memorizer.vars]
+token = { backend = "personal", ref = "op://Private/memorizer/token" }
+```
+
+A field inside a section takes one more segment,
+`op://<vault>/<item>/<section>/<field>`. That segment is optional when the
+field name is unique across the item, and the field may be named by its id
+instead of its label; matching ignores case either way. Check it the same way
+step 3 does, with `--ref` in place of `--path` and `--key`:
+
+```sh
+trg secret get --backend personal --ref "op://Private/memorizer/token"
+```
+
+References into the same item are read together, the way vars sharing a path
+are: `op item get` answers with every field on the item, so four references
+into one item cost one round trip between them, not four.
+
+This backend is read-only. `trg secret put` against it fails rather than
+writing, because the item is managed in 1Password itself. `path` and `key` are
+not a second spelling of a reference either: a var that uses them here fails to
+load.
+
 ## Troubleshooting
 
 **The backend is down and I need to reset a server's credentials**
@@ -156,9 +199,16 @@ heredoc.
 
 **``` `addr` cannot come from a secrets backend, because it is what reaching one requires ```**
 
-A `[secrets.backends.*]` entry's `addr` or `token` used
-`{ backend = ..., path = ..., key = ... }`. Reaching a backend cannot depend on
-having already reached it. Use a literal, `{ env = "..." }`, or `token_file`.
+A `[secrets.backends.*]` entry's `addr` or `token` used a secret var of any
+shape. Reaching a backend cannot depend on having already reached it. Use a
+literal, `{ env = "..." }`, or `token_file`.
+
+**``... which is addressed with a 1Password secret reference, not `path`/`key` ``**
+
+The var names a `onepassword` backend but was written with `path` and `key`.
+The message spells out the `ref` line to replace it with. The mirror case, a
+`ref` naming a `keychain` or `openbao` backend, reports the same thing in
+reverse.
 
 ## See also
 

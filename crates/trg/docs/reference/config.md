@@ -29,6 +29,7 @@ secrets = "<backend-name>"         # optional
 [mcp.servers.<name>.vars]
 <var-name> = "<literal>"           # or { env = "...", default = "..." }
                                    # or { backend = "...", path = "...", key = "..." }
+                                   # or { backend = "...", ref = "op://..." }
 
 [mcp.servers.<name>.headers]
 <HeaderName> = "<value>"
@@ -66,20 +67,40 @@ Each entry is one of:
   variable fails loading with `environment variable <NAME> is required but
   unset`.
 
-- An inline secret table (`VarSource`):
+- An inline secret table (`VarSource`), written in the vocabulary of the
+  backend it names:
 
     ```toml
-    token = { backend = "homelab", path = "mcp/prod", key = "token" }
+    token   = { backend = "homelab", path = "mcp/prod", key = "token" }
+    api_key = { backend = "personal", ref = "op://Ops/deploy-keys/api-token" }
     ```
 
-  The value is read from the named `[secrets.backends.<name>]` entry at
-  load time. All three fields are required; the declaration is the secret's
-  whole identity and says nothing about which server reads it, so the same
-  inline table can be pasted into as many servers as need that value.
+  `backend` is always required and names a `[secrets.backends.<name>]` entry.
+  What comes after it is whatever that entry's `kind` uses to address a value:
 
-  Vars naming the same `backend` and `path` are read together. A KV v2 read
-  answers with the whole entry at a path, so four vars pointing at one path
-  cost one round trip between them, not four.
+  | `kind`        | Address                                              |
+  | ------------- | ---------------------------------------------------- |
+  | `keychain`    | `path` and `key`, both required                      |
+  | `openbao`     | `path` and `key`, both required                      |
+  | `onepassword` | `ref`, a 1Password secret reference                  |
+
+  The two spellings are not interchangeable. A `path`/`key` var naming a
+  `onepassword` backend fails to load, and so does a `ref` var naming a
+  `keychain` or `openbao` one; see [Error reference](#error-reference). A var
+  naming a backend that no `[secrets.backends]` table declares fails to load
+  too, because there is no `kind` to say which of the two it should have been
+  written in.
+
+  The value is read at load time. The declaration is the secret's whole
+  identity and says nothing about which server reads it, so the same inline
+  table can be pasted into as many servers as need that value.
+
+  Vars that share a round trip are read together. For `keychain` and
+  `openbao` that means vars naming the same `backend` and `path`, because a
+  KV v2 read answers with the whole entry at a path; for `onepassword` it
+  means references into the same item, because `op item get` answers with
+  every field on it. Four vars pointing at one path, or four references into
+  one item, cost one round trip between them, not four.
 
 Unknown keys in an env or secret table (e.g. `{ env = "X", typo = true }`)
 are rejected at parse time. The two shapes are told apart by their fields, so
@@ -103,9 +124,9 @@ dir = [{ env = "HOME" }, "/app/state"]
 ```
 
 This resolves to `<value of $HOME>/app/state`. Each array element is a full
-`VarSource` — a literal, `{ env = ... }`, or `{ backend = ..., path = ...,
-key = ... }` — and a plain scalar value (as shown above for `vars`) still
-works exactly as before.
+`VarSource`: a literal, `{ env = ... }`, `{ backend = ..., path = ...,
+key = ... }`, or `{ backend = ..., ref = "op://..." }`. A plain scalar value
+(as shown above for `vars`) still works exactly as before.
 
 This composition is available only for `env`. `vars`, `url`, and header
 values still accept only a single `VarSource` (for `vars`) or `VarTemplate`
@@ -119,6 +140,14 @@ Reading a secret var needs a working backend, which reading it through
 
 ```console
 $ trg secret get --backend homelab --path mcp/prod --key token
+```
+
+The flags mirror the var: a backend addressed by `path` and `key` is checked
+with `--path` and `--key`, and one addressed by a secret reference is checked
+with `--ref`.
+
+```console
+$ trg secret get --backend personal --ref "op://Ops/deploy-keys/api-token"
 ```
 
 ## `[mcp.servers.<name>]`
@@ -304,10 +333,40 @@ read.
 | --------- | ------ | -------- | ---------------------------------------------------------------------- |
 | `account` | string | yes      | Which `op` account to read from: its sign-in address, the bare subdomain of that address, email, user UUID or account UUID — any form `op --account` accepts. |
 
-A path here is `<vault>/<item>`, e.g. `Ops/deploy-keys` for an item named
-`deploy-keys` in the `Ops` vault, and each key is that item's field label. One
-`get` reads every field on the item, same as a single OpenBao or Keychain read
+A value here is addressed by a 1Password secret reference, written as a var's
+`ref`: `op://<vault>/<item>/<field>`, or `op://<vault>/<item>/<section>/<field>`
+for a field that lives inside a section. That is 1Password's own spelling of
+an address, so a reference pastes verbatim out of the item's `Copy Secret
+Reference` button with nothing to translate, and a field inside a section is
+addressable at all, which a `<vault>/<item>` path plus a bare field label
+cannot express. A var addressing this backend is that reference and nothing
+else:
+
+```toml
+token = { backend = "personal", ref = "op://Ops/deploy-keys/api-token" }
+```
+
+A reference is matched the way `op` itself matches one, so anything that
+resolves through `op read` resolves here:
+
+- The field segment names either the field's label or its id. An imported
+  field can carry only an id, and that is the only way to address it.
+- Matching is case-insensitive, for the field and for the section.
+- The section segment is optional even for a field that lives in a section,
+  as long as the name picks out one field. 1Password does not require a field
+  label to be unique, either within a section or across an item's sections, so
+  more than one field can match a name whether or not the reference names a
+  section; rather than guess between them, this is an error listing the
+  matches: see `... is ambiguous: ...` in
+  [Error reference](#error-reference).
+
+One read fetches the whole item, so several references into the same item
+cost one `op item get` between them, same as a single OpenBao or Keychain read
 yields every key stored at a path.
+
+The query parameters `op read` accepts, such as `?attribute=otp`, are rejected
+here: what they name is derived at read time rather than a field the item
+stores, and a var is a reference to a stored value.
 
 ```toml
 [secrets.backends.personal]
@@ -345,9 +404,21 @@ managed by hand, through the 1Password app or `op` CLI directly, not through
 
 It also cannot store an MCP server's OAuth credentials: a bare server name
 carries no vault to address, and there is no default vault to guess at the way
-OpenBao derives a path from a machine id. Addressing this backend directly by
-path — as an `[exec.<name>.env]` entry's `{ backend = "...", path = "...", key = "..." }`
-does — works as usual; only the OAuth credential-storage path is closed to it.
+OpenBao derives a path from a machine id.
+
+Reading is unaffected. An `[exec.<name>.env]` entry addresses this backend the
+same way an MCP server's var does, by `ref`:
+
+```toml
+[exec.claude]
+command = "claude"
+
+[exec.claude.env]
+API_TOKEN = { backend = "personal", ref = "op://Ops/deploy-keys/api-token" }
+```
+
+`{ backend = "...", path = "...", key = "..." }` naming this backend is a load
+error rather than a second spelling of the same address.
 
 ### Credential layout
 
@@ -478,9 +549,10 @@ status if there is no matching item; scripts should account for that.
 ## `[exec.<name>]`
 
 An entry names a command `trg exec run <name>` execs into, with its own `env`
-resolved the same way a server's `vars` are — literal, `{ env = ... }`, or
-`{ backend = ..., path = ..., key = ... }`. `trg exec list` prints every
-declared name.
+resolved the same way a server's `vars` are: a literal, `{ env = ... }`,
+`{ backend = ..., path = ..., key = ... }`, or
+`{ backend = ..., ref = "op://..." }`. `trg exec list` prints every declared
+name.
 
 ```toml trg-example=skip
 [exec.<name>]
@@ -491,6 +563,7 @@ unset   = ["<ENV_NAME>", "..."] # optional
 [exec.<name>.env]
 <VAR-NAME> = "<literal>"        # or { env = "...", default = "..." }
                                  # or { backend = "...", path = "...", key = "..." }
+                                 # or { backend = "...", ref = "op://..." }
 ```
 
 | Field     | Type                  | Required | Notes                                                                 |
@@ -511,7 +584,8 @@ to start is reported back, in `--output-format text` or `json`.
 `--env KEY=VALUE` on the command line is for a one-off literal like `DEBUG=1`,
 applied after the entry's own `env`. It is not a place for a secret: like
 every other flag it lands in `argv` and shell history. A secret belongs in the
-entry's `env` table as a `{ backend = ..., path = ..., key = ... }`.
+entry's `env` table as a `{ backend = ..., path = ..., key = ... }` or
+`{ backend = ..., ref = "op://..." }`.
 
 ## Examples
 
@@ -562,6 +636,30 @@ Authorization = ["Bearer ", { var = "token" }]
 Nothing has to be exported into the environment first. Write the value once
 with `trg secret put --backend homelab --path mcp/memorizer --key token` and
 every server naming that declaration reads the same value.
+
+### Token read from a 1Password item
+
+```toml
+[secrets.backends.personal]
+kind    = "onepassword"
+account = "my.1password.com"
+
+[mcp.servers.memorizer]
+url = "https://mcp.example.com/mcp"
+
+[mcp.servers.memorizer.vars]
+token   = { backend = "personal", ref = "op://Ops/deploy-keys/api-token" }
+account = { backend = "personal", ref = "op://Ops/deploy-keys/staging/account-id" }
+
+[mcp.servers.memorizer.headers]
+Authorization = ["Bearer ", { var = "token" }]
+X-Account     = [{ var = "account" }]
+```
+
+Each `ref` is what the item's `Copy Secret Reference` button puts on the
+clipboard, so nothing has to be transcribed. The second one reaches a field
+in the item's `staging` section. Both name the same item, so loading this
+config costs one `op item get`, not two.
 
 ### URL composed from static + env-sourced pieces
 
@@ -662,6 +760,17 @@ trg exec run claude -- --resume
 | `environment variable <NAME> is required but unset` | A `vars` entry's env had no `default` and the env var was missing. |
 | `var ... found nothing at that path` | A secret var's `path` has never been written. The message names the `trg secret put` that writes it. |
 | `var ... found no such key there` | The path exists but holds different keys. The message lists the keys that are there, never their values. |
+| `... names backend <name>, which is not declared; declared: ...` | A var's `backend` matches no `[secrets.backends.<name>]` entry, so there is no `kind` to say how the var should have been addressed. |
+| `... names backend <name>, but no secrets backends are declared` | The same, in a config with no `[secrets.backends]` at all. |
+| `` ... which is addressed with a 1Password secret reference, not `path`/`key` `` | A var used `path` and `key` against a `onepassword` backend. The message spells out the `ref` line to replace it with. |
+| `` ... which is addressed with `path` and `key`, not `ref` `` | A var used `ref` against a `keychain` or `openbao` backend. |
+| `` ... which needs both `path` and `key`; `<field>` is missing `` | Only one half of a path-and-key address was given. |
+| `` 1Password secret reference `...` must start with `op://` `` | The `ref` is not a secret reference. Use the item's `Copy Secret Reference` button. |
+| `` 1Password secret reference `...` must be `op://<vault>/<item>/<field>` or `op://<vault>/<item>/<section>/<field>` `` | The reference has too few or too many segments. |
+| `` 1Password secret reference `...` must not contain an empty segment `` | A `//` or a trailing `/` left a vault, item, section, or field name empty. |
+| `` 1Password secret reference `...` must not start with `-` in its <vault/item> `` | The vault or the item/title started with `-`, which `op` would read as a flag rather than a value to look up. Only the vault and item are checked this way; a section or field named `-foo` is unaffected. |
+| `` 1Password secret reference `...` carries `?<query>`, which is not supported by this backend `` | A query such as `?attribute=otp` names something derived at read time rather than a stored field. |
+| `` `<field>` in 1Password item `<item>` is ambiguous: ...; name a section, or address the field by its id, to pick one `` | More than one field matched that name: 1Password does not require labels to be unique within a section or across an item's sections. The message lists each match as `<section>/<field>` (or bare `<field>` when unsectioned), never a value. |
 | `` `<field>` cannot come from a secrets backend `` | A `[secrets.backends.*]` `addr` or `token` used `{ backend = ... }`. |
 | `undefined variable <NAME> referenced; declare it in [mcp.servers.<name>.vars]` | `{ var = "..." }` references a name not present in `vars`. |
 | TOML parse errors                                 | Unknown fields, malformed TOML, or `{ env = "..." }` used directly in `url`/headers (must go through `vars`). |

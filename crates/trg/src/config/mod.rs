@@ -1,8 +1,10 @@
 //! `~/.config/trg/config.toml` loader for `trg mcp *` (and future subcommands).
 //!
 //! Env-backed inputs are declared once in `[mcp.servers.<name>.vars]` as
-//! `VarSource` entries (literal string, `{ env, default? }` table, or
-//! `{ backend, path, key }` table naming a secrets backend). The
+//! `VarSource` entries (literal string, `{ env, default? }` table, or a table
+//! naming a secrets backend and addressing one value inside it in that
+//! backend's own vocabulary, `{ backend, path, key }` or
+//! `{ backend, ref }`). The
 //! server's `url` and each header value (`VarTemplate`) accept three shapes:
 //!   - a TOML string (literal),
 //!   - a `{ var = "<name>" }` reference to a `vars` entry,
@@ -12,8 +14,8 @@
 //!
 //! `[exec.<name>.env]` has no separate `vars` table to indirect through, so
 //! each value (`EnvValue`) accepts a `VarSource` directly, or a TOML array of
-//! them concatenated in order — inline `{ env = "..." }` and
-//! `{ backend, path, key }` are both allowed inside that array.
+//! them concatenated in order. Inline `{ env = "..." }` and a secret table are
+//! both allowed inside that array.
 
 #[cfg(test)]
 mod doc_examples;
@@ -25,7 +27,10 @@ use std::path::{Path, PathBuf};
 use http::HeaderName;
 pub use secrecy::SecretString;
 use serde::Deserialize;
-pub use var::{EnvValue, FetchedSecrets, SecretVar, Segment, VarRef, VarResolveError, VarSource, VarTemplate};
+pub use var::{
+    EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretVar, SecretVarError, Segment, VarRef,
+    VarResolveError, VarSite, VarSource, VarTemplate,
+};
 
 use crate::secrets::SecretsSection;
 
@@ -66,6 +71,9 @@ pub enum ConfigError {
 
     #[error("unknown exec entry `{name}` — known: {available}")]
     UnknownExecEntry { name: String, available: String },
+
+    #[error("{0}")]
+    SecretVar(#[from] SecretVarError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,9 +94,14 @@ struct McpSection {
     servers: HashMap<String, McpServerEntryRaw>,
 }
 
+/// One `[mcp.servers.<name>]` entry.
+///
+/// Generic over the secret payload so that the entry read out of the file and
+/// the entry whose vars have been checked against the declared backends are
+/// different types. Deserialisation only ever produces the raw one.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-struct McpServerEntryRaw {
+#[serde(deny_unknown_fields, bound(deserialize = "S: Deserialize<'de>"))]
+struct McpServerEntry<S = SecretVar> {
     url: VarTemplate,
     #[serde(default)]
     transport: Option<String>,
@@ -101,14 +114,45 @@ struct McpServerEntryRaw {
     #[serde(default)]
     headers: Option<HashMap<String, VarTemplate>>,
     #[serde(default)]
-    vars: Option<HashMap<String, VarSource>>,
+    vars: Option<HashMap<String, VarSource<S>>>,
     #[serde(default)]
     secrets: Option<String>,
 }
 
+type McpServerEntryRaw = McpServerEntry<RawSecretVar>;
+
+impl McpServerEntryRaw {
+    fn into_resolved(self, name: &str, secrets: &SecretsSection) -> Result<McpServerEntry, SecretVarError> {
+        let vars = match self.vars {
+            None => None,
+            Some(table) => Some(
+                table
+                    .into_iter()
+                    .map(|(key, source)| {
+                        source
+                            .into_resolved(secrets, || VarSite::mcp_var(name, &key))
+                            .map(|source| (key, source))
+                    })
+                    .collect::<Result<HashMap<_, _>, _>>()?,
+            ),
+        };
+        Ok(McpServerEntry {
+            url: self.url,
+            transport: self.transport,
+            max_disconnected_time: self.max_disconnected_time,
+            initial_retry_interval: self.initial_retry_interval,
+            override_protocol_version: self.override_protocol_version,
+            headers: self.headers,
+            vars,
+            secrets: self.secrets,
+        })
+    }
+}
+
+/// One `[exec.<name>]` entry, generic for the reason [`McpServerEntry`] is.
 #[derive(Debug, Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-struct ExecEntryRaw {
+#[serde(deny_unknown_fields, bound(deserialize = "S: Deserialize<'de>"))]
+struct ExecEntry<S = SecretVar> {
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -117,7 +161,29 @@ struct ExecEntryRaw {
     #[serde(default)]
     unset: Vec<String>,
     #[serde(default)]
-    env: HashMap<String, EnvValue>,
+    env: HashMap<String, EnvValue<S>>,
+}
+
+type ExecEntryRaw = ExecEntry<RawSecretVar>;
+
+impl ExecEntryRaw {
+    fn into_resolved(self, name: &str, secrets: &SecretsSection) -> Result<ExecEntry, SecretVarError> {
+        let env = self
+            .env
+            .into_iter()
+            .map(|(key, value)| {
+                value
+                    .into_resolved(secrets, || VarSite::exec_env(name, &key))
+                    .map(|value| (key, value))
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        Ok(ExecEntry {
+            command: self.command,
+            args: self.args,
+            unset: self.unset,
+            env,
+        })
+    }
 }
 
 /// Resolved server profile for MCP `proxy`.
@@ -171,7 +237,7 @@ pub struct LoadedMcp {
 /// offline or holding an expired token.
 #[derive(Debug)]
 pub struct PendingMcp {
-    raw: McpServerEntryRaw,
+    entry: McpServerEntry,
     pub secrets: SecretsSection,
 }
 
@@ -181,7 +247,7 @@ impl PendingMcp {
     /// string rather than a var. Commands that only touch stored credentials
     /// need this and nothing else from the entry.
     pub fn server_secrets(&self) -> Option<&str> {
-        self.raw.secrets.as_deref()
+        self.entry.secrets.as_deref()
     }
 
     /// Every distinct secret this server's vars name.
@@ -189,13 +255,10 @@ impl PendingMcp {
     /// Deduplicated, because two vars pointing at the same coordinates are one
     /// read, and sorted so the order a caller sees does not depend on hashing.
     pub fn secret_vars(&self) -> Vec<SecretVar> {
-        let Some(vars) = &self.raw.vars else {
+        let Some(vars) = &self.entry.vars else {
             return Vec::new();
         };
-        let mut out: Vec<SecretVar> = vars.values().filter_map(|v| v.secret().cloned()).collect();
-        out.sort_by(|a, b| (&a.backend, &a.path, &a.key).cmp(&(&b.backend, &b.path, &b.key)));
-        out.dedup();
-        out
+        sorted_distinct(vars.values().filter_map(VarSource::secret).cloned())
     }
 
     pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedMcp, ConfigError> {
@@ -218,7 +281,7 @@ pub struct LoadedExec {
 /// it names is reachable.
 #[derive(Debug)]
 pub struct PendingExec {
-    raw: ExecEntryRaw,
+    entry: ExecEntry,
     pub secrets: SecretsSection,
 }
 
@@ -226,15 +289,25 @@ impl PendingExec {
     /// Every distinct secret this entry's `env` names, deduplicated and
     /// sorted for the same reason [`PendingMcp::secret_vars`] is.
     pub fn secret_vars(&self) -> Vec<SecretVar> {
-        let mut out: Vec<SecretVar> = self.raw.env.values().flat_map(|v| v.secrets()).cloned().collect();
-        out.sort_by(|a, b| (&a.backend, &a.path, &a.key).cmp(&(&b.backend, &b.path, &b.key)));
-        out.dedup();
-        out
+        sorted_distinct(self.entry.env.values().flat_map(EnvValue::secrets).cloned())
     }
 
     pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedExec, ConfigError> {
         finish_exec(self, fetched)
     }
+}
+
+/// Deduplicated and ordered, because two vars pointing at the same address
+/// are one read, and the order a caller sees should not depend on hashing.
+///
+/// Ordered on the rendered form rather than on the address itself: an address
+/// is not comparable across backend kinds, and what this is for is a stable
+/// sequence rather than a meaningful one.
+fn sorted_distinct(vars: impl Iterator<Item = SecretVar>) -> Vec<SecretVar> {
+    let mut out: Vec<SecretVar> = vars.collect();
+    out.sort_by_cached_key(|v| (v.backend().to_string(), v.address().to_string()));
+    out.dedup();
+    out
 }
 
 pub fn load_mcp(selected_name: &str) -> Result<PendingMcp, ConfigError> {
@@ -293,6 +366,32 @@ fn read_error(path: &Path, e: &std::io::Error) -> ConfigError {
     }
 }
 
+/// Check every var in the rest of the document, so a mistyped address is a
+/// config error wherever it was written.
+///
+/// A var is validated against the kind of the backend it names, and that
+/// pairing is a property of the file rather than of the entry being launched.
+/// Reporting it only for the selected entry would mean a config that loads
+/// today and fails tomorrow because a different server was asked for, which
+/// is the failure mode this whole phase exists to remove.
+fn check_mcp_addresses(mcp: Option<McpSection>, secrets: &SecretsSection) -> Result<(), SecretVarError> {
+    for (name, entry) in mcp.map(|m| m.servers).unwrap_or_default() {
+        entry.into_resolved(&name, secrets)?;
+    }
+    Ok(())
+}
+
+/// See [`check_mcp_addresses`].
+fn check_exec_addresses(
+    exec: Option<HashMap<String, ExecEntryRaw>>,
+    secrets: &SecretsSection,
+) -> Result<(), SecretVarError> {
+    for (name, entry) in exec.unwrap_or_default() {
+        entry.into_resolved(&name, secrets)?;
+    }
+    Ok(())
+}
+
 fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
 
@@ -311,7 +410,13 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigErr
         });
     };
 
-    Ok(PendingMcp { raw, secrets })
+    let entry = raw.into_resolved(selected_name, &secrets)?;
+    check_exec_addresses(root.exec, &secrets)?;
+    for (name, other) in servers {
+        other.into_resolved(&name, &secrets)?;
+    }
+
+    Ok(PendingMcp { entry, secrets })
 }
 
 fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
@@ -332,27 +437,33 @@ fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
         });
     };
 
-    Ok(PendingExec { raw, secrets })
+    let entry = raw.into_resolved(name, &secrets)?;
+    check_mcp_addresses(root.mcp, &secrets)?;
+    for (name, other) in entries {
+        other.into_resolved(&name, &secrets)?;
+    }
+
+    Ok(PendingExec { entry, secrets })
 }
 
 fn finish_exec(pending: PendingExec, fetched: &FetchedSecrets) -> Result<LoadedExec, ConfigError> {
-    let PendingExec { raw, secrets: _ } = pending;
+    let PendingExec { entry, secrets: _ } = pending;
 
-    let mut env = HashMap::with_capacity(raw.env.len());
-    for (k, v) in &raw.env {
+    let mut env = HashMap::with_capacity(entry.env.len());
+    for (k, v) in &entry.env {
         env.insert(k.clone(), v.resolve(fetched)?);
     }
 
     Ok(LoadedExec {
-        command: raw.command,
-        args: raw.args,
-        unset: raw.unset,
+        command: entry.command,
+        args: entry.args,
+        unset: entry.unset,
         env,
     })
 }
 
 fn finish_mcp(pending: PendingMcp, fetched: &FetchedSecrets) -> Result<LoadedMcp, ConfigError> {
-    let PendingMcp { raw, secrets } = pending;
+    let PendingMcp { entry: raw, secrets } = pending;
 
     let resolved_vars: HashMap<String, String> = match &raw.vars {
         None => HashMap::new(),
@@ -421,7 +532,19 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::secrets::keychain::KeychainReference;
+    use crate::secrets::{SecretAddress, SecretKey, SecretPath};
     use tempfile::tempdir;
+
+    fn keychain_var(backend: &str, path: &str, key: &str) -> SecretVar {
+        SecretVar::new(
+            backend.to_string(),
+            SecretAddress::Keychain(KeychainReference::new(
+                SecretPath::parse(path).expect("path"),
+                SecretKey::parse(key).expect("key"),
+            )),
+        )
+    }
 
     /// A config that exists but will not open must not be reported as one that
     /// was never written, since the two have opposite remedies.
@@ -516,6 +639,9 @@ mod tests {
         write_secure_config(
             &path,
             r#"
+            [secrets.backends.homelab]
+            kind = "keychain"
+
             [mcp.servers.s1]
             url = "https://example.com/mcp"
 
@@ -530,11 +656,7 @@ mod tests {
         let pending = load_mcp_at(&path, "s1").expect("parses without reaching anything");
         assert_eq!(
             pending.secret_vars(),
-            vec![SecretVar {
-                backend: "homelab".into(),
-                path: "agentgateway".into(),
-                key: "token".into(),
-            }]
+            vec![keychain_var("homelab", "agentgateway", "token")]
         );
 
         let mut fetched = FetchedSecrets::new();
@@ -547,6 +669,57 @@ mod tests {
         );
     }
 
+    /// A typo in a backend name has to read as the config mistake it is, and
+    /// it has to do so wherever it sits: launching `s1` must not hide that
+    /// `s2` or an unrelated exec entry can never run.
+    #[test]
+    fn a_var_naming_an_undeclared_backend_anywhere_in_the_document_fails_the_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [secrets.backends.homelab]
+            kind = "keychain"
+
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+
+            [mcp.servers.s1.vars]
+            a = { backend = "homelab", path = "agentgateway", key = "token" }
+
+            [mcp.servers.s2]
+            url = "https://example.com/other"
+
+            [mcp.servers.s2.vars]
+            b = { backend = "hoemlab", path = "agentgateway", key = "token" }
+
+            [exec.p]
+            command = "claude"
+
+            [exec.p.env]
+            TOKEN = { backend = "nowhere", path = "agentgateway", key = "token" }
+            "#,
+        );
+
+        let message = load_mcp_at(&path, "s1")
+            .expect_err("the document does not load")
+            .to_string();
+        assert!(
+            message.contains("`hoemlab`") || message.contains("`nowhere`"),
+            "{message}"
+        );
+        assert!(message.contains("declared: homelab"), "{message}");
+
+        let message = load_exec_at(&path, "p")
+            .expect_err("nor from the exec side")
+            .to_string();
+        assert!(
+            message.contains("[exec.p.env] TOKEN names backend `nowhere`"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn one_entry_read_by_two_vars_is_named_once() {
         let dir = tempdir().unwrap();
@@ -554,6 +727,9 @@ mod tests {
         write_secure_config(
             &path,
             r#"
+            [secrets.backends.homelab]
+            kind = "keychain"
+
             [mcp.servers.s1]
             url = "https://example.com/mcp"
 
@@ -573,10 +749,11 @@ mod tests {
             "the duplicate collapses and the literal is not a backend read: {wanted:?}"
         );
         assert_eq!(
-            wanted[0].key, "principal",
+            wanted[0],
+            keychain_var("homelab", "agentgateway", "principal"),
             "sorted, so the order does not depend on hashing"
         );
-        assert_eq!(wanted[1].key, "token");
+        assert_eq!(wanted[1], keychain_var("homelab", "agentgateway", "token"));
     }
 
     #[test]
@@ -1275,6 +1452,9 @@ api  = "v1"
         write_secure_config(
             &path,
             r#"
+            [secrets.backends.homelab]
+            kind = "keychain"
+
             [exec.p]
             command = "claude"
             unset = ["ANTHROPIC_API_KEY"]
