@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.8.2...trg@v0.9.0) (2026-09-10)
+
+
+### Features
+
+* **trg:** Address secrets in the vocabulary of the backend that holds them ([#104](https://github.com/TrogonStack/rusty-monorepo/issues/104)) ([6ed1fbc](https://github.com/TrogonStack/rusty-monorepo/commit/6ed1fbc9887cfaf7975b7efdbcf7dab83f4527b3))
+
 ## [0.8.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.8.1...trg@v0.8.2) (2026-09-09)
 
 
