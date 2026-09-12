@@ -164,9 +164,11 @@ trg ai skills eval verify ./runs/run-001/workspace --mode strict
 - Start with 2–4 assertions per eval case; add more as you discover failure modes.
 - Write assertions that fail for the `without_skill` scenario but pass for
   `with_skill`. That is the signal your skill adds value.
-- A `skill_used` grader is not that signal: it can only hold where the skill is
-  staged, so it is reported in both arms and scored in neither. Add `"arm":
-  "both"` when the point of the case is that the skill must not be engaged.
+- A `skill_used` grader is not that signal: it is settled by whether the skill
+  was staged, so it is reported in both arms and scored in neither. When the
+  point of the case is that the skill must *not* be engaged, write it as
+  `{"type": "skill_used", "negate": true, "arm": "both"}`, because failing it is
+  then the finding.
 - To ask whether the skill gets reached for at all, add
   `"skill_disclosure": "unannounced"` to the case. Announced prompts name the
   skill, so the routing decision is made for the run rather than by it.

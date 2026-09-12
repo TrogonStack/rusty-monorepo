@@ -235,9 +235,9 @@ every reader and to every runner.
 | `regex` | `pattern`, `target`, `negate` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
 | `contains` | `text`, `target`, `case`, `negate` | The target contains the text. `case` is `insensitive` (default) or `sensitive` |
 | `file_exists` | `path` | The run produced the file |
-| `tool_used` | `tool`, `min_calls` | The transcript shows at least `min_calls` calls to the tool |
+| `tool_used` | `tool`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive |
 | `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
-| `skill_used` | | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
+| `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
 | `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
 
 Every grader also accepts `arm`, which decides whether its result counts toward
@@ -251,6 +251,24 @@ the workspace itself, then the run directory. Declared outputs therefore win
 over an incidental file of the same name, and a plain `summary.md` still
 resolves when the agent wrote it straight into its working directory. A path
 that matches nowhere reports against the workspace candidate.
+
+### Stating that a tool or the skill must not be reached for
+
+A skill that answers a prompt it was never meant to answer is as much a defect
+as one that never fires, and a lower bound alone cannot say so, since every
+number of calls satisfies it. `max_calls` is the upper half:
+
+```json
+{ "type": "tool_used", "tool": "WebSearch", "min_calls": 0, "max_calls": 0 }
+```
+
+`min_calls: 0` on its own is refused. It accepts every run, and a check that
+cannot fail reads in a report exactly like one that held. So is a `max_calls`
+below `min_calls`, which no run can satisfy.
+
+Tool names belong to one harness's vocabulary, so the portable form of "the
+skill must not be reached for" is `skill_used` with `negate`, which answers on
+every runner. See [Arm-scoped graders](#arm-scoped-graders).
 
 ### Graders that depend on the transcript
 
@@ -292,7 +310,17 @@ reach for.
 
 `arm: both` is how a negative expectation is written: a case whose point is that
 the skill must *not* be engaged needs its `skill_used` grader scored, because
-failing it is the finding.
+failing it is the finding. Pair it with `negate` so the check reads the way the
+case means it:
+
+```json
+{ "type": "skill_used", "negate": true, "arm": "both" }
+```
+
+A negated engagement check is settled by the arm just as much as a plain one,
+which is why it still needs `arm: both`: there is no skill to engage in the
+without-skill arm, so "not engaged" holds there for a run that did nothing at
+all.
 
 `arm: with_only` is the manual form for anything trg cannot recognise on its
 own. Tool names belong to one harness's vocabulary, so a `tool_used` grader
@@ -438,7 +466,7 @@ adds `excluded`, which takes an arm-scoped grader out of the score in both arms.
       "passed": true,
       "evidence": "the run read the staged skill directory",
       "grader": { "kind": "declarative" },
-      "excluded": "'skill_used' cannot hold without the skill, so it is reported in both arms and scored in neither; declare 'arm': 'both' to score it anyway"
+      "excluded": "'skill_used' is settled by whether the skill was staged rather than by the run, so it is reported in both arms and scored in neither; declare 'arm': 'both' to score it anyway"
     }
   ],
   "summary": {

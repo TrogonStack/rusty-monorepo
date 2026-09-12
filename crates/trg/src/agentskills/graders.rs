@@ -1,5 +1,4 @@
 use std::fmt;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -7,6 +6,7 @@ use schemars::JsonSchema;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
+use super::call_bounds::CallBounds;
 use super::evals::{NonEmptyString, RelativeSkillPath};
 use super::transcript::{NormalizedTranscript, ToolName};
 
@@ -83,10 +83,6 @@ impl fmt::Display for GradeTarget {
     }
 }
 
-fn one() -> NonZeroUsize {
-    NonZeroUsize::new(1).expect("1 is non-zero")
-}
-
 /// Which arm of a with-skill versus without-skill comparison a grader is
 /// allowed to score in.
 ///
@@ -141,14 +137,18 @@ pub enum Grader {
     },
     ToolUsed {
         tool: ToolName,
-        #[serde(default = "one")]
-        min_calls: NonZeroUsize,
+        #[serde(flatten)]
+        calls: CallBounds,
     },
     ToolOrder {
         #[schemars(length(min = 2))]
         tools: Vec<ToolName>,
     },
-    SkillUsed,
+    SkillUsed {
+        #[serde(default, skip_serializing_if = "is_not_negated")]
+        #[schemars(extend("default" = false))]
+        negate: bool,
+    },
     Llm {
         criterion: NonEmptyString,
     },
@@ -162,7 +162,7 @@ impl Grader {
             Self::FileExists { .. } => "file_exists",
             Self::ToolUsed { .. } => "tool_used",
             Self::ToolOrder { .. } => "tool_order",
-            Self::SkillUsed => "skill_used",
+            Self::SkillUsed { .. } => "skill_used",
             Self::Llm { .. } => "llm",
         }
     }
@@ -193,33 +193,40 @@ impl Grader {
                 format!("{target} {verb} '{text}'{suffix}")
             }
             Self::FileExists { path } => format!("file '{path}' exists"),
-            Self::ToolUsed { tool, min_calls } => {
-                if min_calls.get() == 1 {
-                    format!("tool '{tool}' was used")
-                } else {
-                    format!("tool '{tool}' was used at least {min_calls} times")
-                }
-            }
+            Self::ToolUsed { tool, calls } => match calls.max() {
+                None if calls.min() == 1 => format!("tool '{tool}' was used"),
+                _ => format!("tool '{tool}' was used {calls}"),
+            },
             Self::ToolOrder { tools } => {
                 let names = tools.iter().map(ToolName::as_str).collect::<Vec<_>>().join(" then ");
                 format!("tools were used in order: {names}")
             }
-            Self::SkillUsed => "the skill was engaged".to_string(),
+            Self::SkillUsed { negate } => match negate {
+                true => "the skill was not engaged".to_string(),
+                false => "the skill was engaged".to_string(),
+            },
             Self::Llm { criterion } => criterion.to_string(),
         }
     }
 
     pub fn needs_tool_visibility(&self) -> bool {
-        matches!(self, Self::ToolUsed { .. } | Self::ToolOrder { .. } | Self::SkillUsed)
+        matches!(
+            self,
+            Self::ToolUsed { .. } | Self::ToolOrder { .. } | Self::SkillUsed { .. }
+        )
     }
 
-    /// Whether the grader states a property that cannot hold unless the skill
-    /// is staged, regardless of how well the run did the work it was asked to
-    /// do. Skill engagement is the harness-agnostic example, and the only one
-    /// trg can recognise without being told: a tool-name check is specific to
-    /// one harness's vocabulary, so it has to be marked by hand.
+    /// Whether the staging of the skill, rather than how well the run did the
+    /// work it was asked to do, decides the verdict. Skill engagement is the
+    /// harness-agnostic example, and the only one trg can recognise without
+    /// being told: a tool-name check is specific to one harness's vocabulary, so
+    /// it has to be marked by hand.
+    ///
+    /// A negated engagement check is settled by the arm just as much as a plain
+    /// one. There is no skill to engage in the without-skill arm, so "not
+    /// engaged" holds there for a run that did nothing at all.
     pub fn presupposes_the_skill(&self) -> bool {
-        matches!(self, Self::SkillUsed)
+        matches!(self, Self::SkillUsed { .. })
     }
 }
 
@@ -231,6 +238,10 @@ pub struct CaseGrader {
     pub grader: Grader,
     #[serde(default, skip_serializing_if = "is_default_arm")]
     pub arm: GraderArm,
+}
+
+fn is_not_negated(negate: &bool) -> bool {
+    !*negate
 }
 
 fn is_default_arm(arm: &GraderArm) -> bool {
@@ -258,7 +269,7 @@ impl CaseGrader {
                 GraderArm::WithOnly.as_str()
             )),
             GraderArm::Auto if self.grader.presupposes_the_skill() => Some(format!(
-                "'{}' cannot hold without the skill, so it is reported in both arms and scored in neither; declare 'arm': '{}' to score it anyway",
+                "'{}' is settled by whether the skill was staged rather than by the run, so it is reported in both arms and scored in neither; declare 'arm': '{}' to score it anyway",
                 self.grader.kind(),
                 GraderArm::Both.as_str()
             )),
@@ -419,11 +430,11 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                 GraderOutcome::from_bool(found.is_some() != *negate, evidence)
             }
         },
-        Grader::ToolUsed { tool, min_calls } => with_transcript(input, |transcript| {
-            let calls = transcript.tool_call_count(tool.as_str());
+        Grader::ToolUsed { tool, calls } => with_transcript(input, |transcript| {
+            let observed = transcript.tool_call_count(tool.as_str());
             GraderOutcome::from_bool(
-                calls >= min_calls.get(),
-                format!("'{tool}' was called {calls} time(s), needed {min_calls}"),
+                calls.admits(observed),
+                format!("'{tool}' was called {observed} time(s), expected {calls}"),
             )
         }),
         Grader::ToolOrder { tools } => with_transcript(input, |transcript| {
@@ -436,10 +447,10 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                 format!("observed tool order [{rendered}] {verb} the expected order"),
             )
         }),
-        Grader::SkillUsed => with_transcript(input, |transcript| {
+        Grader::SkillUsed { negate } => with_transcript(input, |transcript| {
             let engagement = transcript.skill_engagement();
             match engagement.engaged() {
-                Some(engaged) => GraderOutcome::from_bool(engaged, engagement.describe().to_string()),
+                Some(engaged) => GraderOutcome::from_bool(engaged != *negate, engagement.describe().to_string()),
                 None => GraderOutcome::Unsupported {
                     reason: unobservable_reason(transcript),
                 },
@@ -659,7 +670,7 @@ mod tests {
         let outcome = evaluate(
             &Grader::ToolUsed {
                 tool: tool("read"),
-                min_calls: one(),
+                calls: CallBounds::at_least_once(),
             },
             &fixture.input(),
         );
@@ -668,7 +679,7 @@ mod tests {
         let outcome = evaluate(
             &Grader::ToolUsed {
                 tool: tool("Read"),
-                min_calls: NonZeroUsize::new(2).unwrap(),
+                calls: CallBounds::parse(2, None).unwrap(),
             },
             &fixture.input(),
         );
@@ -699,7 +710,7 @@ mod tests {
     fn skill_used_passes_on_a_staged_path_reference() {
         let fixture = Fixture::new();
         assert!(matches!(
-            evaluate(&Grader::SkillUsed, &fixture.input()),
+            evaluate(&Grader::SkillUsed { negate: false }, &fixture.input()),
             GraderOutcome::Passed { .. }
         ));
     }
@@ -718,10 +729,10 @@ mod tests {
         };
 
         for grader in [
-            Grader::SkillUsed,
+            Grader::SkillUsed { negate: false },
             Grader::ToolUsed {
                 tool: tool("Read"),
-                min_calls: one(),
+                calls: CallBounds::at_least_once(),
             },
             Grader::ToolOrder {
                 tools: vec![tool("Read"), tool("Write")],
@@ -753,14 +764,14 @@ mod tests {
         };
 
         assert!(matches!(
-            evaluate(&Grader::SkillUsed, &input),
+            evaluate(&Grader::SkillUsed { negate: false }, &input),
             GraderOutcome::Passed { .. }
         ));
         assert!(matches!(
             evaluate(
                 &Grader::ToolUsed {
                     tool: tool("command_execution"),
-                    min_calls: one(),
+                    calls: CallBounds::at_least_once(),
                 },
                 &input
             ),
@@ -799,7 +810,7 @@ mod tests {
             raw_transcript: "",
             transcript: None,
         };
-        match evaluate(&Grader::SkillUsed, &input) {
+        match evaluate(&Grader::SkillUsed { negate: false }, &input) {
             GraderOutcome::Unsupported { reason } => assert!(reason.contains("no normalized transcript"), "{reason}"),
             other => panic!("expected unsupported, got {other:?}"),
         }
@@ -818,7 +829,7 @@ mod tests {
         assert!(grader
             .exclusion_reason()
             .expect("a reason is recorded")
-            .contains("cannot hold without the skill"));
+            .contains("settled by whether the skill was staged"));
     }
 
     #[test]
@@ -912,7 +923,7 @@ mod tests {
             (
                 Grader::ToolUsed {
                     tool: tool("Read"),
-                    min_calls: one(),
+                    calls: CallBounds::at_least_once(),
                 },
                 "tool 'Read' was used",
             ),
@@ -922,7 +933,8 @@ mod tests {
                 },
                 "tools were used in order: Read then Write",
             ),
-            (Grader::SkillUsed, "the skill was engaged"),
+            (Grader::SkillUsed { negate: false }, "the skill was engaged"),
+            (Grader::SkillUsed { negate: true }, "the skill was not engaged"),
         ];
         for (grader, expected) in cases {
             assert_eq!(grader.describe(), expected, "{}", grader.kind());
@@ -959,13 +971,49 @@ mod tests {
     }
 
     #[test]
-    fn min_calls_of_zero_is_rejected() {
+    fn a_lower_bound_of_zero_alone_is_rejected_as_a_check_that_cannot_fail() {
         let err = serde_json::from_value::<Grader>(serde_json::json!({
             "type": "tool_used",
             "tool": "Read",
             "min_calls": 0
         }))
         .unwrap_err();
-        assert!(err.to_string().contains("zero"), "{err}");
+        assert!(err.to_string().contains("max_calls"), "{err}");
+    }
+
+    /// The only way to state that a tool must not be reached for, which is how a skill
+    /// answering a prompt it was never meant to answer gets caught.
+    #[test]
+    fn a_tool_a_case_forbids_fails_the_moment_it_is_called() {
+        let grader: Grader = serde_json::from_value(serde_json::json!({
+            "type": "tool_used",
+            "tool": "Read",
+            "min_calls": 0,
+            "max_calls": 0
+        }))
+        .unwrap();
+        let fixture = Fixture::new();
+
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Failed { .. }
+        ));
+        assert_eq!(grader.describe(), "tool 'Read' was used never");
+    }
+
+    /// Over-triggering is the mirror of not triggering, and until now only one of the
+    /// two could be stated.
+    #[test]
+    fn a_skill_that_must_not_be_engaged_fails_on_the_run_that_engaged_it() {
+        let fixture = Fixture::new();
+
+        assert!(matches!(
+            evaluate(&Grader::SkillUsed { negate: false }, &fixture.input()),
+            GraderOutcome::Passed { .. }
+        ));
+        assert!(matches!(
+            evaluate(&Grader::SkillUsed { negate: true }, &fixture.input()),
+            GraderOutcome::Failed { .. }
+        ));
     }
 }
