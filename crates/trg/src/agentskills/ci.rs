@@ -68,6 +68,7 @@ pub enum CiViolationKind {
     FailedAssertion,
     MissingGrading,
     PassRateBelowMinimum,
+    NothingScored,
     PassRateRegression,
     TokenBudgetExceeded,
     InputTokenBudgetExceeded,
@@ -234,8 +235,13 @@ pub fn run_ci_checks(
         }
     }
 
-    if let (Some(minimum), Some(pass_rate)) = (thresholds.min_pass_rate, metrics.pass_rate) {
-        if pass_rate + f64::EPSILON < minimum {
+    // A threshold nothing was measured against is the one case where silence is the
+    // worst answer: the gate an operator asked for reports green over a pass that
+    // scored nothing at all, which is how a suite stops being run without anyone
+    // noticing. Excluding unsupported results from the rate is still right; having no
+    // rate to exclude them from is not the same thing.
+    match (thresholds.min_pass_rate, metrics.pass_rate) {
+        (Some(minimum), Some(pass_rate)) if pass_rate + f64::EPSILON < minimum => {
             violations.push(CiViolation {
                 kind: CiViolationKind::PassRateBelowMinimum,
                 message: format!("pass rate {pass_rate:.4} is below minimum {minimum:.4}"),
@@ -245,6 +251,20 @@ pub fn run_ci_checks(
                 line: None,
             });
         }
+        (Some(minimum), None) => {
+            violations.push(CiViolation {
+                kind: CiViolationKind::NothingScored,
+                message: format!(
+                    "a minimum pass rate of {minimum:.4} was required, but nothing was scored: {} run(s) completed, {} skipped, {} grading file(s) read",
+                    metrics.completed_runs, metrics.skipped_runs, metrics.grading_files
+                ),
+                run_id: None,
+                workspace: None,
+                file: None,
+                line: None,
+            });
+        }
+        _ => {}
     }
 
     if let Some(maximum) = thresholds.max_tokens {
@@ -566,6 +586,60 @@ mod tests {
             max_duration_ms: duration,
             total_duration_ms: duration,
         }
+    }
+
+    fn unscored_metrics(skipped_runs: usize) -> ReportMetrics {
+        ReportMetrics {
+            total_runs: skipped_runs,
+            skipped_runs,
+            completed_runs: 0,
+            pass_rate: None,
+            ..sample_metrics(0.0, 0, 0)
+        }
+    }
+
+    /// A gate that cannot be evaluated has to say so. Reporting it as met is how a
+    /// suite that stopped running keeps its green check.
+    #[test]
+    fn a_minimum_pass_rate_is_not_met_by_a_pass_that_scored_nothing() {
+        let result = run_ci_checks(
+            &unscored_metrics(6),
+            CiPolicy::default(),
+            &ThresholdConfig {
+                min_pass_rate: Some(1.0),
+                ..Default::default()
+            },
+            &[],
+            &[],
+        );
+
+        assert!(!result.passed);
+        let violation = result
+            .violations
+            .iter()
+            .find(|v| v.kind == CiViolationKind::NothingScored)
+            .expect("the unmet gate is reported");
+        assert!(
+            violation.message.contains("nothing was scored"),
+            "{}",
+            violation.message
+        );
+        assert!(violation.message.contains("6 skipped"), "{}", violation.message);
+    }
+
+    /// Asking for no minimum is not asking for a gate, so a scaffolded bundle stays
+    /// the useful thing it is.
+    #[test]
+    fn a_pass_that_scored_nothing_is_not_a_violation_on_its_own() {
+        let result = run_ci_checks(
+            &unscored_metrics(6),
+            CiPolicy::strict_ci(),
+            &ThresholdConfig::default(),
+            &[],
+            &[],
+        );
+
+        assert!(result.passed, "{:?}", result.violations);
     }
 
     #[test]
