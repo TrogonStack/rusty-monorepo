@@ -51,6 +51,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
+| `--allow-scaffold` | bool | `false` | Run the `scaffold` a case declares. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 
 ### Runner values
 
@@ -219,6 +220,7 @@ only accepted from the `schema_version` that introduced it.
 | `timeout_secs` | integer | no | Per-case runner timeout override |
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
 | `grader_hints` | object | no | Passed through to a script grader on stdin |
+| `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 
 A case must declare at least one `assertion` or one `grader`.
 
@@ -675,6 +677,67 @@ announcing the skill, because such a case cannot pass or fail for the reason it
 was written. The `init` scaffold's `triggers-the-skill` case is unannounced for
 that reason, and its prompt is a placeholder: replace it with the words a user
 would actually use, naming neither the skill nor where it lives.
+
+---
+
+## The state a case is asking about
+
+A run starts in an empty workspace, so by default every case is a cold first turn
+on a blank slate. A skill whose work depends on the state of a directory cannot be
+asked about that work there: a case about a repository mid-rebase, a project with a
+lockfile, or a file that is already wrong has no way to say so.
+
+A case says so with `scaffold`, a path to a script inside the skill directory:
+
+```json
+{
+  "id": "resolves-a-conflicted-rebase",
+  "prompt": "Finish the rebase.",
+  "expected_output": "The rebase is completed and the conflict is resolved.",
+  "scaffold": "evals/scaffolds/conflicted-rebase.sh",
+  "graders": [{ "type": "tool_used", "tool": "Bash", "input_match": "git rebase" }]
+}
+```
+
+The script runs with the workspace as its working directory, before the skill and
+the case's `files` are staged, so what a case declares in `files` survives what its
+scaffold wrote to the same path. It must be executable; it is spawned directly, so
+its shebang decides what interprets it.
+
+Every attempt starts from an emptied workspace, so a retry after a runner failure
+re-runs the script on the directory the case declared rather than on what the last
+attempt left behind. The script does not have to be idempotent.
+
+trg runs the script itself rather than asking a harness to, which is what makes the
+case portable: the same case puts the same directory in front of `claude-code`,
+`codex` and `cursor-agent`, and none of them needs a setup mechanism of its own.
+
+### `--allow-scaffold` is required
+
+The script is author-supplied code that runs with the operator's own reach, so
+nothing runs it on the strength of a manifest alone. Without `--allow-scaffold` a
+case that declares a scaffold **fails its runs**, naming the script and the flag.
+
+It fails rather than running on a blank slate because a case scored against a
+workspace it never asked for reads as an answer about the skill when it is an answer
+about the wrong directory. Only that case's runs fail, so the rest of the suite is
+still measured.
+
+A pass with no `--runner` neither runs the scaffold nor needs the flag, because its
+runs are scaffolded as `skipped` and no agent starts in the workspace.
+
+A case's scaffold is part of what identifies its runs, so editing the script
+re-executes rather than serving a cached run, under `--no-cache` and under
+`--reuse-completed` alike.
+
+### What is deliberately not here
+
+Seeding a conversation, so a case can ask about a mid-conversation turn rather than
+a first one, is not supported. Resuming a transcript is a per-harness mechanism:
+the file format, the flag, and whether resumption is possible at all differ across
+`claude-code`, `codex` and `cursor-agent`. A field that worked on one and silently
+did nothing on the others would make a suite's results incomparable, which is the
+one thing trg exists to avoid.
 
 ---
 

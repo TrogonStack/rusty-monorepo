@@ -3,6 +3,7 @@ use super::grading::{self, GradingFile};
 use super::outputs::guess_mime_type;
 use super::runner::TimingFile;
 use super::validation::{ValidationError, ValidationErrors};
+use super::workspace_scaffold::WorkspaceScaffold;
 use crate::fs::FileSystem;
 use schemars::JsonSchema;
 use serde::de::{self, Visitor};
@@ -301,6 +302,10 @@ pub struct EvalCase {
     pub graders: Vec<CaseGrader>,
     #[serde(default, skip_serializing_if = "is_announced")]
     pub skill_disclosure: SkillDisclosure,
+    /// The state this case is asking about, for a case that is not asking about an empty
+    /// directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaffold: Option<WorkspaceScaffold>,
 }
 
 impl EvalCase {
@@ -1424,6 +1429,7 @@ mod tests {
             grader_hints: None,
             graders: vec![],
             skill_disclosure: SkillDisclosure::default(),
+            scaffold: None,
         }
     }
 

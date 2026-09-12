@@ -42,6 +42,7 @@ fn bash_request<'a>(
         timeout_secs,
         skill_staging: crate::agentskills::report::SkillStaging::Symlink,
         environment: crate::agentskills::report::EnvironmentPolicy::Scrubbed,
+        scaffold_permission: crate::agentskills::workspace_scaffold::ScaffoldPermission::Withheld,
     }
 }
 
@@ -95,7 +96,9 @@ fn bash_runner_retries_transient_failures() {
     let stderr = workspace.join("stderr.log");
     let request = bash_request(&case, &workspace, &transcript, &stderr, None);
 
-    let counter = workspace.join("attempts");
+    // Outside the workspace: every attempt is handed a workspace emptied of what the last
+    // one left, so a tally kept inside it would be the tally of a single attempt.
+    let counter = temp.path().join("attempts");
     let script = format!(
         r#"
 count=0
