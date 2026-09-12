@@ -109,7 +109,24 @@ pub(crate) fn grade_report_dir_with_report(
             if !format.is_json() {
                 print_report_dir(report_dir);
                 println!("Graded {} run(s)", report.runs_graded);
-                println!("  assertions: {}/{} passed", report.passed, report.assertions_graded);
+                println!(
+                    "  assertions: {}/{} passed",
+                    report.passed,
+                    report.assertions_graded - report.unsupported
+                );
+                if report.unsupported > 0 {
+                    println!(
+                        "  unsupported: {} (not gradable on this runner, excluded from the tally above)",
+                        report.unsupported
+                    );
+                }
+                if let Some(detail) = report.run_statuses.describe_not_completed() {
+                    println!(
+                        "  runs not completed: {} ({}), so an empty workspace grades as a failure",
+                        report.run_statuses.not_completed(),
+                        detail
+                    );
+                }
                 if report.needs_llm > 0 {
                     println!("  needs LLM: {}", report.needs_llm);
                 }

@@ -203,6 +203,57 @@ pub struct GradeReport {
     pub needs_llm: usize,
     #[serde(default)]
     pub unsupported: usize,
+    #[serde(default)]
+    pub run_statuses: GradedRunStatuses,
+}
+
+/// The run statuses behind an assertion tally.
+///
+/// An assertion tally alone cannot separate a skill that failed its checks from
+/// a runner that never produced a workspace to check, and both arrive as
+/// `0/N passed`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GradedRunStatuses {
+    pub completed: usize,
+    pub failed: usize,
+    pub timed_out: usize,
+    pub skipped: usize,
+    pub unrecognized: usize,
+}
+
+impl GradedRunStatuses {
+    pub fn record(&mut self, status: &str) {
+        match status {
+            "completed" => self.completed += 1,
+            "failed" => self.failed += 1,
+            "timeout" => self.timed_out += 1,
+            "skipped" => self.skipped += 1,
+            _ => self.unrecognized += 1,
+        }
+    }
+
+    pub fn not_completed(self) -> usize {
+        self.failed + self.timed_out + self.skipped + self.unrecognized
+    }
+
+    pub fn describe_not_completed(self) -> Option<String> {
+        let parts: Vec<String> = [
+            (self.failed, "failed"),
+            (self.timed_out, "timed out"),
+            (self.skipped, "skipped"),
+            (self.unrecognized, "of an unrecognized status"),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} {label}"))
+        .collect();
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +385,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         failed: 0,
         needs_llm: 0,
         unsupported: 0,
+        run_statuses: GradedRunStatuses::default(),
     };
 
     let runs = document.runs.clone();
@@ -385,6 +437,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
 
         store_grader_artifacts(run_mut, report_dir, &ctx, &options, &grading)?;
 
+        report.run_statuses.record(&run.status);
         report.runs_graded += 1;
     }
 
@@ -1696,6 +1749,28 @@ mod tests {
     }
 
     #[test]
+    fn a_grade_tally_names_the_runs_that_never_completed() {
+        let mut statuses = GradedRunStatuses::default();
+        for status in ["completed", "failed", "timeout", "skipped", "exploded"] {
+            statuses.record(status);
+        }
+
+        assert_eq!(statuses.completed, 1);
+        assert_eq!(statuses.not_completed(), 4);
+        assert_eq!(
+            statuses.describe_not_completed().as_deref(),
+            Some("1 failed, 1 timed out, 1 skipped, 1 of an unrecognized status")
+        );
+
+        let clean = GradedRunStatuses {
+            completed: 3,
+            ..GradedRunStatuses::default()
+        };
+        assert_eq!(clean.not_completed(), 0);
+        assert_eq!(clean.describe_not_completed(), None);
+    }
+
+    #[test]
     fn grading_a_run_from_an_unobservable_runner_reports_unsupported_instead_of_failed() {
         let temp = tempdir().unwrap();
         let (report_dir, run_dir) = unobservable_report_dir(&temp);
@@ -1715,6 +1790,12 @@ mod tests {
         assert_eq!(report.passed, 1);
         assert_eq!(report.failed, 0);
         assert_eq!(report.needs_llm, 0);
+        assert_eq!(report.run_statuses.skipped, 1);
+        assert_eq!(report.run_statuses.completed, 0);
+        assert_eq!(
+            report.run_statuses.describe_not_completed().as_deref(),
+            Some("1 skipped")
+        );
 
         let grading: GradingFile =
             serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
