@@ -43,6 +43,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--runner-model` | string | *(unset)* | Model identifier forwarded to the runner CLI (`--model` / `-m`). When unset, the runner picks its own default |
 | `--force` | bool | `false` | Overwrite an existing report directory if it already exists |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
+| `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
 
 ### Runner values
 
@@ -319,6 +320,7 @@ subcommands run.
 | `generated_at` | string | RFC 3339 timestamp |
 | `producer.name` | string | Always `trg` |
 | `producer.version` | string | `trg` crate version |
+| `environment` | string | Environment policy the runs were executed under: `scrubbed`, `isolated`, or `inherited` |
 | `ci` | object | Present when running inside GitHub Actions (`GITHUB_ACTIONS=true`) |
 
 ### `suite` section
@@ -518,6 +520,91 @@ to the skill root.
 same `name` as the current one unless you pass `--allow-skill-name-mismatch`,
 which guards against comparing two unrelated skills by accident. Tampering
 detection is scoped to the old skill directory for these runs.
+
+---
+
+## Run environment
+
+A harness subprocess inherits nothing by accident. `--environment` chooses how
+much of the host machine a run can see.
+
+| Policy | Environment | `HOME` | Harness config home |
+| ------ | ----------- | ------ | ------------------- |
+| `scrubbed` (default) | Replaced with an allowlist | Host | Host |
+| `isolated` | Replaced with an allowlist | Per run | Per run |
+| `inherited` | Passed through untouched | Host | Host |
+
+The allowlist is fixed: the variables a CLI needs to start (`PATH`, `TMPDIR`,
+`HOME`, locale and terminal settings), the variables that decide whether it can
+reach the network (proxies and their trust stores), the cloud credential
+variables, the credential variables for the harness being run, and the variable
+that names the harness config home. Everything else is dropped.
+
+The config home variable is on the list because `scrubbed` leaves the config
+home alone. Dropping it would not leave it alone: the harness would fall back to
+the default under `HOME`, which is neither the operator's config home nor one
+this run set up.
+
+Scrubbing is not only about secrets. Launching `trg` from inside an agent
+session puts that session's own identity in the environment, including a live IPC
+socket and token, and passing those to a run hands it a channel back into the
+session that launched it. Project variables are dropped for the same reason a
+fixture is declared rather than assumed: a run that depends on one is not
+reproducible anywhere else.
+
+Each harness receives only its own credential variables, so a `codex` run cannot
+read an Anthropic key and a `claude-code` run cannot read an OpenAI one.
+
+### `--environment isolated`
+
+The harness config home is where a harness keeps the per-user state that changes
+what its agent does: installed skills, global instruction files, MCP servers,
+permission settings, and history. Under `scrubbed` that state is still live, so
+a skill the operator happens to have installed globally is present in *both*
+arms of a comparison, and the baseline is not a baseline.
+
+`isolated` moves it aside. The run gets `HOME` inside its own run directory, and
+the harness config home is redirected into it:
+
+| Harness | Redirected by |
+| ------- | ------------- |
+| `claude-code` | `CLAUDE_CONFIG_DIR` |
+| `codex` | `CODEX_HOME` |
+| `cursor-agent` | `HOME` only; the CLI has no config home variable |
+
+Authentication has to survive the redirect, so the auth files from the host
+config home are carried into the run's config home, and nothing beside them is.
+A file that holds credentials and nothing else is symlinked rather than copied,
+so no credential is duplicated onto disk and a token refresh still reaches the
+real file.
+
+`cursor-agent` keeps its login in `cli-config.json`, alongside its permissions,
+approval mode, and model selection, which are exactly what an isolated run holds
+still. That file is therefore reduced rather than symlinked: only the members
+that carry the login are written into the run's config home. Anything
+unrecognized is left behind, so a harness that moves its login elsewhere fails
+to authenticate rather than quietly handing the run the operator's settings
+again.
+
+That is not always sufficient. A harness may derive the identity of its
+credential store from the config home path, in which case redirecting the path
+invalidates a working login. Where the harness exposes a variable that locates
+credentials independently, an isolated run pins it to the host config home;
+`claude-code` is pinned through `CLAUDE_SECURESTORAGE_CONFIG_DIR`. Where it does
+not, an isolated run needs credentials reachable from the environment, which is
+the normal case in CI and the reason `isolated` is the right policy there.
+
+`--environment inherited` is the escape hatch for a machine where neither route
+works. It reproduces the behaviour of releases before this flag existed, and
+because it is recorded in `report.json` a reader can tell that a comparison was
+made against an unknown baseline.
+
+Every policy writes the variables a run actually received to `env.json` in the
+run directory, with secret-looking values left out.
+
+The policy is part of a run's cache identity, alongside `--skill-staging`. A
+completed run answers only for what it was allowed to see, so switching either
+flag executes again rather than serving a run that saw something else.
 
 ---
 

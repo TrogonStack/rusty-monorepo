@@ -113,6 +113,26 @@
       ],
       "type": "object"
     },
+    "EnvironmentPolicy": {
+      "description": "How much of the operator's machine a run's harness subprocess is allowed to see.\n\nA run that inherits the operator's environment is not reproducible: the harness picks\nup whatever skills, instructions, MCP servers, and settings happen to be installed for\nthat user, and both arms of a comparison are shifted by them.",
+      "oneOf": [
+        {
+          "const": "inherited",
+          "description": "Pass the operator's environment through untouched.",
+          "type": "string"
+        },
+        {
+          "const": "scrubbed",
+          "description": "Replace the environment with an allowlist, and leave the harness config home alone.",
+          "type": "string"
+        },
+        {
+          "const": "isolated",
+          "description": "Scrub, and additionally give the run its own `HOME` and harness config home.\n\nThe strongest guarantee, and what CI should use. It needs the harness to be able to\nauthenticate without its host config home, which in practice means credentials\nreachable from the environment or from the auth files linked in for the run.",
+          "type": "string"
+        }
+      ]
+    },
     "EvalCaseDimension": {
       "properties": {
         "assertion_ids": {
@@ -469,6 +489,14 @@
               "type": "null"
             }
           ]
+        },
+        "environment": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/EnvironmentPolicy"
+            }
+          ],
+          "default": "scrubbed"
         },
         "generated_at": {
           "type": "string"

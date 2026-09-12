@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::report::{RunRecord, ScenarioKind};
+use super::report::{EnvironmentPolicy, RunRecord, ScenarioKind, SkillStaging};
 use super::runner::Runner;
 
 pub const PROMPT_CONTRACT_VERSION: &str = "v1";
@@ -64,6 +64,15 @@ pub struct CacheKeyInput {
     pub runner_version: Option<String>,
     pub scenario: ScenarioKind,
     pub prompt_contract_version: String,
+    /// What the run was allowed to see of this machine and of the live skill tree.
+    ///
+    /// Both decide what the harness could read while it worked, so a completed run
+    /// answers only for the pair it ran under. Serving it to another pair would
+    /// report a policy the run never ran with.
+    #[serde(default)]
+    pub environment: EnvironmentPolicy,
+    #[serde(default)]
+    pub skill_staging: SkillStaging,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,7 +422,42 @@ mod tests {
             runner_version: None,
             scenario,
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
+            environment: EnvironmentPolicy::default(),
+            skill_staging: SkillStaging::default(),
         }
+    }
+
+    /// A run that inherited this machine is not the run a scrubbed invocation asked
+    /// for, so the completed one must not be served in its place.
+    #[test]
+    fn a_run_from_another_environment_policy_is_a_different_run() {
+        let inherited = CacheKeyInput {
+            environment: EnvironmentPolicy::Inherited,
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture")
+        };
+        let scrubbed = CacheKeyInput {
+            environment: EnvironmentPolicy::Scrubbed,
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture")
+        };
+        let symlinked = CacheKeyInput {
+            skill_staging: SkillStaging::Symlink,
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture")
+        };
+
+        assert_ne!(
+            CacheKey::from_input(&inherited),
+            CacheKey::from_input(&scrubbed),
+            "the environment a run saw belongs in its identity"
+        );
+        assert_ne!(
+            CacheKey::from_input(&symlinked),
+            CacheKey::from_input(&sample_key_input(
+                ScenarioKind::WithSkill,
+                "sha256:skill",
+                "sha256:fixture"
+            )),
+            "what the run could reach out of its workspace belongs in its identity"
+        );
     }
 
     fn write_completed_run(report_dir: &Path, run_id: &str, eval_case_id: &str, scenario: ScenarioKind) {

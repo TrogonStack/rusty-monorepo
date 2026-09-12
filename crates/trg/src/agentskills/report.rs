@@ -60,6 +60,54 @@ impl SkillStaging {
     }
 }
 
+/// How much of the operator's machine a run's harness subprocess is allowed to see.
+///
+/// A run that inherits the operator's environment is not reproducible: the harness picks
+/// up whatever skills, instructions, MCP servers, and settings happen to be installed for
+/// that user, and both arms of a comparison are shifted by them.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    clap::ValueEnum,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentPolicy {
+    /// Pass the operator's environment through untouched.
+    #[value(name = "inherited")]
+    Inherited,
+    /// Replace the environment with an allowlist, and leave the harness config home alone.
+    #[default]
+    #[value(name = "scrubbed")]
+    Scrubbed,
+    /// Scrub, and additionally give the run its own `HOME` and harness config home.
+    ///
+    /// The strongest guarantee, and what CI should use. It needs the harness to be able to
+    /// authenticate without its host config home, which in practice means credentials
+    /// reachable from the environment or from the auth files linked in for the run.
+    #[value(name = "isolated")]
+    Isolated,
+}
+
+impl EnvironmentPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherited => "inherited",
+            Self::Scrubbed => "scrubbed",
+            Self::Isolated => "isolated",
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize, Deserialize, JsonSchema,
 )]
@@ -101,6 +149,8 @@ pub struct BuildReportOptions {
     pub runner_version: Option<String>,
     /// How the skill is staged into each run workspace.
     pub skill_staging: SkillStaging,
+    /// How much of the operator's machine each run is allowed to see.
+    pub environment: EnvironmentPolicy,
 }
 
 impl Default for BuildReportOptions {
@@ -116,6 +166,7 @@ impl Default for BuildReportOptions {
             runner_binary: None,
             runner_version: None,
             skill_staging: SkillStaging::default(),
+            environment: EnvironmentPolicy::default(),
         }
     }
 }
@@ -156,6 +207,8 @@ pub struct ReportSection {
     pub runner_binary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_version: Option<String>,
+    #[serde(default)]
+    pub environment: EnvironmentPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiSection>,
 }
@@ -404,6 +457,7 @@ pub fn build_report_bundle(
             runner: options.runner.clone(),
             runner_binary: options.runner_binary.clone(),
             runner_version: options.runner_version.clone(),
+            environment: options.environment,
             ci: build_ci_section(),
         },
         suite: SuiteSection {
@@ -1047,6 +1101,7 @@ mod tests {
                     runner: None,
                     runner_binary: None,
                     runner_version: None,
+                    environment: EnvironmentPolicy::default(),
                     ci: None,
                 },
                 suite: SuiteSection {

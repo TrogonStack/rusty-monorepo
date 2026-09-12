@@ -7,7 +7,7 @@ use super::{
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
-use crate::agentskills::redact::{redact_command_args, redact_env};
+use crate::agentskills::redact::redact_command_args;
 
 const PROGRAM: &str = "cursor-agent";
 const INSTALL_HINT: &str = "install Cursor Agent CLI and ensure `cursor-agent` is on PATH";
@@ -17,7 +17,7 @@ pub fn check_available() -> Result<(), EvalError> {
 }
 
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
-    let prepared = prepare_workspace(request)?;
+    let prepared = prepare_workspace(request, Runner::CursorAgent)?;
 
     let mut command = Command::new(PROGRAM);
     command
@@ -48,8 +48,14 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     }
     cmd_args.push(&prepared.prompt);
     if let Some(run_dir) = request.transcript_path.parent() {
-        write_runner_invocation_metadata(run_dir, redact_command_args(PROGRAM, &cmd_args), redact_env())?;
+        write_runner_invocation_metadata(
+            run_dir,
+            redact_command_args(PROGRAM, &cmd_args),
+            prepared.environment.recorded_vars(),
+        )?;
     }
+
+    prepared.environment.apply(&mut command);
 
     let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
     persist_runner_io(Runner::CursorAgent, request, &captured)?;

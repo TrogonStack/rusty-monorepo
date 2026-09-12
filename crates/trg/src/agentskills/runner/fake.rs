@@ -6,10 +6,11 @@ use super::{
 };
 
 pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome, RunnerError> {
-    let _prepared = prepare_workspace(request)?;
+    let prepared = prepare_workspace(request, Runner::ClaudeCode)?;
 
     let mut command = Command::new("bash");
     command.arg("-c").arg(script).current_dir(request.workspace_dir);
+    prepared.environment.apply(&mut command);
 
     let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
     persist_runner_io(Runner::ClaudeCode, request, &captured)?;
