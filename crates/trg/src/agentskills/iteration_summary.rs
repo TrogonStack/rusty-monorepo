@@ -146,6 +146,16 @@ struct AssertionResultInput {
     assertion: String,
     #[serde(default)]
     passed: bool,
+    #[serde(default)]
+    unsupported: Option<String>,
+    #[serde(default)]
+    excluded: Option<String>,
+}
+
+impl AssertionResultInput {
+    fn is_scored(&self) -> bool {
+        self.unsupported.is_none() && self.excluded.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -396,7 +406,7 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
         if let Some(grading) = &sample.grading {
             for result in &grading.assertion_results {
                 let assertion_text = normalize_assertion_key(&result.assertion);
-                if assertion_text.is_empty() {
+                if assertion_text.is_empty() || !result.is_scored() {
                     continue;
                 }
 

@@ -208,7 +208,7 @@ only accepted from the `schema_version` that introduced it.
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
 | `graders` | object[] | no | Typed checks (see below). Requires `schema_version` 3 |
 | `tags` | string[] | no | Free-form labels |
-| `priority` | enum | no | `low`, `medium`, or `high` |
+| `priority` | enum | no | `low`, `normal`, `high`, or `critical` |
 | `timeout_secs` | integer | no | Per-case runner timeout override |
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
 | `grader_hints` | object | no | Passed through to a script grader on stdin |
@@ -232,6 +232,9 @@ every reader and to every runner.
 | `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
 | `skill_used` | | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
 | `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
+
+Every grader also accepts `arm`, which decides whether its result counts toward
+the score. See [Arm-scoped graders](#arm-scoped-graders).
 
 `target` is `final_text` (default), `transcript`, `any_output`, or
 `{"file": "<relative path>"}`.
@@ -258,6 +261,40 @@ made. `codex` reaches the filesystem through a shell, so it reports
 that must run on every harness should prefer `skill_used`, which is defined in
 terms of the staged skill path and answers everywhere. See
 [Transcript artifact](#transcript-artifact).
+
+### Arm-scoped graders
+
+A `skill_used` grader states a property that cannot hold unless the skill is
+staged. Scored as written, it passes in every with-skill run and fails in every
+without-skill run for no reason but its own premise, and the gap `benchmark.json`
+reports between the two arms widens by exactly the number of such graders. The
+skill gets credit for being present rather than for the work it changed.
+
+So a grader that presupposes the skill is evaluated and reported in both arms
+and scored in neither. Its result carries `excluded` in `grading.json`, counts
+in `summary.excluded`, and stays out of `summary.pass_rate`. Read it as an
+indicator: whether the run reached for the skill.
+
+| `arm` | Meaning |
+| ----- | ------- |
+| `auto` (default) | `skill_used` is reported but not scored; every other grader is scored |
+| `with_only` | Reported in both arms, scored in neither, whatever the grader checks |
+| `both` | Scored in both arms even though the grader presupposes the skill |
+
+`arm: both` is how a negative expectation is written: a case whose point is that
+the skill must *not* be engaged needs its `skill_used` grader scored, because
+failing it is the finding.
+
+`arm: with_only` is the manual form for anything trg cannot recognise on its
+own. Tool names belong to one harness's vocabulary, so a `tool_used` grader
+naming a harness's skill-invocation tool has to be marked by hand; `skill_used`
+is the portable way to state the same thing and needs no marking.
+
+If every check in a case would be excluded, the case would measure nothing at
+all, which is never what writing it meant. The exclusions are lifted and the
+case is scored as declared, so a suite whose only check is `skill_used` still
+produces a score. Such a case does widen the arm gap, and that is the author's
+declared intent rather than an accident of scaffolding.
 
 ### The LLM judge
 
@@ -360,14 +397,15 @@ Run ordering: eval cases in manifest order, then scenarios in flag order.
 `runs/<run-id>/grading.json`. `verify` discovers these recursively under a
 workspace tree.
 
-Schema version: `trg.skills-eval.grading.v3`. `v2` and `v1` are still accepted
-on read. `v2` added `unsupported` and narrowed `pass_rate` to scored results
-only; `v3` makes `pass_rate` nullable, because a run where nothing could be
-scored has no pass rate and reporting `0.0` reads as a total failure.
+Schema version: `trg.skills-eval.grading.v4`. `v3`, `v2` and `v1` are still
+accepted on read. `v2` added `unsupported` and narrowed `pass_rate` to scored
+results only; `v3` makes `pass_rate` nullable, because a run where nothing could
+be scored has no pass rate and reporting `0.0` reads as a total failure; `v4`
+adds `excluded`, which takes an arm-scoped grader out of the score in both arms.
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v3",
+  "schema_version": "trg.skills-eval.grading.v4",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",
@@ -381,13 +419,21 @@ scored has no pass rate and reporting `0.0` reads as a total failure.
       "evidence": "runner 'mystery-runner' does not expose tool calls in a form trg can read",
       "grader": { "kind": "declarative" },
       "unsupported": "runner 'mystery-runner' does not expose tool calls in a form trg can read"
+    },
+    {
+      "assertion": "the skill was engaged",
+      "passed": true,
+      "evidence": "the run read the staged skill directory",
+      "grader": { "kind": "declarative" },
+      "excluded": "'skill_used' cannot hold without the skill, so it is reported in both arms and scored in neither; declare 'arm': 'both' to score it anyway"
     }
   ],
   "summary": {
     "passed": 1,
     "failed": 0,
     "unsupported": 1,
-    "total": 2,
+    "excluded": 1,
+    "total": 3,
     "pass_rate": 1.0
   }
 }
@@ -396,16 +442,18 @@ scored has no pass rate and reporting `0.0` reads as a total failure.
 | Field | Type | Notes |
 | ----- | ---- | ----- |
 | `assertion_results[].assertion` | string | Non-empty. Accepts `text` as an alias. For a typed grader, its rendered description |
-| `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` is present |
+| `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` is present. An indicator rather than a score when `excluded` is present |
 | `assertion_results[].evidence` | string | Non-empty. A passing result must not merely restate its assertion |
 | `assertion_results[].grader.kind` | enum | `mechanical`, `declarative`, `llm`, `script`, `needs_llm`, or `none` |
 | `assertion_results[].rationale` | string | Optional judge reasoning |
 | `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
+| `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |
 | `summary.passed` | integer | Must equal the count of scored, passing results |
 | `summary.failed` | integer | Must equal the count of scored, failing results |
-| `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` |
+| `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` and not `excluded` |
+| `summary.excluded` | integer | Must equal the count of results carrying `excluded` |
 | `summary.total` | integer | Must equal `assertion_results` length |
-| `summary.pass_rate` | float or null | Must equal `passed / (total - unsupported)`, or `null` when nothing was scored |
+| `summary.pass_rate` | float or null | Must equal `passed / (total - unsupported - excluded)`, or `null` when nothing was scored |
 
 ---
 

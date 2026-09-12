@@ -257,6 +257,16 @@ struct AssertionResultInput {
     passed: bool,
     #[serde(default)]
     evidence: String,
+    #[serde(default)]
+    unsupported: Option<String>,
+    #[serde(default)]
+    excluded: Option<String>,
+}
+
+impl AssertionResultInput {
+    fn is_scored(&self) -> bool {
+        self.unsupported.is_none() && self.excluded.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -580,8 +590,9 @@ fn grading_summary(grading: &GradingFileInput) -> PassFailSummary {
         }
     }
 
-    let passed = grading.assertion_results.iter().filter(|result| result.passed).count();
-    let failed = grading.assertion_results.len().saturating_sub(passed);
+    let scored = grading.assertion_results.iter().filter(|result| result.is_scored());
+    let passed = scored.clone().filter(|result| result.passed).count();
+    let failed = scored.count().saturating_sub(passed);
     pass_fail_summary(passed, failed)
 }
 
@@ -925,7 +936,7 @@ fn detect_flaky_assertions(samples: &[(u32, GradingFileInput)]) -> Vec<String> {
     for (attempt, grading) in samples {
         for result in &grading.assertion_results {
             let key = normalize_assertion_key(&result.assertion);
-            if key.is_empty() {
+            if key.is_empty() || !result.is_scored() {
                 continue;
             }
             by_assertion.entry(key).or_default().insert(*attempt, result.passed);
@@ -968,7 +979,7 @@ fn build_iteration_summary(
         };
         for result in &grading.assertion_results {
             let assertion_key = normalize_assertion_key(&result.assertion);
-            if assertion_key.is_empty() {
+            if assertion_key.is_empty() || !result.is_scored() {
                 continue;
             }
             let key = (run.eval_case_id.clone(), assertion_key);
@@ -1453,6 +1464,56 @@ mod tests {
 
         let without_skill = &benchmark.scenarios["without_skill"];
         assert_eq!(without_skill.completed.runs.failed, 1);
+    }
+
+    #[test]
+    fn an_arm_scoped_check_does_not_widen_the_gap_between_the_arms() {
+        let temp = tempfile::tempdir().unwrap();
+        write_report(
+            temp.path(),
+            serde_json::json!([
+                sample_run("run-001", "with_skill", "completed", None),
+                sample_run("run-002", "without_skill", "completed", None),
+            ]),
+            None,
+        );
+        write_run_artifacts(
+            temp.path(),
+            "run-001",
+            Some(
+                r#"{
+  "assertion_results": [
+    { "assertion": "the skill was engaged", "passed": true, "evidence": "read SKILL.md", "excluded": "presupposes the skill" },
+    { "assertion": "b", "passed": true, "evidence": "ok" }
+  ],
+  "summary": { "passed": 1, "failed": 0, "total": 2, "excluded": 1, "pass_rate": 1.0 }
+}"#,
+            ),
+            Some(r#"{ "duration_ms": 1000 }"#),
+        );
+        write_run_artifacts(
+            temp.path(),
+            "run-002",
+            Some(
+                r#"{
+  "assertion_results": [
+    { "assertion": "the skill was engaged", "passed": false, "evidence": "never read", "excluded": "presupposes the skill" },
+    { "assertion": "b", "passed": true, "evidence": "ok" }
+  ],
+  "summary": { "passed": 1, "failed": 0, "total": 2, "excluded": 1, "pass_rate": 1.0 }
+}"#,
+            ),
+            Some(r#"{ "duration_ms": 1000 }"#),
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let delta = benchmark.deltas.with_skill_vs_without_skill.as_ref().unwrap();
+        assert!(
+            delta.assertion_pass_rate.abs() < 0.0001,
+            "the skill was credited for its own premise: {}",
+            delta.assertion_pass_rate
+        );
+        assert!(benchmark.iteration_summary.always_fail.is_empty());
     }
 
     #[test]

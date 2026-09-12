@@ -112,12 +112,18 @@ pub(crate) fn grade_report_dir_with_report(
                 println!(
                     "  assertions: {}/{} passed",
                     report.passed,
-                    report.assertions_graded - report.unsupported
+                    report.assertions_graded - report.unsupported - report.excluded
                 );
                 if report.unsupported > 0 {
                     println!(
                         "  unsupported: {} (not gradable on this runner, excluded from the tally above)",
                         report.unsupported
+                    );
+                }
+                if report.excluded > 0 {
+                    println!(
+                        "  arm scoped: {} (presuppose the skill, so they score in neither arm)",
+                        report.excluded
                     );
                 }
                 if let Some(detail) = report.run_statuses.describe_not_completed() {

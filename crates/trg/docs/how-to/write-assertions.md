@@ -164,6 +164,9 @@ trg ai skills eval verify ./runs/run-001/workspace --mode strict
 - Start with 2–4 assertions per eval case; add more as you discover failure modes.
 - Write assertions that fail for the `without_skill` scenario but pass for
   `with_skill`. That is the signal your skill adds value.
+- A `skill_used` grader is not that signal: it can only hold where the skill is
+  staged, so it is reported in both arms and scored in neither. Add `"arm":
+  "both"` when the point of the case is that the skill must not be engaged.
 - Keep `expected_output` as a human-readable reference; graders use assertions,
   not exact string matching against `expected_output`.
 
@@ -175,7 +178,7 @@ After `trg ai skills eval grade`, each run directory contains:
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v3",
+  "schema_version": "trg.skills-eval.grading.v4",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",

@@ -1,135 +1,7 @@
 {
   "$defs": {
-    "EvalCase": {
-      "additionalProperties": false,
-      "properties": {
-        "assertions": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/NonEmptyString"
-          },
-          "type": "array"
-        },
-        "expected_output": {
-          "$ref": "#/$defs/NonEmptyString"
-        },
-        "expected_output_files": {
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "files": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/RelativeSkillPath"
-          },
-          "type": "array"
-        },
-        "grader_hints": {
-          "additionalProperties": true,
-          "type": [
-            "object",
-            "null"
-          ]
-        },
-        "graders": {
-          "items": {
-            "$ref": "#/$defs/Grader"
-          },
-          "type": "array"
-        },
-        "id": {
-          "$ref": "#/$defs/EvalCaseId"
-        },
-        "priority": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EvalPriority"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "prompt": {
-          "$ref": "#/$defs/NonEmptyString"
-        },
-        "tags": {
-          "items": {
-            "type": "string"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "timeout_secs": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "id",
-        "prompt",
-        "expected_output"
-      ],
-      "type": "object"
-    },
-    "EvalCaseId": {
-      "description": "Non-empty string or non-negative integer",
-      "oneOf": [
-        {
-          "minLength": 1,
-          "type": "string"
-        },
-        {
-          "minimum": 0,
-          "type": "integer"
-        }
-      ]
-    },
-    "EvalPriority": {
-      "enum": [
-        "low",
-        "normal",
-        "high",
-        "critical"
-      ],
-      "type": "string"
-    },
-    "GradeTarget": {
-      "oneOf": [
-        {
-          "enum": [
-            "final_text",
-            "transcript",
-            "any_output"
-          ],
-          "type": "string"
-        },
-        {
-          "additionalProperties": false,
-          "properties": {
-            "file": {
-              "$ref": "#/$defs/RelativeSkillPath"
-            }
-          },
-          "required": [
-            "file"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "Grader": {
+    "CaseGrader": {
+      "description": "A grader as a case declares it, together with the arm scope that decides\nwhether its result counts toward the score.",
       "oneOf": [
         {
           "properties": {
@@ -280,6 +152,161 @@
             "criterion"
           ],
           "type": "object"
+        }
+      ],
+      "properties": {
+        "arm": {
+          "$ref": "#/$defs/GraderArm"
+        }
+      },
+      "type": "object"
+    },
+    "EvalCase": {
+      "additionalProperties": false,
+      "properties": {
+        "assertions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "type": "array"
+        },
+        "expected_output": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "expected_output_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "files": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RelativeSkillPath"
+          },
+          "type": "array"
+        },
+        "grader_hints": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "graders": {
+          "items": {
+            "$ref": "#/$defs/CaseGrader"
+          },
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/EvalCaseId"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvalPriority"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prompt": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "prompt",
+        "expected_output"
+      ],
+      "type": "object"
+    },
+    "EvalCaseId": {
+      "description": "Non-empty string or non-negative integer",
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "minimum": 0,
+          "type": "integer"
+        }
+      ]
+    },
+    "EvalPriority": {
+      "enum": [
+        "low",
+        "normal",
+        "high",
+        "critical"
+      ],
+      "type": "string"
+    },
+    "GradeTarget": {
+      "oneOf": [
+        {
+          "enum": [
+            "final_text",
+            "transcript",
+            "any_output"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "$ref": "#/$defs/RelativeSkillPath"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "GraderArm": {
+      "description": "Which arm of a with-skill versus without-skill comparison a grader is\nallowed to score in.\n\nA check that presupposes the skill can only ever pass where the skill is\npresent, so scoring it would credit the skill for its own premise and widen\nthe reported gap between the arms by exactly the number of such checks.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "Let the grader decide: one that presupposes the skill is reported but\nnever scored, and everything else is scored.",
+          "type": "string"
+        },
+        {
+          "const": "with_only",
+          "description": "Report the result in both arms and score it in neither.",
+          "type": "string"
+        },
+        {
+          "const": "both",
+          "description": "Score in both arms even though the grader presupposes the skill, which\nis how a \"the skill must not be engaged\" expectation is written.",
+          "type": "string"
         }
       ]
     },

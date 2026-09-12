@@ -1,4 +1,4 @@
-use super::graders::Grader;
+use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
 use super::outputs::guess_mime_type;
 use super::runner::TimingFile;
@@ -263,7 +263,7 @@ pub struct EvalCase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grader_hints: Option<HashMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub graders: Vec<Grader>,
+    pub graders: Vec<CaseGrader>,
 }
 
 impl EvalCase {
@@ -421,12 +421,15 @@ pub struct WorkspaceCheckReport {
     pub grading_files: usize,
     pub timing_files: usize,
     /// Scored results only: results the runner could not answer are counted in
-    /// `unsupported_assertions` and kept out of `pass_rate`.
+    /// `unsupported_assertions`, results that presuppose the skill in
+    /// `excluded_assertions`, and neither reaches `pass_rate`.
     pub assertion_results: usize,
     pub passed_assertions: usize,
     pub failed_assertions: usize,
     #[serde(default)]
     pub unsupported_assertions: usize,
+    #[serde(default)]
+    pub excluded_assertions: usize,
     /// `null` when the workspace produced no scored assertion at all, so an
     /// unobservable runner is not reported as a total failure.
     pub pass_rate: Option<f64>,
@@ -766,6 +769,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
     let mut passed_assertions = 0;
     let mut failed_assertions = 0;
     let mut unsupported_assertions = 0;
+    let mut excluded_assertions = 0;
 
     if options.require_grading && grading_files.is_empty() {
         errors.push(ValidationError::for_field(
@@ -783,6 +787,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         passed_assertions += counts.passed;
         failed_assertions += counts.failed;
         unsupported_assertions += counts.unsupported;
+        excluded_assertions += counts.excluded;
     }
 
     for timing_path in &timing_files {
@@ -807,6 +812,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         passed_assertions,
         failed_assertions,
         unsupported_assertions,
+        excluded_assertions,
         pass_rate,
     })
 }
@@ -951,6 +957,16 @@ fn validate_grading_file(
             format!(
                 "{} does not match {} unsupported assertion results",
                 grading.summary.unsupported, counts.unsupported
+            ),
+        ));
+    }
+
+    if grading.summary.excluded != counts.excluded {
+        errors.push(ValidationError::for_field(
+            format!("{} summary.excluded", file_label),
+            format!(
+                "{} does not match {} excluded assertion results",
+                grading.summary.excluded, counts.excluded
             ),
         ));
     }

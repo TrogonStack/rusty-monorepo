@@ -27,21 +27,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::evals::{parse_eval_suite, EvalCase, EvalError, EvalSuite, Result};
-use super::graders::{self, GradeInput, Grader, GraderOutcome};
+use super::graders::{self, CaseGrader, GradeInput, Grader, GraderOutcome};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::outputs::FINAL_MD;
 use super::report::{ReportDocument, RunRecord};
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
-pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v3";
+pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v4";
+const GRADING_SCHEMA_VERSION_V3: &str = "trg.skills-eval.grading.v3";
 const GRADING_SCHEMA_VERSION_V2: &str = "trg.skills-eval.grading.v2";
 const GRADING_SCHEMA_VERSION_V1: &str = "trg.skills-eval.grading.v1";
 
 pub fn grading_schema_version_is_supported(version: &str) -> bool {
     matches!(
         version,
-        GRADING_SCHEMA_VERSION | GRADING_SCHEMA_VERSION_V2 | GRADING_SCHEMA_VERSION_V1
+        GRADING_SCHEMA_VERSION | GRADING_SCHEMA_VERSION_V3 | GRADING_SCHEMA_VERSION_V2 | GRADING_SCHEMA_VERSION_V1
     )
 }
 
@@ -89,6 +90,12 @@ pub struct AssertionGradeResult {
     /// from `summary.pass_rate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported: Option<String>,
+    /// Present when the grader presupposes the skill, so its `passed` value is
+    /// an indicator to read rather than a score to count. Kept out of
+    /// `summary.pass_rate` in both arms, so the gap between them measures the
+    /// work and not the premise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded: Option<String>,
 }
 
 impl AssertionGradeResult {
@@ -96,8 +103,12 @@ impl AssertionGradeResult {
         self.unsupported.is_some()
     }
 
+    pub fn is_excluded(&self) -> bool {
+        self.excluded.is_some()
+    }
+
     pub fn is_scored(&self) -> bool {
-        !self.is_unsupported()
+        !self.is_unsupported() && !self.is_excluded()
     }
 }
 
@@ -108,6 +119,8 @@ pub struct GradingSummary {
     pub total: usize,
     #[serde(default)]
     pub unsupported: usize,
+    #[serde(default)]
+    pub excluded: usize,
     /// Over the scored assertions only, so an ungradable property cannot drag a
     /// skill's score down on a runner that simply cannot be observed. `null` when
     /// nothing was scored at all, because no assertion answered is not the same
@@ -123,24 +136,30 @@ pub struct GradingCounts {
     pub passed: usize,
     pub failed: usize,
     pub unsupported: usize,
+    pub excluded: usize,
     pub total: usize,
 }
 
 impl GradingCounts {
     pub fn tally(results: &[AssertionGradeResult]) -> Self {
-        let unsupported = results.iter().filter(|r| r.is_unsupported()).count();
+        let excluded = results.iter().filter(|r| r.is_excluded()).count();
+        let unsupported = results
+            .iter()
+            .filter(|r| !r.is_excluded() && r.is_unsupported())
+            .count();
         let passed = results.iter().filter(|r| r.is_scored() && r.passed).count();
         let total = results.len();
         Self {
             passed,
-            failed: total - passed - unsupported,
+            failed: total - passed - unsupported - excluded,
             unsupported,
+            excluded,
             total,
         }
     }
 
     pub fn scored(self) -> usize {
-        self.total - self.unsupported
+        self.total - self.unsupported - self.excluded
     }
 
     pub fn pass_rate(self) -> Option<f64> {
@@ -157,6 +176,7 @@ impl GradingCounts {
             failed: self.failed,
             total: self.total,
             unsupported: self.unsupported,
+            excluded: self.excluded,
             pass_rate: self.pass_rate(),
         }
     }
@@ -203,6 +223,8 @@ pub struct GradeReport {
     pub needs_llm: usize,
     #[serde(default)]
     pub unsupported: usize,
+    #[serde(default)]
+    pub excluded: usize,
     #[serde(default)]
     pub run_statuses: GradedRunStatuses,
 }
@@ -320,7 +342,9 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
         GraderMode::Llm => true,
         GraderMode::None | GraderMode::Script => false,
         GraderMode::Auto => suite.evals.iter().any(|case| {
-            case.graders.iter().any(|grader| matches!(grader, Grader::Llm { .. }))
+            case.graders
+                .iter()
+                .any(|declared| matches!(declared.grader, Grader::Llm { .. }))
                 || case
                     .assertions
                     .iter()
@@ -385,6 +409,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         failed: 0,
         needs_llm: 0,
         unsupported: 0,
+        excluded: 0,
         run_statuses: GradedRunStatuses::default(),
     };
 
@@ -415,19 +440,19 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             assertion_results.push(grade_assertion(assertion.as_str(), case, &ctx, &session)?);
         }
 
+        restore_when_nothing_would_be_scored(&mut assertion_results);
+
         for result in &assertion_results {
             if result.grader.kind == GraderKind::NeedsLlm {
                 report.needs_llm += 1;
             }
-            if result.is_unsupported() {
-                report.unsupported += 1;
-            } else if result.passed {
-                report.passed += 1;
-            } else {
-                report.failed += 1;
-            }
             report.assertions_graded += 1;
         }
+        let counts = GradingCounts::tally(&assertion_results);
+        report.passed += counts.passed;
+        report.failed += counts.failed;
+        report.unsupported += counts.unsupported;
+        report.excluded += counts.excluded;
 
         let grading = build_grading_file(assertion_results)?;
         validate_grading_document(&grading, options.strict)?;
@@ -502,6 +527,7 @@ fn grade_assertion(
                     },
                     rationale: None,
                     unsupported: None,
+                    excluded: None,
                 })
             } else if options.grader == GraderMode::None {
                 Ok(needs_llm_result(
@@ -547,15 +573,17 @@ impl DeclarativeContext {
 }
 
 fn grade_declaratively(
-    grader: &Grader,
+    declared: &CaseGrader,
     eval_case: &EvalCase,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
     session: &GradeSession,
 ) -> Result<AssertionGradeResult> {
     let options = session.options;
+    let grader = &declared.grader;
     let assertion = grader.describe();
     let outcome = graders::evaluate(grader, &declarative.input(ctx));
+    let excluded = declared.exclusion_reason();
 
     let declarative_info = GraderInfo {
         kind: GraderKind::Declarative,
@@ -571,6 +599,7 @@ fn grade_declaratively(
             grader: declarative_info,
             rationale: None,
             unsupported: None,
+            excluded,
         },
         GraderOutcome::Failed { evidence } => AssertionGradeResult {
             assertion,
@@ -579,6 +608,7 @@ fn grade_declaratively(
             grader: declarative_info,
             rationale: None,
             unsupported: None,
+            excluded,
         },
         GraderOutcome::Unsupported { reason } => AssertionGradeResult {
             assertion,
@@ -587,13 +617,31 @@ fn grade_declaratively(
             grader: declarative_info,
             rationale: None,
             unsupported: Some(reason),
+            excluded,
         },
-        GraderOutcome::Deferred { criterion } => match options.grader {
-            GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, ctx, session)?,
-            GraderMode::Script => grade_with_script(&criterion, eval_case, ctx, options)?,
-            GraderMode::None => needs_llm_result(&criterion, "grader mode is none, so no judge was consulted"),
-        },
+        GraderOutcome::Deferred { criterion } => {
+            let mut result = match options.grader {
+                GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, ctx, session)?,
+                GraderMode::Script => grade_with_script(&criterion, eval_case, ctx, options)?,
+                GraderMode::None => needs_llm_result(&criterion, "grader mode is none, so no judge was consulted"),
+            };
+            result.excluded = excluded;
+            result
+        }
     })
+}
+
+/// A case whose every check is arm-scoped would otherwise measure nothing at
+/// all, which is never what the author meant by writing it, so the exclusions
+/// are lifted and the case is scored as declared.
+fn restore_when_nothing_would_be_scored(results: &mut [AssertionGradeResult]) {
+    let scored = results.iter().filter(|result| result.is_scored()).count();
+    if scored > 0 || !results.iter().any(AssertionGradeResult::is_excluded) {
+        return;
+    }
+    for result in results.iter_mut() {
+        result.excluded = None;
+    }
 }
 
 fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
@@ -608,6 +656,7 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
         },
         rationale: None,
         unsupported: None,
+        excluded: None,
     }
 }
 
@@ -677,6 +726,7 @@ fn grade_with_script(
             },
             rationale: None,
             unsupported: None,
+            excluded: None,
         });
     }
 
@@ -701,6 +751,7 @@ fn grade_with_script(
         },
         rationale: parsed.rationale,
         unsupported: None,
+        excluded: None,
     })
 }
 
@@ -726,6 +777,7 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
             },
             rationale: None,
             unsupported: None,
+            excluded: None,
         });
     }
 
@@ -745,6 +797,7 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
         },
         rationale: parsed.rationale,
         unsupported: None,
+        excluded: None,
     })
 }
 
@@ -1274,8 +1327,12 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
         errors.push(ValidationError::for_field(
             "schema_version",
             format!(
-                "expected '{}', '{}' or '{}', got '{}'",
-                GRADING_SCHEMA_VERSION, GRADING_SCHEMA_VERSION_V2, GRADING_SCHEMA_VERSION_V1, grading.schema_version
+                "expected '{}', '{}', '{}' or '{}', got '{}'",
+                GRADING_SCHEMA_VERSION,
+                GRADING_SCHEMA_VERSION_V3,
+                GRADING_SCHEMA_VERSION_V2,
+                GRADING_SCHEMA_VERSION_V1,
+                grading.schema_version
             ),
         ));
     }
@@ -1336,6 +1393,15 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
             format!(
                 "{} does not match {} unsupported results",
                 grading.summary.unsupported, counts.unsupported
+            ),
+        ));
+    }
+    if grading.summary.excluded != counts.excluded {
+        errors.push(ValidationError::for_field(
+            "summary.excluded",
+            format!(
+                "{} does not match {} excluded results",
+                grading.summary.excluded, counts.excluded
             ),
         ));
     }
@@ -1541,7 +1607,7 @@ mod tests {
                 "prompt": "prompt a",
                 "expected_output": "output a",
                 "graders": [
-                    {"type": "skill_used"},
+                    {"type": "skill_used", "arm": "both"},
                     {"type": "contains", "text": "all done"}
                 ]
             }
@@ -1592,6 +1658,181 @@ mod tests {
         write_normalized_transcript(&transcript_path, &NormalizedTranscript::unavailable("codex")).unwrap();
 
         (report_dir, run_dir)
+    }
+
+    const ENGAGED_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"outputs/summary.md"}}]}}
+{"type":"result","is_error":false,"result":"all done"}
+"#;
+
+    const IMPROVISED_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"outputs/summary.md"}}]}}
+{"type":"result","is_error":false,"result":"all done"}
+"#;
+
+    /// Both arms of a suite, each run leaving the same final text so the only
+    /// thing that differs between them is whether the skill was engaged.
+    fn both_arms_report_dir(temp: &tempfile::TempDir, suite_json: &str) -> PathBuf {
+        use crate::agentskills::redact::redact_transcript_bytes;
+        use crate::agentskills::transcript::{normalize_stream_json, WorkspaceBoundary};
+
+        let skill_dir = temp.path().join("demo-skill");
+        fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        let skill_md = "---\nname: demo-skill\ndescription: d\n---\n";
+        fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), suite_json).unwrap();
+
+        let mem = MemFS::new();
+        let mem_skill = Path::new("demo-skill");
+        mem.insert(mem_skill.join("SKILL.md"), skill_md);
+        mem.insert(mem_skill.join("evals/evals.json"), suite_json);
+
+        let bundle = build_report_bundle(
+            &mem,
+            mem_skill,
+            &skill_dir,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
+            BuildReportOptions {
+                report_id: Some("report-arms".to_string()),
+                generated_at: Some("2026-05-26T12:00:00Z".to_string()),
+                runner: Some("claude-code".to_string()),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        let report_dir = write_report_bundle(&temp.path().join("out"), &bundle, WriteReportOptions::default()).unwrap();
+
+        for run in &bundle.document.runs {
+            let workspace = report_dir.join(&run.paths.workspace);
+            let run_dir = workspace.parent().unwrap().to_path_buf();
+            fs::write(workspace.join("outputs").join(FINAL_MD), "all done\n").unwrap();
+            let stream = match run.scenario_id {
+                ScenarioKind::WithSkill => ENGAGED_STREAM,
+                _ => IMPROVISED_STREAM,
+            };
+            let transcript_path = run_dir.join("transcript.jsonl");
+            fs::write(&transcript_path, stream).unwrap();
+            write_normalized_transcript(
+                &transcript_path,
+                &normalize_stream_json(
+                    "claude-code",
+                    &redact_transcript_bytes(stream),
+                    &WorkspaceBoundary::unknown(),
+                ),
+            )
+            .unwrap();
+        }
+
+        report_dir
+    }
+
+    fn grading_files_by_scenario(report_dir: &Path) -> Vec<(ScenarioKind, GradingFile)> {
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        document
+            .runs
+            .iter()
+            .map(|run| {
+                let workspace = report_dir.join(&run.paths.workspace);
+                let run_dir = workspace.parent().unwrap();
+                let grading: GradingFile =
+                    serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+                (run.scenario_id, grading)
+            })
+            .collect()
+    }
+
+    const ARM_SCOPED_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "skill_used"},
+                    {"type": "contains", "text": "all done"}
+                ]
+            }
+        ]
+    }"#;
+
+    const TRIGGERING_ONLY_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "skill_used"}
+                ]
+            }
+        ]
+    }"#;
+
+    #[test]
+    fn a_check_that_presupposes_the_skill_scores_in_neither_arm() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, ARM_SCOPED_SUITE);
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.excluded, 2, "one skill_used result per arm");
+        assert_eq!(report.assertions_graded, 4);
+        assert_eq!(report.passed, 2);
+        assert_eq!(report.failed, 0);
+
+        for (scenario, grading) in grading_files_by_scenario(&report_dir) {
+            assert_eq!(grading.summary.excluded, 1, "{scenario:?}");
+            assert_eq!(
+                grading.summary.pass_rate,
+                Some(1.0),
+                "{scenario:?} must not be scored on the skill's own premise"
+            );
+            let skill_result = grading
+                .assertion_results
+                .iter()
+                .find(|result| result.assertion.contains("skill was engaged"))
+                .expect("the indicator is still reported");
+            assert!(skill_result.is_excluded());
+            assert_eq!(skill_result.passed, scenario == ScenarioKind::WithSkill);
+        }
+    }
+
+    #[test]
+    fn a_case_whose_every_check_is_arm_scoped_is_scored_as_declared() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, TRIGGERING_ONLY_SUITE);
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.excluded, 0, "excluding everything would measure nothing");
+        assert_eq!(report.passed, 1);
+        assert_eq!(report.failed, 1);
+
+        for (_, grading) in grading_files_by_scenario(&report_dir) {
+            assert_eq!(grading.summary.excluded, 0);
+            assert!(grading.summary.pass_rate.is_some());
+        }
     }
 
     fn suite_from(json: &str) -> EvalSuite {
@@ -1699,6 +1940,7 @@ mod tests {
                 },
                 rationale: None,
                 unsupported: None,
+                excluded: None,
             },
             AssertionGradeResult {
                 assertion: "the skill was engaged".to_string(),
@@ -1711,6 +1953,7 @@ mod tests {
                 },
                 rationale: None,
                 unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
+                excluded: None,
             },
         ]);
 
@@ -1735,6 +1978,7 @@ mod tests {
             },
             rationale: None,
             unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
+            excluded: None,
         }]);
 
         assert_eq!(counts.scored(), 0);
@@ -1787,6 +2031,7 @@ mod tests {
 
         assert_eq!(report.assertions_graded, 2);
         assert_eq!(report.unsupported, 1);
+        assert_eq!(report.excluded, 0);
         assert_eq!(report.passed, 1);
         assert_eq!(report.failed, 0);
         assert_eq!(report.needs_llm, 0);
@@ -2084,12 +2329,14 @@ mod tests {
                 },
                 rationale: None,
                 unsupported: None,
+                excluded: None,
             }],
             summary: GradingSummary {
                 passed: 1,
                 failed: 0,
                 total: 1,
                 unsupported: 0,
+                excluded: 0,
                 pass_rate: Some(1.0),
             },
         };
