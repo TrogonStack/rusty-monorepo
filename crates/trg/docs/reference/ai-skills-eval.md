@@ -537,8 +537,13 @@ much of the host machine a run can see.
 The allowlist is fixed: the variables a CLI needs to start (`PATH`, `TMPDIR`,
 `HOME`, locale and terminal settings), the variables that decide whether it can
 reach the network (proxies and their trust stores), the cloud credential
-variables, and the credential variables for the harness being run. Everything
-else is dropped.
+variables, the credential variables for the harness being run, and the variable
+that names the harness config home. Everything else is dropped.
+
+The config home variable is on the list because `scrubbed` leaves the config
+home alone. Dropping it would not leave it alone: the harness would fall back to
+the default under `HOME`, which is neither the operator's config home nor one
+this run set up.
 
 Scrubbing is not only about secrets. Launching `trg` from inside an agent
 session puts that session's own identity in the environment, including a live IPC
@@ -568,9 +573,18 @@ the harness config home is redirected into it:
 | `cursor-agent` | `HOME` only; the CLI has no config home variable |
 
 Authentication has to survive the redirect, so the auth files from the host
-config home are symlinked into the run's config home, and nothing beside them
-is. Symlinked rather than copied so no credential is duplicated onto disk and a
-token refresh still reaches the real file.
+config home are carried into the run's config home, and nothing beside them is.
+A file that holds credentials and nothing else is symlinked rather than copied,
+so no credential is duplicated onto disk and a token refresh still reaches the
+real file.
+
+`cursor-agent` keeps its login in `cli-config.json`, alongside its permissions,
+approval mode, and model selection, which are exactly what an isolated run holds
+still. That file is therefore reduced rather than symlinked: only the members
+that carry the login are written into the run's config home. Anything
+unrecognized is left behind, so a harness that moves its login elsewhere fails
+to authenticate rather than quietly handing the run the operator's settings
+again.
 
 That is not always sufficient. A harness may derive the identity of its
 credential store from the config home path, in which case redirecting the path

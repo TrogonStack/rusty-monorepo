@@ -103,7 +103,12 @@ impl Runner {
                 "CLAUDE_CODE_USE_BEDROCK",
                 "CLAUDE_CODE_USE_VERTEX",
             ],
-            Self::Codex => &["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+            Self::Codex => &[
+                "CODEX_API_KEY",
+                "CODEX_ACCESS_TOKEN",
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+            ],
             Self::CursorAgent => &["CURSOR_API_KEY"],
         }
     }
@@ -122,16 +127,62 @@ impl Runner {
         }
     }
 
-    /// Entries inside the config home that carry authentication and nothing else.
-    ///
-    /// These are linked into an isolated run's config home so the run can authenticate
-    /// without also inheriting the skills, instructions, and MCP servers sitting beside
-    /// them.
-    fn auth_entries(self) -> &'static [&'static str] {
+    /// Entries inside the config home that an isolated run is given, so it can
+    /// authenticate without also inheriting the skills, instructions, and MCP servers
+    /// sitting beside them.
+    fn auth_entries(self) -> &'static [AuthEntry] {
         match self {
-            Self::ClaudeCode => &[".credentials.json"],
-            Self::Codex => &["auth.json"],
-            Self::CursorAgent => &["cli-config.json"],
+            Self::ClaudeCode => &[AuthEntry::Whole(".credentials.json")],
+            Self::Codex => &[AuthEntry::Whole("auth.json")],
+            Self::CursorAgent => &[AuthEntry::Reduced {
+                file: "cli-config.json",
+                keep: &["authInfo"],
+            }],
+        }
+    }
+}
+
+/// How one entry of a harness config home is carried into an isolated run.
+///
+/// A file that is credentials and nothing else can be handed over whole. A harness that
+/// keeps its login in the same file as its settings cannot: permissions, approval mode,
+/// and model selection live there too, and those are exactly what an isolated run is
+/// supposed to hold still, so only the members that carry the login are copied across.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AuthEntry {
+    Whole(&'static str),
+    Reduced {
+        file: &'static str,
+        keep: &'static [&'static str],
+    },
+}
+
+impl AuthEntry {
+    fn file(self) -> &'static str {
+        match self {
+            Self::Whole(file) | Self::Reduced { file, .. } => file,
+        }
+    }
+
+    /// Anything unrecognized is left behind rather than carried across, so a harness that
+    /// moves its login somewhere else fails to authenticate instead of quietly handing the
+    /// run the operator's settings again.
+    fn carry(self, source: &Path, destination: &Path) -> std::io::Result<()> {
+        match self {
+            Self::Whole(_) => std::os::unix::fs::symlink(source, destination),
+            Self::Reduced { keep, .. } => {
+                let Ok(serde_json::Value::Object(members)) =
+                    serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(source)?)
+                else {
+                    return Ok(());
+                };
+                let kept: serde_json::Map<String, serde_json::Value> = keep
+                    .iter()
+                    .filter_map(|name| members.get_key_value(*name))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
+                std::fs::write(destination, serde_json::Value::Object(kept).to_string())
+            }
         }
     }
 }
@@ -214,13 +265,22 @@ fn host_environment() -> BTreeMap<String, String> {
     std::env::vars().collect()
 }
 
+/// `Scrubbed` leaves the harness config home alone, so the variable that names it is on
+/// the allowlist. Dropping it would not leave the config home alone: the harness would
+/// fall back to the default under `HOME`, which is neither the operator's config home nor
+/// a config home this run set up. `Isolated` overwrites the variable afterwards.
 fn allowlisted(runner: Runner, host: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     let locator = runner.credential_locator_var();
+    let config_home_var = match runner.config_home() {
+        HarnessConfigHome::Redirectable { var, .. } => Some(var),
+        HarnessConfigHome::HomeRelative { .. } => None,
+    };
     let named = PROCESS_VARS
         .iter()
         .chain(NETWORK_VARS.iter())
         .chain(runner.credential_vars().iter())
-        .chain(locator.iter());
+        .chain(locator.iter())
+        .chain(config_home_var.iter());
 
     let mut vars: BTreeMap<String, String> = named
         .filter_map(|name| host.get_key_value(*name))
@@ -238,15 +298,15 @@ fn allowlisted(runner: Runner, host: &BTreeMap<String, String>) -> BTreeMap<Stri
 
 fn link_auth_entries(runner: Runner, host_config_home: &Path, config_home: &Path) -> std::io::Result<()> {
     for entry in runner.auth_entries() {
-        let source = host_config_home.join(entry);
+        let source = host_config_home.join(entry.file());
         if !source.exists() {
             continue;
         }
-        let destination = config_home.join(entry);
+        let destination = config_home.join(entry.file());
         if destination.symlink_metadata().is_ok() {
             continue;
         }
-        std::os::unix::fs::symlink(&source, &destination)?;
+        entry.carry(&source, &destination)?;
     }
     Ok(())
 }
@@ -403,6 +463,67 @@ mod tests {
         let recorded = env.recorded_vars();
         assert!(recorded.contains_key("PATH"));
         assert!(!recorded.contains_key("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn scrubbed_leaves_the_operator_config_home_where_the_operator_put_it() {
+        let temp = tempdir().unwrap();
+        let mut host = host();
+        host.insert("CODEX_HOME".to_string(), "/host/home/elsewhere/.codex".to_string());
+
+        let env = RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, &host).unwrap();
+
+        assert_eq!(
+            env.vars.get("CODEX_HOME").map(String::as_str),
+            Some("/host/home/elsewhere/.codex"),
+            "dropping it sends the run to the default under HOME, which is nobody's config home"
+        );
+    }
+
+    #[test]
+    fn a_harness_gets_every_credential_variable_it_reads() {
+        let temp = tempdir().unwrap();
+        let mut host = host();
+        host.insert("CODEX_API_KEY".to_string(), "sk-codex".to_string());
+        host.insert("CODEX_ACCESS_TOKEN".to_string(), "token-codex".to_string());
+
+        let env = RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, &host).unwrap();
+
+        assert_eq!(env.vars.get("CODEX_API_KEY").map(String::as_str), Some("sk-codex"));
+        assert_eq!(
+            env.vars.get("CODEX_ACCESS_TOKEN").map(String::as_str),
+            Some("token-codex")
+        );
+    }
+
+    #[test]
+    fn isolated_takes_the_login_out_of_a_settings_file_and_leaves_the_settings() {
+        let temp = tempdir().unwrap();
+        let host_config_home = temp.path().join("host-cursor");
+        std::fs::create_dir_all(&host_config_home).unwrap();
+        std::fs::write(
+            host_config_home.join("cli-config.json"),
+            r#"{"authInfo":{"userId":7},"permissions":{"allow":["Bash"]},"model":{"modelId":"operator-choice"}}"#,
+        )
+        .unwrap();
+
+        let mut host = host();
+        host.insert("HOME".to_string(), temp.path().to_string_lossy().into_owned());
+        std::fs::rename(&host_config_home, temp.path().join(".cursor")).unwrap();
+
+        let run_dir = temp.path().join("run-001");
+        let env =
+            RunEnvironment::prepare_from(Runner::CursorAgent, &run_dir, EnvironmentPolicy::Isolated, &host).unwrap();
+
+        let config_home = PathBuf::from(env.vars.get("HOME").unwrap()).join(".cursor");
+        let carried: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config_home.join("cli-config.json")).unwrap()).unwrap();
+
+        assert_eq!(carried["authInfo"]["userId"], 7);
+        assert!(
+            carried.get("permissions").is_none() && carried.get("model").is_none(),
+            "an isolated run must not be handed the operator's permissions or model choice"
+        );
     }
 
     #[test]

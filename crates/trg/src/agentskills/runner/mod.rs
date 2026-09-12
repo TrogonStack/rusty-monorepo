@@ -1028,7 +1028,7 @@ mod workspace_tests {
             None,
         );
         request.skill_staging = SkillStaging::Copy;
-        prepare_workspace(&request).unwrap();
+        prepare_workspace(&request, Runner::ClaudeCode).unwrap();
     }
 
     #[test]
@@ -1090,7 +1090,7 @@ mod workspace_tests {
         );
         request.skill_staging = SkillStaging::Copy;
 
-        prepare_workspace(&request).unwrap();
+        prepare_workspace(&request, Runner::ClaudeCode).unwrap();
 
         assert!(
             !workspace.join(".skill/.git").exists(),
