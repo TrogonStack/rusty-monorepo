@@ -19,6 +19,36 @@
       ],
       "type": "object"
     },
+    "BudgetReport": {
+      "description": "What a pass spent against its ceiling.\n\nAbsent when the pass never ran a runner at all, since nothing was spent and no\nceiling could have bound it. Present, with `ceiling_usd` absent, when a runner ran\nwithout `--max-cost-usd`: there was nothing to be admitted against, but a reader still\nwants to know what the pass cost.",
+      "properties": {
+        "ceiling_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "exhausted": {
+          "type": "boolean"
+        },
+        "runs_skipped": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "spent_usd": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "spent_usd",
+        "exhausted",
+        "runs_skipped"
+      ],
+      "type": "object"
+    },
     "CaseSelectionRecord": {
       "description": "The selection a report was produced under, so a reader is not shown partial coverage\nas if it were a pass over the whole suite.",
       "properties": {
@@ -932,6 +962,16 @@
     "assertion_results": {
       "items": {},
       "type": "array"
+    },
+    "budget": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BudgetReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "comparisons": {
       "items": {},

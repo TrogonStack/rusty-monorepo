@@ -47,6 +47,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
 | `--attempts` | integer | `3` | Draw each (case × scenario) cell this many times. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
+| `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
@@ -67,6 +68,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | ---- | ------- |
 | `0` | Success. Under `text` prints the report directory path on stdout; under `json` prints the document for the final stage that ran |
 | `1` | Skill validation, eval-suite validation, bundle write, or runner failure |
+| `2` | `--max-cost-usd` was set and the pass either had runs refused or spent strictly past the ceiling. A pass that lands exactly on the ceiling having refused nothing exits `0`. Only reported when `1` is not, so a genuine assertion or grading failure is never masked by a budget stop. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 
 ### Example (scaffold only)
 
@@ -415,11 +417,21 @@ snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
 | `assertion_results` | array | Per-assertion grading outcomes |
 | `summaries` | object | Aggregated counts by scenario |
 | `comparisons` | array | Cross-scenario comparison records |
+| `budget` | object | Present once a runner has run. What the pass spent, and against what ceiling. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 
 `assertion_results` is populated by `eval grade`, which flattens every run's
 `grading.json` into it, carrying `unsupported` forward where present.
 `comparisons` is populated by `eval compare`. Both are empty until those
 subcommands run.
+
+### `budget` section
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `ceiling_usd` | number | Value of `--max-cost-usd`. Absent when the pass ran with no ceiling |
+| `spent_usd` | number | Total reported cost across every run in the pass |
+| `exhausted` | bool | Whether spend had reached the ceiling by the time the pass finished |
+| `runs_skipped` | integer | Runs not started because the ledger had already refused them |
 
 ### `report` section
 
@@ -950,6 +962,43 @@ so re-running the same command does not pay for the draws again. See
 `--retries` is not a substitute. It re-invokes the harness only when a run
 failed in transit, meaning a non-zero exit with no result or a timeout, and
 never because an assertion failed, so it adds no draws to the distribution.
+
+---
+
+## Bounding what a pass may spend
+
+`--attempts` defaulting to three draws means an ordinary pass now pays for
+three model calls where it once paid for one, and `-j` lets more of them run at
+once. Neither flag bounds what that costs, so a case count, a scenario count,
+or a draw count entered wrong spends the difference before a report exists to
+say so. `--max-cost-usd` is that bound.
+
+The ledger it checks against is read before a run starts, not reserved for it,
+so a pass can still spend past the ceiling by whatever the runs already in
+flight cost when the check last passed. That is the price of a check cheap
+enough to run before every one of them rather than one that has to coordinate
+every lane in flight to answer.
+
+A run the ledger refuses is recorded with `status: skipped` and
+`failure_kind: budget`, carrying a warning naming what the pass had spent and
+the ceiling it hit. It is not a failed run: nothing was asked of the runner and
+nothing about the skill was measured, so it does not count against a pass rate
+or a `--require-assertions` gate. A run already served from cache is unaffected
+by the ceiling, since a cache hit costs nothing and reusing it is exactly what
+a budget is for.
+
+Only the `claude-code` runner reports what a run cost today, so `--max-cost-usd`
+never binds a `codex` or `cursor-agent` pass: nothing accumulates against the
+ledger, so it never refuses a run.
+
+`trg` exits `2` instead of `0` when the pass got less than it asked for or paid
+more than it allowed: either a run was refused, or spend went strictly past the
+ceiling, which one run can do on its own because admission is checked rather
+than reserved. A pass that lands exactly on the ceiling having refused nothing
+is neither, and exits `0`: it did every run and paid what it said it would.
+A genuine assertion or grading failure still exits `1`, which wins over `2`, so
+a budget stop is not allowed to hide a suite that also failed on its merits. See [Exit codes](#exit-codes) and the `budget` field of
+[`report.json`](#artifact-reportjson).
 
 ---
 

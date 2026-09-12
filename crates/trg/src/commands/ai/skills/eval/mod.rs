@@ -42,7 +42,7 @@ pub struct EvalArgs {
 #[derive(Subcommand)]
 pub enum EvalCommands {
     /// Run skill evals and write an artifact bundle
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Grade a completed eval report bundle
     Grade(GradeArgs),
     /// Verify a generated eval bundle

@@ -1,4 +1,5 @@
 pub mod benchmark;
+pub mod budget;
 pub mod cache;
 pub mod call_bounds;
 pub mod case_selection;
