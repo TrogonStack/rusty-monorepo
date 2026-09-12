@@ -18,6 +18,7 @@ pub mod redact;
 pub mod report;
 pub mod runner;
 pub mod schemas;
+pub mod transcript;
 pub mod validation;
 pub mod validator;
 

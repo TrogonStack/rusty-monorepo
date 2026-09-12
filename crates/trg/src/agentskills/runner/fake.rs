@@ -2,7 +2,7 @@ use std::process::Command;
 
 use super::{
     capture_subprocess, completed_outcome, persist_runner_io, prepare_workspace, runner_failure_outcome,
-    timeout_duration, timeout_outcome, EvalRunOutcome, EvalRunRequest, RunnerError,
+    timeout_duration, timeout_outcome, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
 };
 
 pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome, RunnerError> {
@@ -12,7 +12,7 @@ pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome
     command.arg("-c").arg(script).current_dir(request.workspace_dir);
 
     let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
-    persist_runner_io(request, &captured)?;
+    persist_runner_io(Runner::ClaudeCode, request, &captured)?;
 
     if captured.timed_out {
         let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);

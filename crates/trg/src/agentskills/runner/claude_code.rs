@@ -3,7 +3,7 @@ use std::process::Command;
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
     runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
-    EvalRunOutcome, EvalRunRequest, RunStatus, RunnerError,
+    EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
@@ -42,7 +42,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     }
 
     let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
-    persist_runner_io(request, &captured)?;
+    persist_runner_io(Runner::ClaudeCode, request, &captured)?;
 
     if captured.timed_out {
         let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
