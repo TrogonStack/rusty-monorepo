@@ -174,6 +174,33 @@ fn env_policy_request<'a>(
 const LEAK_VAR: &str = "TRG_EVAL_ENVIRONMENT_LEAK_PROBE";
 const LEAK_SCRIPT: &str = r#"printf '{"type":"result","leak":"%s"}\n' "${TRG_EVAL_ENVIRONMENT_LEAK_PROBE:-}""#;
 
+static OPERATOR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The operator environment a run is probed for, held for one test at a time.
+///
+/// An environment variable belongs to the whole process, and these tests run on
+/// different threads of that one process, so without taking turns one test clears
+/// the variable the other is still asking a subprocess about.
+struct OperatorEnvironment {
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+impl OperatorEnvironment {
+    const SECRET: &'static str = "operator-secret";
+
+    fn visible_to_this_process() -> Self {
+        let turn = OPERATOR_ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var(LEAK_VAR, Self::SECRET);
+        Self { _turn: turn }
+    }
+}
+
+impl Drop for OperatorEnvironment {
+    fn drop(&mut self) {
+        std::env::remove_var(LEAK_VAR);
+    }
+}
+
 #[test]
 fn a_scrubbed_run_cannot_see_the_operator_environment() {
     let temp = tempdir().unwrap();
@@ -184,7 +211,7 @@ fn a_scrubbed_run_cannot_see_the_operator_environment() {
     let transcript_path = run_dir.join("transcript.jsonl");
     let stderr_path = run_dir.join("stderr.log");
 
-    std::env::set_var(LEAK_VAR, "operator-secret");
+    let _operator = OperatorEnvironment::visible_to_this_process();
     let request = env_policy_request(
         &case,
         &workspace,
@@ -193,7 +220,6 @@ fn a_scrubbed_run_cannot_see_the_operator_environment() {
         crate::agentskills::report::EnvironmentPolicy::Scrubbed,
     );
     let outcome = run_bash(&request, LEAK_SCRIPT).unwrap();
-    std::env::remove_var(LEAK_VAR);
 
     assert!(matches!(outcome.status, RunStatus::Completed));
     assert!(
@@ -213,7 +239,7 @@ fn an_inherited_run_still_sees_the_operator_environment() {
     let transcript_path = run_dir.join("transcript.jsonl");
     let stderr_path = run_dir.join("stderr.log");
 
-    std::env::set_var(LEAK_VAR, "operator-secret");
+    let _operator = OperatorEnvironment::visible_to_this_process();
     let request = env_policy_request(
         &case,
         &workspace,
@@ -222,9 +248,8 @@ fn an_inherited_run_still_sees_the_operator_environment() {
         crate::agentskills::report::EnvironmentPolicy::Inherited,
     );
     let outcome = run_bash(&request, LEAK_SCRIPT).unwrap();
-    std::env::remove_var(LEAK_VAR);
 
-    assert!(outcome.final_text.contains("operator-secret"));
+    assert!(outcome.final_text.contains(OperatorEnvironment::SECRET));
 }
 
 #[test]

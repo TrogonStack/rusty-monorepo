@@ -900,7 +900,7 @@ mod workspace_tests {
         );
         request.skill_staging = SkillStaging::default();
 
-        prepare_workspace(&request).unwrap();
+        prepare_workspace(&request, Runner::ClaudeCode).unwrap();
 
         let staged = workspace.join(".skill");
         assert!(
@@ -947,7 +947,7 @@ mod workspace_tests {
         );
         request.skill_staging = SkillStaging::Symlink;
 
-        prepare_workspace(&request).unwrap();
+        prepare_workspace(&request, Runner::ClaudeCode).unwrap();
 
         let staged_skill_md = workspace.join(".skill/SKILL.md");
         let target = std::fs::read_link(&staged_skill_md).unwrap();

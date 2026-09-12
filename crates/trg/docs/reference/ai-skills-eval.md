@@ -588,6 +588,10 @@ made against an unknown baseline.
 Every policy writes the variables a run actually received to `env.json` in the
 run directory, with secret-looking values left out.
 
+The policy is part of a run's cache identity, alongside `--skill-staging`. A
+completed run answers only for what it was allowed to see, so switching either
+flag executes again rather than serving a run that saw something else.
+
 ---
 
 ## Transcript artifact

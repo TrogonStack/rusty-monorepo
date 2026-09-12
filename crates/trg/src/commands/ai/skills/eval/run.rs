@@ -528,6 +528,8 @@ fn execute_runs(
             runner_version: runner_version.clone(),
             scenario,
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
+            environment,
+            skill_staging,
         };
         let reuse_input = ReuseKeyInput {
             eval_case_id: run.eval_case_id.clone(),
