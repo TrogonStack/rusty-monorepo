@@ -207,6 +207,7 @@ only accepted from the `schema_version` that introduced it.
 | `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
 | `graders` | object[] | no | Typed checks (see below). Requires `schema_version` 3 |
+| `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
 | `tags` | string[] | no | Free-form labels |
 | `priority` | enum | no | `low`, `normal`, `high`, or `critical` |
 | `timeout_secs` | integer | no | Per-case runner timeout override |
@@ -294,7 +295,10 @@ If every check in a case would be excluded, the case would measure nothing at
 all, which is never what writing it meant. The exclusions are lifted and the
 case is scored as declared, so a suite whose only check is `skill_used` still
 produces a score. Such a case does widen the arm gap, and that is the author's
-declared intent rather than an accident of scaffolding.
+declared intent rather than an accident of scaffolding: a triggering case is
+asking exactly whether the skill was reached for. Write it with
+`"skill_disclosure": "unannounced"` so the answer is the run's own, not the
+prompt's. See [Measuring triggering](#measuring-triggering).
 
 ### The LLM judge
 
@@ -516,11 +520,49 @@ scenarios recorded separately in the same record.
 
 ---
 
+## Measuring triggering
+
+A prompt that names the skill measures how well a run uses a skill it was
+handed. It cannot also measure whether the skill's own `description` wins the
+run's routing decision, because the prompt already made that decision. Those
+are two different questions, and `skill_disclosure` says which one a case asks.
+
+| `skill_disclosure` | Prompt | Skill staged at |
+| ------------------ | ------ | --------------- |
+| `announced` (default) | Names the staged directory, the skill `name`, and its `description` | `.skill/`, or `.old-skill/` in the `old_skill` arm |
+| `unannounced` | Says nothing about the skill | `skills/<skill-name>/` |
+
+An unannounced case gets the same prompt in both arms, so the only difference
+between them is whether the skill is in the workspace. It is staged under a
+plain directory rather than the dot-prefixed link because a run that was told
+nothing can only find what a listing of its workspace reports.
+
+State the expectation with `skill_used`, which answers on every runner. A
+`tool_used` grader naming one harness's skill-invocation tool cannot: `codex`
+and `cursor-agent` have no such tool, so the same case would be unanswerable in
+two of three columns. What trg observes is a native skill tool call or a tool
+call that names the staged directory. A path that left the workspace is never
+counted, so reading a skill the harness installed elsewhere does not pass.
+
+What this does not do is register the staged skill with a harness's own skill
+discovery mechanism. A harness that has one would offer the skill from its own
+system prompt, which is a stronger measurement than discovery from the working
+tree. trg stages the same way for all three runners instead, so the number
+means the same thing in every column.
+
+`eval run` and `eval verify` both warn when a case checks `skill_used` while
+announcing the skill, because such a case cannot pass or fail for the reason it
+was written. The `init` scaffold's `triggers-the-skill` case is unannounced for
+that reason, and its prompt is a placeholder: replace it with the words a user
+would actually use, naming neither the skill nor where it lives.
+
+---
+
 ## Scenario kinds
 
 | Kind | CLI value | Runner behavior |
 | ---- | --------- | --------------- |
-| With skill | `with_skill` | Stages skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
+| With skill | `with_skill` | Stages skill to `.skill/` in workspace; prompt prefixed with skill frontmatter. An unannounced case stages to `skills/<skill-name>/` and prefixes nothing |
 | Without skill | `without_skill` | Raw eval prompt; nothing staged |
 | Old skill | `old_skill` | Stages the `--old-skill-dir` revision to `.old-skill/` in the workspace; prompt prefixed with that revision's frontmatter |
 

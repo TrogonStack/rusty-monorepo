@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::prompt::{SKILL_LINK_OLD, SKILL_LINK_WITH};
+use super::prompt::{SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::RedactedTranscript;
 
 pub const NORMALIZED_TRANSCRIPT_SCHEMA_VERSION: &str = "trg.skills-eval.transcript.v1";
@@ -223,16 +223,28 @@ impl NormalizedTranscript {
             if tool.eq_ignore_case("Skill") {
                 return SkillEngagement::NativeSkillTool;
             }
-            if paths.iter().any(|path| references_staged_skill(path)) {
+            if paths.iter().any(|path| self.references_staged_skill(path)) {
                 return SkillEngagement::StagedPathReference;
             }
         }
         SkillEngagement::NotEngaged
     }
-}
 
-fn references_staged_skill(path: &str) -> bool {
-    path.contains(SKILL_LINK_WITH) || path.contains(SKILL_LINK_OLD)
+    /// Whether a path the run named is the skill this run staged.
+    ///
+    /// An unannounced case stages under a plain directory name that also appears
+    /// in the harness's own skill install paths, so a path that left the
+    /// workspace is somebody else's skill and never this run's.
+    fn references_staged_skill(&self, path: &str) -> bool {
+        let staged = [SKILL_LINK_WITH, SKILL_LINK_OLD, SKILL_DIR_UNANNOUNCED]
+            .iter()
+            .any(|directory| path.contains(directory));
+        staged && !self.left_the_workspace(path)
+    }
+
+    fn left_the_workspace(&self, path: &str) -> bool {
+        self.workspace_escapes.iter().any(|escape| escape.path == path)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -741,6 +753,35 @@ mod tests {
             &WorkspaceBoundary::unknown(),
         );
         assert_eq!(transcript.skill_engagement(), SkillEngagement::NativeSkillTool);
+    }
+
+    #[test]
+    fn an_unannounced_staged_skill_path_counts_as_engagement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// A harness keeps its own skills in a directory named the same way, and
+    /// reading one of those is not this run reaching for the skill under test.
+    #[test]
+    fn a_skill_installed_outside_the_workspace_is_not_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/opt/harness/skills/other/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
     }
 
     #[test]

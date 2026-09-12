@@ -26,7 +26,7 @@ use super::errors::SkillError;
 use super::evals::EVAL_SUITE_DIR_NAME;
 use super::evals::{EvalCase, EvalError};
 use super::outputs::ensure_outputs_dir;
-use super::prompt::{build_eval_prompt, EvalPromptInput, SKILL_LINK_OLD, SKILL_LINK_WITH};
+use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
 use super::report::{EnvironmentPolicy, ScenarioKind, SkillStaging};
 use super::transcript::{write_normalized_transcript, TranscriptFormat, WorkspaceBoundary};
@@ -348,54 +348,23 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
     std::fs::create_dir_all(request.workspace_dir)?;
     ensure_outputs_dir(request.workspace_dir)?;
 
-    match request.scenario {
-        ScenarioKind::WithSkill => {
-            stage_skill_into_workspace(
-                request.skill_path,
-                request.workspace_dir,
-                SKILL_LINK_WITH,
-                request.skill_staging,
-            )?;
-            for relative in &request.eval.files {
-                stage_eval_file(request.skill_path, request.workspace_dir, relative.as_str())?;
-            }
-        }
-        ScenarioKind::WithoutSkill => {
-            for relative in &request.eval.files {
-                stage_eval_file(request.skill_path, request.workspace_dir, relative.as_str())?;
-            }
-        }
-        ScenarioKind::OldSkill => {
-            let old_skill_path = request.old_skill_path.ok_or_else(|| RunnerError::InvalidOutput {
-                program: "trg".to_string(),
-                detail: "old_skill scenario requires old_skill_path".to_string(),
-            })?;
-            request.old_skill_md.ok_or_else(|| RunnerError::InvalidOutput {
-                program: "trg".to_string(),
-                detail: "old_skill scenario requires old_skill_md".to_string(),
-            })?;
-            stage_skill_into_workspace(
-                old_skill_path,
-                request.workspace_dir,
-                SKILL_LINK_OLD,
-                request.skill_staging,
-            )?;
-            for relative in &request.eval.files {
-                stage_eval_file(request.skill_path, request.workspace_dir, relative.as_str())?;
-            }
-        }
+    if let Some((skill_path, staged_dir)) = skill_to_stage(request)? {
+        stage_skill_into_workspace(
+            skill_path,
+            request.workspace_dir,
+            staged_dir.as_str(),
+            request.skill_staging,
+        )?;
     }
 
-    let skill_md_for_prompt = match request.scenario {
-        ScenarioKind::WithSkill => Some(request.skill_md),
-        ScenarioKind::WithoutSkill => None,
-        ScenarioKind::OldSkill => request.old_skill_md,
-    };
+    for relative in &request.eval.files {
+        stage_eval_file(request.skill_path, request.workspace_dir, relative.as_str())?;
+    }
 
     let prompt = build_eval_prompt(EvalPromptInput {
         scenario: request.scenario,
         eval: request.eval,
-        skill_md: skill_md_for_prompt,
+        skill_md: skill_source(request)?.map(|(_, skill_md)| skill_md),
     })
     .map_err(skill_error_to_runner)?;
 
@@ -411,6 +380,44 @@ fn skill_error_to_runner(err: SkillError) -> RunnerError {
     RunnerError::InvalidOutput {
         program: "trg".to_string(),
         detail: err.to_string(),
+    }
+}
+
+/// The skill directory and its `SKILL.md` this scenario runs against, or `None`
+/// for the arm that runs without a skill at all.
+fn skill_source<'a>(request: &'a EvalRunRequest<'a>) -> Result<Option<(&'a Path, &'a str)>, RunnerError> {
+    match request.scenario {
+        ScenarioKind::WithoutSkill => Ok(None),
+        ScenarioKind::WithSkill => Ok(Some((request.skill_path, request.skill_md))),
+        ScenarioKind::OldSkill => {
+            let path = request
+                .old_skill_path
+                .ok_or_else(|| missing_old_skill_input("old_skill_path"))?;
+            let skill_md = request
+                .old_skill_md
+                .ok_or_else(|| missing_old_skill_input("old_skill_md"))?;
+            Ok(Some((path, skill_md)))
+        }
+    }
+}
+
+/// The skill to stage and the workspace directory to stage it in, which the case
+/// decides by saying whether its prompt announces the skill.
+fn skill_to_stage<'a>(request: &'a EvalRunRequest<'a>) -> Result<Option<(&'a Path, StagedSkillDir)>, RunnerError> {
+    let Some((skill_path, skill_md)) = skill_source(request)? else {
+        return Ok(None);
+    };
+    let summary = SkillSummary::from_skill_md(skill_md).map_err(skill_error_to_runner)?;
+    Ok(
+        StagedSkillDir::for_run(request.scenario, request.eval.skill_disclosure, &summary.name)
+            .map(|staged_dir| (skill_path, staged_dir)),
+    )
+}
+
+fn missing_old_skill_input(field: &str) -> RunnerError {
+    RunnerError::InvalidOutput {
+        program: "trg".to_string(),
+        detail: format!("old_skill scenario requires {field}"),
     }
 }
 
@@ -784,6 +791,61 @@ mod workspace_tests {
             "staged entries are symlinks so staging stays cheap"
         );
         assert!(workspace.join("evals/files/input.txt").is_file());
+    }
+
+    /// A triggering case asks whether the run reaches for the skill on its own, so
+    /// the skill has to sit where a listing of the workspace reports it and the
+    /// prompt has to stay silent about it.
+    #[test]
+    fn an_unannounced_case_stages_the_skill_in_plain_sight_and_names_it_nowhere() {
+        for staging in [SkillStaging::Symlink, SkillStaging::Copy] {
+            let temp = tempdir().unwrap();
+            let skill_path = temp.path().join("skill");
+            std::fs::create_dir_all(&skill_path).unwrap();
+            let skill_md = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+            std::fs::write(skill_path.join("SKILL.md"), skill_md).unwrap();
+
+            let workspace = temp.path().join("ws");
+            let transcript = workspace.join("transcript.jsonl");
+            let stderr = workspace.join("stderr.log");
+            let case: EvalCase = serde_json::from_value(serde_json::json!({
+                "id": "triggers-the-skill",
+                "prompt": "do the thing",
+                "expected_output": "done",
+                "skill_disclosure": "unannounced",
+            }))
+            .unwrap();
+            let mut request = test_request(
+                &case,
+                ScenarioKind::WithSkill,
+                skill_md,
+                &skill_path,
+                &workspace,
+                &transcript,
+                &stderr,
+                None,
+                None,
+            );
+            request.skill_staging = staging;
+
+            let prepared = prepare_workspace(&request, Runner::ClaudeCode).unwrap();
+            assert!(
+                !prepared.prompt.contains("Skill available at:"),
+                "{staging:?}: an unannounced case must not be told where the skill is"
+            );
+            assert!(
+                !prepared.prompt.contains("test-skill"),
+                "{staging:?}: an unannounced case must not be told which skill to use"
+            );
+            assert!(
+                !workspace.join(".skill").exists(),
+                "{staging:?}: the hidden link is what the prompt points at, and nothing points here"
+            );
+            assert!(
+                workspace.join("skills/test-skill/SKILL.md").is_file(),
+                "{staging:?}: the skill must be discoverable from the workspace"
+            );
+        }
     }
 
     /// The suite carries every case's expected output and its graders' literal patterns.

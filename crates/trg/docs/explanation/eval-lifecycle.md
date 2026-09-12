@@ -99,7 +99,7 @@ When `--runner` is provided, the CLI invokes the agent for each run:
 
 | Step | What happens |
 | ---- | ------------ |
-| Prepare workspace | Stage fixtures; stage skill to `.skill/` or `.old-skill/` via copy (default) or symlink (`--skill-staging`) |
+| Prepare workspace | Stage fixtures; stage skill to `.skill/`, `.old-skill/`, or `skills/<skill-name>/` for an unannounced case, via copy (default) or symlink (`--skill-staging`) |
 | Build prompt | Task + fixture paths + frontmatter summary + output constraints (`prompt` contract v1) |
 | Invoke runner | Spawn `cursor-agent`, `claude`, or `codex` with stream-json output |
 | Capture output | Write `transcript.jsonl`, `timing.json`; update run status and metrics |
@@ -251,7 +251,7 @@ context, iteration aliases) that the spec does not cover.
 
 ## Prompt contract
 
-Eval runner prompts follow `PROMPT_CONTRACT_VERSION` (`v1` in
+Eval runner prompts follow `PROMPT_CONTRACT_VERSION` (`v2` in
 `crates/trg/src/agentskills/prompt.rs`). Snapshot tests lock the exact wording
 so benchmark comparisons stay repeatable across CLI releases.
 
@@ -263,6 +263,13 @@ so benchmark comparisons stay repeatable across CLI releases.
 | Input file paths (staged fixture relatives) | when listed | when listed | when listed |
 | Skill path hint | `.skill/` | n/a | `.old-skill/` |
 | Skill summary (frontmatter only) | current skill | n/a | old skill |
+
+A case that declares `"skill_disclosure": "unannounced"` drops both skill
+sections, so every arm of that case gets the same prompt and the skill is
+staged under `skills/<skill-name>/` for the run to find on its own. That is the
+only way to ask whether the skill's description wins the routing decision, and
+it is the only form of the question `codex` and `cursor-agent` can answer at
+all, since neither has a native skill tool.
 | Output constraints | yes | yes | yes |
 
 Output constraints are always:
@@ -283,6 +290,7 @@ file changes without updating the hash used for caching.
 | `with_skill` | Copy or symlink → `.skill/` | Frontmatter `name` + `description` only |
 | `old_skill` | Copy or symlink → `.old-skill/` | Old skill frontmatter only |
 | `without_skill` | No skill link | No skill lines at all |
+| any, unannounced | Symlink or copy → `skills/<skill-name>/` | No skill lines at all |
 
 `--skill-staging copy` (default) gives the run its own copy of the skill, so no
 path it can follow leads out of the workspace and mid-run edits to the source

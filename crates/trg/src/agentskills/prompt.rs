@@ -1,13 +1,20 @@
 use super::errors::SkillError;
-use super::evals::EvalCase;
+use super::evals::{EvalCase, SkillDisclosure};
 use super::models::SkillProperties;
 use super::outputs::EVAL_ARTIFACT_CONSTRAINTS;
 use super::parser::skill_summary_from_content;
 use super::report::ScenarioKind;
 
-pub const PROMPT_CONTRACT_VERSION: &str = "v1";
+pub const PROMPT_CONTRACT_VERSION: &str = "v2";
 pub const SKILL_LINK_WITH: &str = ".skill/";
 pub const SKILL_LINK_OLD: &str = ".old-skill/";
+/// Where an unannounced case stages the skill.
+///
+/// The announced links are dot-prefixed because the prompt points at them and
+/// nothing else should have to see them. A prompt that says nothing can only be
+/// answered from what the workspace shows, so an unannounced skill is staged
+/// under a plain directory that a listing reports, named after the skill itself.
+pub const SKILL_DIR_UNANNOUNCED: &str = "skills/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptText(pub String);
@@ -43,6 +50,52 @@ impl SkillSummary {
     }
 }
 
+/// The workspace-relative directory a run's skill is staged in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedSkillDir(String);
+
+impl StagedSkillDir {
+    /// Where this run's skill belongs, or `None` for the arm that has no skill.
+    pub fn for_run(scenario: ScenarioKind, disclosure: SkillDisclosure, skill_name: &str) -> Option<Self> {
+        let link = match (scenario, disclosure) {
+            (ScenarioKind::WithoutSkill, _) => return None,
+            (_, SkillDisclosure::Unannounced) => {
+                format!("{SKILL_DIR_UNANNOUNCED}{}/", directory_segment(skill_name))
+            }
+            (ScenarioKind::WithSkill, SkillDisclosure::Announced) => SKILL_LINK_WITH.to_string(),
+            (ScenarioKind::OldSkill, SkillDisclosure::Announced) => SKILL_LINK_OLD.to_string(),
+        };
+        Some(Self(link))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A skill name is free text, and this has to be one directory inside the
+/// workspace, so anything that is not a name character becomes a separator.
+fn directory_segment(skill_name: &str) -> String {
+    let mut segment = String::new();
+    for ch in skill_name.chars() {
+        let ch = if ch.is_ascii_alphanumeric() || ch == '_' {
+            ch
+        } else {
+            '-'
+        };
+        if ch == '-' && (segment.is_empty() || segment.ends_with('-')) {
+            continue;
+        }
+        segment.push(ch);
+    }
+    let trimmed = segment.trim_end_matches('-');
+    if trimmed.is_empty() {
+        "skill".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub struct EvalPromptInput<'a> {
     pub scenario: ScenarioKind,
     pub eval: &'a EvalCase,
@@ -62,21 +115,16 @@ pub fn build_eval_prompt(input: EvalPromptInput<'_>) -> Result<PromptText, Skill
         sections.push(files);
     }
 
-    match input.scenario {
-        ScenarioKind::WithSkill => {
-            let skill_md = input.skill_md.ok_or(SkillError::MissingFrontmatter)?;
-            let summary = SkillSummary::from_skill_md(skill_md)?;
+    if !matches!(input.scenario, ScenarioKind::WithoutSkill) {
+        let skill_md = input.skill_md.ok_or(SkillError::MissingFrontmatter)?;
+        let summary = SkillSummary::from_skill_md(skill_md)?;
+        let disclosure = input.eval.skill_disclosure;
+        let announced = StagedSkillDir::for_run(input.scenario, disclosure, &summary.name)
+            .filter(|_| disclosure.announces_the_skill());
+        if let Some(staged) = announced {
             sections.push(format!(
-                "Skill available at: {SKILL_LINK_WITH}\n{}",
-                summary.format_block()
-            ));
-        }
-        ScenarioKind::WithoutSkill => {}
-        ScenarioKind::OldSkill => {
-            let skill_md = input.skill_md.ok_or(SkillError::MissingFrontmatter)?;
-            let summary = SkillSummary::from_skill_md(skill_md)?;
-            sections.push(format!(
-                "Skill available at: {SKILL_LINK_OLD}\n{}",
+                "Skill available at: {}\n{}",
+                staged.as_str(),
                 summary.format_block()
             ));
         }
@@ -303,8 +351,8 @@ Test Description
     const CONTRACT_OLD_SKILL_MD: &str = "---\nname: demo-skill\ndescription: Legacy CSV handler.\n---\n\n# Old body\n";
 
     #[test]
-    fn eval_prompt_contract_version_is_v1() {
-        assert_eq!(PROMPT_CONTRACT_VERSION, "v1");
+    fn eval_prompt_contract_version_is_v2() {
+        assert_eq!(PROMPT_CONTRACT_VERSION, "v2");
     }
 
     #[test]
@@ -392,6 +440,71 @@ Write all deliverable files under outputs/. Do not write files outside outputs/.
         assert!(!prompt.as_str().contains("Analyzes CSV sales data"));
         assert!(!prompt.as_str().contains("Skill available at: .skill/"));
         assert!(!prompt.as_str().contains("# Old body"));
+    }
+
+    fn unannounced_contract_case() -> EvalCase {
+        serde_json::from_value(serde_json::json!({
+            "id": "triggers-the-skill",
+            "prompt": "Turn the staged sales file into a summary for the finance team.",
+            "expected_output": "The run reaches for the skill rather than improvising.",
+            "skill_disclosure": "unannounced",
+        }))
+        .unwrap()
+    }
+
+    /// The point of an unannounced case is that the only difference between the
+    /// arms is whether the skill is in the workspace, so the prompt cannot be a
+    /// second difference.
+    #[test]
+    fn an_unannounced_case_gives_both_arms_the_same_prompt() {
+        let eval = unannounced_contract_case();
+        let with_skill = build_eval_prompt(EvalPromptInput {
+            scenario: ScenarioKind::WithSkill,
+            eval: &eval,
+            skill_md: Some(CONTRACT_SKILL_MD),
+        })
+        .unwrap();
+        let without_skill = build_eval_prompt(EvalPromptInput {
+            scenario: ScenarioKind::WithoutSkill,
+            eval: &eval,
+            skill_md: Some(CONTRACT_SKILL_MD),
+        })
+        .unwrap();
+
+        assert_eq!(with_skill.as_str(), without_skill.as_str());
+        assert!(!with_skill.as_str().contains("Skill available at:"));
+        assert!(!with_skill.as_str().contains("Skill summary:"));
+        assert!(!with_skill.as_str().contains("demo-skill"));
+        assert!(with_skill.as_str().contains("Turn the staged sales file"));
+    }
+
+    #[test]
+    fn an_unannounced_skill_is_staged_where_a_listing_of_the_workspace_shows_it() {
+        let announced =
+            StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Announced, "demo-skill").unwrap();
+        assert_eq!(announced.as_str(), SKILL_LINK_WITH);
+
+        let old = StagedSkillDir::for_run(ScenarioKind::OldSkill, SkillDisclosure::Announced, "demo-skill").unwrap();
+        assert_eq!(old.as_str(), SKILL_LINK_OLD);
+
+        let unannounced =
+            StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Unannounced, "demo-skill").unwrap();
+        assert_eq!(unannounced.as_str(), "skills/demo-skill/");
+        assert!(!unannounced.as_str().starts_with('.'));
+
+        assert!(
+            StagedSkillDir::for_run(ScenarioKind::WithoutSkill, SkillDisclosure::Unannounced, "demo-skill").is_none()
+        );
+    }
+
+    #[test]
+    fn a_skill_name_that_is_not_a_directory_name_still_stages_inside_the_workspace() {
+        let staged =
+            StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Unannounced, "Demo Skill/../x").unwrap();
+        assert_eq!(staged.as_str(), "skills/Demo-Skill-x/");
+
+        let unnamed = StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Unannounced, "///").unwrap();
+        assert_eq!(unnamed.as_str(), "skills/skill/");
     }
 
     #[test]
