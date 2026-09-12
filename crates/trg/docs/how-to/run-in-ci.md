@@ -14,7 +14,7 @@ skill regressions on every pull request.
 | Grade assertions and graders | yes | `eval grade`, or `eval run --grade` |
 | Verify `grading.json` | yes | `eval verify`, strict or lenient |
 | Aggregate `benchmark.json` | yes | `eval benchmark`, or `eval run --benchmark` |
-| Fail on assertion pass rate | yes | `--min-pass-rate`, or `--mode strict` on `verify` |
+| Fail on assertion pass rate | yes | `--min-pass-rate`, or `--mode strict` on `verify`. Also fails when nothing was scored |
 | Fail on regression against a baseline | yes | `--baseline` plus the `--fail-on-*` flags |
 | Compare scenarios qualitatively | yes | `eval compare --judge llm` or `--judge script` |
 
@@ -140,7 +140,7 @@ $ trg ai skills eval verify ./runs/run-001/workspace \
 
 | Flag | Fails when |
 | ---- | ---------- |
-| `--min-pass-rate RATE` | pass rate across the bundle is below `RATE` |
+| `--min-pass-rate RATE` | pass rate across the bundle is below `RATE`, or the bundle scored nothing at all |
 | `--max-tokens N` | total tokens across all runs exceed `N` |
 | `--max-input-tokens N` | input tokens across all runs exceed `N` |
 | `--max-output-tokens N` | output tokens across all runs exceed `N` |
@@ -162,6 +162,14 @@ Regression gates compare the current bundle to a baseline report directory:
 The pass rate excludes `unsupported` results, so a runner that cannot be
 observed does not drag the rate below the threshold. See
 [Graders](../reference/ai-skills-eval.md#graders).
+
+A bundle that scored nothing at all has no rate to exclude them from, and
+`--min-pass-rate` fails rather than passing on it. A pass with no `--runner`,
+one whose runner was not on `PATH`, or one that was never graded all produce a
+bundle with no scored result, and a gate that reported those as met would keep
+its green check long after the suite stopped measuring anything. Without
+`--min-pass-rate` such a bundle is still fine, because scaffolding one is a
+legitimate use of `eval run`.
 
 If you do want the raw number, it lives under `check.metrics` in the JSON
 output:
