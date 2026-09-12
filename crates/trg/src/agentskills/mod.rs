@@ -9,6 +9,7 @@ pub mod feedback;
 pub mod grading;
 pub mod improvement_bundle;
 pub mod iteration_summary;
+pub mod judge;
 pub mod layout;
 pub mod models;
 pub mod outputs;

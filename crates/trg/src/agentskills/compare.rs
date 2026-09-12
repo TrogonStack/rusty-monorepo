@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::evals::EvalError;
+use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::report::ScenarioKind;
 
 pub const RUBRIC_ITEMS: &[&str] = &[
@@ -114,6 +115,10 @@ pub struct BlindLabelMapping {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ComparisonJudgeMetadata {
     pub kind: JudgeKind,
+    /// Which judge backend answered, recorded because the same model name can
+    /// be served by more than one provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +142,7 @@ pub struct ComparisonRecord {
 pub struct CompareOptions {
     pub pairs: Vec<ScenarioPair>,
     pub judge: JudgeKind,
+    pub judge_provider: JudgeProvider,
     pub judge_model: Option<String>,
     pub judge_command: Option<String>,
     pub emit_comparison_json: bool,
@@ -213,11 +219,22 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
         ));
     }
 
-    if options.judge == JudgeKind::Llm && options.judge_model.as_deref().unwrap_or("").is_empty() {
-        return Err(EvalError::Validation(
-            super::validation::ValidationError::for_field("judge_model", "is required when --judge llm").into(),
-        ));
-    }
+    let endpoint = match options.judge {
+        JudgeKind::Llm => {
+            let model = options
+                .judge_model
+                .as_deref()
+                .and_then(JudgeModel::new)
+                .ok_or_else(|| {
+                    EvalError::Validation(
+                        super::validation::ValidationError::for_field("judge_model", "is required when --judge llm")
+                            .into(),
+                    )
+                })?;
+            Some(JudgeEndpoint::resolve(options.judge_provider, &model, "judge_model")?)
+        }
+        JudgeKind::None | JudgeKind::Script => None,
+    };
 
     let report_path = report_dir.join("report.json");
     let content = std::fs::read_to_string(&report_path).map_err(|source| {
@@ -248,9 +265,9 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
                     )?
                 }
                 JudgeKind::Llm => {
-                    let model = options.judge_model.as_deref().unwrap_or_default();
+                    let endpoint = endpoint.as_ref().expect("llm judging resolves its endpoint up front");
                     run_llm_judge(
-                        model,
+                        endpoint,
                         &eval_case.id,
                         &eval_case.prompt,
                         &eval_case.expected_output,
@@ -276,6 +293,7 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
                 rubric: RUBRIC_ITEMS.iter().map(|item| (*item).to_string()).collect(),
                 judge: ComparisonJudgeMetadata {
                     kind: options.judge,
+                    provider: endpoint.as_ref().map(|endpoint| endpoint.provider.as_str().to_string()),
                     model: options.judge_model.clone(),
                     command: options.judge_command.clone(),
                 },
@@ -529,19 +547,12 @@ fn run_script_judge(
 }
 
 fn run_llm_judge(
-    model: &str,
+    endpoint: &JudgeEndpoint,
     eval_case_id: &str,
     prompt: &str,
     expected_output: &str,
     blind_outputs: &HashMap<String, String>,
 ) -> Result<Verdict, EvalError> {
-    let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-        EvalError::Validation(
-            super::validation::ValidationError::for_field("judge_model", "OPENAI_API_KEY must be set for llm judging")
-                .into(),
-        )
-    })?;
-
     let system_prompt = format!(
         "You are a blind evaluator comparing two anonymous outputs labeled A and B. \
          Judge only the provided rubric dimensions: {}. \
@@ -557,56 +568,8 @@ fn run_llm_judge(
         outputs: blind_outputs.clone(),
     })?;
 
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "response_format": {"type": "json_object"}
-    });
-
-    let response = reqwest::blocking::Client::new()
-        .post("https://api.openai.com/v1/chat/completions")
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .map_err(|source| {
-            EvalError::Validation(
-                super::validation::ValidationError::for_field("judge_model", source.to_string()).into(),
-            )
-        })?;
-
-    if !response.status().is_success() {
-        let detail = response.text().unwrap_or_default();
-        return Err(EvalError::Validation(
-            super::validation::ValidationError::for_field("judge_model", format!("llm judge request failed: {detail}"))
-                .into(),
-        ));
-    }
-
-    let payload: serde_json::Value = response.json().map_err(|source| {
-        EvalError::Validation(super::validation::ValidationError::for_field("judge_model", source.to_string()).into())
-    })?;
-    let content = payload
-        .pointer("/choices/0/message/content")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            EvalError::Validation(
-                super::validation::ValidationError::for_field("judge_model", "llm judge returned no message content")
-                    .into(),
-            )
-        })?;
-
-    let parsed: LlmJudgeResponse = serde_json::from_str(content).map_err(|source| {
-        EvalError::Validation(
-            super::validation::ValidationError::for_field(
-                "judge_model",
-                format!("llm judge returned invalid JSON: {source}"),
-            )
-            .into(),
-        )
-    })?;
+    let reply = judge::judge(endpoint, &JudgeRequest::new(system_prompt, user_prompt), "judge_model")?;
+    let parsed: LlmJudgeResponse = judge::parse_json_reply(&reply, "judge_model")?;
 
     Ok(Verdict {
         winner: parse_winner(&parsed.winner)?,
@@ -874,6 +837,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
                     b: ScenarioKind::WithoutSkill,
                 }],
                 judge: JudgeKind::Script,
+                judge_provider: JudgeProvider::default(),
                 judge_model: None,
                 judge_command: Some(format!("python3 {}", judge_script.display())),
                 emit_comparison_json: true,
@@ -923,6 +887,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
                     b: ScenarioKind::WithoutSkill,
                 }],
                 judge: JudgeKind::None,
+                judge_provider: JudgeProvider::default(),
                 judge_model: None,
                 judge_command: None,
                 emit_comparison_json: false,

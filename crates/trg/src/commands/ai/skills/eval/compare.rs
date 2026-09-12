@@ -9,6 +9,7 @@ use crate::agentskills::eval_suite_drift::{
     EvalSuiteDriftWarning,
 };
 use crate::agentskills::iteration_summary::detect_previous_report_dir;
+use crate::agentskills::judge::JudgeProvider;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 
@@ -70,6 +71,14 @@ pub struct CompareArgs {
     #[arg(long, value_enum, default_value_t = CompareJudge::None)]
     pub judge: CompareJudge,
 
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = JudgeProvider::default(),
+        help = "Judge backend for --judge llm. 'compatible' addresses any OpenAI-compatible endpoint through TRG_JUDGE_BASE_URL and TRG_JUDGE_API_KEY."
+    )]
+    pub judge_provider: JudgeProvider,
+
     #[arg(long, value_name = "MODEL", help = "Model identifier for LLM judging")]
     pub judge_model: Option<String>,
 
@@ -130,6 +139,7 @@ impl CompareArgs {
             CompareOptions {
                 pairs,
                 judge: self.judge.into(),
+                judge_provider: self.judge_provider,
                 judge_model: self.judge_model,
                 judge_command: self.judge_command,
                 emit_comparison_json: self.emit_comparison_json,

@@ -417,6 +417,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
                     b: ScenarioKind::WithoutSkill,
                 }],
                 judge: JudgeKind::Script,
+                judge_provider: crate::agentskills::judge::JudgeProvider::default(),
                 judge_model: None,
                 judge_command: Some(format!("python3 {}", judge_script.display())),
                 emit_comparison_json: true,
