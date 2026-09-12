@@ -791,7 +791,9 @@ runs with `--force` and `claude-code` has no sandbox flag, so a run can read a
 file from anywhere the invoking user can. What is checked is what a tool named as
 a path: a file argument, and the operands of a shell command that name a path
 outright, so `cat ~/.codex/skills/demo/SKILL.md` is reported while the
-interpreter in `/bin/zsh -lc '...'` is not. A search pattern can mention a path
+interpreter in `/bin/zsh -lc '...'` is not. Quoting says where an operand ends, so
+a quoted path is one path however many spaces it holds, and the payload of an
+interpreter flag is read as the command line it is. A search pattern can mention a path
 without naming one, so it is left unchecked. A path beginning with `~` names the
 host home directory rather than a directory in the workspace, so it is resolved
 against `HOME` before the check. Every escape is also recorded as a run warning

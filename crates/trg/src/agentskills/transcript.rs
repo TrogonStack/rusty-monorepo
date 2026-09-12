@@ -251,6 +251,7 @@ impl NormalizedTranscript {
             return false;
         }
         named_tokens(named)
+            .into_iter()
             .filter(|token| !self.left_the_workspace(token))
             .any(|token| STAGED_SKILL_DIRS.iter().any(|directory| token.contains(directory)))
     }
@@ -446,6 +447,9 @@ impl ToolArguments {
     }
 }
 
+/// The flags after which a command line carries another command line.
+const INTERPRETER_FLAGS: &[&str] = &["-c", "-lc", "-ic", "-lic"];
+
 /// The operands of a command that name a path on the host.
 ///
 /// This is not a shell parse. The program is skipped, since `/bin/zsh -lc '...'`
@@ -455,20 +459,18 @@ impl ToolArguments {
 /// which is enough for the escapes that matter here: a run that reaches a skill or
 /// a host file through a shell instead of a file tool.
 fn command_operands(command: &str) -> Vec<String> {
-    const INTERPRETER_FLAGS: &[&str] = &["-c", "-lc", "-ic", "-lic"];
-
     let mut operands = Vec::new();
     let mut skip_program = true;
     for token in named_tokens(command) {
         if std::mem::take(&mut skip_program) {
             continue;
         }
-        if INTERPRETER_FLAGS.contains(&token) {
+        if INTERPRETER_FLAGS.contains(&token.as_str()) {
             skip_program = true;
             continue;
         }
         if token.starts_with('/') || token.starts_with('~') || token.starts_with("..") {
-            operands.push(token.to_string());
+            operands.push(token);
         }
     }
     operands
@@ -478,14 +480,42 @@ fn command_operands(command: &str) -> Vec<String> {
 /// carries around it.
 ///
 /// One argument can name several paths, since a command-style tool records its
-/// whole command line, and the tokens are how they are told apart. Every reader
-/// strips quoting the same way, so a token that named a path can be compared
-/// against a recorded escape by equality.
-fn named_tokens(named: &str) -> impl Iterator<Item = &str> {
-    named
-        .split_whitespace()
-        .map(|token| token.trim_matches(|c| c == '\'' || c == '"' || c == '`'))
-        .filter(|token| !token.is_empty())
+/// whole command line, and the tokens are how they are told apart. The quoting is
+/// what says where a token ends: whitespace alone tears a quoted path that holds a
+/// space in two, and the tail of a torn host skill path still reads as a skill
+/// directory of this run's own. The payload of an interpreter flag is a command
+/// line in its own right, so it is opened into its own tokens and a path reached
+/// through a shell is a token like any other. Every reader tokenizes the same way,
+/// so a token that named a path can be compared against a recorded escape by
+/// equality.
+fn named_tokens(named: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote: Option<char> = None;
+    let mut nested = false;
+    for character in named.chars() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => token.push(character),
+            None if character == '\'' || character == '"' || character == '`' => quote = Some(character),
+            None if character.is_whitespace() => push_token(&mut tokens, std::mem::take(&mut token), &mut nested),
+            None => token.push(character),
+        }
+    }
+    push_token(&mut tokens, token, &mut nested);
+    tokens
+}
+
+fn push_token(tokens: &mut Vec<String>, token: String, nested: &mut bool) {
+    if token.is_empty() {
+        return;
+    }
+    if std::mem::take(nested) {
+        tokens.extend(named_tokens(&token));
+        return;
+    }
+    *nested = INTERPRETER_FLAGS.contains(&token.as_str());
+    tokens.push(token);
 }
 
 pub fn ndjson_values(stdout: &RedactedTranscript) -> Vec<serde_json::Value> {
@@ -1054,6 +1084,32 @@ mod tests {
         assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
     }
 
+    /// A command line quotes a path that holds a space, so the quoting says where
+    /// the path ends. Read to the next space instead, the tail of a host skill path
+    /// is a directory of this run's own and a run that never opened the staged skill
+    /// is graded as having reached for it.
+    #[test]
+    fn a_quoted_host_skill_path_holding_a_space_is_not_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cat \"/opt/my harness/skills/other/SKILL.md\""}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert_eq!(
+            transcript
+                .workspace_escapes
+                .iter()
+                .map(|escape| escape.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/opt/my harness/skills/other/SKILL.md"]
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
     /// The home directory and a skill installed under it are two paths that left
     /// the workspace, and neither of them is this run's skill, however the tokens
     /// of the command they were named in overlap.
@@ -1148,6 +1204,20 @@ mod tests {
         assert_eq!(command_operands("python3 -c 'print(1)'"), Vec::<String>::new());
         assert_eq!(command_operands("ls -l /etc/hosts"), vec!["/etc/hosts".to_string()]);
         assert_eq!(command_operands("ls outputs"), Vec::<String>::new());
+    }
+
+    /// A quoted operand is one path however many spaces it holds, and the payload of
+    /// an interpreter flag is still read as the command line it is.
+    #[test]
+    fn a_quoted_operand_is_one_path_however_many_spaces_it_holds() {
+        assert_eq!(
+            command_operands("cat \"/opt/my harness/skills/other/SKILL.md\""),
+            vec!["/opt/my harness/skills/other/SKILL.md".to_string()]
+        );
+        assert_eq!(
+            command_operands("/bin/zsh -lc \"cat '/opt/my harness/notes.md'\""),
+            vec!["/opt/my harness/notes.md".to_string()]
+        );
     }
 
     #[test]
