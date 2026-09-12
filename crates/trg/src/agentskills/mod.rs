@@ -1,5 +1,6 @@
 pub mod benchmark;
 pub mod cache;
+pub mod case_selection;
 pub mod ci;
 pub mod compare;
 pub mod errors;

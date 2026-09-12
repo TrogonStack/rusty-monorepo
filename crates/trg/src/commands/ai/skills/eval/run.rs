@@ -5,6 +5,7 @@ use crate::agentskills::cache::{
     apply_cache_hit, compute_fixture_hash, record_completion, runner_kind_label, try_resolve_cache, CacheKey,
     CacheKeyInput, CacheOptions, ReuseKeyInput, PROMPT_CONTRACT_VERSION,
 };
+use crate::agentskills::case_selection::CaseSelection;
 use crate::agentskills::evals::{
     effective_timeout_secs, missing_expected_output_warnings, parse_eval_suite, EvalCase, EvalCheckOptions, EvalSuite,
 };
@@ -66,6 +67,20 @@ pub struct RunArgs {
         help = "Scenario kind to include (repeatable)"
     )]
     pub scenario: Vec<ScenarioKind>,
+
+    #[arg(
+        long = "case",
+        value_name = "PATTERN",
+        help = "Cover only the cases whose id matches this glob (* and ?), matched in full (repeatable)"
+    )]
+    pub cases: Vec<String>,
+
+    #[arg(
+        long = "tag",
+        value_name = "TAG",
+        help = "Cover only the cases carrying this tag (repeatable). Combined with --case it narrows further: named and tagged"
+    )]
+    pub tags: Vec<String>,
 
     #[arg(
         long,
@@ -281,6 +296,14 @@ impl RunArgs {
             None
         };
 
+        let cases = match CaseSelection::parse(&self.cases, &self.tags) {
+            Ok(cases) => cases,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        };
+
         let build_options = BuildReportOptions {
             iteration: Some(iteration),
             attempts: self.attempts.max(1),
@@ -293,6 +316,7 @@ impl RunArgs {
             runner_version: runner_probe.as_ref().and_then(|probe| probe.version.clone()),
             skill_staging: self.skill_staging,
             environment: self.environment,
+            cases,
             ..BuildReportOptions::default()
         };
 
@@ -976,6 +1000,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs {
                 strict_ci: false,
                 fail_on_runner_failure: false,
@@ -1110,6 +1136,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1149,6 +1177,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1204,6 +1234,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1304,6 +1336,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         };
 
@@ -1351,6 +1385,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         };
 
@@ -1398,6 +1434,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         };
 
@@ -1437,6 +1475,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         };
 
@@ -1475,6 +1515,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         });
 
@@ -1501,6 +1543,8 @@ mod tests {
             reuse_completed: true,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         });
 
@@ -1541,6 +1585,8 @@ mod tests {
             reuse_completed: true,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1611,6 +1657,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         });
 
@@ -1675,6 +1723,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         });
 
@@ -1762,6 +1812,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         });
 
@@ -1800,6 +1852,8 @@ mod tests {
                 reuse_completed: false,
                 skill_staging: SkillStaging::Symlink,
                 environment: EnvironmentPolicy::Scrubbed,
+                cases: Vec::new(),
+                tags: Vec::new(),
                 ci: EvalCiArgs::default(),
             }
             .handle(&crate::fs::RealFS);
@@ -1863,6 +1917,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1906,6 +1962,8 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
             ci: EvalCiArgs::default(),
         });
 

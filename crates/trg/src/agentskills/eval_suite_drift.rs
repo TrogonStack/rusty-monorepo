@@ -16,7 +16,7 @@ pub const WARNING_KIND: &str = "eval_suite_drift";
 pub struct ReportDriftSnapshot {
     pub iteration: u32,
     pub evals_hash: String,
-    pub eval_case_ids: BTreeSet<String>,
+    pub declared_eval_case_ids: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,7 +75,30 @@ pub fn load_report_drift_snapshot(report_dir: &Path) -> Result<ReportDriftSnapsh
         .and_then(|field| field.as_str())
         .unwrap_or_default()
         .to_string();
-    let eval_case_ids = value
+    let declared_eval_case_ids = recorded_declared_case_ids(&value).unwrap_or_else(|| dimension_case_ids(&value));
+
+    Ok(ReportDriftSnapshot {
+        iteration,
+        evals_hash,
+        declared_eval_case_ids,
+    })
+}
+
+/// The suite a narrowed run recorded selecting from, absent when the run covered the
+/// whole suite or predates the record.
+fn recorded_declared_case_ids(value: &serde_json::Value) -> Option<BTreeSet<String>> {
+    let declared: BTreeSet<String> = value
+        .pointer("/suite/case_selection/declared")?
+        .as_array()?
+        .iter()
+        .filter_map(|id| id.as_str())
+        .map(str::to_string)
+        .collect();
+    (!declared.is_empty()).then_some(declared)
+}
+
+fn dimension_case_ids(value: &serde_json::Value) -> BTreeSet<String> {
+    value
         .pointer("/dimensions/eval_cases")
         .and_then(|cases| cases.as_array())
         .map(|cases| {
@@ -85,13 +108,7 @@ pub fn load_report_drift_snapshot(report_dir: &Path) -> Result<ReportDriftSnapsh
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default();
-
-    Ok(ReportDriftSnapshot {
-        iteration,
-        evals_hash,
-        eval_case_ids,
-    })
+        .unwrap_or_default()
 }
 
 pub fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
@@ -116,13 +133,21 @@ pub fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
     })
 }
 
-pub fn eval_case_ids(report: &ReportDocument) -> BTreeSet<String> {
-    report
-        .dimensions
-        .eval_cases
-        .iter()
-        .map(|eval_case| eval_case.id.clone())
-        .collect()
+/// Every case ID the report's suite declared, which is not always what the run covered.
+///
+/// Drift is a statement about the manifest. A narrowed run's dimensions list only the
+/// cases it selected, so diffing those would report a case the run merely left out as one
+/// the suite lost, and report it as added again the next time a run selects it.
+pub fn declared_eval_case_ids(report: &ReportDocument) -> BTreeSet<String> {
+    match &report.suite.case_selection {
+        Some(selection) if !selection.declared.is_empty() => selection.declared.iter().cloned().collect(),
+        _ => report
+            .dimensions
+            .eval_cases
+            .iter()
+            .map(|eval_case| eval_case.id.clone())
+            .collect(),
+    }
 }
 
 pub fn detect_eval_suite_drift(current: &ReportDocument, previous: &ReportDocument) -> Option<EvalSuiteDriftReport> {
@@ -130,12 +155,12 @@ pub fn detect_eval_suite_drift(current: &ReportDocument, previous: &ReportDocume
         &ReportDriftSnapshot {
             iteration: current.report.iteration,
             evals_hash: current.suite.evals_hash.clone(),
-            eval_case_ids: eval_case_ids(current),
+            declared_eval_case_ids: declared_eval_case_ids(current),
         },
         &ReportDriftSnapshot {
             iteration: previous.report.iteration,
             evals_hash: previous.suite.evals_hash.clone(),
-            eval_case_ids: eval_case_ids(previous),
+            declared_eval_case_ids: declared_eval_case_ids(previous),
         },
     )
 }
@@ -148,7 +173,8 @@ pub fn detect_eval_suite_drift_snapshots(
         return None;
     }
 
-    let (added_eval_ids, removed_eval_ids) = diff_eval_case_ids(&current.eval_case_ids, &previous.eval_case_ids);
+    let (added_eval_ids, removed_eval_ids) =
+        diff_eval_case_ids(&current.declared_eval_case_ids, &previous.declared_eval_case_ids);
 
     Some(EvalSuiteDriftReport {
         current_hash: current.evals_hash.clone(),
@@ -177,7 +203,7 @@ pub fn detect_eval_suite_drift_vs_skill(
 
     let suite = parse_eval_suite(&current_content)?;
     let current_ids: BTreeSet<String> = suite.evals.iter().map(|eval| eval.id.to_string()).collect();
-    let previous_ids = eval_case_ids(report);
+    let previous_ids = declared_eval_case_ids(report);
     let (added_eval_ids, removed_eval_ids) = diff_eval_case_ids(&current_ids, &previous_ids);
 
     Ok(Some(EvalSuiteDriftReport {
@@ -309,6 +335,112 @@ mod tests {
         assert_ne!(drift.current_hash, drift.previous_hash);
         assert_eq!(drift.added_eval_ids, vec!["case-c".to_string()]);
         assert_eq!(drift.removed_eval_ids, vec!["case-b".to_string()]);
+    }
+
+    fn narrowed_report_from_skill(fs: &MemFS, skill_path: &Path, pattern: &str, iteration: u32) -> ReportDocument {
+        let bundle = build_report_bundle(
+            fs,
+            skill_path,
+            skill_path,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                iteration: Some(iteration),
+                cases: crate::agentskills::case_selection::CaseSelection::parse(&[pattern.to_string()], &[]).unwrap(),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+        bundle.document
+    }
+
+    /// Editing a case rewrites the manifest, so the next run's hash differs and the IDs
+    /// get diffed. A run that covered one case out of two did not take the other one out
+    /// of the suite.
+    #[test]
+    fn a_case_a_narrowed_run_skipped_is_not_reported_as_one_the_suite_gained() {
+        let fs = MemFS::new();
+        let previous_path = Path::new("demo-skill-prev");
+        let current_path = Path::new("demo-skill-next");
+        for (path, prompt) in [(previous_path, "p"), (current_path, "p2")] {
+            fs.insert(path.join("SKILL.md"), "---\nname: demo-skill\ndescription: d\n---\n");
+            fs.insert(
+                path.join("evals/evals.json"),
+                format!(
+                    r#"{{
+                        "skill_name": "demo-skill",
+                        "evals": [
+                            {{ "id": "case-a", "prompt": "{prompt}", "expected_output": "o", "assertions": ["a"] }},
+                            {{ "id": "case-b", "prompt": "{prompt}", "expected_output": "o", "assertions": ["b"] }}
+                        ]
+                    }}"#
+                ),
+            );
+        }
+        let previous = narrowed_report_from_skill(&fs, previous_path, "case-a", 1);
+        let current = report_from_skill(&fs, current_path, 2);
+
+        let drift = detect_eval_suite_drift(&current, &previous).expect("the manifest changed");
+        assert_eq!(drift.added_eval_ids, Vec::<String>::new());
+        assert_eq!(drift.removed_eval_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_narrowed_report_is_diffed_against_the_skill_by_the_suite_it_selected_from() {
+        let fs = MemFS::new();
+        let skill_path = sample_skill(
+            &fs,
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [
+                    { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] },
+                    { "id": "case-b", "prompt": "p", "expected_output": "o", "assertions": ["b"] }
+                ]
+            }"#,
+        );
+        let report = narrowed_report_from_skill(&fs, &skill_path, "case-a", 1);
+
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("demo-skill");
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [
+                    { "id": "case-a", "prompt": "edited", "expected_output": "o", "assertions": ["a"] },
+                    { "id": "case-b", "prompt": "edited", "expected_output": "o", "assertions": ["b"] }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let drift = detect_eval_suite_drift_vs_skill(&report, &skill_dir)
+            .unwrap()
+            .expect("the manifest changed");
+        assert_eq!(drift.added_eval_ids, Vec::<String>::new());
+        assert_eq!(drift.removed_eval_ids, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_snapshot_reads_the_declared_suite_a_narrowed_report_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = serde_json::json!({
+            "report": { "iteration": 2 },
+            "suite": {
+                "evals_hash": "sha256:abc",
+                "case_selection": { "cases": ["case-a"], "covered": 1, "declared": ["case-a", "case-b"] }
+            },
+            "dimensions": { "eval_cases": [{ "id": "case-a" }] }
+        });
+        std::fs::write(temp.path().join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
+
+        let snapshot = load_report_drift_snapshot(temp.path()).unwrap();
+        assert_eq!(
+            snapshot.declared_eval_case_ids,
+            BTreeSet::from(["case-a".to_string(), "case-b".to_string()])
+        );
     }
 
     #[test]

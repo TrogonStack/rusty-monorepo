@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use crate::fs::FileSystem;
 
 use super::cache::RunCacheInfo;
+use super::case_selection::{CaseSelection, CaseSelectionRecord};
 use super::evals::{parse_eval_suite, EvalError, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
@@ -151,6 +152,8 @@ pub struct BuildReportOptions {
     pub skill_staging: SkillStaging,
     /// How much of the operator's machine each run is allowed to see.
     pub environment: EnvironmentPolicy,
+    /// Which of the suite's cases this run covers.
+    pub cases: CaseSelection,
 }
 
 impl Default for BuildReportOptions {
@@ -167,6 +170,7 @@ impl Default for BuildReportOptions {
             runner_version: None,
             skill_staging: SkillStaging::default(),
             environment: EnvironmentPolicy::default(),
+            cases: CaseSelection::default(),
         }
     }
 }
@@ -247,6 +251,12 @@ pub struct SuiteSection {
     pub old_skill_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_skill_hash: Option<String>,
+    /// Absent when the run covered every case the suite declares.
+    ///
+    /// `evals_hash` covers the whole file either way, so without this a narrowed run and a
+    /// full one are indistinguishable to a reader comparing two reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_selection: Option<CaseSelectionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -412,7 +422,10 @@ pub fn build_report_bundle(
     let evals_path = skill_path.join("evals").join("evals.json");
     let evals_content = fs.read_to_string(&evals_path)?;
     let evals_hash = sha256_digest(&evals_content);
-    let suite: EvalSuite = parse_eval_suite(&evals_content)?;
+    let mut suite: EvalSuite = parse_eval_suite(&evals_content)?;
+    let declared_case_ids: Vec<String> = suite.evals.iter().map(|case| case.id.to_string()).collect();
+    suite.evals = options.cases.apply(suite.evals)?;
+    let case_selection = options.cases.record(suite.evals.len(), declared_case_ids);
     let eval_slugs = slugs_for_suite(&suite);
     let iteration = options.iteration.unwrap_or(1);
     let attempts = options.attempts.max(1);
@@ -468,6 +481,7 @@ pub fn build_report_bundle(
             evals_hash,
             old_skill_path: old_skill_path_str,
             old_skill_hash,
+            case_selection,
         },
         dimensions,
         runs,
@@ -1083,6 +1097,88 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowed_bundle_holds_runs_for_the_covered_cases_only() {
+        let fs = MemFS::new();
+        let skill_path = Path::new("demo-skill");
+        fs.insert(
+            skill_path.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: d\n---\n",
+        );
+        fs.insert(
+            skill_path.join("evals/evals.json"),
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [
+                    { "id": "parse-csv", "prompt": "p", "expected_output": "o", "assertions": ["a"] },
+                    { "id": "parse-json", "prompt": "p", "expected_output": "o", "assertions": ["a"] },
+                    { "id": "render-chart", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                ]
+            }"#,
+        );
+
+        let bundle = build_report_bundle(
+            &fs,
+            skill_path,
+            Path::new("demo-skill"),
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                iteration: Some(1),
+                cases: CaseSelection::parse(&["parse-*".to_string()], &[]).unwrap(),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        let covered: Vec<&str> = bundle
+            .document
+            .runs
+            .iter()
+            .map(|run| run.eval_case_id.as_str())
+            .collect();
+        assert_eq!(covered, vec!["parse-csv", "parse-json"]);
+
+        let record = bundle.document.suite.case_selection.as_ref().unwrap();
+        assert_eq!(record.cases, vec!["parse-*".to_string()]);
+        assert_eq!(record.covered, 2);
+        assert_eq!(record.declared, vec!["parse-csv", "parse-json", "render-chart"]);
+    }
+
+    #[test]
+    fn a_full_bundle_records_no_case_selection() {
+        let fs = MemFS::new();
+        let skill_path = Path::new("demo-skill");
+        fs.insert(
+            skill_path.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: d\n---\n",
+        );
+        fs.insert(
+            skill_path.join("evals/evals.json"),
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [{ "id": "1", "prompt": "p", "expected_output": "o", "assertions": ["a"] }]
+            }"#,
+        );
+
+        let bundle = build_report_bundle(
+            &fs,
+            skill_path,
+            Path::new("demo-skill"),
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                iteration: Some(1),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(bundle.document.suite.case_selection.is_none());
+    }
+
+    #[test]
     fn write_report_bundle_creates_report_and_empty_workspace() {
         let temp = tempfile::tempdir().unwrap();
         let bundle = ReportBundle {
@@ -1112,6 +1208,7 @@ mod tests {
                     evals_hash: "sha256:feedface".to_string(),
                     old_skill_path: None,
                     old_skill_hash: None,
+                    case_selection: None,
                 },
                 dimensions: DimensionsSection {
                     eval_cases: Vec::new(),
