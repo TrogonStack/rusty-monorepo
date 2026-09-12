@@ -79,11 +79,14 @@
           "type": "integer"
         },
         "pass_rate": {
-          "description": "Over the scored assertions only, so an ungradable property cannot drag a\nskill's score down on a runner that simply cannot be observed.",
+          "description": "Over the scored assertions only, so an ungradable property cannot drag a\nskill's score down on a runner that simply cannot be observed. `null` when\nnothing was scored at all, because no assertion answered is not the same\nresult as every assertion failed.",
           "format": "double",
           "maximum": 1.0,
           "minimum": 0.0,
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "passed": {
           "format": "uint",
@@ -105,8 +108,7 @@
       "required": [
         "passed",
         "failed",
-        "total",
-        "pass_rate"
+        "total"
       ],
       "type": "object"
     }

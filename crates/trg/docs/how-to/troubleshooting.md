@@ -153,10 +153,11 @@ The `grading.json` summary counts are inconsistent with `assertion_results`.
 **Fix:** Recompute summary fields:
 
 ```text
-passed  = count of assertion_results where passed == true
-failed  = count where passed == false
-total   = len(assertion_results)
-pass_rate = passed / total
+passed      = count of scored assertion_results where passed == true
+failed      = count of scored results where passed == false
+unsupported = count of results carrying `unsupported`
+total       = len(assertion_results)
+pass_rate   = passed / (total - unsupported), or null when nothing was scored
 ```
 
 ---
@@ -212,7 +213,7 @@ automatically; manual edits must respect the constraint.
 | All runs `skipped` | Did you pass `--runner`? |
 | All runs `failed` | Is the runner CLI installed and authenticated? |
 | Empty workspace after run | Runner may have failed before writing output; check stderr |
-| `pass_rate: 0.0` with 0 assertions | No `grading.json` present (expected until grading PR) |
+| `pass_rate: null` | Nothing was scored: every result is `unsupported`, or there is no `grading.json` |
 | Duplicate scenario error | Remove duplicate `--scenario` flags |
 | CI missing context in report | Set `GITHUB_ACTIONS=true` (automatic on GitHub Actions) |
 

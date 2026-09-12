@@ -793,7 +793,7 @@ pub(crate) mod testutil {
                 failed: usize::from(!passed),
                 total: 1,
                 unsupported: 0,
-                pass_rate: if passed { 1.0 } else { 0.0 },
+                pass_rate: Some(if passed { 1.0 } else { 0.0 }),
             },
         };
         std::fs::write(

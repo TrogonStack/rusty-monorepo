@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde::Deserialize;
 
 use super::evals::{check_workspace, EvalError, WorkspaceCheckOptions, WorkspaceCheckReport};
+use super::grading::describe_pass_rate;
 use super::report::RunRecord;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,7 +52,7 @@ pub struct ReportMetrics {
     pub passed_assertions: usize,
     pub failed_assertions: usize,
     pub unsupported_assertions: usize,
-    pub pass_rate: f64,
+    pub pass_rate: Option<f64>,
     pub total_tokens: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -232,11 +233,11 @@ pub fn run_ci_checks(
         }
     }
 
-    if let Some(minimum) = thresholds.min_pass_rate {
-        if metrics.assertion_results > 0 && metrics.pass_rate + f64::EPSILON < minimum {
+    if let (Some(minimum), Some(pass_rate)) = (thresholds.min_pass_rate, metrics.pass_rate) {
+        if pass_rate + f64::EPSILON < minimum {
             violations.push(CiViolation {
                 kind: CiViolationKind::PassRateBelowMinimum,
-                message: format!("pass rate {:.4} is below minimum {:.4}", metrics.pass_rate, minimum),
+                message: format!("pass rate {pass_rate:.4} is below minimum {minimum:.4}"),
                 run_id: None,
                 workspace: None,
                 file: None,
@@ -301,16 +302,17 @@ pub fn run_ci_checks(
     }
 
     if let Some(baseline) = &baseline_metrics {
-        if policy.fail_on_pass_rate_regression
-            && baseline.assertion_results > 0
-            && metrics.assertion_results > 0
-            && metrics.pass_rate + f64::EPSILON < baseline.pass_rate
-        {
+        let regressed = match (metrics.pass_rate, baseline.pass_rate) {
+            (Some(current), Some(previous)) => current + f64::EPSILON < previous,
+            _ => false,
+        };
+        if policy.fail_on_pass_rate_regression && regressed {
             violations.push(CiViolation {
                 kind: CiViolationKind::PassRateRegression,
                 message: format!(
-                    "pass rate {:.4} regressed from baseline {:.4}",
-                    metrics.pass_rate, baseline.pass_rate
+                    "pass rate {} regressed from baseline {}",
+                    describe_pass_rate(metrics.pass_rate),
+                    describe_pass_rate(baseline.pass_rate)
                 ),
                 run_id: None,
                 workspace: None,
@@ -458,12 +460,15 @@ pub fn emit_github_annotations(violations: &[CiViolation]) {
 }
 
 pub fn print_human_summary(check: &CiCheckResult) {
-    println!(
-        "assertions: {}/{} passed ({:.2}%)",
-        check.metrics.passed_assertions,
-        check.metrics.assertion_results,
-        check.metrics.pass_rate * 100.0
-    );
+    match check.metrics.pass_rate {
+        Some(pass_rate) => println!(
+            "assertions: {}/{} passed ({:.2}%)",
+            check.metrics.passed_assertions,
+            check.metrics.assertion_results,
+            pass_rate * 100.0
+        ),
+        None => println!("assertions: none scored"),
+    }
     if check.metrics.unsupported_assertions > 0 {
         println!(
             "unsupported: {} (not graded on this runner, excluded from the pass rate)",
@@ -488,11 +493,11 @@ fn merge_workspace_metrics(metrics: &mut ReportMetrics, workspace: &WorkspaceChe
     metrics.unsupported_assertions += workspace.unsupported_assertions;
 }
 
-fn compute_pass_rate(passed: usize, total: usize) -> f64 {
+fn compute_pass_rate(passed: usize, total: usize) -> Option<f64> {
     if total == 0 {
-        0.0
+        None
     } else {
-        passed as f64 / total as f64
+        Some(passed as f64 / total as f64)
     }
 }
 
@@ -537,7 +542,7 @@ mod tests {
             passed_assertions: passed,
             failed_assertions: total - passed,
             unsupported_assertions: 0,
-            pass_rate,
+            pass_rate: Some(pass_rate),
             total_tokens: tokens,
             input_tokens: tokens / 2,
             output_tokens: tokens / 2,
@@ -777,7 +782,7 @@ mod tests {
 
     fn write_metrics_report(dir: &Path, metrics: ReportMetrics) {
         fs::create_dir_all(dir.join("runs/run-001/workspace")).unwrap();
-        let pass_rate = metrics.pass_rate;
+        let pass_rate = metrics.pass_rate.unwrap_or(0.0);
         let passed = metrics.passed_assertions;
         let failed = metrics.failed_assertions;
         let assertion_rows: Vec<String> = (0..metrics.assertion_results)
@@ -888,7 +893,7 @@ mod tests {
         write_metrics_report(temp.path(), sample_metrics(0.5, 1000, 2500));
         let metrics = collect_report_metrics(temp.path()).unwrap();
         assert_eq!(metrics.assertion_results, 10);
-        assert!((metrics.pass_rate - 0.5).abs() < 0.0001);
+        assert_eq!(metrics.pass_rate, Some(0.5));
         assert_eq!(metrics.total_tokens, 1000);
         assert_eq!(metrics.max_duration_ms, 2500);
     }

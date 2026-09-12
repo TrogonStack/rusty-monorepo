@@ -348,12 +348,14 @@ Run ordering: eval cases in manifest order, then scenarios in flag order.
 `runs/<run-id>/grading.json`. `verify` discovers these recursively under a
 workspace tree.
 
-Schema version: `trg.skills-eval.grading.v2`. `v1` is still accepted on read;
-`v2` adds `unsupported` and narrows `pass_rate` to scored results only.
+Schema version: `trg.skills-eval.grading.v3`. `v2` and `v1` are still accepted
+on read. `v2` added `unsupported` and narrowed `pass_rate` to scored results
+only; `v3` makes `pass_rate` nullable, because a run where nothing could be
+scored has no pass rate and reporting `0.0` reads as a total failure.
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v2",
+  "schema_version": "trg.skills-eval.grading.v3",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",
@@ -391,7 +393,7 @@ Schema version: `trg.skills-eval.grading.v2`. `v1` is still accepted on read;
 | `summary.failed` | integer | Must equal the count of scored, failing results |
 | `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` |
 | `summary.total` | integer | Must equal `assertion_results` length |
-| `summary.pass_rate` | float | Must equal `passed / (total - unsupported)`, or `0.0` when nothing was scored |
+| `summary.pass_rate` | float or null | Must equal `passed / (total - unsupported)`, or `null` when nothing was scored |
 
 ---
 
