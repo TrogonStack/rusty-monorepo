@@ -174,7 +174,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Reuse any prior completed run for the same eval case, even when scenario or model config differs (still invalidated when skill, evals, or fixtures change). Rejected when more than one --scenario is requested"
+        help = "Reuse any prior completed run for the same eval case and scenario, even when the model config or runner differs (still invalidated when skill, evals, or fixtures change). The scenario is never forgotten: the arms of a comparison differ in nothing else. Rejected when more than one --scenario is requested"
     )]
     pub reuse_completed: bool,
 
@@ -543,9 +543,9 @@ fn execute_runs(
 
         let key_input = CacheKeyInput {
             eval_case_id: run.eval_case_id.clone(),
-            skill_hash: skill_hash.clone(),
+            skill_hash,
             evals_hash: bundle.document.suite.evals_hash.clone(),
-            fixture_hash: fixture_hash.clone(),
+            fixture_hash,
             model_config: run.model_config_id.clone(),
             runner_model: runner_model.map(str::to_string),
             runner_kind: runner_kind.clone(),
@@ -555,12 +555,7 @@ fn execute_runs(
             environment,
             skill_staging,
         };
-        let reuse_input = ReuseKeyInput {
-            eval_case_id: run.eval_case_id.clone(),
-            skill_hash,
-            evals_hash: bundle.document.suite.evals_hash.clone(),
-            fixture_hash,
-        };
+        let reuse_input = ReuseKeyInput::of(&key_input);
         let cache_key = CacheKey::from_input(&key_input);
 
         if let Some(pointer) = try_resolve_cache(out_dir, cache_options, &key_input, &reuse_input) {
@@ -1486,7 +1481,80 @@ mod tests {
     }
 
     #[test]
-    fn reuse_completed_reuses_across_scenarios() {
+    fn reuse_completed_serves_the_same_arm_produced_under_another_model_config() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_cacheable_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        run_with_fake_runner(RunArgs {
+            skill_dir: skill_dir.clone(),
+            out_dir: out_dir.clone(),
+            model_config: "ci-default".to_string(),
+            scenario: vec![ScenarioKind::WithSkill],
+            runner: Some(Runner::Codex),
+            runner_model: None,
+            timeout_secs: None,
+            retries: 0,
+            attempts: 1,
+            force: true,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: false,
+            reuse_completed: false,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            ci: EvalCiArgs::default(),
+        });
+
+        let second_report = run_with_fake_runner(RunArgs {
+            skill_dir: skill_dir.clone(),
+            out_dir: out_dir.clone(),
+            model_config: "other-model".to_string(),
+            scenario: vec![ScenarioKind::WithSkill],
+            runner: Some(Runner::Codex),
+            runner_model: Some("gpt-test".to_string()),
+            timeout_secs: None,
+            retries: 0,
+            attempts: 1,
+            force: true,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: false,
+            reuse_completed: true,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            ci: EvalCiArgs::default(),
+        });
+
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(second_report.join("report.json")).unwrap()).unwrap();
+        let cache = &report["runs"][0]["cache"];
+        assert_eq!(cache["hit"], true);
+        assert_eq!(cache["source_run_id"], "run-001");
+        assert_eq!(first_run_duration(&second_report), 100);
+    }
+
+    /// The two arms of a case differ in the scenario and nothing else, so answering the
+    /// baseline with the with-skill run would compare a run against itself.
+    #[test]
+    fn reuse_completed_does_not_serve_the_with_skill_run_to_the_baseline() {
         super::fake_runner::reset();
         let temp = tempfile::tempdir().unwrap();
         let skill_dir = write_cacheable_skill(temp.path());
@@ -1550,10 +1618,10 @@ mod tests {
 
         let report: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(second_report.join("report.json")).unwrap()).unwrap();
-        let cache = &report["runs"][0]["cache"];
-        assert_eq!(cache["hit"], true);
-        assert_eq!(cache["source_run_id"], "run-001");
-        assert_eq!(first_run_duration(&second_report), 100);
+        assert!(
+            report["runs"][0]["cache"].is_null(),
+            "the baseline arm has to be executed rather than answered with the run that had the skill"
+        );
     }
 
     #[test]
