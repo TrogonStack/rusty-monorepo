@@ -495,6 +495,13 @@ holds every revision of the suite, so a run handed the working tree without
 `evals/` could ask version control for the answer key instead. No run needs a
 skill's history to do its work.
 
+Copying dereferences links, which is what makes the staged copy self-contained,
+so a link inside the skill decides what ends up in the workspace. A link that
+resolves into the withheld suite, or out of the skill altogether, is left out
+the same way the suite is, rather than delivering its target into the run's own
+directory with no link left to give it away. A skill that keeps content behind
+such a link is staged without it under `--skill-staging copy`.
+
 Leaving the suite out of the staged directory keeps it out of a listing, which
 is all a symlink can offer. A symlink names the path it points at, so a run that
 reads one learns where the skill really lives, and the suite it was not given is

@@ -10,7 +10,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -463,25 +463,64 @@ fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_na
 }
 
 fn copy_skill_into_workspace(skill_path: &Path, dest: &Path) -> std::io::Result<()> {
+    let skill = CopyableSkill::rooted_at(skill_path)?;
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(skill_path)? {
         let entry = entry?;
         if is_withheld_from_staging(&entry.file_name()) {
             continue;
         }
-        copy_skill_tree(&entry.path(), &dest.join(entry.file_name()))?;
+        copy_skill_tree(&skill, &entry.path(), &dest.join(entry.file_name()))?;
     }
     Ok(())
 }
 
+/// What a copy of a skill is allowed to draw from.
+///
+/// Copying dereferences links, which is what makes the staged copy self-contained, so the
+/// question of what a link may point at is the question of what ends up in the workspace.
+/// A link inside a skill can name the withheld suite as easily as it can name a file on the
+/// operator's machine, and either one would arrive in the run's own directory with no link
+/// left to give it away.
+struct CopyableSkill {
+    root: PathBuf,
+    withheld: Vec<PathBuf>,
+}
+
+impl CopyableSkill {
+    fn rooted_at(skill_path: &Path) -> std::io::Result<Self> {
+        let root = std::fs::canonicalize(skill_path)?;
+        let withheld = WITHHELD_FROM_STAGING
+            .iter()
+            .map(|name| root.join(name))
+            .filter_map(|path| std::fs::canonicalize(path).ok())
+            .collect();
+        Ok(Self { root, withheld })
+    }
+
+    /// A path that cannot be resolved is a broken link, which there is nothing to copy from.
+    fn may_copy(&self, path: &Path) -> bool {
+        let Ok(resolved) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        resolved.starts_with(&self.root) && !self.withheld.iter().any(|withheld| resolved.starts_with(withheld))
+    }
+}
+
 /// Copy a skill directory, dereferencing symlinks so the destination is fully self-contained.
-fn copy_skill_tree(src: &Path, dest: &Path) -> std::io::Result<()> {
+///
+/// Anything that resolves outside what the copy may draw from is left out, the same way the
+/// suite itself is.
+fn copy_skill_tree(skill: &CopyableSkill, src: &Path, dest: &Path) -> std::io::Result<()> {
+    if !skill.may_copy(src) {
+        return Ok(());
+    }
     let metadata = std::fs::metadata(src)?;
     if metadata.is_dir() {
         std::fs::create_dir_all(dest)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
-            copy_skill_tree(&entry.path(), &dest.join(entry.file_name()))?;
+            copy_skill_tree(skill, &entry.path(), &dest.join(entry.file_name()))?;
         }
         return Ok(());
     }
@@ -941,6 +980,67 @@ mod workspace_tests {
         assert_eq!(
             std::fs::read_to_string(workspace.join(".skill/reference/evals/guide.md")).unwrap(),
             "keep me"
+        );
+    }
+
+    fn skill_with_a_link(link_name: &str, target: &Path) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("evals/evals.json"), "expected_output").unwrap();
+        std::os::unix::fs::symlink(target, skill_path.join(link_name)).unwrap();
+        (temp, skill_path)
+    }
+
+    fn stage_by_copy(skill_path: &Path, workspace: &Path) {
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let case = make_case(vec![]);
+        let mut request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+            skill_path,
+            workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+        request.skill_staging = SkillStaging::Copy;
+        prepare_workspace(&request).unwrap();
+    }
+
+    #[test]
+    fn copy_staging_does_not_follow_a_link_to_the_withheld_suite() {
+        let (temp, skill_path) = skill_with_a_link("notes", Path::new("evals"));
+        let workspace = temp.path().join("ws");
+
+        stage_by_copy(&skill_path, &workspace);
+
+        assert!(
+            !workspace.join(".skill/notes").exists(),
+            "copying dereferences links, so a link naming the suite would deliver the answer key"
+        );
+    }
+
+    #[test]
+    fn copy_staging_does_not_follow_a_link_out_of_the_skill() {
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("operator-secret"), "secret").unwrap();
+        let (temp, skill_path) = skill_with_a_link("elsewhere", outside.path());
+        let workspace = temp.path().join("ws");
+
+        stage_by_copy(&skill_path, &workspace);
+
+        assert!(
+            !workspace.join(".skill/elsewhere").exists(),
+            "every path a copied skill offers has to stay inside the workspace"
         );
     }
 
