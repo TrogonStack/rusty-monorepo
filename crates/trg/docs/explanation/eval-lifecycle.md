@@ -294,11 +294,13 @@ file changes without updating the hash used for caching.
 
 `--skill-staging copy` (default) gives the run its own copy of the skill, so no
 path it can follow leads out of the workspace and mid-run edits to the source
-skill cannot reach it (external symlinks in the skill are copied as links, not
-followed). `--skill-staging symlink` shares the live skill directory instead,
+skill cannot reach it (a link inside the skill that resolves into the withheld
+suite, or out of the skill altogether, is left out rather than delivered into the
+workspace). `--skill-staging symlink` shares the live skill directory instead,
 which is cheaper for a large skill and tells any run that reads a staged link
-where the skill, and the eval suite next to it, actually live. The chosen mode
-is recorded per run in `report.json` as `skill_staging`.
+where the skill, and the eval suite next to it, actually live, so choosing it
+warns on stderr. The chosen mode is recorded per run in `report.json` as
+`skill_staging`.
 
 Baseline (`without_skill`) prompts must not mention skills, `.skill/`, or
 `.old-skill/`. `old_skill` prompts must reference `.old-skill/` only and must not
