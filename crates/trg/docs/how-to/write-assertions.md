@@ -1,8 +1,12 @@
 # Write eval assertions
 
-Assertions are natural-language checks in `evals/evals.json` that graders
-evaluate against agent workspace output. Good assertions are specific,
+Assertions are natural-language checks in `evals/evals.json` that a judge
+evaluates against agent workspace output. Good assertions are specific,
 observable, and independent of implementation details.
+
+If a check is mechanical, declare a typed grader instead. Assertions are for
+the judgments a machine cannot make on its own. See
+[Prefer a typed grader when the check is mechanical](#prefer-a-typed-grader-when-the-check-is-mechanical).
 
 ## Where assertions live
 
@@ -48,13 +52,13 @@ Assertion IDs follow the pattern `<eval-case-id>:a<index>` (zero-based).
 
 ### Example: strong vs weak
 
-**Weak** — too vague, hard to grade consistently:
+**Weak** (too vague, hard to grade consistently):
 
 ```json
 "assertions": ["The output is good"]
 ```
 
-**Strong** — checks concrete artifacts:
+**Strong** (checks concrete artifacts):
 
 ```json
 "assertions": [
@@ -86,23 +90,59 @@ Use the `files` array to stage inputs the agent needs:
 Paths must be relative to the skill directory and must exist at validation
 time.
 
-## How graders consume assertions
+## Prefer a typed grader when the check is mechanical
 
-> **Status: planned** — automatic LLM grading that writes `grading.json` is not
-> yet wired into `eval run`. Today, assertions are validated at suite load time
-> and recorded in `report.json` dimensions.
-
-When grading lands, each assertion will produce a `grading.json` entry:
+A prose assertion has to be interpreted before it can be evaluated. Under
+`--grader auto`, grading recognizes a handful of mechanical phrasings and sends
+everything else to the LLM judge, which costs a call and can disagree with
+itself between runs. Anything you can state precisely belongs in `graders`
+instead, where the verdict is deterministic and needs no credential:
 
 ```json
 {
-  "text": "The workspace contains a summary file",
-  "passed": true,
-  "evidence": "Found summary.md (142 lines)"
+  "id": "analyze-sales",
+  "prompt": "Analyze evals/files/sales.csv and write a summary.",
+  "expected_output": "A markdown summary with revenue totals by month.",
+  "files": ["evals/files/sales.csv"],
+  "graders": [
+    { "type": "file_exists", "path": "summary.md" },
+    { "type": "contains", "text": "May", "target": { "file": "summary.md" } },
+    { "type": "regex", "pattern": "\\$[0-9,]+", "target": { "file": "summary.md" } },
+    { "type": "tool_used", "tool": "Read" }
+  ],
+  "assertions": [
+    "The summary reads as a coherent narrative rather than a data dump"
+  ]
 }
 ```
 
-You can write `grading.json` manually today and verify with:
+`graders` requires `schema_version: 3` on the suite. Mixing the two is the
+intended shape: typed graders for the facts, assertions for the judgments. See
+[Graders](../reference/ai-skills-eval.md#graders) for the full grader list.
+
+Only prose assertions appear in `dimensions.assertions` in `report.json`. A
+grader-only case contributes no assertion dimensions, but still produces
+`assertion_results` once graded.
+
+## How grading consumes assertions
+
+`trg ai skills eval grade <report-dir>` (or `eval run --grade`) writes one
+`grading.json` per run, with one entry per grader and per assertion:
+
+```json
+{
+  "assertion": "The workspace contains a summary file",
+  "passed": true,
+  "evidence": "'.../workspace/summary.md' exists and holds 142 bytes",
+  "grader": { "kind": "declarative" }
+}
+```
+
+`evidence` must be a concrete observation. Grading rejects evidence that merely
+restates the assertion, because a passing result nobody can check is worse than
+no result.
+
+Verify a graded bundle with:
 
 ```shell
 trg ai skills eval verify ./runs/run-001/workspace --mode strict
@@ -110,8 +150,12 @@ trg ai skills eval verify ./runs/run-001/workspace --mode strict
 
 ## Validation rules
 
-- Assertions are optional at suite validation time (default).
+- Assertions and graders are both optional by default. Pass
+  `--require-assertions` (or verify with `--mode strict`) to require that each
+  case declares at least one of the two.
 - Each assertion string must be non-empty.
+- `graders` requires `schema_version: 3`; declaring it on an older
+  `schema_version` is rejected.
 - Duplicate eval case IDs are rejected.
 - `skill_name` must match `SKILL.md` frontmatter `name`.
 
@@ -119,7 +163,7 @@ trg ai skills eval verify ./runs/run-001/workspace --mode strict
 
 - Start with 2–4 assertions per eval case; add more as you discover failure modes.
 - Write assertions that fail for the `without_skill` scenario but pass for
-  `with_skill` — that is the signal your skill adds value.
+  `with_skill`. That is the signal your skill adds value.
 - Keep `expected_output` as a human-readable reference; graders use assertions,
   not exact string matching against `expected_output`.
 
@@ -131,25 +175,26 @@ After `trg ai skills eval grade`, each run directory contains:
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v1",
+  "schema_version": "trg.skills-eval.grading.v2",
   "assertion_results": [
     {
-      "assertion": "The workspace contains a summary file (summary.md or report.md)",
+      "assertion": "file 'summary.md' exists",
       "passed": true,
-      "evidence": "Found summary.md",
-      "grader": { "kind": "mechanical" }
+      "evidence": "'.../workspace/summary.md' exists and holds 142 bytes",
+      "grader": { "kind": "declarative" }
     },
     {
       "assertion": "The summary mentions total revenue for May",
       "passed": false,
-      "evidence": "No file mentions May revenue",
-      "grader": { "kind": "mechanical" }
+      "evidence": "no file under the workspace mentions May",
+      "grader": { "kind": "llm", "model": "gpt-4o" }
     }
   ],
   "summary": {
     "passed": 1,
     "failed": 1,
     "total": 2,
+    "unsupported": 0,
     "pass_rate": 0.5
   }
 }

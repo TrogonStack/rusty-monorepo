@@ -1,8 +1,7 @@
 # `trg ai skills eval` reference
 
 Command-line interface for running Agent Skills eval suites, writing artifact
-bundles, and verifying workspace outputs. This page lists every subcommand,
-flag, and artifact shape supported on the `yordis/eval-2` branch.
+bundles, grading them, and verifying workspace outputs.
 
 ## Invocation
 
@@ -13,7 +12,14 @@ trg ai skills eval <SUBCOMMAND>
 | Subcommand | Purpose |
 | ---------- | ------- |
 | `run` | Validate a skill, scaffold an eval report bundle, optionally invoke an agent runner |
+| `grade` | Grade a completed report bundle and write `grading.json` per run |
 | `verify` | Validate `grading.json` / `timing.json` files under a workspace tree |
+| `init` | Scaffold `evals/evals.json` for a skill directory |
+| `benchmark` | Aggregate grading and timing artifacts into `benchmark.json` |
+| `iteration-summary` | Summarize assertion stability, skill impact, flakiness, and metric outliers |
+| `feedback` | Manage human review feedback artifacts |
+| `compare` | Blindly compare scenario outputs within a report directory |
+| `next-iteration` | Build an improvement bundle from a prior iteration |
 
 ---
 
@@ -108,12 +114,23 @@ trg ai skills eval verify <WORKSPACE> [OPTIONS]
 | -------- | ----------- |
 | `WORKSPACE` | Root directory to scan recursively for `grading.json` and `timing.json` |
 
+`eval grade` writes `grading.json` into the run directory, beside `workspace/`
+rather than inside it. A path whose last component is `workspace` therefore
+widens to its parent before the scan, so pointing `verify` at a workspace finds
+the grading for that run.
+
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--mode` | enum | `lenient` | `lenient` — tolerate missing grading files and failed assertions; `strict` — require at least one `grading.json` and fail on failed assertions |
+| `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: require at least one `grading.json` and fail on failed assertions |
+| `--require-assertions` | bool | `false` | Fail when an eval case declares neither an assertion nor a grader |
+| `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
+
+`verify` also accepts the threshold and regression flags (`--min-pass-rate`,
+`--max-tokens`, `--baseline`, `--strict-ci`, and the `--fail-on-*` family). See
+[Pass-rate thresholds](../how-to/run-in-ci.md#pass-rate-thresholds).
 
 ### Example (text)
 
@@ -169,10 +186,12 @@ $ trg ai skills eval verify ./report/runs/run-001/workspace --output-format json
 
 ## Eval suite manifest (`evals/evals.json`)
 
-Validated before `run` executes. Unknown fields are rejected.
+Validated before `run` executes. Unknown fields are rejected, and a field is
+only accepted from the `schema_version` that introduced it.
 
 | Field | Type | Required | Notes |
 | ----- | ---- | -------- | ----- |
+| `schema_version` | integer | no | Defaults to `1`. `3` is current and is what `init` scaffolds. `graders` requires `3` |
 | `skill_name` | string | yes | Must match the `name` in `SKILL.md` frontmatter |
 | `evals` | array | yes | At least one eval case; IDs must be unique |
 
@@ -184,13 +203,79 @@ Validated before `run` executes. Unknown fields are rejected.
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
 | `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
-| `assertions` | string[] | no | Natural-language checks consumed by graders |
+| `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
+| `graders` | object[] | no | Typed checks (see below). Requires `schema_version` 3 |
+| `tags` | string[] | no | Free-form labels |
+| `priority` | enum | no | `low`, `medium`, or `high` |
+| `timeout_secs` | integer | no | Per-case runner timeout override |
+| `expected_output_files` | string[] | no | Files the case is expected to produce |
+| `grader_hints` | object | no | Passed through to a script grader on stdin |
+
+A case must declare at least one `assertion` or one `grader`.
+
+---
+
+## Graders
+
+A grader states one checkable property in a form trg can evaluate itself. Unlike
+an `assertion`, it is not parsed out of prose, so it means the same thing to
+every reader and to every runner.
+
+| `type` | Fields | Checks |
+| ------ | ------ | ------ |
+| `regex` | `pattern`, `target`, `negate` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
+| `contains` | `text`, `target`, `case`, `negate` | The target contains the text. `case` is `insensitive` (default) or `sensitive` |
+| `file_exists` | `path` | The run produced the file |
+| `tool_used` | `tool`, `min_calls` | The transcript shows at least `min_calls` calls to the tool |
+| `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
+| `skill_used` | | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
+| `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
+
+`target` is `final_text` (default), `transcript`, `any_output`, or
+`{"file": "<relative path>"}`.
+
+A relative path resolves against the workspace `outputs/` directory first, then
+the workspace itself, then the run directory. Declared outputs therefore win
+over an incidental file of the same name, and a plain `summary.md` still
+resolves when the agent wrote it straight into its working directory. A path
+that matches nowhere reports against the workspace candidate.
+
+### Graders that depend on the transcript
+
+`tool_used`, `tool_order`, and `skill_used` read the normalized transcript, and
+not every runner exposes one. When the runner cannot be observed, the result is
+recorded as **unsupported**: neither passed nor failed, and excluded from
+`pass_rate`. This keeps a harness that hides its tool calls from silently
+reading as a regression. See [Transcript artifact](#transcript-artifact).
+
+### The LLM judge
+
+`--grader llm`, and an `llm` grader under `--grader auto`, send one request per
+assertion to a judge. `compare --judge llm` uses the same machinery.
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--grader-provider` / `--judge-provider` | `openai` | `openai`, `anthropic`, or `compatible` |
+| `--grader-model` / `--judge-model` | *(unset)* | Required whenever a judge is needed |
+
+| Variable | Description |
+| -------- | ----------- |
+| `TRG_JUDGE_BASE_URL` | Overrides the endpoint. Required for `compatible` |
+| `TRG_JUDGE_API_KEY` | Overrides the credential for any provider |
+| `OPENAI_API_KEY` | Credential for `openai` when `TRG_JUDGE_API_KEY` is unset |
+| `ANTHROPIC_API_KEY` | Credential for `anthropic` when `TRG_JUDGE_API_KEY` is unset |
+
+The judge is chosen independently of `--runner`: grading a `codex` run with an
+Anthropic judge, or a `claude-code` run with a local OpenAI-compatible endpoint,
+are both ordinary. Under `--grader auto` a suite of typed graders needs no
+credential at all, and the endpoint is resolved once up front so a missing
+credential is reported before any run is graded.
 
 ---
 
 ## Artifact: `report.json`
 
-**Status: available** — always written by `eval run`.
+**Status: available.** Always written by `eval run`.
 
 Schema version: `trg.skills-eval.report.v1`. This file is a **superset** of the
 agentskills.io report model; companion artifacts (`benchmark.json`,
@@ -212,8 +297,10 @@ snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
 | `summaries` | object | Aggregated counts by scenario |
 | `comparisons` | array | Cross-scenario comparison records |
 
-> **Status: planned** — `assertion_results` and `comparisons` are scaffolded as
-> empty arrays today. Population requires the grading and comparison PRs.
+`assertion_results` is populated by `eval grade`, which flattens every run's
+`grading.json` into it, carrying `unsupported` forward where present.
+`comparisons` is populated by `eval compare`. Both are empty until those
+subcommands run.
 
 ### `report` section
 
@@ -257,25 +344,36 @@ Run ordering: eval cases in manifest order, then scenarios in flag order.
 
 ## Artifact: `grading.json`
 
-> **Status: planned** — not emitted by `eval run` on `yordis/eval-2`. The
-> `verify` subcommand validates this shape when you place files manually or
-> when a future grader PR writes them.
+**Status: available.** Written by `eval grade` (and by `eval run --grade`) as
+`runs/<run-id>/grading.json`. `verify` discovers these recursively under a
+workspace tree.
 
-Expected location: anywhere under a run workspace (discovered recursively).
+Schema version: `trg.skills-eval.grading.v2`. `v1` is still accepted on read;
+`v2` adds `unsupported` and narrows `pass_rate` to scored results only.
 
 ```json
 {
+  "schema_version": "trg.skills-eval.grading.v2",
   "assertion_results": [
     {
-      "text": "The output includes a summary",
+      "assertion": "file 'summary.md' exists",
       "passed": true,
-      "evidence": "Found summary.md in workspace"
+      "evidence": "'/abs/path/outputs/summary.md' exists and holds 412 bytes",
+      "grader": { "kind": "declarative" }
+    },
+    {
+      "assertion": "the skill was engaged",
+      "passed": false,
+      "evidence": "runner 'codex' does not expose tool calls in a form trg can read",
+      "grader": { "kind": "declarative" },
+      "unsupported": "runner 'codex' does not expose tool calls in a form trg can read"
     }
   ],
   "summary": {
     "passed": 1,
     "failed": 0,
-    "total": 1,
+    "unsupported": 1,
+    "total": 2,
     "pass_rate": 1.0
   }
 }
@@ -283,19 +381,23 @@ Expected location: anywhere under a run workspace (discovered recursively).
 
 | Field | Type | Notes |
 | ----- | ---- | ----- |
-| `assertion_results[].text` | string | Non-empty; matches an assertion from `evals.json` |
-| `assertion_results[].passed` | bool | Pass/fail for this assertion |
-| `assertion_results[].evidence` | string | Non-empty explanation |
-| `summary.passed` | integer | Must equal count of `passed: true` results |
-| `summary.failed` | integer | Must equal count of `passed: false` results |
+| `assertion_results[].assertion` | string | Non-empty. Accepts `text` as an alias. For a typed grader, its rendered description |
+| `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` is present |
+| `assertion_results[].evidence` | string | Non-empty. A passing result must not merely restate its assertion |
+| `assertion_results[].grader.kind` | enum | `mechanical`, `declarative`, `llm`, `script`, `needs_llm`, or `none` |
+| `assertion_results[].rationale` | string | Optional judge reasoning |
+| `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
+| `summary.passed` | integer | Must equal the count of scored, passing results |
+| `summary.failed` | integer | Must equal the count of scored, failing results |
+| `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` |
 | `summary.total` | integer | Must equal `assertion_results` length |
-| `summary.pass_rate` | float | Must equal `passed / total` |
+| `summary.pass_rate` | float | Must equal `passed / (total - unsupported)`, or `0.0` when nothing was scored |
 
 ---
 
 ## Artifact: `timing.json`
 
-**Status: available** — written by agent runners (`cursor-agent`, `claude-code`,
+**Status: available.** Written by agent runners (`cursor-agent`, `claude-code`,
 `codex`) alongside each run when `--runner` is set.
 
 Location: `runs/<run-id>/timing.json` (sibling of `workspace/`).
@@ -319,42 +421,36 @@ the runner completes.
 
 ## Artifact: `benchmark.json`
 
-> **Status: planned** — not emitted by the CLI on `yordis/eval-2`. Reserved for
-> cross-run latency and cost aggregates in a future benchmark PR.
-
-Expected to capture per-scenario p50/p95 duration, token totals, and cost
-summaries across eval cases.
+**Status: available.** Written by `eval benchmark` (and by `eval run
+--benchmark`), aggregating the grading and timing artifacts of a report bundle
+into per-scenario duration, token, and cost summaries.
 
 ---
 
 ## Artifact: `feedback.json`
 
-> **Status: planned** — not emitted by the CLI on `yordis/eval-2`. Reserved for
-> structured reviewer or LLM-grader feedback in a future grading PR.
-
-Expected to hold qualitative notes, improvement suggestions, and links to failed
-assertions.
+**Status: available.** Managed by `eval feedback`, holding a reviewer identity, a
+timestamp, and severity-tagged notes against a report bundle.
 
 ---
 
 ## Artifact: `comparison.json`
 
-> **Status: planned** — not emitted as a standalone file on `yordis/eval-2`.
-> The `comparisons` array inside `report.json` is scaffolded empty. A future
-> comparison PR will populate cross-scenario deltas (with-skill vs without-skill
-> vs old-skill).
+**Status: available.** Written by `eval compare --emit-comparison-json` under
+the iteration layout directories, and recorded in the `comparisons` array of
+`report.json`.
 
-Expected shape (illustrative):
+Each record names the judge that produced it, including which provider
+answered, because the same model name can be served by more than one endpoint:
 
 ```json
 {
-  "eval_case_id": "analyze-csv",
-  "baseline_scenario": "without_skill",
-  "candidate_scenario": "with_skill",
-  "assertion_delta": { "gained": 2, "lost": 0, "unchanged": 1 },
-  "metrics_delta": { "duration_ms": -450, "total_tokens": 120 }
+  "judge": { "kind": "llm", "provider": "anthropic", "model": "<model id>" }
 }
 ```
+
+Outputs are presented to the judge blindly, as A and B, with the mapping back to
+scenarios recorded separately in the same record.
 
 ---
 
@@ -364,11 +460,12 @@ Expected shape (illustrative):
 | ---- | --------- | --------------- |
 | With skill | `with_skill` | Symlinks skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
 | Without skill | `without_skill` | Raw eval prompt; no skill symlink |
-| Old skill | `old_skill` | Scaffolded in report; **runners reject** with `UnsupportedScenario` today |
+| Old skill | `old_skill` | Stages the `--old-skill-dir` revision to `.old-skill/` in the workspace; prompt prefixed with that revision's frontmatter |
 
-> **Status: planned** — full `old_skill` runner support (staging a prior skill
-> revision) lands in a future PR. You can include `--scenario old_skill` in
-> `run` to reserve report slots, but agent invocation will fail until then.
+`--scenario old_skill` requires `--old-skill-dir`. The old skill must carry the
+same `name` as the current one unless you pass `--allow-skill-name-mismatch`,
+which guards against comparing two unrelated skills by accident. Tampering
+detection is scoped to the old skill directory for these runs.
 
 ---
 
@@ -383,3 +480,37 @@ When `--runner` is set, raw runner stdout is written to
 ```
 
 Format is runner-specific stream-json (one JSON object per line).
+
+### Normalized transcript (`events.json`)
+
+Alongside the raw transcript, each run gets
+`runs/<run-id>/events.json`: the same turn reduced to one event vocabulary, so a
+grader is written once rather than once per harness.
+
+Schema version: `trg.skills-eval.transcript.v1`.
+
+```json
+{
+  "schema_version": "trg.skills-eval.transcript.v1",
+  "runner": "claude",
+  "tool_visibility": "observed",
+  "events": [
+    { "kind": "tool_call", "tool": "Read", "paths": [".skill/SKILL.md"] },
+    { "kind": "assistant_text", "text": "..." },
+    { "kind": "terminal", "ok": true }
+  ]
+}
+```
+
+| Field | Type | Notes |
+| ----- | ---- | ----- |
+| `runner` | string | The program that produced the raw transcript |
+| `tool_visibility` | enum | `observed` or `unavailable` |
+| `events[].kind` | enum | `assistant_text`, `tool_call`, or `terminal` |
+
+`tool_visibility` is the honest part. Tool-call events are normalized for the
+Anthropic stream-json vocabulary, which is what `claude-code` emits. For
+`codex` and `cursor-agent`, trg records only their verified terminal events and
+reports `unavailable`, rather than guessing at an event shape it has not
+verified. A grader that needs tool calls then returns **unsupported** on those
+runners instead of a fabricated pass or fail; text-based graders are unaffected.

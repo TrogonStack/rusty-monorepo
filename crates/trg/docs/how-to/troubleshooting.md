@@ -40,16 +40,21 @@ Run run-001 failed: 'cursor-agent' exited without emitting a terminal result eve
 - Check `runs/run-001/transcript.jsonl` for partial output.
 - Retry with `--runner-model` if the default model is unavailable.
 
-### `scenario 'old_skill' is not supported by this runner`
+### `--old-skill-dir is required when --scenario old_skill is included`
 
-`old_skill` is scaffolded in reports but not yet executable.
+The `old_skill` scenario stages a prior skill revision into the workspace, so it
+needs to know which revision.
 
-```shell
-Run run-003 failed: scenario 'old_skill' is not supported by this runner
-```
+**Fix:** Pass `--old-skill-dir ./path/to/previous/skill`, or drop
+`--scenario old_skill`.
 
-**Fix:** Omit `--scenario old_skill` until the old-skill runner PR lands, or
-run without `--runner` to scaffold only.
+### `Old skill name 'X' does not match current skill name 'Y'`
+
+A name mismatch usually means `--old-skill-dir` points at a different skill
+rather than an earlier revision of the same one.
+
+**Fix:** Point at the right directory, or pass `--allow-skill-name-mismatch`
+when the rename is intentional.
 
 ---
 
@@ -121,13 +126,15 @@ Bundle verified
   assertion results: 0/0 passed (0.00%)
 ```
 
-**Expected on `yordis/eval-2`** — automatic grading is not wired yet.
-
 **Fix:**
 
-- Write `grading.json` manually or via a grader script (see
+- Grade the bundle: `trg ai skills eval grade <report-dir>`, or add `--grade` to
+  `eval run` so grading happens in the same invocation.
+- If the suite declares no assertions and no graders, nothing can be graded.
+  Add at least one of the two to each eval case.
+- To grade out of band instead, write `grading.json` yourself or via a grader
+  script (see
   [write-mechanical-grader-scripts.md](./write-mechanical-grader-scripts.md)).
-- Use `--mode strict` only after graders are producing files.
 
 ### `must contain at least one grading.json` (strict mode)
 
@@ -179,7 +186,7 @@ After a runner completes, `report.json` may include:
 }
 ```
 
-The agent modified skill source files during the run. This is informational —
+The agent modified skill source files during the run. This is informational:
 the run is not automatically failed.
 
 **Fix:** Review whether the agent should write to the skill directory. Scope

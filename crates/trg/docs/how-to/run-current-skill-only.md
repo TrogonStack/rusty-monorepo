@@ -22,7 +22,7 @@ $ trg ai skills eval run \
 
 Without `--runner`, every run is scaffolded with `status: skipped`. The command
 still validates the skill, writes `report.json`, and creates empty workspace
-directories — useful for CI layout checks.
+directories, which is useful for CI layout checks.
 
 Inspect the bundle:
 
@@ -86,8 +86,9 @@ $ jq '.runs[0] | {status, metrics, skill_integrity}' \
 
 ## 3. Verify outputs (optional)
 
-> **Status: planned** — automatic `grading.json` emission is not yet wired.
-> Until the grading PR lands, `verify` only validates files you write yourself.
+Add `--grade` to the `eval run` above to write `grading.json` into each run
+workspace, or grade an existing bundle with `eval grade <report-dir>`. `verify`
+also validates `grading.json` files you write yourself.
 
 When grading artifacts exist under the workspace:
 
@@ -100,7 +101,7 @@ Bundle verified
   assertion results: 2/2 passed (100.00%)
 ```
 
-Use `--mode strict` in CI once graders are producing `grading.json`.
+Use `--mode strict` in CI to turn a missing `grading.json` or a failed assertion into a non-zero exit.
 
 ## Tips
 
@@ -144,5 +145,5 @@ After `eval run`, the report directory contains:
 }
 ```
 
-After grading, each run may also contain `runs/run-001/grading.json` — see
+After grading, each run may also contain `runs/run-001/grading.json`. See
 [Write assertions](./write-assertions.md#generated-artifacts).

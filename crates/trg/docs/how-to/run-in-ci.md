@@ -11,14 +11,16 @@ skill regressions on every pull request.
 | Scaffold report bundle | yes | Works without a runner (`status: skipped`) |
 | Execute agent runs | yes | Requires runner CLI in PATH |
 | Write `timing.json` | yes | When `--runner` is set |
-| Verify `grading.json` | yes | When graders write the file |
-| Fail on assertion pass rate | partial | `--mode strict` on `verify` |
-| Auto-grade assertions | no | Planned grading PR |
-| CI pass-rate thresholds | no | Planned CI thresholds PR |
+| Grade assertions and graders | yes | `eval grade`, or `eval run --grade` |
+| Verify `grading.json` | yes | `eval verify`, strict or lenient |
+| Aggregate `benchmark.json` | yes | `eval benchmark`, or `eval run --benchmark` |
+| Fail on assertion pass rate | yes | `--min-pass-rate`, or `--mode strict` on `verify` |
+| Fail on regression against a baseline | yes | `--baseline` plus the `--fail-on-*` flags |
+| Compare scenarios qualitatively | yes | `eval compare --judge llm` or `--judge script` |
 
 ## Minimal CI job (validation only)
 
-No agent runner needed — validates structure and writes the bundle:
+No agent runner needed. This validates structure and writes the bundle:
 
 ```yaml
 name: skill-eval
@@ -117,7 +119,7 @@ jobs:
 | `lenient` (default) | allowed | reported, exit 0 |
 | `strict` | error | error |
 
-Use `--mode strict` once graders are wired:
+Use `--mode strict` once every run in the bundle is graded:
 
 ```shell
 $ trg ai skills eval verify ./runs/run-001/workspace --mode strict
@@ -126,25 +128,59 @@ $ trg ai skills eval verify ./runs/run-001/workspace --mode strict
 
 ## Pass-rate thresholds
 
-> **Status: planned** — a future CI thresholds PR will add flags like
-> `--min-pass-rate 0.9` to `eval verify` (or a dedicated `eval gate`
-> subcommand) so pipelines fail when assertion pass rate drops below a
-> configured minimum.
+`eval verify` and `eval run` accept threshold flags directly, so the pipeline
+does not need to post-process JSON:
 
-Until then, parse JSON output in your workflow:
+```shell
+$ trg ai skills eval verify ./runs/run-001/workspace \
+    --min-pass-rate 0.9 \
+    --max-tokens 500000 \
+    --max-duration-ms 600000
+```
+
+| Flag | Fails when |
+| ---- | ---------- |
+| `--min-pass-rate RATE` | pass rate across the bundle is below `RATE` |
+| `--max-tokens N` | total tokens across all runs exceed `N` |
+| `--max-input-tokens N` | input tokens across all runs exceed `N` |
+| `--max-output-tokens N` | output tokens across all runs exceed `N` |
+| `--max-duration-ms MS` | any single run takes longer than `MS` |
+| `--baseline REPORT_DIR` | regression flags below have something to compare against |
+
+Regression gates compare the current bundle to a baseline report directory:
+
+| Flag | Fails when |
+| ---- | ---------- |
+| `--fail-on-runner-failure` | any runner invocation failed |
+| `--fail-on-failed-assertions` | any assertion result failed |
+| `--fail-on-missing-grading` | a completed run workspace has no `grading.json` |
+| `--fail-on-pass-rate-regression` | pass rate dropped below the baseline |
+| `--fail-on-token-regression` | total tokens exceed the baseline |
+| `--fail-on-duration-regression` | max duration exceeds the baseline |
+| `--strict-ci` | shorthand that turns on every flag in this table |
+
+The pass rate excludes `unsupported` results, so a runner that cannot be
+observed does not drag the rate below the threshold. See
+[Graders](../reference/ai-skills-eval.md#graders).
+
+If you do want the raw number, it lives under `check.metrics` in the JSON
+output:
 
 ```yaml
-- name: Check pass rate
+- name: Read pass rate
   run: |
-    RATE=$(trg ai skills eval verify "$WS" --output-format json | jq '.pass_rate')
-    python3 -c "import sys; sys.exit(0 if float('$RATE') >= 0.9 else 1)"
+    trg ai skills eval verify "$WS" --output-format json \
+      | jq '.check.metrics.pass_rate'
 ```
 
 ## Benchmark aggregation
 
-> **Status: planned** — `benchmark.json` with cross-run p50/p95 latency and
-> token totals is not emitted yet. Track `timing.json` per run manually or
-> aggregate from `report.json` run metrics.
+`benchmark.json` carries cross-run latency percentiles and token totals. Emit
+it with `eval run --benchmark`, or aggregate an existing bundle afterwards:
+
+```shell
+$ trg ai skills eval benchmark ./artifacts/csv-analyzer/2026-01-15/report-001
+```
 
 ## Tips
 
