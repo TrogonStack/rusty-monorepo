@@ -31,6 +31,11 @@ static INSTALL_HANDLER: Once = Once::new();
 
 /// Make the child the leader of its own process group, so its descendants can be
 /// addressed as one.
+///
+/// The group is a background one as far as the terminal is concerned, which is why the
+/// caller hands the harness a closed stdin: a background process that reads the
+/// controlling terminal is stopped with `SIGTTIN` rather than given the keystrokes, and a
+/// stopped harness is indistinguishable from a working one to anything watching it exit.
 pub fn lead_own_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
@@ -134,10 +139,33 @@ fn track(pgid: i32) -> Option<usize> {
 fn install_termination_handler() {
     INSTALL_HANDLER.call_once(|| {
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            let handler = on_termination as *const () as libc::sighandler_t;
-            unsafe { libc::signal(signal, handler) };
+            handle_unless_ignored(signal);
         }
     });
+}
+
+/// Install the handler for one signal, unless this process was started with that signal
+/// already ignored.
+///
+/// `nohup`, a launch from a job runner, and a background shell all answer some of these
+/// signals with "ignore" on the process's behalf. A handler installed over that answer
+/// turns the arrangement inside out: a hangup the operator arranged to survive would
+/// instead kill every harness and then `trg` itself, which is the opposite of what asking
+/// for it to be ignored meant.
+fn handle_unless_ignored(signal: i32) {
+    unsafe {
+        let mut current: libc::sigaction = std::mem::zeroed();
+        if libc::sigaction(signal, std::ptr::null(), &mut current) != 0 {
+            return;
+        }
+        if current.sa_sigaction == libc::SIG_IGN {
+            return;
+        }
+        let mut wanted: libc::sigaction = std::mem::zeroed();
+        wanted.sa_sigaction = on_termination as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut wanted.sa_mask);
+        libc::sigaction(signal, &wanted, std::ptr::null_mut());
+    }
 }
 
 extern "C" fn on_termination(signal: i32) {
@@ -158,4 +186,55 @@ extern "C" fn on_termination(signal: i32) {
 #[cfg(test)]
 pub fn process_is_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn disposition(signal: i32) -> libc::sighandler_t {
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) },
+            0,
+            "sigaction query"
+        );
+        current.sa_sigaction
+    }
+
+    fn set_disposition(signal: i32, handler: libc::sighandler_t) {
+        let mut wanted: libc::sigaction = unsafe { std::mem::zeroed() };
+        wanted.sa_sigaction = handler;
+        unsafe {
+            libc::sigemptyset(&mut wanted.sa_mask);
+            assert_eq!(
+                libc::sigaction(signal, &wanted, std::ptr::null_mut()),
+                0,
+                "sigaction set"
+            );
+        }
+    }
+
+    /// `nohup trg ...` asks for a hangup to be ignored. Answering it with a handler that
+    /// kills every harness and re-raises is the opposite of what was asked for.
+    #[test]
+    fn a_signal_the_process_was_told_to_ignore_stays_ignored() {
+        let restore = disposition(libc::SIGHUP);
+
+        set_disposition(libc::SIGHUP, libc::SIG_IGN);
+        handle_unless_ignored(libc::SIGHUP);
+        let over_ignored = disposition(libc::SIGHUP);
+
+        set_disposition(libc::SIGHUP, libc::SIG_DFL);
+        handle_unless_ignored(libc::SIGHUP);
+        let over_default = disposition(libc::SIGHUP);
+
+        set_disposition(libc::SIGHUP, restore);
+
+        assert_eq!(over_ignored, libc::SIG_IGN, "an ignored hangup must be left ignored");
+        assert_eq!(
+            over_default, on_termination as *const () as libc::sighandler_t,
+            "a hangup nobody spoke for still has to take the harnesses down"
+        );
+    }
 }

@@ -627,7 +627,15 @@ which is enough to make the timeout itself never return.
 Because a harness leads its own process group, interrupting the terminal no
 longer reaches it directly. `trg` stops every running harness on `SIGINT`,
 `SIGTERM`, and `SIGHUP` before exiting, so an interrupted invocation does not
-leave agents behind.
+leave agents behind. A signal the invocation was started with ignored, as `nohup`
+and most job runners arrange, is left ignored: an invocation set up to survive a
+hangup keeps surviving it.
+
+That group is a background one as far as the terminal is concerned, so each run
+is given a closed stdin. A run receives its prompt on the command line, and a
+background process that reads the controlling terminal is stopped rather than
+answered, which would hang the run instead of ending it. A harness that reads
+its stdin sees end of file immediately.
 
 ---
 

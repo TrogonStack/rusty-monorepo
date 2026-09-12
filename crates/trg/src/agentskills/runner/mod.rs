@@ -171,7 +171,10 @@ pub enum RunnerError {
 }
 
 pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> Result<CapturedProcess, RunnerError> {
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     group::lead_own_group(command);
     let start = Instant::now();
     let mut child = command.spawn().map_err(|source| RunnerError::Spawn {
@@ -465,8 +468,8 @@ fn remove_staged_skill(path: &Path) -> std::io::Result<()> {
 }
 
 /// Dot-prefixed so the skill is hidden from default `ls`/glob and won't collide with
-/// staged fixture paths or with a `skill/` directory the agent might create itself —
-/// the workspace is the agent's task space; the skill is sidecar reference material.
+/// staged fixture paths or with a `skill/` directory the agent might create itself.
+/// The workspace is the agent's task space; the skill is sidecar reference material.
 fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_name: &str) -> std::io::Result<()> {
     let dest = workspace_dir.join(link_name.trim_end_matches('/'));
     let absolute = std::fs::canonicalize(skill_path)?;
@@ -1297,6 +1300,26 @@ mod workspace_tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("Bearer abcdefghijklmnop"));
         assert!(written.contains("<redacted>"));
+    }
+
+    /// A run is handed its prompt on the command line, never from the operator's
+    /// keyboard. It also leads a background process group, where reading the controlling
+    /// terminal stops the reader rather than failing it, so a harness that tried would
+    /// hang the run instead of ending it.
+    #[test]
+    fn a_run_cannot_read_the_terminal_that_started_it() {
+        let mut command = Command::new("bash");
+        command
+            .arg("-c")
+            .arg("if [ -t 0 ]; then echo tty; else echo notty; fi; cat");
+
+        let captured = capture_subprocess(&mut command, Some(Duration::from_secs(10))).unwrap();
+
+        assert!(
+            !captured.timed_out,
+            "a read of the run's stdin has to end the read, not the run"
+        );
+        assert_eq!(String::from_utf8_lossy(&captured.stdout).trim(), "notty");
     }
 
     #[test]
