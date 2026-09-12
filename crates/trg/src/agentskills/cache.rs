@@ -52,6 +52,7 @@ impl RunnerVersion {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheKeyInput {
+    pub eval_case_id: String,
     pub skill_hash: String,
     pub evals_hash: String,
     pub fixture_hash: String,
@@ -205,7 +206,7 @@ fn read_pointer_if_fresh(dir: &Path, current: &CacheKeyInput) -> Option<CachePoi
 fn read_reuse_pointer_if_fresh(dir: &Path, current: &ReuseKeyInput) -> Option<CachePointer> {
     let pointer = read_pointer(dir)?;
     let reuse = ReuseKeyInput {
-        eval_case_id: current.eval_case_id.clone(),
+        eval_case_id: pointer.key_input.eval_case_id.clone(),
         skill_hash: pointer.key_input.skill_hash.clone(),
         evals_hash: pointer.key_input.evals_hash.clone(),
         fixture_hash: pointer.key_input.fixture_hash.clone(),
@@ -234,7 +235,6 @@ pub fn record_completion(
     out_dir: &Path,
     key: &CacheKey,
     key_input: &CacheKeyInput,
-    eval_case_id: &str,
     report_dir: &Path,
     run_id: &str,
 ) -> io::Result<()> {
@@ -247,7 +247,7 @@ pub fn record_completion(
     write_pointer(
         &cache_root(out_dir)
             .join(REUSE_DIR)
-            .join(sanitize_dir_name(eval_case_id)),
+            .join(sanitize_dir_name(&key_input.eval_case_id)),
         &pointer,
     )
 }
@@ -393,7 +393,17 @@ mod tests {
     use tempfile::tempdir;
 
     fn sample_key_input(scenario: ScenarioKind, skill_hash: &str, fixture_hash: &str) -> CacheKeyInput {
+        sample_key_input_for_case("one", scenario, skill_hash, fixture_hash)
+    }
+
+    fn sample_key_input_for_case(
+        eval_case_id: &str,
+        scenario: ScenarioKind,
+        skill_hash: &str,
+        fixture_hash: &str,
+    ) -> CacheKeyInput {
         CacheKeyInput {
+            eval_case_id: eval_case_id.to_string(),
             skill_hash: skill_hash.to_string(),
             evals_hash: "sha256:evals".to_string(),
             fixture_hash: fixture_hash.to_string(),
@@ -478,6 +488,42 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_changes_when_the_eval_case_differs() {
+        let empty_fixtures = FixtureHash::empty();
+        let first = sample_key_input_for_case("one", ScenarioKind::WithSkill, "sha256:skill", empty_fixtures.as_str());
+        let second = sample_key_input_for_case("two", ScenarioKind::WithSkill, "sha256:skill", empty_fixtures.as_str());
+        assert_ne!(CacheKey::from_input(&first), CacheKey::from_input(&second));
+    }
+
+    #[test]
+    fn a_completed_run_is_not_served_to_a_different_eval_case() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run(&report_a, "run-001", "one", ScenarioKind::WithSkill);
+
+        let empty_fixtures = FixtureHash::empty();
+        let first = sample_key_input_for_case("one", ScenarioKind::WithSkill, "sha256:skill", empty_fixtures.as_str());
+        record_completion(&out_dir, &CacheKey::from_input(&first), &first, &report_a, "run-001").unwrap();
+
+        let second = sample_key_input_for_case("two", ScenarioKind::WithSkill, "sha256:skill", empty_fixtures.as_str());
+        let reuse_second = ReuseKeyInput {
+            eval_case_id: "two".to_string(),
+            skill_hash: "sha256:skill".to_string(),
+            evals_hash: "sha256:evals".to_string(),
+            fixture_hash: empty_fixtures.as_str().to_string(),
+        };
+        let options = CacheOptions {
+            enabled: true,
+            reuse_completed: true,
+        };
+
+        assert!(try_resolve_cache(&out_dir, options, &second, &reuse_second).is_none());
+        assert!(try_resolve_cache(&out_dir, options, &first, &reuse_second).is_some());
+    }
+
+    #[test]
     fn fixture_hash_is_stable_and_changes_with_content() {
         let temp = tempdir().unwrap();
         let skill = temp.path().join("skill");
@@ -505,7 +551,7 @@ mod tests {
 
         let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
         let key = CacheKey::from_input(&input);
-        record_completion(&out_dir, &key, &input, "one", &report_a, "run-001").unwrap();
+        record_completion(&out_dir, &key, &input, &report_a, "run-001").unwrap();
 
         let report_b = out_dir.join("demo/report-b");
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
@@ -561,7 +607,7 @@ mod tests {
 
         let stored = sample_key_input(ScenarioKind::WithSkill, "sha256:old", FixtureHash::empty().as_str());
         let key = CacheKey::from_input(&stored);
-        record_completion(&out_dir, &key, &stored, "one", &report_a, "run-001").unwrap();
+        record_completion(&out_dir, &key, &stored, &report_a, "run-001").unwrap();
 
         let current = sample_key_input(ScenarioKind::WithSkill, "sha256:new", FixtureHash::empty().as_str());
         assert!(lookup_exact(&out_dir, &key, &current).is_none());
@@ -578,7 +624,7 @@ mod tests {
 
         let stored = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixtures-old");
         let key = CacheKey::from_input(&stored);
-        record_completion(&out_dir, &key, &stored, "one", &report_a, "run-001").unwrap();
+        record_completion(&out_dir, &key, &stored, &report_a, "run-001").unwrap();
 
         let reuse_current = ReuseKeyInput {
             eval_case_id: "one".to_string(),
@@ -599,7 +645,7 @@ mod tests {
 
         let stored = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
         let key = CacheKey::from_input(&stored);
-        record_completion(&out_dir, &key, &stored, "one", &report_a, "run-001").unwrap();
+        record_completion(&out_dir, &key, &stored, &report_a, "run-001").unwrap();
 
         let without_skill = sample_key_input(
             ScenarioKind::WithoutSkill,
