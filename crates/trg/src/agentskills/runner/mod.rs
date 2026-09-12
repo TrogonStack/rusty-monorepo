@@ -3,6 +3,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod cursor_agent;
 pub mod environment;
+pub mod group;
 
 #[cfg(test)]
 mod fake;
@@ -171,11 +172,13 @@ pub enum RunnerError {
 
 pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> Result<CapturedProcess, RunnerError> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    group::lead_own_group(command);
     let start = Instant::now();
     let mut child = command.spawn().map_err(|source| RunnerError::Spawn {
         program: command.get_program().to_string_lossy().into_owned(),
         source,
     })?;
+    let mut group = group::ProcessGroupGuard::led_by(&child);
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -185,6 +188,7 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
     loop {
         match child.try_wait()? {
             Some(status) => {
+                group.disarm();
                 let stdout = stdout_handle.join().unwrap_or_default();
                 let stderr = stderr_handle.join().unwrap_or_default();
                 return Ok(CapturedProcess {
@@ -198,6 +202,7 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
             None => {
                 if let Some(limit) = timeout {
                     if start.elapsed() >= limit {
+                        group.terminate();
                         let _ = child.kill();
                         let _ = child.wait();
                         break;
@@ -1292,6 +1297,33 @@ mod workspace_tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("Bearer abcdefghijklmnop"));
         assert!(written.contains("<redacted>"));
+    }
+
+    #[test]
+    fn a_timeout_takes_down_the_tools_the_harness_spawned() {
+        let temp = tempdir().unwrap();
+        let pid_file = temp.path().join("grandchild.pid");
+
+        let mut command = Command::new("bash");
+        command
+            .arg("-c")
+            .arg(format!("sleep 600 & echo $! > {}; sleep 600", pid_file.display()));
+
+        let captured = capture_subprocess(&mut command, Some(Duration::from_secs(1))).unwrap();
+        assert!(
+            captured.timed_out,
+            "the run had to be cut short for this to mean anything"
+        );
+
+        let grandchild: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the harness recorded the tool it spawned")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            !group::process_is_alive(grandchild),
+            "a tool the harness spawned outlived the run it belonged to"
+        );
     }
 
     #[test]

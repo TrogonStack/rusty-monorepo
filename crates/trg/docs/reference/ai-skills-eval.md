@@ -44,6 +44,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--force` | bool | `false` | Overwrite an existing report directory if it already exists |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 | `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
+| `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
 
 ### Runner values
 
@@ -605,6 +606,28 @@ run directory, with secret-looking values left out.
 The policy is part of a run's cache identity, alongside `--skill-staging`. A
 completed run answers only for what it was allowed to see, so switching either
 flag executes again rather than serving a run that saw something else.
+
+---
+
+## Timeouts
+
+When a run exceeds its timeout it is recorded with `status: timeout` and a
+`duration_ms` equal to the limit, not to the time actually spent, because what
+was spent past the limit is not a property of the skill.
+
+The timeout stops the whole process tree, not just the harness. A harness spawns
+tools and those tools spawn children, and every one of them is put in a process
+group led by the harness so the group can be stopped as a unit: first a chance to
+exit cleanly, so a harness can finish flushing the transcript the timed-out run
+will be diagnosed from, then outright. A tool left running would keep consuming
+provider quota for a run that is already over, keep writing into a workspace that
+is about to be scored, and hold open the pipes the run's output is read through,
+which is enough to make the timeout itself never return.
+
+Because a harness leads its own process group, interrupting the terminal no
+longer reaches it directly. `trg` stops every running harness on `SIGINT`,
+`SIGTERM`, and `SIGHUP` before exiting, so an interrupted invocation does not
+leave agents behind.
 
 ---
 
