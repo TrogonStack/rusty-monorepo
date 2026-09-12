@@ -85,10 +85,18 @@
         },
         {
           "properties": {
+            "max_calls": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "min_calls": {
               "default": 1,
               "format": "uint",
-              "minimum": 1,
+              "minimum": 0,
               "type": "integer"
             },
             "tool": {
@@ -127,6 +135,10 @@
         },
         {
           "properties": {
+            "negate": {
+              "default": false,
+              "type": "boolean"
+            },
             "type": {
               "const": "skill_used",
               "type": "string"
