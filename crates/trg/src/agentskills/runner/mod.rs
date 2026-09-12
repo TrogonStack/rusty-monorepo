@@ -188,7 +188,7 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
     loop {
         match child.try_wait()? {
             Some(status) => {
-                group.disarm();
+                group.stop_leftovers();
                 let stdout = stdout_handle.join().unwrap_or_default();
                 let stderr = stderr_handle.join().unwrap_or_default();
                 return Ok(CapturedProcess {
@@ -1322,6 +1322,46 @@ mod workspace_tests {
             .unwrap();
         assert!(
             !group::process_is_alive(grandchild),
+            "a tool the harness spawned outlived the run it belonged to"
+        );
+    }
+
+    fn wait_until_gone(pid: i32) -> bool {
+        for _ in 0..40 {
+            if !group::process_is_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    /// A harness can finish its turn and still leave a tool running. That tool writes
+    /// into a workspace that is about to be scored, so the run is not over until it is.
+    #[test]
+    fn a_harness_that_exits_does_not_leave_its_tools_running() {
+        let temp = tempdir().unwrap();
+        let pid_file = temp.path().join("leftover.pid");
+
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(format!(
+            "sleep 600 >/dev/null 2>&1 & echo $! > {}; exit 0",
+            pid_file.display()
+        ));
+
+        let captured = capture_subprocess(&mut command, Some(Duration::from_secs(30))).unwrap();
+        assert!(
+            !captured.timed_out,
+            "the harness had to exit on its own for this to mean anything"
+        );
+
+        let leftover: i32 = std::fs::read_to_string(&pid_file)
+            .expect("the harness recorded the tool it spawned")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            wait_until_gone(leftover),
             "a tool the harness spawned outlived the run it belonged to"
         );
     }

@@ -62,17 +62,32 @@ impl ProcessGroupGuard {
             return;
         }
         self.armed = false;
+        self.take_down();
+    }
+
+    /// The harness exited on its own; take down whatever it left behind.
+    ///
+    /// A harness that finishes can still leave tools running, and they keep writing
+    /// into a workspace that is about to be scored and holding the write end of the
+    /// pipes this run is read through, so nothing here is free to outlive the run.
+    ///
+    /// A group exists for as long as it has a member, and its identifier is the
+    /// identifier of the process that led it, so an identifier that answers here is
+    /// still this run's group and not something unrelated that inherited the number.
+    pub fn stop_leftovers(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        if group_exists(self.pgid) {
+            self.take_down();
+        }
+    }
+
+    fn take_down(&self) {
         signal_group(self.pgid, libc::SIGTERM);
         thread::sleep(TERMINATION_GRACE);
         signal_group(self.pgid, libc::SIGKILL);
-    }
-
-    /// The subprocess exited on its own, so there is nothing left to signal.
-    ///
-    /// Signalling anyway would be worse than pointless: the group is gone, and the
-    /// operating system is free to have reused the identifier for something unrelated.
-    pub fn disarm(&mut self) {
-        self.armed = false;
     }
 }
 
@@ -83,6 +98,14 @@ impl Drop for ProcessGroupGuard {
             TRACKED_GROUPS[slot].store(0, Ordering::SeqCst);
         }
     }
+}
+
+/// Whether any process still belongs to this group.
+fn group_exists(pgid: i32) -> bool {
+    if pgid <= 0 {
+        return false;
+    }
+    unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
 fn signal_group(pgid: i32, signal: i32) {
