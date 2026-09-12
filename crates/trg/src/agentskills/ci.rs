@@ -824,6 +824,7 @@ mod tests {
                 runner: None,
                 runner_binary: None,
                 runner_version: None,
+                environment: crate::agentskills::report::EnvironmentPolicy::default(),
                 ci: None,
                 iteration: 1,
             },

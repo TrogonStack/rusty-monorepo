@@ -39,6 +39,7 @@ fn bash_request<'a>(
         runner_model: None,
         timeout_secs,
         skill_staging: crate::agentskills::report::SkillStaging::Symlink,
+        environment: crate::agentskills::report::EnvironmentPolicy::Scrubbed,
     }
 }
 
@@ -156,4 +157,100 @@ echo '{{"type":"result","is_error":false,"result":"done"}}'"#
     assert!(!raw.contains(token));
     assert!(!events.contains(token));
     assert!(events.contains("<redacted>"));
+}
+
+fn env_policy_request<'a>(
+    case: &'a EvalCase,
+    workspace: &'a Path,
+    transcript_path: &'a Path,
+    stderr_path: &'a Path,
+    environment: crate::agentskills::report::EnvironmentPolicy,
+) -> EvalRunRequest<'a> {
+    let mut request = bash_request(case, workspace, transcript_path, stderr_path, None);
+    request.environment = environment;
+    request
+}
+
+const LEAK_VAR: &str = "TRG_EVAL_ENVIRONMENT_LEAK_PROBE";
+const LEAK_SCRIPT: &str = r#"printf '{"type":"result","leak":"%s"}\n' "${TRG_EVAL_ENVIRONMENT_LEAK_PROBE:-}""#;
+
+#[test]
+fn a_scrubbed_run_cannot_see_the_operator_environment() {
+    let temp = tempdir().unwrap();
+    let run_dir = temp.path().join("runs/run-001");
+    let workspace = run_dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript_path = run_dir.join("transcript.jsonl");
+    let stderr_path = run_dir.join("stderr.log");
+
+    std::env::set_var(LEAK_VAR, "operator-secret");
+    let request = env_policy_request(
+        &case,
+        &workspace,
+        &transcript_path,
+        &stderr_path,
+        crate::agentskills::report::EnvironmentPolicy::Scrubbed,
+    );
+    let outcome = run_bash(&request, LEAK_SCRIPT).unwrap();
+    std::env::remove_var(LEAK_VAR);
+
+    assert!(matches!(outcome.status, RunStatus::Completed));
+    assert!(
+        outcome.final_text.contains(r#""leak":"""#),
+        "scrubbed run saw the operator environment: {}",
+        outcome.final_text
+    );
+}
+
+#[test]
+fn an_inherited_run_still_sees_the_operator_environment() {
+    let temp = tempdir().unwrap();
+    let run_dir = temp.path().join("runs/run-001");
+    let workspace = run_dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript_path = run_dir.join("transcript.jsonl");
+    let stderr_path = run_dir.join("stderr.log");
+
+    std::env::set_var(LEAK_VAR, "operator-secret");
+    let request = env_policy_request(
+        &case,
+        &workspace,
+        &transcript_path,
+        &stderr_path,
+        crate::agentskills::report::EnvironmentPolicy::Inherited,
+    );
+    let outcome = run_bash(&request, LEAK_SCRIPT).unwrap();
+    std::env::remove_var(LEAK_VAR);
+
+    assert!(outcome.final_text.contains("operator-secret"));
+}
+
+#[test]
+fn an_isolated_run_gets_its_own_home() {
+    let temp = tempdir().unwrap();
+    let run_dir = temp.path().join("runs/run-001");
+    let workspace = run_dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript_path = run_dir.join("transcript.jsonl");
+    let stderr_path = run_dir.join("stderr.log");
+
+    let request = env_policy_request(
+        &case,
+        &workspace,
+        &transcript_path,
+        &stderr_path,
+        crate::agentskills::report::EnvironmentPolicy::Isolated,
+    );
+    let outcome = run_bash(&request, r#"printf '{"type":"result","home":"%s"}\n' "$HOME""#).unwrap();
+
+    let expected = run_dir.join(crate::agentskills::runner::environment::RUN_HOME_DIR_NAME);
+    assert!(expected.is_dir());
+    assert!(
+        outcome.final_text.contains(expected.to_str().unwrap()),
+        "isolated run did not get its own HOME: {}",
+        outcome.final_text
+    );
 }

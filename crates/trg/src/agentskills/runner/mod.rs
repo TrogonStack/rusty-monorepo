@@ -2,6 +2,7 @@ pub mod availability;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor_agent;
+pub mod environment;
 
 #[cfg(test)]
 mod fake;
@@ -26,8 +27,9 @@ use super::evals::{EvalCase, EvalError};
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
-use super::report::{ScenarioKind, SkillStaging};
+use super::report::{EnvironmentPolicy, ScenarioKind, SkillStaging};
 use super::transcript::{write_normalized_transcript, TranscriptFormat, WorkspaceBoundary};
+use environment::RunEnvironment;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum Runner {
@@ -91,6 +93,14 @@ pub struct EvalRunRequest<'a> {
     pub runner_model: Option<&'a str>,
     pub timeout_secs: Option<u64>,
     pub skill_staging: SkillStaging,
+    pub environment: EnvironmentPolicy,
+}
+
+impl EvalRunRequest<'_> {
+    /// The run's own directory, which holds its transcript and, when isolated, its `HOME`.
+    pub fn run_dir(&self) -> &Path {
+        self.transcript_path.parent().unwrap_or(self.workspace_dir)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,11 +331,12 @@ fn runner_unavailable_error(program: &str, install_hint: &str, output: &std::pro
 }
 
 #[derive(Debug)]
-pub struct PreparedPrompt {
+pub struct PreparedRun {
     pub prompt: String,
+    pub environment: RunEnvironment,
 }
 
-pub fn prepare_workspace(request: &EvalRunRequest) -> Result<PreparedPrompt, RunnerError> {
+pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<PreparedRun, RunnerError> {
     std::fs::create_dir_all(request.workspace_dir)?;
     ensure_outputs_dir(request.workspace_dir)?;
 
@@ -380,8 +391,11 @@ pub fn prepare_workspace(request: &EvalRunRequest) -> Result<PreparedPrompt, Run
     })
     .map_err(skill_error_to_runner)?;
 
-    Ok(PreparedPrompt {
+    let environment = RunEnvironment::prepare(runner, request.run_dir(), request.environment)?;
+
+    Ok(PreparedRun {
         prompt: prompt.into_string(),
+        environment,
     })
 }
 
@@ -710,6 +724,7 @@ mod workspace_tests {
             runner_model: None,
             timeout_secs: None,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
         }
     }
 
@@ -741,7 +756,7 @@ mod workspace_tests {
             None,
         );
 
-        let prepared = prepare_workspace(&request).unwrap();
+        let prepared = prepare_workspace(&request, Runner::ClaudeCode).unwrap();
         assert!(prepared.prompt.contains("Skill available at: .skill/"));
         assert!(prepared.prompt.contains("name: test-skill"));
         assert!(!prepared.prompt.contains("# Skill"));
@@ -803,7 +818,7 @@ mod workspace_tests {
             );
             request.skill_staging = staging;
 
-            prepare_workspace(&request).unwrap();
+            prepare_workspace(&request, Runner::ClaudeCode).unwrap();
 
             let staged_suite_dir = workspace.join(".skill/evals");
             assert!(
@@ -974,7 +989,7 @@ mod workspace_tests {
         );
         request.skill_staging = SkillStaging::Copy;
 
-        prepare_workspace(&request).unwrap();
+        prepare_workspace(&request, Runner::ClaudeCode).unwrap();
 
         assert!(!workspace.join(".skill/evals").exists());
         assert_eq!(
@@ -1110,7 +1125,7 @@ mod workspace_tests {
             None,
         );
 
-        let prepared = prepare_workspace(&request).unwrap();
+        let prepared = prepare_workspace(&request, Runner::ClaudeCode).unwrap();
         assert!(prepared.prompt.starts_with("do the thing"));
         assert!(prepared.prompt.contains("outputs/"));
         assert!(!prepared.prompt.contains("Skill available at:"));
@@ -1153,7 +1168,7 @@ mod workspace_tests {
             Some(&old_skill),
         );
 
-        let prepared = prepare_workspace(&request).unwrap();
+        let prepared = prepare_workspace(&request, Runner::ClaudeCode).unwrap();
         assert!(prepared.prompt.contains("Skill available at: .old-skill/"));
         assert!(prepared.prompt.contains("name: old-skill"));
         assert!(!prepared.prompt.contains("name: current-skill"));
@@ -1217,7 +1232,7 @@ mod workspace_tests {
             None,
         );
 
-        let err = prepare_workspace(&request).unwrap_err();
+        let err = prepare_workspace(&request, Runner::ClaudeCode).unwrap_err();
         assert!(matches!(err, RunnerError::InvalidOutput { .. }));
     }
 

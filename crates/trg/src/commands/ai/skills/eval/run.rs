@@ -11,8 +11,8 @@ use crate::agentskills::evals::{
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::report::{
-    build_report_bundle, write_report_bundle, BuildReportOptions, ReportBundle, ScenarioKind, SkillIntegrityReport,
-    SkillStaging, WriteReportOptions,
+    build_report_bundle, write_report_bundle, BuildReportOptions, EnvironmentPolicy, ReportBundle, ScenarioKind,
+    SkillIntegrityReport, SkillStaging, WriteReportOptions,
 };
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
@@ -172,6 +172,15 @@ pub struct RunArgs {
     )]
     pub skill_staging: SkillStaging,
 
+    #[arg(
+        long,
+        value_enum,
+        value_name = "POLICY",
+        default_value_t = EnvironmentPolicy::Scrubbed,
+        help = "How much of this machine each run may see: scrubbed (default) replaces the environment with an allowlist; isolated also gives the run its own HOME and harness config home, so installed skills, global instructions, and MCP servers cannot reach it; inherited passes the environment through"
+    )]
+    pub environment: EnvironmentPolicy,
+
     #[command(flatten)]
     pub ci: EvalCiArgs,
 }
@@ -283,6 +292,7 @@ impl RunArgs {
                 .map(|probe| probe.binary_path.to_string_lossy().into_owned()),
             runner_version: runner_probe.as_ref().and_then(|probe| probe.version.clone()),
             skill_staging: self.skill_staging,
+            environment: self.environment,
             ..BuildReportOptions::default()
         };
 
@@ -334,6 +344,7 @@ impl RunArgs {
                 bundle,
                 cache_options,
                 self.skill_staging,
+                self.environment,
             ) {
                 return code;
             }
@@ -410,6 +421,7 @@ fn execute_runs(
     mut bundle: ReportBundle,
     cache_options: CacheOptions,
     skill_staging: SkillStaging,
+    environment: EnvironmentPolicy,
 ) -> std::result::Result<(), i32> {
     let skill_md = match std::fs::read_to_string(skill_path.join("SKILL.md")) {
         Ok(s) => s,
@@ -547,6 +559,7 @@ fn execute_runs(
             runner_model,
             timeout_secs: effective_timeout_secs(case, timeout_secs),
             skill_staging,
+            environment,
         };
 
         let digest_before = match compute_skill_digest(integrity_path) {
@@ -960,7 +973,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
-
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs {
                 strict_ci: false,
                 fail_on_runner_failure: false,
@@ -1094,6 +1107,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1132,6 +1146,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1186,6 +1201,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1285,6 +1301,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         };
 
@@ -1331,6 +1348,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         };
 
@@ -1377,6 +1395,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         };
 
@@ -1415,6 +1434,7 @@ mod tests {
             no_cache,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         };
 
@@ -1452,6 +1472,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         });
 
@@ -1477,6 +1498,7 @@ mod tests {
             no_cache: false,
             reuse_completed: true,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         });
 
@@ -1516,6 +1538,7 @@ mod tests {
             no_cache: false,
             reuse_completed: true,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1585,6 +1608,7 @@ mod tests {
             no_cache: true,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         });
 
@@ -1648,6 +1672,7 @@ mod tests {
             no_cache: true,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         });
 
@@ -1734,6 +1759,7 @@ mod tests {
             no_cache: true,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         });
 
@@ -1771,6 +1797,7 @@ mod tests {
                 no_cache: false,
                 reuse_completed: false,
                 skill_staging: SkillStaging::Symlink,
+                environment: EnvironmentPolicy::Scrubbed,
                 ci: EvalCiArgs::default(),
             }
             .handle(&crate::fs::RealFS);
@@ -1833,6 +1860,7 @@ mod tests {
             no_cache: false,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1875,6 +1903,7 @@ mod tests {
             no_cache: true,
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
             ci: EvalCiArgs::default(),
         });
 
