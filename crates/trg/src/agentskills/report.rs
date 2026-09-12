@@ -218,14 +218,21 @@ pub struct ReportDocument {
 
 /// What a pass spent against its ceiling.
 ///
-/// Absent when the pass never ran a runner at all, since nothing was spent and no
-/// ceiling could have bound it. Present, with `ceiling_usd` absent, when a runner ran
+/// Absent when the pass was given no runner at all, since nothing could have been spent
+/// and no ceiling could have bound it. Present whenever the pass was given one, including
+/// a pass every run of which was served from cache: that pass really did cost nothing, and
+/// a reader tracking spend wants to read the zero rather than watch the section come and
+/// go with the state of a cache. Present, with `ceiling_usd` absent, when a runner ran
 /// without `--max-cost-usd`: there was nothing to be admitted against, but a reader still
 /// wants to know what the pass cost.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BudgetReport {
+    /// Only ever a finite amount greater than zero, since a ceiling of zero or less could
+    /// admit nothing and would make the pass unrunnable rather than bounded.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
     pub ceiling_usd: Option<f64>,
+    #[schemars(range(min = 0.0))]
     pub spent_usd: f64,
     pub exhausted: bool,
     pub runs_skipped: usize,

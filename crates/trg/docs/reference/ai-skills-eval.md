@@ -47,7 +47,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
 | `--attempts` | integer | `3` | Draw each (case × scenario) cell this many times. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
-| `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
+| `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. Accepts a finite amount greater than zero; a ceiling of zero or less could admit nothing and is refused. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
@@ -417,7 +417,7 @@ snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
 | `assertion_results` | array | Per-assertion grading outcomes |
 | `summaries` | object | Aggregated counts by scenario |
 | `comparisons` | array | Cross-scenario comparison records |
-| `budget` | object | Present once a runner has run. What the pass spent, and against what ceiling. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
+| `budget` | object | Present whenever the pass was given a runner, including one whose every run was served from cache and so spent nothing. Absent only when the pass had no runner at all. What the pass spent, and against what ceiling. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 
 `assertion_results` is populated by `eval grade`, which flattens every run's
 `grading.json` into it, carrying `unsupported` forward where present.
@@ -428,7 +428,7 @@ subcommands run.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `ceiling_usd` | number | Value of `--max-cost-usd`. Absent when the pass ran with no ceiling |
+| `ceiling_usd` | number | Value of `--max-cost-usd`, always greater than zero. Absent when the pass ran with no ceiling |
 | `spent_usd` | number | Total reported cost across every runner invocation in the pass, including attempts `--retries` discarded |
 | `exhausted` | bool | Whether spend had reached the ceiling by the time the pass finished |
 | `runs_skipped` | integer | Runs not started because the ledger had already refused them |

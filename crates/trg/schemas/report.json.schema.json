@@ -20,9 +20,11 @@
       "type": "object"
     },
     "BudgetReport": {
-      "description": "What a pass spent against its ceiling.\n\nAbsent when the pass never ran a runner at all, since nothing was spent and no\nceiling could have bound it. Present, with `ceiling_usd` absent, when a runner ran\nwithout `--max-cost-usd`: there was nothing to be admitted against, but a reader still\nwants to know what the pass cost.",
+      "description": "What a pass spent against its ceiling.\n\nAbsent when the pass was given no runner at all, since nothing could have been spent\nand no ceiling could have bound it. Present whenever the pass was given one, including\na pass every run of which was served from cache: that pass really did cost nothing, and\na reader tracking spend wants to read the zero rather than watch the section come and\ngo with the state of a cache. Present, with `ceiling_usd` absent, when a runner ran\nwithout `--max-cost-usd`: there was nothing to be admitted against, but a reader still\nwants to know what the pass cost.",
       "properties": {
         "ceiling_usd": {
+          "description": "Only ever a finite amount greater than zero, since a ceiling of zero or less could\nadmit nothing and would make the pass unrunnable rather than bounded.",
+          "exclusiveMinimum": 0.0,
           "format": "double",
           "type": [
             "number",
@@ -39,6 +41,7 @@
         },
         "spent_usd": {
           "format": "double",
+          "minimum": 0.0,
           "type": "number"
         }
       },
