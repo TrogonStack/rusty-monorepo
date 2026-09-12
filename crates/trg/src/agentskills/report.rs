@@ -344,6 +344,27 @@ pub struct SkillIntegrityReport {
     pub tampered_files: Vec<String>,
 }
 
+impl SkillIntegrityReport {
+    pub fn changed(files: Vec<String>) -> Self {
+        Self {
+            tampered: !files.is_empty(),
+            tampered_files: files,
+        }
+    }
+
+    /// What to report when the directory could not be read again.
+    ///
+    /// A hash that never came back is not an answer, and a report that says the skill was
+    /// unchanged would be claiming a comparison nobody made. The directory a run was
+    /// scored against is gone or unreadable, which is the finding.
+    pub fn unverifiable() -> Self {
+        Self {
+            tampered: true,
+            tampered_files: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RunPaths {
     pub workspace: String,

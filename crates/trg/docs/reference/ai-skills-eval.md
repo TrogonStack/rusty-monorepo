@@ -808,6 +808,19 @@ agent while the next is served from cache. Runs keep their suite order in
 `report.json` whatever order the lanes finish in, so the same command compared
 across two passes lines its runs up by position.
 
+One thing changes meaning with more than one lane. `skill_integrity` reports
+whether the skill directory a run was handed still holds what it held before,
+and every lane reads the same directory, so a run that rewrites the skill
+rewrites it for every lane still reading it. With `-j 1` the check is hashed
+around each run and names that run. With `-j N` it is hashed once around the
+whole pass, the finding is recorded on every run that executed, and each of
+those runs carries a warning saying the change cannot be charged to it alone.
+
+Either window can also fail to read the directory back, which is what a run that
+deleted the skill leaves behind. That is reported as `tampered: true` with no
+`tampered_files` and a warning naming the read failure, because a hash that
+never came back is not a comparison that passed.
+
 ---
 
 ## Timeouts

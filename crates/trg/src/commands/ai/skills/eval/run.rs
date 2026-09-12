@@ -20,6 +20,7 @@ use crate::agentskills::report::{
 };
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
+    SkillDigest,
 };
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
@@ -537,6 +538,19 @@ fn execute_runs(
     Ok(())
 }
 
+/// When the skill directory is hashed to see whether a run rewrote it.
+///
+/// Every run of a pass is handed the same skill directory, so a change to it can only be
+/// pinned on one run while that run is the only thing executing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntegrityWindow {
+    /// Hash around the run itself, which is the only candidate for what changed.
+    Run,
+    /// Leave the check to the pass, because the lanes share the directory and a change
+    /// seen inside one run's window may have come from any of the others.
+    Pass,
+}
+
 /// Everything the execution of one run needs that does not belong to that run.
 ///
 /// Shared by reference across lanes, so nothing here may be specific to a single run.
@@ -574,33 +588,111 @@ impl RunExecution<'_> {
         let lanes = concurrency.lanes_for(runs.len());
         if concurrency.is_serial() || lanes <= 1 {
             for run in runs.iter_mut() {
-                self.execute(run);
+                self.execute(run, IntegrityWindow::Run);
             }
             return;
         }
 
-        let queue = &Mutex::new(runs.iter_mut().collect::<VecDeque<&mut RunRecord>>());
-        thread::scope(|scope| {
-            for _ in 0..lanes {
-                let lane_context = lane_context();
-                scope.spawn(move || {
-                    adopt_lane_context(lane_context);
-                    loop {
-                        let next = queue
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .pop_front();
-                        match next {
-                            Some(run) => self.execute(run),
-                            None => break,
+        let baseline = self.skill_digests();
+        {
+            let queue = &Mutex::new(runs.iter_mut().collect::<VecDeque<&mut RunRecord>>());
+            thread::scope(|scope| {
+                for _ in 0..lanes {
+                    let lane_context = lane_context();
+                    scope.spawn(move || {
+                        adopt_lane_context(lane_context);
+                        loop {
+                            let next = queue
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .pop_front();
+                            match next {
+                                Some(run) => self.execute(run, IntegrityWindow::Pass),
+                                None => break,
+                            }
                         }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+        }
+        self.record_pass_integrity(runs, &baseline);
     }
 
-    fn execute(&self, run: &mut RunRecord) {
+    /// The directory whose contents answer for a scenario's skill.
+    fn integrity_source(&self, scenario: ScenarioKind) -> Option<&Path> {
+        match scenario {
+            ScenarioKind::OldSkill => self.old_skill_path,
+            _ => Some(self.skill_path),
+        }
+    }
+
+    /// Hash every skill directory the pass will hand out, once, before any run starts.
+    fn skill_digests(&self) -> HashMap<PathBuf, SkillDigest> {
+        let paths = [Some(self.skill_path), self.old_skill_path];
+        let mut digests = HashMap::new();
+        for path in paths.into_iter().flatten() {
+            match compute_skill_digest(path) {
+                Ok(digest) => {
+                    digests.insert(path.to_path_buf(), digest);
+                }
+                Err(e) => eprintln!("failed to hash skill '{}' before the pass: {}", path.display(), e),
+            }
+        }
+        digests
+    }
+
+    /// Record what the pass did to the skill directories it handed out.
+    ///
+    /// A run that rewrote the skill rewrote it for every lane that was still reading it,
+    /// so the finding belongs on all of them, and the warning says as much rather than
+    /// letting a reader charge it to whichever run happened to finish next.
+    fn record_pass_integrity(&self, runs: &mut [RunRecord], baseline: &HashMap<PathBuf, SkillDigest>) {
+        let mut tampered: HashMap<&PathBuf, Vec<String>> = HashMap::new();
+        let mut unreadable: HashMap<&PathBuf, String> = HashMap::new();
+        for (path, before) in baseline {
+            match compute_skill_digest(path) {
+                Ok(after) => {
+                    let files = detect_tampering(before, &after);
+                    if !files.is_empty() {
+                        tampered.insert(path, files);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("failed to hash skill '{}' after the pass: {}", path.display(), e);
+                    unreadable.insert(path, e.to_string());
+                }
+            }
+        }
+
+        for run in runs.iter_mut() {
+            if run.cache.is_some() || run.status == "skipped" {
+                continue;
+            }
+            let Some(source) = self.integrity_source(run.scenario_id).map(Path::to_path_buf) else {
+                continue;
+            };
+            if !baseline.contains_key(&source) {
+                continue;
+            }
+            if let Some(reason) = unreadable.get(&source) {
+                run.warnings.push(format!(
+                    "the skill directory could not be read after the pass, so what it holds now is unknown: {reason}"
+                ));
+                run.skill_integrity = Some(SkillIntegrityReport::unverifiable());
+                continue;
+            }
+            let files = tampered.get(&source).cloned().unwrap_or_default();
+            if !files.is_empty() {
+                run.warnings.push(format!(
+                    "the skill directory changed during a pass that ran runs side by side, so no single run answers for it: {}",
+                    files.join(", ")
+                ));
+            }
+            run.skill_integrity = Some(SkillIntegrityReport::changed(files));
+        }
+    }
+
+    fn execute(&self, run: &mut RunRecord, integrity: IntegrityWindow) {
         let case = match self.case_index.get(&run.eval_case_id) {
             Some(case) => *case,
             None => {
@@ -696,12 +788,15 @@ impl RunExecution<'_> {
             environment: self.environment,
         };
 
-        let digest_before = match compute_skill_digest(integrity_path) {
-            Ok(digest) => Some(digest),
-            Err(e) => {
-                eprintln!("Run {}: failed to hash skill before invoke: {}", run.id, e);
-                None
-            }
+        let digest_before = match integrity {
+            IntegrityWindow::Pass => None,
+            IntegrityWindow::Run => match compute_skill_digest(integrity_path) {
+                Ok(digest) => Some(digest),
+                Err(e) => {
+                    eprintln!("Run {}: failed to hash skill before invoke: {}", run.id, e);
+                    None
+                }
+            },
         };
 
         let max_attempts = self.retries.saturating_add(1);
@@ -761,14 +856,14 @@ impl RunExecution<'_> {
         if let Some(before) = digest_before {
             match compute_skill_digest(integrity_path) {
                 Ok(after) => {
-                    let tampered_files = detect_tampering(&before, &after);
-                    run.skill_integrity = Some(SkillIntegrityReport {
-                        tampered: !tampered_files.is_empty(),
-                        tampered_files,
-                    });
+                    run.skill_integrity = Some(SkillIntegrityReport::changed(detect_tampering(&before, &after)));
                 }
                 Err(e) => {
                     eprintln!("Run {}: failed to hash skill after invoke: {}", run.id, e);
+                    run.warnings.push(format!(
+                        "the skill directory could not be read after the run, so what it holds now is unknown: {e}"
+                    ));
+                    run.skill_integrity = Some(SkillIntegrityReport::unverifiable());
                 }
             }
         }
@@ -830,6 +925,8 @@ mod fake_runner {
         last_timeout_secs: Mutex<Option<u64>>,
         lanes: Mutex<LaneCensus>,
         joined: Condvar,
+        tamper_case: Mutex<Option<String>>,
+        remove_case: Mutex<Option<String>>,
     }
 
     #[derive(Default)]
@@ -863,6 +960,20 @@ mod fake_runner {
         state.invocations.store(0, Ordering::SeqCst);
         *state.last_timeout_secs.lock().expect("fake timeout") = None;
         *state.lanes.lock().expect("fake lanes") = LaneCensus::default();
+        *state.tamper_case.lock().expect("fake tamper") = None;
+        *state.remove_case.lock().expect("fake remove") = None;
+    }
+
+    /// Have this case's run rewrite the skill directory it was handed, standing in for an
+    /// agent that followed a staged path back out of its workspace.
+    pub fn tamper_on_case(case_id: &str) {
+        *state().tamper_case.lock().expect("fake tamper") = Some(case_id.to_string());
+    }
+
+    /// Have this case's run delete the skill directory it was handed, standing in for an
+    /// agent that removed the directory the pass is meant to answer for.
+    pub fn remove_skill_on_case(case_id: &str) {
+        *state().remove_case.lock().expect("fake remove") = Some(case_id.to_string());
     }
 
     /// Hold every run until this many are in flight, so a test can tell lanes that
@@ -909,6 +1020,29 @@ mod fake_runner {
             let _ = std::fs::write(outputs_dir.join("out.json"), r#"{"ok":true}"#);
         }
         std::fs::write(request.transcript_path, format!(r#"{{"invocation":{count}}}"#)).expect("transcript");
+
+        if state
+            .tamper_case
+            .lock()
+            .expect("fake tamper")
+            .as_deref()
+            .is_some_and(|case| case == request.eval.id.as_str())
+        {
+            let skill_md = request.skill_path.join("SKILL.md");
+            let mut content = std::fs::read_to_string(&skill_md).expect("skill md");
+            content.push_str("\nrewritten by the run\n");
+            std::fs::write(&skill_md, content).expect("skill md");
+        }
+
+        if state
+            .remove_case
+            .lock()
+            .expect("fake remove")
+            .as_deref()
+            .is_some_and(|case| case == request.eval.id.as_str())
+        {
+            std::fs::remove_dir_all(request.skill_path).expect("skill dir");
+        }
 
         leave_lane(&state);
 
@@ -1808,6 +1942,156 @@ mod tests {
         assert_eq!(report["runs"][1]["eval_case_id"], "two");
         assert_eq!(report["runs"][0]["status"], "completed");
         assert_eq!(report["runs"][1]["status"], "completed");
+    }
+
+    /// Tamper detection exists to say that the skill a run was scored on is not the skill
+    /// it was handed. Lanes read one directory, so a rewrite lands on whichever runs were
+    /// still reading it, and charging it to the run whose window happened to contain it
+    /// would name a culprit the check cannot identify.
+    #[test]
+    fn a_skill_rewritten_during_a_concurrent_pass_is_not_charged_to_one_run() {
+        super::fake_runner::reset();
+        super::fake_runner::expect_lanes(2);
+        super::fake_runner::tamper_on_case("one");
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            concurrency: RunConcurrency::parse(2).unwrap(),
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        for index in 0..2 {
+            let run = &report["runs"][index];
+            assert_eq!(
+                run["skill_integrity"]["tampered"], true,
+                "a rewritten skill was read by every lane still running"
+            );
+            assert!(
+                run["warnings"]
+                    .as_array()
+                    .expect("warnings")
+                    .iter()
+                    .any(|warning| warning.as_str().unwrap_or_default().contains("no single run answers")),
+                "the report has to say the rewrite cannot be pinned on this run"
+            );
+        }
+    }
+
+    /// One run at a time is the case where the check can name the run, so it still does,
+    /// and says nothing about the runs that came before it.
+    #[test]
+    fn a_skill_rewritten_by_a_serial_run_is_charged_to_that_run() {
+        super::fake_runner::reset();
+        super::fake_runner::tamper_on_case("two");
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(base_run_args(&skill_dir, &out_dir)));
+
+        assert_eq!(report["runs"][0]["eval_case_id"], "one");
+        assert_eq!(
+            report["runs"][0]["skill_integrity"]["tampered"], false,
+            "the run that ran before the rewrite did not see it"
+        );
+        assert_eq!(report["runs"][1]["skill_integrity"]["tampered"], true);
+        assert!(
+            report["runs"][1]["warnings"]
+                .as_array()
+                .is_none_or(|warnings| warnings.is_empty()),
+            "a serial pass can name the run, so there is nothing to qualify"
+        );
+    }
+
+    /// The check exists to say whether the skill a run was scored on is still the skill it
+    /// was handed. A directory that cannot be read back answers neither way, and calling it
+    /// unchanged would hide the deletion the check is there to catch.
+    #[test]
+    fn a_skill_that_cannot_be_read_after_a_concurrent_pass_is_not_reported_as_unchanged() {
+        super::fake_runner::reset();
+        super::fake_runner::expect_lanes(2);
+        super::fake_runner::remove_skill_on_case("two");
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            concurrency: RunConcurrency::parse(2).unwrap(),
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        for index in 0..2 {
+            let run = &report["runs"][index];
+            assert_eq!(
+                run["skill_integrity"]["tampered"], true,
+                "a skill directory that is gone is not a skill directory that was left alone"
+            );
+            assert!(
+                run["warnings"]
+                    .as_array()
+                    .expect("warnings")
+                    .iter()
+                    .any(|warning| warning.as_str().unwrap_or_default().contains("could not be read")),
+                "the report has to say why nothing answers for the directory"
+            );
+        }
+    }
+
+    /// One run at a time reads the directory in its own window, and the same rule holds
+    /// there: a read that failed is not a comparison that passed.
+    #[test]
+    fn a_skill_that_cannot_be_read_after_a_serial_run_is_not_reported_as_unchanged() {
+        super::fake_runner::reset();
+        super::fake_runner::remove_skill_on_case("one");
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(base_run_args(&skill_dir, &out_dir)));
+
+        assert_eq!(report["runs"][0]["eval_case_id"], "one");
+        assert_eq!(report["runs"][0]["skill_integrity"]["tampered"], true);
+        assert!(
+            report["runs"][0]["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning.as_str().unwrap_or_default().contains("could not be read")),
+            "the run whose window lost the directory has to say so"
+        );
+    }
+
+    fn base_run_args(skill_dir: &Path, out_dir: &Path) -> RunArgs {
+        RunArgs {
+            skill_dir: skill_dir.to_path_buf(),
+            out_dir: out_dir.to_path_buf(),
+            model_config: "ci-default".to_string(),
+            scenario: vec![ScenarioKind::WithSkill],
+            runner: Some(Runner::Codex),
+            runner_model: None,
+            timeout_secs: None,
+            retries: 0,
+            attempts: 1,
+            concurrency: RunConcurrency::serial(),
+            force: true,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: true,
+            reuse_completed: false,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            ci: EvalCiArgs::default(),
+        }
     }
 
     fn write_two_case_skill(root: &Path) -> PathBuf {
