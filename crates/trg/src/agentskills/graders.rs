@@ -682,11 +682,7 @@ mod tests {
     #[test]
     fn text_graders_still_work_on_an_unobservable_runner() {
         let dir = tempfile::tempdir().unwrap();
-        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
-            "codex",
-            &redact_transcript_bytes(br#"{"type":"turn.completed"}"#),
-            &WorkspaceBoundary::unknown(),
-        );
+        let transcript = NormalizedTranscript::unavailable("mystery-runner");
         let input = GradeInput {
             final_text: "the answer is 42",
             run_dir: dir.path(),

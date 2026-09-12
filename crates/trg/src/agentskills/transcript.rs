@@ -331,11 +331,16 @@ impl<'a> TranscriptBuilder<'a> {
     }
 
     fn tool_call(&mut self, tool: ToolName, arguments: ToolArguments) {
-        for path in &arguments.paths {
-            if !self.boundary.contains(path) {
+        let named = arguments
+            .paths
+            .iter()
+            .cloned()
+            .chain(arguments.commands.iter().flat_map(|command| command_operands(command)));
+        for path in named {
+            if !self.boundary.contains(&path) {
                 self.workspace_escapes.push(WorkspaceEscape {
                     tool: tool.clone(),
-                    path: path.clone(),
+                    path,
                 });
             }
         }
@@ -356,19 +361,26 @@ impl<'a> TranscriptBuilder<'a> {
     }
 }
 
-/// The arguments of one tool call, split by whether they name a file.
+/// The arguments of one tool call, split by what each one can be read as.
 ///
-/// Only `paths` can be checked against the workspace boundary. A shell command or
-/// a search pattern may mention a path without being one, so it stays in `texts`
-/// where skill-engagement detection can still read it.
+/// `paths` name a file outright. `commands` name a program and its operands, so a
+/// path can be recovered from them without being asserted. Everything else, such
+/// as a search pattern, may mention a path without naming one and stays in
+/// `texts`, where skill-engagement detection can still read it.
 #[derive(Debug, Default)]
 struct ToolArguments {
     paths: Vec<String>,
+    commands: Vec<String>,
     texts: Vec<String>,
 }
 
 impl ToolArguments {
-    fn from_object(input: Option<&serde_json::Value>, path_keys: &[&str], text_keys: &[&str]) -> Self {
+    fn from_object(
+        input: Option<&serde_json::Value>,
+        path_keys: &[&str],
+        command_keys: &[&str],
+        text_keys: &[&str],
+    ) -> Self {
         let Some(object) = input.and_then(|value| value.as_object()) else {
             return Self::default();
         };
@@ -382,6 +394,7 @@ impl ToolArguments {
         };
         Self {
             paths: collect(path_keys),
+            commands: collect(command_keys),
             texts: collect(text_keys),
         }
     }
@@ -389,22 +402,55 @@ impl ToolArguments {
     fn from_paths(paths: Vec<String>) -> Self {
         Self {
             paths,
-            texts: Vec::new(),
+            ..Self::default()
         }
     }
 
-    fn from_text(text: &str) -> Self {
+    fn from_command(command: &str) -> Self {
         Self {
-            paths: Vec::new(),
-            texts: vec![text.to_string()],
+            commands: vec![command.to_string()],
+            ..Self::default()
         }
     }
 
     fn into_event_paths(self) -> Vec<String> {
         let mut all = self.paths;
+        all.extend(self.commands);
         all.extend(self.texts);
         all
     }
+}
+
+/// The operands of a command that name a path on the host.
+///
+/// This is not a shell parse. The program is skipped, since `/bin/zsh -lc '...'`
+/// names an interpreter rather than a file the run reached for, and the payload of
+/// an interpreter flag is scanned as the nested command it is. Only a token
+/// beginning with `/`, `~`, or `..` can be read as naming a path without guessing,
+/// which is enough for the escapes that matter here: a run that reaches a skill or
+/// a host file through a shell instead of a file tool.
+fn command_operands(command: &str) -> Vec<String> {
+    const INTERPRETER_FLAGS: &[&str] = &["-c", "-lc", "-ic", "-lic", "-li", "-l"];
+
+    let mut operands = Vec::new();
+    let mut skip_program = true;
+    for token in command.split_whitespace() {
+        let token = token.trim_matches(|c| c == '\'' || c == '"' || c == '`');
+        if token.is_empty() {
+            continue;
+        }
+        if std::mem::take(&mut skip_program) {
+            continue;
+        }
+        if INTERPRETER_FLAGS.contains(&token) {
+            skip_program = true;
+            continue;
+        }
+        if token.starts_with('/') || token.starts_with('~') || token.starts_with("..") {
+            operands.push(token.to_string());
+        }
+    }
+    operands
 }
 
 pub fn ndjson_values(stdout: &RedactedTranscript) -> Vec<serde_json::Value> {
@@ -434,7 +480,8 @@ pub fn normalize_stream_json(
     boundary: &WorkspaceBoundary,
 ) -> NormalizedTranscript {
     const PATH_KEYS: &[&str] = &["file_path", "path", "notebook_path"];
-    const TEXT_KEYS: &[&str] = &["command", "pattern", "skill"];
+    const COMMAND_KEYS: &[&str] = &["command"];
+    const TEXT_KEYS: &[&str] = &["pattern", "skill"];
 
     let mut builder = TranscriptBuilder::new(boundary);
 
@@ -455,7 +502,7 @@ pub fn normalize_stream_json(
                             };
                             builder.tool_call(
                                 tool,
-                                ToolArguments::from_object(block.get("input"), PATH_KEYS, TEXT_KEYS),
+                                ToolArguments::from_object(block.get("input"), PATH_KEYS, COMMAND_KEYS, TEXT_KEYS),
                             );
                         }
                         _ => {}
@@ -482,7 +529,8 @@ pub fn normalize_cursor_stream_json(
 ) -> NormalizedTranscript {
     const CALL_SUFFIX: &str = "ToolCall";
     const PATH_KEYS: &[&str] = &["path", "targetDirectory"];
-    const TEXT_KEYS: &[&str] = &["command", "globPattern", "pattern"];
+    const COMMAND_KEYS: &[&str] = &["command"];
+    const TEXT_KEYS: &[&str] = &["globPattern", "pattern"];
 
     let mut builder = TranscriptBuilder::new(boundary);
 
@@ -512,7 +560,10 @@ pub fn normalize_cursor_stream_json(
                 let Some(tool) = ToolName::new(member.trim_end_matches(CALL_SUFFIX)) else {
                     continue;
                 };
-                builder.tool_call(tool, ToolArguments::from_object(body.get("args"), PATH_KEYS, TEXT_KEYS));
+                builder.tool_call(
+                    tool,
+                    ToolArguments::from_object(body.get("args"), PATH_KEYS, COMMAND_KEYS, TEXT_KEYS),
+                );
             }
             Some("result") => builder.terminal(terminal_ok_flag(&value)),
             _ => {}
@@ -556,7 +607,7 @@ pub fn normalize_codex_thread_jsonl(
                 let Some(tool) = ToolName::new("command_execution") else {
                     continue;
                 };
-                builder.tool_call(tool, ToolArguments::from_text(command));
+                builder.tool_call(tool, ToolArguments::from_command(command));
             }
             (Some("item.started"), Some("file_change")) => {
                 let paths = item
@@ -908,6 +959,37 @@ mod tests {
         let serialized = serde_json::to_string(&transcript).unwrap();
         assert!(!serialized.contains("abcdefghijklmnopqrst"));
         assert!(serialized.contains("<redacted>"));
+    }
+
+    #[test]
+    fn a_host_file_reached_through_a_shell_command_is_reported_as_an_escape() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cat ~/.codex/skills/demo/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.workspace_escapes[0].path, "~/.codex/skills/demo/SKILL.md");
+        assert!(transcript.workspace_escapes[0].tool.eq_ignore_case("command_execution"));
+    }
+
+    #[test]
+    fn an_interpreter_is_not_reported_as_a_file_the_run_reached() {
+        assert_eq!(
+            command_operands("/bin/zsh -lc \"sed -n '1,240p' .skill/SKILL.md\""),
+            Vec::<String>::new()
+        );
+        assert_eq!(command_operands("cat /etc/hosts"), vec!["/etc/hosts".to_string()]);
+        assert_eq!(
+            command_operands("cd ../../elsewhere && ls"),
+            vec!["../../elsewhere".to_string()]
+        );
+        assert_eq!(command_operands("python3 -c 'print(1)'"), Vec::<String>::new());
+        assert_eq!(command_operands("ls outputs"), Vec::<String>::new());
     }
 
     #[test]

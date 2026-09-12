@@ -91,7 +91,7 @@ $ trg ai skills eval run \
         └── runs/
             └── run-001/
                 ├── workspace/          # agent working directory
-                ├── transcript.jsonl    # raw runner stdout (when --runner set)
+                ├── transcript.jsonl    # redacted runner stdout (when --runner set)
                 └── timing.json         # run metrics (when --runner set)
 ```
 
@@ -482,8 +482,8 @@ detection is scoped to the old skill directory for these runs.
 
 ## Transcript artifact
 
-When `--runner` is set, raw runner stdout is written to
-`runs/<run-id>/transcript.jsonl`. A descriptor is appended to the run's
+When `--runner` is set, runner stdout is written to
+`runs/<run-id>/transcript.jsonl` with secrets redacted. A descriptor is appended to the run's
 `artifacts` array in `report.json`:
 
 ```json
@@ -494,7 +494,7 @@ Format is runner-specific stream-json (one JSON object per line).
 
 ### Normalized transcript (`events.json`)
 
-Alongside the raw transcript, each run gets
+Alongside the redacted transcript, each run gets
 `runs/<run-id>/events.json`: the same turn reduced to one event vocabulary, so a
 grader is written once rather than once per harness.
 
@@ -518,7 +518,7 @@ Schema version: `trg.skills-eval.transcript.v1`.
 
 | Field | Type | Notes |
 | ----- | ---- | ----- |
-| `runner` | string | The program that produced the raw transcript |
+| `runner` | string | The program that produced the transcript |
 | `tool_visibility` | enum | `observed` or `unavailable` |
 | `events[].kind` | enum | `assistant_text`, `tool_call`, or `terminal` |
 | `workspace_escapes[]` | array | Paths the run named that resolve outside its workspace; omitted when empty |
@@ -539,12 +539,14 @@ all reports `unavailable`, and a grader that needs tool calls then returns
 `workspace_escapes` is the other honest part. trg invokes each harness's own
 CLI, which means it cannot confine that CLI's filesystem access: `cursor-agent`
 runs with `--force` and `claude-code` has no sandbox flag, so a run can read a
-file from anywhere the invoking user can. Only paths a tool named as a file are
-checked, since a shell command or a search pattern can mention a path without
-being one. A path beginning with `~` names the host home directory rather than a
-directory in the workspace, so it is resolved against `HOME` and reported as an
-escape. Every escape is also recorded as a run warning in `report.json`.
-Detection is the remedy available here; prevention is not.
+file from anywhere the invoking user can. What is checked is what a tool named as
+a path: a file argument, and the operands of a shell command that name a path
+outright, so `cat ~/.codex/skills/demo/SKILL.md` is reported while the
+interpreter in `/bin/zsh -lc '...'` is not. A search pattern can mention a path
+without naming one, so it is left unchecked. A path beginning with `~` names the
+host home directory rather than a directory in the workspace, so it is resolved
+against `HOME` before the check. Every escape is also recorded as a run warning
+in `report.json`. Detection is the remedy available here; prevention is not.
 
 `events.json` is normalized from the redacted transcript, so it carries no
 secret that `transcript.jsonl` had stripped.
