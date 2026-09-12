@@ -26,7 +26,7 @@ use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine};
 use super::report::{ScenarioKind, SkillStaging};
-use super::transcript::{write_normalized_transcript, TranscriptFormat};
+use super::transcript::{write_normalized_transcript, TranscriptFormat, WorkspaceBoundary};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum Runner {
@@ -287,9 +287,11 @@ pub fn persist_runner_io(
 ) -> Result<(), RunnerError> {
     write_transcript(request.transcript_path, &captured.stdout)?;
     write_stderr(request.stderr_path, &captured.stderr)?;
-    let normalized = runner
-        .transcript_format()
-        .normalize(runner.program_name(), &captured.stdout);
+    let normalized = runner.transcript_format().normalize(
+        runner.program_name(),
+        &captured.stdout,
+        &WorkspaceBoundary::at(request.workspace_dir),
+    );
     write_normalized_transcript(request.transcript_path, &normalized)?;
     Ok(())
 }

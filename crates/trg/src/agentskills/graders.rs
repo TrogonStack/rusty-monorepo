@@ -390,7 +390,7 @@ fn is_subsequence(expected: &[ToolName], observed: &[&ToolName]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agentskills::transcript::{normalize_stream_json, TranscriptFormat};
+    use crate::agentskills::transcript::{normalize_stream_json, TranscriptFormat, WorkspaceBoundary};
 
     const CLAUDE_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}
@@ -419,7 +419,7 @@ mod tests {
                 run_dir,
                 workspace_dir,
                 outputs_dir,
-                transcript: normalize_stream_json("claude", CLAUDE_STREAM),
+                transcript: normalize_stream_json("claude", CLAUDE_STREAM, &WorkspaceBoundary::unknown()),
             }
         }
 
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn tool_graders_are_unsupported_on_an_unobservable_runner() {
         let dir = tempfile::tempdir().unwrap();
-        let transcript = TranscriptFormat::CodexThreadJsonl.normalize("codex", br#"{"type":"turn.completed"}"#);
+        let transcript = NormalizedTranscript::unavailable("mystery-runner");
         let input = GradeInput {
             final_text: "done",
             run_dir: dir.path(),
@@ -634,16 +634,54 @@ mod tests {
             },
         ] {
             match evaluate(&grader, &input) {
-                GraderOutcome::Unsupported { reason } => assert!(reason.contains("codex"), "{reason}"),
+                GraderOutcome::Unsupported { reason } => assert!(reason.contains("mystery-runner"), "{reason}"),
                 other => panic!("{} should be unsupported, got {other:?}", grader.kind()),
             }
         }
     }
 
     #[test]
+    fn skill_used_reads_the_shell_command_codex_ran() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            br#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,240p' .skill/SKILL.md\""}}
+{"type":"turn.completed"}"#,
+            &WorkspaceBoundary::unknown(),
+        );
+        let input = GradeInput {
+            final_text: "done",
+            run_dir: dir.path(),
+            workspace_dir: dir.path(),
+            outputs_dir: dir.path(),
+            raw_transcript: "",
+            transcript: Some(&transcript),
+        };
+
+        assert!(matches!(
+            evaluate(&Grader::SkillUsed, &input),
+            GraderOutcome::Passed { .. }
+        ));
+        assert!(matches!(
+            evaluate(
+                &Grader::ToolUsed {
+                    tool: tool("command_execution"),
+                    min_calls: one(),
+                },
+                &input
+            ),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
     fn text_graders_still_work_on_an_unobservable_runner() {
         let dir = tempfile::tempdir().unwrap();
-        let transcript = TranscriptFormat::CodexThreadJsonl.normalize("codex", br#"{"type":"turn.completed"}"#);
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            br#"{"type":"turn.completed"}"#,
+            &WorkspaceBoundary::unknown(),
+        );
         let input = GradeInput {
             final_text: "the answer is 42",
             run_dir: dir.path(),

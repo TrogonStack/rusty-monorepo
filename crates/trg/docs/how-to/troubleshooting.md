@@ -40,6 +40,23 @@ Run run-001 failed: 'cursor-agent' exited without emitting a terminal result eve
 - Check `runs/run-001/transcript.jsonl` for partial output.
 - Retry with `--runner-model` if the default model is unavailable.
 
+### `reached N path(s) outside the workspace, which trg cannot prevent`
+
+The run named a file that resolves outside the workspace it was given. trg
+invokes each harness's own CLI, so it cannot confine those reads: it reports
+them and keeps going.
+
+```shell
+Run run-001: runner 'cursor-agent' reached 1 path(s) outside the workspace, which trg cannot prevent: /host/plugins/cache/demo/SKILL.md (read)
+```
+
+**Fix:** Read the named paths before trusting the result. A run that read a
+skill from somewhere other than `.skill/` was not graded against the skill
+revision you staged, and the `without_skill` arm of a comparison is worthless if
+the agent found the skill elsewhere on the host. The same escapes are recorded
+under `runs[].warnings` in `report.json` and under `workspace_escapes` in
+`runs/<run-id>/events.json`.
+
 ### `--old-skill-dir is required when --scenario old_skill is included`
 
 The `old_skill` scenario stages a prior skill revision into the workspace, so it

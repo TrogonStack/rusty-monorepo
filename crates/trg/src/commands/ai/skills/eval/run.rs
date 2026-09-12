@@ -27,6 +27,7 @@ use super::finish_eval_output;
 use super::grade::{grade_report_dir_with_report, GradeJsonOutput};
 use crate::agentskills::benchmark::BenchmarkOptions;
 use crate::agentskills::grading::{GradeOptions, GraderMode};
+use crate::agentskills::transcript::{read_normalized_transcript, NormalizedTranscript};
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -792,6 +793,42 @@ fn apply_outcome(
         run.warnings
             .extend(missing_expected_output_warnings(eval, &outputs_dir));
     }
+
+    if let Ok(transcript) = read_normalized_transcript(transcript_path) {
+        if let Some(warning) = workspace_escape_warning(&transcript) {
+            eprintln!("Run {}: {}", run.id, warning);
+            run.warnings.push(warning);
+        }
+    }
+}
+
+/// trg runs each harness's own CLI, so it cannot stop one from reading outside the
+/// workspace it was given. Naming what left the workspace is the whole remedy
+/// available here, and it belongs in the report rather than only on the terminal.
+fn workspace_escape_warning(transcript: &NormalizedTranscript) -> Option<String> {
+    const NAMED: usize = 5;
+
+    if !transcript.escaped_workspace() {
+        return None;
+    }
+    let escapes = &transcript.workspace_escapes;
+    let named = escapes
+        .iter()
+        .take(NAMED)
+        .map(|escape| format!("{} ({})", escape.path, escape.tool))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remainder = escapes.len().saturating_sub(NAMED);
+    let tail = if remainder > 0 {
+        format!(", and {remainder} more")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "runner '{}' reached {} path(s) outside the workspace, which trg cannot prevent: {named}{tail}",
+        transcript.runner,
+        escapes.len()
+    ))
 }
 
 fn artifact_relative_path(path: &Path, report_dir: &Path) -> String {
@@ -826,7 +863,39 @@ fn rebuild_summaries(bundle: &mut ReportBundle) {
 mod tests {
     use super::*;
     use crate::agentskills::report::ScenarioKind;
+    use crate::agentskills::transcript::{
+        ToolName, ToolVisibility, TranscriptFormat, WorkspaceBoundary, WorkspaceEscape,
+    };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_path_reached_outside_the_workspace_becomes_a_run_warning() {
+        let mut transcript = NormalizedTranscript::new("cursor-agent", ToolVisibility::Observed, Vec::new());
+        assert_eq!(workspace_escape_warning(&transcript), None);
+
+        transcript.workspace_escapes = vec![WorkspaceEscape {
+            tool: ToolName::new("read").unwrap(),
+            path: "/host/plugins/cache/SKILL.md".to_string(),
+        }];
+
+        let warning = workspace_escape_warning(&transcript).unwrap();
+        assert!(warning.contains("cursor-agent"), "{warning}");
+        assert!(warning.contains("/host/plugins/cache/SKILL.md"), "{warning}");
+        assert!(warning.contains("read"), "{warning}");
+    }
+
+    #[test]
+    fn a_run_that_stayed_in_its_workspace_is_not_warned_about() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"args":{"path":"outputs/summary.md"}}}}
+"#;
+        let transcript = TranscriptFormat::CursorStreamJson.normalize(
+            "cursor-agent",
+            stdout,
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+        assert_eq!(workspace_escape_warning(&transcript), None);
+    }
 
     fn write_fixture_skill(root: &Path) -> PathBuf {
         let skill_dir = root.join("fixture-skill");

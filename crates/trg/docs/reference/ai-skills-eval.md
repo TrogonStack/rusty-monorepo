@@ -242,11 +242,20 @@ that matches nowhere reports against the workspace candidate.
 
 ### Graders that depend on the transcript
 
-`tool_used`, `tool_order`, and `skill_used` read the normalized transcript, and
-not every runner exposes one. When the runner cannot be observed, the result is
-recorded as **unsupported**: neither passed nor failed, and excluded from
-`pass_rate`. This keeps a harness that hides its tool calls from silently
-reading as a regression. See [Transcript artifact](#transcript-artifact).
+`tool_used`, `tool_order`, and `skill_used` read the normalized transcript.
+`claude-code`, `codex`, and `cursor-agent` all expose their tool calls, so all
+three answer these graders. When a runner emits no readable stream at all, the
+result is recorded as **unsupported**: neither passed nor failed, and excluded
+from `pass_rate`, which keeps an unobservable harness from reading as a
+regression.
+
+Tool *names* stay in each harness's own vocabulary, because renaming one
+harness's tools into another's would assert an equivalence the harness never
+made. `codex` reaches the filesystem through a shell, so it reports
+`command_execution` and `file_change` rather than `Read` and `Write`. A suite
+that must run on every harness should prefer `skill_used`, which is defined in
+terms of the staged skill path and answers everywhere. See
+[Transcript artifact](#transcript-artifact).
 
 ### The LLM judge
 
@@ -366,9 +375,9 @@ scored has no pass rate and reporting `0.0` reads as a total failure.
     {
       "assertion": "the skill was engaged",
       "passed": false,
-      "evidence": "runner 'codex' does not expose tool calls in a form trg can read",
+      "evidence": "runner 'mystery-runner' does not expose tool calls in a form trg can read",
       "grader": { "kind": "declarative" },
-      "unsupported": "runner 'codex' does not expose tool calls in a form trg can read"
+      "unsupported": "runner 'mystery-runner' does not expose tool calls in a form trg can read"
     }
   ],
   "summary": {
@@ -500,6 +509,9 @@ Schema version: `trg.skills-eval.transcript.v1`.
     { "kind": "tool_call", "tool": "Read", "paths": [".skill/SKILL.md"] },
     { "kind": "assistant_text", "text": "..." },
     { "kind": "terminal", "ok": true }
+  ],
+  "workspace_escapes": [
+    { "tool": "read", "path": "/somewhere/outside/notes.md" }
   ]
 }
 ```
@@ -509,10 +521,25 @@ Schema version: `trg.skills-eval.transcript.v1`.
 | `runner` | string | The program that produced the raw transcript |
 | `tool_visibility` | enum | `observed` or `unavailable` |
 | `events[].kind` | enum | `assistant_text`, `tool_call`, or `terminal` |
+| `workspace_escapes[]` | array | Paths the run named that resolve outside its workspace; omitted when empty |
 
-`tool_visibility` is the honest part. Tool-call events are normalized for the
-Anthropic stream-json vocabulary, which is what `claude-code` emits. For
-`codex` and `cursor-agent`, trg records only their verified terminal events and
-reports `unavailable`, rather than guessing at an event shape it has not
-verified. A grader that needs tool calls then returns **unsupported** on those
-runners instead of a fabricated pass or fail; text-based graders are unaffected.
+Each of the three supported runners is normalized from event shapes verified
+against that runner's own output:
+
+| Runner | Events read | Tool vocabulary |
+| ------ | ----------- | --------------- |
+| `claude-code` | `assistant` blocks, `result` | its own tool names, such as `Read` and `Write` |
+| `cursor-agent` | `assistant` blocks, `tool_call` (`started`), `result` | the tool-call member name, such as `read`, `glob`, `edit` |
+| `codex` | `item.completed`/`agent_message`, `item.started`/`command_execution`, `item.started`/`file_change`, `turn.completed` | `command_execution` and `file_change` |
+
+`tool_visibility` is the honest part. A runner whose stream trg cannot read at
+all reports `unavailable`, and a grader that needs tool calls then returns
+**unsupported** rather than a fabricated pass or fail.
+
+`workspace_escapes` is the other honest part. trg invokes each harness's own
+CLI, which means it cannot confine that CLI's filesystem access: `cursor-agent`
+runs with `--force` and `claude-code` has no sandbox flag, so a run can read a
+file from anywhere the invoking user can. Only paths a tool named as a file are
+checked, since a shell command or a search pattern can mention a path without
+being one. Every escape is also recorded as a run warning in `report.json`.
+Detection is the remedy available here; prevention is not.
