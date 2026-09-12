@@ -99,6 +99,20 @@ impl VerifyArgs {
             return 0;
         };
 
+        let report_dir = find_report_dir(&workspace).unwrap_or_else(|| workspace.clone());
+
+        // Whether a bundle conforms to the schemas is a fact about the writer that produced
+        // it, not about how the suite scored, so it is read before the verdict. Behind the
+        // verdict it was reachable only on a graded bundle whose every assertion passed,
+        // which is a bundle no pass without a live runner can produce, so nothing ever held
+        // a written bundle against the schemas that describe it.
+        if matches!(self.mode, VerifyMode::Strict) {
+            if let Err(error) = validate_report_bundle_schemas(&report_dir) {
+                eprintln!("Schema validation failed: {error}");
+                return 1;
+            }
+        }
+
         let workspace_report = match check_workspace(&workspace, self.mode.into_workspace_options()) {
             Ok(report) => report,
             Err(e) => {
@@ -106,15 +120,6 @@ impl VerifyArgs {
                 return 1;
             }
         };
-
-        let report_dir = find_report_dir(&workspace).unwrap_or_else(|| workspace.clone());
-
-        if matches!(self.mode, VerifyMode::Strict) {
-            if let Err(error) = validate_report_bundle_schemas(&report_dir) {
-                eprintln!("Schema validation failed: {error}");
-                return 1;
-            }
-        }
 
         let metrics = match collect_workspace_metrics(&workspace) {
             Ok(metrics) => metrics,
