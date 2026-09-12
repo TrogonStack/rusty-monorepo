@@ -45,6 +45,8 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 | `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
+| `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
+| `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 
 ### Runner values
 
@@ -208,7 +210,7 @@ only accepted from the `schema_version` that introduced it.
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
 | `graders` | object[] | no | Typed checks (see below). Requires `schema_version` 3 |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
-| `tags` | string[] | no | Free-form labels |
+| `tags` | string[] | no | Free-form labels. `--tag` selects by them. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `priority` | enum | no | `low`, `normal`, `high`, or `critical` |
 | `timeout_secs` | integer | no | Per-case runner timeout override |
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
@@ -376,6 +378,7 @@ subcommands run.
 | `skill_hash` | string | `sha256:` digest of `SKILL.md` |
 | `evals_path` | string | `<skill_path>/evals/evals.json` |
 | `evals_hash` | string | `sha256:` digest of `evals.json` |
+| `case_selection` | object | Present only when the run covered part of the suite. See [Covering part of a suite](#covering-part-of-a-suite) |
 
 ### `runs[]` record
 
@@ -521,6 +524,54 @@ Outputs are presented to the judge blindly, as A and B, with the mapping back to
 scenarios recorded separately in the same record.
 
 ---
+
+## Covering part of a suite
+
+A full pass costs a model call per case, per scenario, per attempt, so a suite that grows
+past a handful of cases stops being something to run while iterating on one of them.
+`--case` and `--tag` narrow what a single invocation covers:
+
+```shell
+# One case, by id
+trg ai skills eval run --skill-dir ./skills/csv-analyzer --out-dir ./artifacts \
+    --case analyze-sales
+
+# Every case whose id starts with analyze-, and every case tagged smoke
+trg ai skills eval run --skill-dir ./skills/csv-analyzer --out-dir ./artifacts \
+    --case 'analyze-*' --tag smoke
+```
+
+`--case` takes a glob, not a regular expression: `*` stands for any run of characters, `?`
+for exactly one, and every other character is matched literally. The pattern is matched
+against the whole id, so `--case analyze-sales` does not select `analyze-sales-by-region`.
+
+Each flag narrows the selection and repeating one widens it. Two `--tag` flags cover a
+case carrying either tag; a `--case` and a `--tag` together cover only the cases that both
+match the pattern and carry the tag.
+
+A selection matching none of the suite's cases is refused rather than run. An eval that
+covers nothing would otherwise exit successfully with an empty report, which reads the
+same as a suite that found no problems.
+
+A narrowed run records what it covered under `suite.case_selection` in `report.json`:
+
+```json
+{
+  "suite": {
+    "evals_hash": "sha256:...",
+    "case_selection": {
+      "cases": ["analyze-*"],
+      "tags": ["smoke"],
+      "covered": 2,
+      "of": 9
+    }
+  }
+}
+```
+
+`evals_hash` covers the whole manifest either way, so without this field a narrowed run
+and a full one are indistinguishable to anyone comparing two reports. The field is absent
+when the run covered every case the suite declares.
 
 ## Measuring triggering
 

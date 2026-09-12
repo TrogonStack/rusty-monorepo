@@ -19,6 +19,38 @@
       ],
       "type": "object"
     },
+    "CaseSelectionRecord": {
+      "description": "The selection a report was produced under, so a reader is not shown partial coverage\nas if it were a pass over the whole suite.",
+      "properties": {
+        "cases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "covered": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "of": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "covered",
+        "of"
+      ],
+      "type": "object"
+    },
     "CiSection": {
       "properties": {
         "commit": {
@@ -819,6 +851,17 @@
     },
     "SuiteSection": {
       "properties": {
+        "case_selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaseSelectionRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when the run covered every case the suite declares.\n\n`evals_hash` covers the whole file either way, so without this a narrowed run and a\nfull one are indistinguishable to a reader comparing two reports."
+        },
         "evals_hash": {
           "type": "string"
         },

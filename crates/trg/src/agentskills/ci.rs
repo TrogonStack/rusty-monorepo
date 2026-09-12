@@ -853,6 +853,7 @@ mod tests {
                 evals_hash: "sha256:def".to_string(),
                 old_skill_path: None,
                 old_skill_hash: None,
+                case_selection: None,
             },
             dimensions: crate::agentskills::report::DimensionsSection {
                 eval_cases: Vec::new(),
