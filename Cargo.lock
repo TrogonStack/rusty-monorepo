@@ -2653,6 +2653,7 @@ dependencies = [
  "gray_matter",
  "http",
  "jsonschema",
+ "libc",
  "oauth2",
  "open",
  "regex",
