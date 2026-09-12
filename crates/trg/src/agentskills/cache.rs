@@ -63,6 +63,13 @@ pub struct CacheKeyInput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_version: Option<String>,
     pub scenario: ScenarioKind,
+    /// Which draw of this cell the run is.
+    ///
+    /// `--attempts` asks for the same cell more than once precisely because one run of a
+    /// non-deterministic agent says little about it. Without this the second draw is
+    /// served the first one's artifacts, and the spread the benchmark reports across
+    /// attempts is zero by construction rather than by measurement.
+    pub attempt: u32,
     pub prompt_contract_version: String,
     /// What the run was allowed to see of this machine and of the live skill tree.
     ///
@@ -80,9 +87,11 @@ pub struct CacheKeyInput {
 ///
 /// `--reuse-completed` deliberately forgets the model config, the runner, and the version
 /// of it a run was produced with, because an operator iterating on a skill wants each case
-/// answered once. It cannot forget the scenario. Two arms of the same case differ in
-/// nothing else, so serving one arm's run to the other compares a run against itself and
-/// reports a delta of zero for a skill that was never exercised.
+/// answered once. It cannot forget the scenario, and it cannot forget which draw of the
+/// cell it is looking at. Two arms of the same case differ in nothing else, so serving one
+/// arm's run to the other compares a run against itself and reports a delta of zero for a
+/// skill that was never exercised; two attempts of one arm differ in nothing at all, and
+/// the point of asking for a second one is to get a second sample rather than a copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReuseKeyInput {
     pub eval_case_id: String,
@@ -90,6 +99,7 @@ pub struct ReuseKeyInput {
     pub evals_hash: String,
     pub fixture_hash: String,
     pub scenario: ScenarioKind,
+    pub attempt: u32,
 }
 
 impl ReuseKeyInput {
@@ -100,18 +110,21 @@ impl ReuseKeyInput {
             evals_hash: key_input.evals_hash.clone(),
             fixture_hash: key_input.fixture_hash.clone(),
             scenario: key_input.scenario,
+            attempt: key_input.attempt,
         }
     }
 
     /// The directory this run's reuse pointer lives in.
     ///
-    /// One slot per case and scenario. A single slot per case would let each arm evict the
-    /// other's pointer, so a comparison would re-execute every run it was told to reuse.
+    /// One slot per case, scenario and attempt. A single slot per case would let each arm
+    /// evict the other's pointer, so a comparison would re-execute every run it was told
+    /// to reuse.
     fn slot(&self, out_dir: &Path) -> PathBuf {
         cache_root(out_dir)
             .join(REUSE_DIR)
             .join(sanitize_dir_name(&self.eval_case_id))
             .join(self.scenario.as_str())
+            .join(format!("attempt-{}", self.attempt))
     }
 }
 
@@ -439,6 +452,7 @@ mod tests {
             runner_kind: "codex".to_string(),
             runner_version: None,
             scenario,
+            attempt: 1,
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             environment: EnvironmentPolicy::default(),
             skill_staging: SkillStaging::default(),
@@ -740,6 +754,59 @@ mod tests {
 
         let pointer = lookup_reuse(&out_dir, &ReuseKeyInput::of(&other_config)).unwrap();
         assert_eq!(pointer.run_id, "run-001");
+    }
+
+    /// A second attempt is a second sample of the same cell, which is the whole reason
+    /// for asking for it. Serving it the first attempt's run turns the spread across
+    /// attempts into zero and the mean into the first draw.
+    #[test]
+    fn a_second_draw_of_a_cell_is_a_different_run() {
+        let first = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture");
+        let second = CacheKeyInput {
+            attempt: 2,
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture")
+        };
+
+        assert_ne!(
+            CacheKey::from_input(&first),
+            CacheKey::from_input(&second),
+            "which draw of the cell a run is belongs in its identity"
+        );
+    }
+
+    /// `--reuse-completed` forgets the model config and the runner. It cannot forget the
+    /// draw, for the same reason the exact key cannot.
+    #[test]
+    fn reuse_completed_does_not_serve_one_attempt_to_the_next() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run(&report_a, "run-001", "one", ScenarioKind::WithSkill);
+
+        let first = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        record_completion(&out_dir, &CacheKey::from_input(&first), &first, &report_a, "run-001").unwrap();
+
+        let second = CacheKeyInput {
+            attempt: 2,
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str())
+        };
+        assert!(lookup_reuse(&out_dir, &ReuseKeyInput::of(&second)).is_none());
+
+        let report_b = out_dir.join("demo/report-b");
+        fs::create_dir_all(&report_b).unwrap();
+        write_completed_run(&report_b, "run-002", "one", ScenarioKind::WithSkill);
+        record_completion(&out_dir, &CacheKey::from_input(&second), &second, &report_b, "run-002").unwrap();
+
+        assert_eq!(
+            lookup_reuse(&out_dir, &ReuseKeyInput::of(&first)).unwrap().run_id,
+            "run-001",
+            "one slot per draw, so a later draw does not evict an earlier one"
+        );
+        assert_eq!(
+            lookup_reuse(&out_dir, &ReuseKeyInput::of(&second)).unwrap().run_id,
+            "run-002"
+        );
     }
 
     /// One slot per case would let each arm evict the other, so a comparison would

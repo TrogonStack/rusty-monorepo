@@ -551,6 +551,7 @@ fn execute_runs(
             runner_kind: runner_kind.clone(),
             runner_version: runner_version.clone(),
             scenario,
+            attempt: run.attempt,
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             environment,
             skill_staging,
@@ -1293,6 +1294,10 @@ mod tests {
             .expect("report dir")
     }
 
+    fn read_report(report_dir: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap()
+    }
+
     fn first_run_duration(report_dir: &Path) -> u64 {
         let report: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
@@ -1478,6 +1483,64 @@ mod tests {
         run_with_fake_runner(base(false));
         let second_report = run_with_fake_runner(base(true));
         assert_eq!(first_run_duration(&second_report), 200);
+    }
+
+    /// `--attempts` buys samples, and a sample the cache copied from the draw before it
+    /// is not one. A cell is identified by its draw as well, so the second attempt
+    /// executes and the second invocation of the same command still reuses both.
+    #[test]
+    fn each_attempt_of_a_cell_executes_rather_than_copying_the_draw_before_it() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_cacheable_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let base = || RunArgs {
+            skill_dir: skill_dir.clone(),
+            out_dir: out_dir.clone(),
+            model_config: "ci-default".to_string(),
+            scenario: vec![ScenarioKind::WithSkill],
+            runner: Some(Runner::Codex),
+            runner_model: None,
+            timeout_secs: None,
+            retries: 0,
+            attempts: 2,
+            force: true,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: false,
+            reuse_completed: false,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            ci: EvalCiArgs::default(),
+        };
+
+        let first_report = read_report(&run_with_fake_runner(base()));
+        assert_eq!(first_report["runs"][0]["metrics"]["duration_ms"], 100);
+        assert!(
+            first_report["runs"][1]["cache"].is_null(),
+            "the second draw must be executed, not copied from the first"
+        );
+        assert_eq!(
+            first_report["runs"][1]["metrics"]["duration_ms"], 200,
+            "the second draw is its own run"
+        );
+
+        let second_report = read_report(&run_with_fake_runner(base()));
+        assert_eq!(second_report["runs"][0]["cache"]["source_run_id"], "run-001");
+        assert_eq!(
+            second_report["runs"][1]["cache"]["source_run_id"], "run-002",
+            "each draw is served the run recorded for that draw"
+        );
+        assert_eq!(second_report["runs"][1]["metrics"]["duration_ms"], 200);
     }
 
     #[test]
