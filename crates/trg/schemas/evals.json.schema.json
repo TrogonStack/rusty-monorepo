@@ -85,6 +85,16 @@
         },
         {
           "properties": {
+            "input_match": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RegexPattern"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "max_calls": {
               "format": "uint",
               "minimum": 0,

@@ -235,7 +235,7 @@ every reader and to every runner.
 | `regex` | `pattern`, `target`, `negate` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
 | `contains` | `text`, `target`, `case`, `negate` | The target contains the text. `case` is `insensitive` (default) or `sensitive` |
 | `file_exists` | `path` | The run produced the file |
-| `tool_used` | `tool`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive |
+| `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
 | `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
 | `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
@@ -252,6 +252,27 @@ over an incidental file of the same name, and a plain `summary.md` still
 resolves when the agent wrote it straight into its working directory. A path
 that matches nowhere reports against the workspace candidate.
 
+### Asserting which command ran, not just that a tool was used
+
+A tool name on its own says "a shell ran", which is rarely what a case means.
+`input_match` is a regular expression, and only the calls that named a value
+matching it are counted:
+
+```json
+{ "type": "tool_used", "tool": "Bash", "input_match": "npm (run )?test" }
+```
+
+The pattern is tested against the values the call named, one at a time: the
+paths it was given, the command lines it ran, and the texts it searched for.
+Those are what the normalized transcript keeps. It is deliberately not tested
+against the JSON body a harness sent, because the key a command arrives under
+differs per harness, so a pattern written against one harness's request body
+would quietly match nothing under another. See
+[Transcript artifact](#transcript-artifact).
+
+An unusable pattern is rejected when the manifest is parsed, not when the
+grader runs.
+
 ### Stating that a tool or the skill must not be reached for
 
 A skill that answers a prompt it was never meant to answer is as much a defect
@@ -265,6 +286,14 @@ number of calls satisfies it. `max_calls` is the upper half:
 `min_calls: 0` on its own is refused. It accepts every run, and a check that
 cannot fail reads in a report exactly like one that held. So is a `max_calls`
 below `min_calls`, which no run can satisfy.
+
+Pairing the two bounds with `input_match` narrows the refusal to one command
+rather than to the whole tool, which is usually what a case means: a skill may
+legitimately reach for a shell and still must not reach for this.
+
+```json
+{ "type": "tool_used", "tool": "Bash", "input_match": "^git push", "min_calls": 0, "max_calls": 0 }
+```
 
 Tool names belong to one harness's vocabulary, so the portable form of "the
 skill must not be reached for" is `skill_used` with `negate`, which answers on
