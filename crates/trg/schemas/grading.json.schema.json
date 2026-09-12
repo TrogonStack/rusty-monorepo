@@ -9,6 +9,13 @@
         "evidence": {
           "type": "string"
         },
+        "excluded": {
+          "description": "Present when the grader presupposes the skill, so its `passed` value is\nan indicator to read rather than a score to count. Kept out of\n`summary.pass_rate` in both arms, so the gap between them measures the\nwork and not the premise.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "grader": {
           "$ref": "#/$defs/GraderInfo"
         },
@@ -73,6 +80,12 @@
     },
     "GradingSummary": {
       "properties": {
+        "excluded": {
+          "default": 0,
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "failed": {
           "format": "uint",
           "minimum": 0,

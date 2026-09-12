@@ -52,6 +52,7 @@ pub struct ReportMetrics {
     pub passed_assertions: usize,
     pub failed_assertions: usize,
     pub unsupported_assertions: usize,
+    pub excluded_assertions: usize,
     pub pass_rate: Option<f64>,
     pub total_tokens: u64,
     pub input_tokens: u64,
@@ -401,7 +402,7 @@ pub fn collect_failed_assertions_in_workspace(
         let content = std::fs::read_to_string(&grading_path)?;
         let grading: GradingForAnnotations = serde_json::from_str(&content)?;
         for (index, result) in grading.assertion_results.iter().enumerate() {
-            if result.passed || result.unsupported.is_some() {
+            if result.passed || !result.is_scored() {
                 continue;
             }
             details.push(FailedAssertionDetail {
@@ -475,6 +476,12 @@ pub fn print_human_summary(check: &CiCheckResult) {
             check.metrics.unsupported_assertions
         );
     }
+    if check.metrics.excluded_assertions > 0 {
+        println!(
+            "excluded: {} (presuppose the skill, so they score in neither arm)",
+            check.metrics.excluded_assertions
+        );
+    }
     if !check.violations.is_empty() {
         println!("ci checks: failed ({} violation(s))", check.violations.len());
         for violation in &check.violations {
@@ -491,6 +498,7 @@ fn merge_workspace_metrics(metrics: &mut ReportMetrics, workspace: &WorkspaceChe
     metrics.passed_assertions += workspace.passed_assertions;
     metrics.failed_assertions += workspace.failed_assertions;
     metrics.unsupported_assertions += workspace.unsupported_assertions;
+    metrics.excluded_assertions += workspace.excluded_assertions;
 }
 
 fn compute_pass_rate(passed: usize, total: usize) -> Option<f64> {
@@ -517,6 +525,14 @@ struct AssertionForAnnotations {
     passed: bool,
     #[serde(default)]
     unsupported: Option<String>,
+    #[serde(default)]
+    excluded: Option<String>,
+}
+
+impl AssertionForAnnotations {
+    fn is_scored(&self) -> bool {
+        self.unsupported.is_none() && self.excluded.is_none()
+    }
 }
 
 #[cfg(test)]
@@ -542,6 +558,7 @@ mod tests {
             passed_assertions: passed,
             failed_assertions: total - passed,
             unsupported_assertions: 0,
+            excluded_assertions: 0,
             pass_rate: Some(pass_rate),
             total_tokens: tokens,
             input_tokens: tokens / 2,
@@ -736,7 +753,7 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         assert_eq!(
             json,
-            r#"{"report_dir":"/tmp/report","exit_code":0,"check":{"passed":true,"violations":[],"metrics":{"total_runs":1,"failed_runs":0,"skipped_runs":0,"completed_runs":1,"grading_files":1,"assertion_results":10,"passed_assertions":10,"failed_assertions":0,"unsupported_assertions":0,"pass_rate":1.0,"total_tokens":10,"input_tokens":5,"output_tokens":5,"max_duration_ms":20,"total_duration_ms":20}}}"#
+            r#"{"report_dir":"/tmp/report","exit_code":0,"check":{"passed":true,"violations":[],"metrics":{"total_runs":1,"failed_runs":0,"skipped_runs":0,"completed_runs":1,"grading_files":1,"assertion_results":10,"passed_assertions":10,"failed_assertions":0,"unsupported_assertions":0,"excluded_assertions":0,"pass_rate":1.0,"total_tokens":10,"input_tokens":5,"output_tokens":5,"max_duration_ms":20,"total_duration_ms":20}}}"#
         );
     }
 

@@ -87,6 +87,36 @@ fn one() -> NonZeroUsize {
     NonZeroUsize::new(1).expect("1 is non-zero")
 }
 
+/// Which arm of a with-skill versus without-skill comparison a grader is
+/// allowed to score in.
+///
+/// A check that presupposes the skill can only ever pass where the skill is
+/// present, so scoring it would credit the skill for its own premise and widen
+/// the reported gap between the arms by exactly the number of such checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GraderArm {
+    /// Let the grader decide: one that presupposes the skill is reported but
+    /// never scored, and everything else is scored.
+    #[default]
+    Auto,
+    /// Report the result in both arms and score it in neither.
+    WithOnly,
+    /// Score in both arms even though the grader presupposes the skill, which
+    /// is how a "the skill must not be engaged" expectation is written.
+    Both,
+}
+
+impl GraderArm {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::WithOnly => "with_only",
+            Self::Both => "both",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Grader {
@@ -181,6 +211,65 @@ impl Grader {
 
     pub fn needs_tool_visibility(&self) -> bool {
         matches!(self, Self::ToolUsed { .. } | Self::ToolOrder { .. } | Self::SkillUsed)
+    }
+
+    /// Whether the grader states a property that cannot hold unless the skill
+    /// is staged, regardless of how well the run did the work it was asked to
+    /// do. Skill engagement is the harness-agnostic example, and the only one
+    /// trg can recognise without being told: a tool-name check is specific to
+    /// one harness's vocabulary, so it has to be marked by hand.
+    pub fn presupposes_the_skill(&self) -> bool {
+        matches!(self, Self::SkillUsed)
+    }
+}
+
+/// A grader as a case declares it, together with the arm scope that decides
+/// whether its result counts toward the score.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CaseGrader {
+    #[serde(flatten)]
+    pub grader: Grader,
+    #[serde(default, skip_serializing_if = "is_default_arm")]
+    pub arm: GraderArm,
+}
+
+fn is_default_arm(arm: &GraderArm) -> bool {
+    *arm == GraderArm::default()
+}
+
+impl CaseGrader {
+    pub fn new(grader: Grader) -> Self {
+        Self {
+            grader,
+            arm: GraderArm::default(),
+        }
+    }
+
+    pub fn counts_toward_score(&self) -> bool {
+        self.exclusion_reason().is_none()
+    }
+
+    /// Why this grader is reported but not scored, when that is the case.
+    pub fn exclusion_reason(&self) -> Option<String> {
+        match self.arm {
+            GraderArm::Both => None,
+            GraderArm::WithOnly => Some(format!(
+                "declared 'arm': '{}', so it is reported in both arms and scored in neither",
+                GraderArm::WithOnly.as_str()
+            )),
+            GraderArm::Auto if self.grader.presupposes_the_skill() => Some(format!(
+                "'{}' cannot hold without the skill, so it is reported in both arms and scored in neither; declare 'arm': '{}' to score it anyway",
+                self.grader.kind(),
+                GraderArm::Both.as_str()
+            )),
+            GraderArm::Auto => None,
+        }
+    }
+}
+
+impl From<Grader> for CaseGrader {
+    fn from(grader: Grader) -> Self {
+        Self::new(grader)
     }
 }
 
@@ -714,6 +803,67 @@ mod tests {
             GraderOutcome::Unsupported { reason } => assert!(reason.contains("no normalized transcript"), "{reason}"),
             other => panic!("expected unsupported, got {other:?}"),
         }
+    }
+
+    fn declared(json: serde_json::Value) -> CaseGrader {
+        serde_json::from_value(json).expect("grader parses")
+    }
+
+    #[test]
+    fn a_skill_engagement_check_is_reported_but_never_scored() {
+        let grader = declared(serde_json::json!({"type": "skill_used"}));
+
+        assert_eq!(grader.arm, GraderArm::Auto);
+        assert!(!grader.counts_toward_score());
+        assert!(grader
+            .exclusion_reason()
+            .expect("a reason is recorded")
+            .contains("cannot hold without the skill"));
+    }
+
+    #[test]
+    fn declaring_both_arms_scores_a_check_that_presupposes_the_skill() {
+        let grader = declared(serde_json::json!({"type": "skill_used", "arm": "both"}));
+
+        assert!(grader.counts_toward_score());
+        assert_eq!(grader.exclusion_reason(), None);
+    }
+
+    #[test]
+    fn a_check_about_the_work_itself_is_scored_in_both_arms() {
+        let grader = declared(serde_json::json!({"type": "contains", "text": "done"}));
+
+        assert!(grader.counts_toward_score());
+    }
+
+    #[test]
+    fn with_only_takes_any_check_out_of_the_score() {
+        let grader = declared(serde_json::json!({
+            "type": "tool_used",
+            "tool": "Skill",
+            "arm": "with_only"
+        }));
+
+        assert!(!grader.counts_toward_score());
+        assert!(grader
+            .exclusion_reason()
+            .expect("a reason is recorded")
+            .contains("scored in neither"));
+    }
+
+    #[test]
+    fn the_declared_arm_round_trips_and_stays_out_of_the_manifest_when_left_alone() {
+        let plain = declared(serde_json::json!({"type": "skill_used"}));
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({"type": "skill_used"})
+        );
+
+        let marked = declared(serde_json::json!({"type": "skill_used", "arm": "with_only"}));
+        assert_eq!(
+            serde_json::to_value(&marked).unwrap(),
+            serde_json::json!({"type": "skill_used", "arm": "with_only"})
+        );
     }
 
     #[test]

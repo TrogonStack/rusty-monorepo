@@ -90,7 +90,7 @@ Written under `runs/run-001/grading.json` after `eval grade`:
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v3",
+  "schema_version": "trg.skills-eval.grading.v4",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",

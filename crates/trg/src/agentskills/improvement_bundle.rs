@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::eval_suite_drift::{detect_eval_suite_drift_vs_skill, maybe_emit_eval_suite_drift_warning};
 use super::evals::{EvalError, Result};
 use super::feedback::{load_run_feedback_entries, FeedbackNote};
-use super::grading::GradingFile;
+use super::grading::{GradingCounts, GradingFile};
 use super::report::{ReportDocument, RunRecord, ScenarioKind};
 
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.improvement-bundle.v1";
@@ -286,13 +286,9 @@ fn build_summary(report: &ReportDocument, report_dir: &Path) -> Result<BundleSum
         let Ok(grading) = serde_json::from_str::<GradingFile>(&content) else {
             continue;
         };
-        for result in &grading.assertion_results {
-            if result.passed {
-                passed_assertions += 1;
-            } else {
-                failed_assertions += 1;
-            }
-        }
+        let counts = GradingCounts::tally(&grading.assertion_results);
+        passed_assertions += counts.passed;
+        failed_assertions += counts.failed;
     }
 
     Ok(BundleSummary {
@@ -327,7 +323,11 @@ fn collect_failed_assertion_groups(report_dir: &Path, report: &ReportDocument) -
         }
 
         let grading: GradingFile = serde_json::from_str(&std::fs::read_to_string(&grading_path)?)?;
-        for result in grading.assertion_results.iter().filter(|result| !result.passed) {
+        for result in grading
+            .assertion_results
+            .iter()
+            .filter(|result| result.is_scored() && !result.passed)
+        {
             let group = groups
                 .entry(run.eval_case_id.clone())
                 .or_insert_with(|| FailedAssertionGroup {
@@ -461,7 +461,10 @@ fn run_has_failed_grading(report_dir: &Path, run: &RunRecord) -> bool {
     let Ok(grading) = serde_json::from_str::<GradingFile>(&content) else {
         return false;
     };
-    grading.assertion_results.iter().any(|result| !result.passed)
+    grading
+        .assertion_results
+        .iter()
+        .any(|result| result.is_scored() && !result.passed)
 }
 
 fn collect_transcript_excerpts(
@@ -561,13 +564,9 @@ fn underperforming_with_skill_focus(report_dir: &Path, report: &ReportDocument) 
         let entry = by_case_scenario
             .entry((run.eval_case_id.clone(), run.scenario_id))
             .or_insert((0, 0));
-        for result in &grading.assertion_results {
-            if result.passed {
-                entry.0 += 1;
-            } else {
-                entry.1 += 1;
-            }
-        }
+        let counts = GradingCounts::tally(&grading.assertion_results);
+        entry.0 += counts.passed;
+        entry.1 += counts.failed;
     }
 
     let eval_cases: HashSet<String> = report.runs.iter().map(|run| run.eval_case_id.clone()).collect();
@@ -787,12 +786,14 @@ pub(crate) mod testutil {
                 },
                 rationale: None,
                 unsupported: None,
+                excluded: None,
             }],
             summary: GradingSummary {
                 passed: usize::from(passed),
                 failed: usize::from(!passed),
                 total: 1,
                 unsupported: 0,
+                excluded: 0,
                 pass_rate: Some(if passed { 1.0 } else { 0.0 }),
             },
         };
