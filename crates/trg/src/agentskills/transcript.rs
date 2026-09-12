@@ -240,18 +240,23 @@ impl NormalizedTranscript {
     /// workspace is somebody else's skill and never this run's.
     ///
     /// A command-style tool records its whole command line, and one command line
-    /// can name this run's skill and a host one at once, so the paths that left
-    /// the workspace are struck out of the text before it is read rather than
-    /// disqualifying everything else the call named.
+    /// can name this run's skill and a host one at once, so each token is judged
+    /// on its own. Cutting the escaping paths out of the text instead would let
+    /// one short escape decide the reading of every other call: an escape of `/`
+    /// takes the separator that `STAGED_SKILL_DIRS` is written in out of the
+    /// text, and an escape of `~` leaves the rest of a host skill path behind to
+    /// be counted as this run's.
     fn references_staged_skill(&self, named: &str) -> bool {
-        let inside = self.without_paths_that_left_the_workspace(named);
-        STAGED_SKILL_DIRS.iter().any(|directory| inside.contains(directory))
+        if self.left_the_workspace(named) {
+            return false;
+        }
+        named_tokens(named)
+            .filter(|token| !self.left_the_workspace(token))
+            .any(|token| STAGED_SKILL_DIRS.iter().any(|directory| token.contains(directory)))
     }
 
-    fn without_paths_that_left_the_workspace(&self, named: &str) -> String {
-        self.workspace_escapes
-            .iter()
-            .fold(named.to_string(), |named, escape| named.replace(&escape.path, " "))
+    fn left_the_workspace(&self, named: &str) -> bool {
+        self.workspace_escapes.iter().any(|escape| escape.path == named)
     }
 }
 
@@ -454,11 +459,7 @@ fn command_operands(command: &str) -> Vec<String> {
 
     let mut operands = Vec::new();
     let mut skip_program = true;
-    for token in command.split_whitespace() {
-        let token = token.trim_matches(|c| c == '\'' || c == '"' || c == '`');
-        if token.is_empty() {
-            continue;
-        }
+    for token in named_tokens(command) {
         if std::mem::take(&mut skip_program) {
             continue;
         }
@@ -471,6 +472,20 @@ fn command_operands(command: &str) -> Vec<String> {
         }
     }
     operands
+}
+
+/// The tokens of a named argument, each stripped of the quoting a command line
+/// carries around it.
+///
+/// One argument can name several paths, since a command-style tool records its
+/// whole command line, and the tokens are how they are told apart. Every reader
+/// strips quoting the same way, so a token that named a path can be compared
+/// against a recorded escape by equality.
+fn named_tokens(named: &str) -> impl Iterator<Item = &str> {
+    named
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c| c == '\'' || c == '"' || c == '`'))
+        .filter(|token| !token.is_empty())
 }
 
 pub fn ndjson_values(stdout: &RedactedTranscript) -> Vec<serde_json::Value> {
@@ -992,6 +1007,69 @@ mod tests {
 
         assert!(transcript.escaped_workspace());
         assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// A run that reads the filesystem root records `/` as a path that left the
+    /// workspace, and `/` is the separator every staged skill directory is
+    /// written with, so one such read must not decide how the rest of the
+    /// transcript is read.
+    #[test]
+    fn a_read_of_the_filesystem_root_does_not_hide_a_later_reach_for_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"ls /"}}
+{"type":"item.started","item":{"type":"command_execution","command":"cat .skill/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert_eq!(
+            transcript
+                .workspace_escapes
+                .iter()
+                .map(|escape| escape.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/"]
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// A file tool names one path however many spaces it holds, so the argument
+    /// is judged whole before its tokens are, or the tail of a host path would
+    /// read as a directory of this run's own.
+    #[test]
+    fn a_host_skill_path_holding_a_space_is_not_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"args":{"path":"/opt/my harness/skills/other/SKILL.md"}}}}
+"#;
+        let transcript = TranscriptFormat::CursorStreamJson.normalize(
+            "cursor-agent",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    /// The home directory and a skill installed under it are two paths that left
+    /// the workspace, and neither of them is this run's skill, however the tokens
+    /// of the command they were named in overlap.
+    #[test]
+    fn a_command_that_names_the_home_directory_and_a_host_skill_is_not_engagement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cd ~ && cat ~/.codex/skills/demo/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
     }
 
     #[test]
