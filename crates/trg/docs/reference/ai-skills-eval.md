@@ -391,7 +391,7 @@ subcommands run.
 | `scenario_id` | enum | `with_skill`, `without_skill`, or `old_skill` |
 | `model_config_id` | string | Value of `--model-config` |
 | `skill_revision_id` | string | Always `current` today |
-| `attempt` | integer | Always `1` today |
+| `attempt` | integer | Which draw of the cell this run is, `1..N` for `--attempts N` |
 | `status` | string | `skipped`, `completed`, or `failed` |
 | `paths.workspace` | string | Relative path to the run workspace |
 | `artifacts` | array | Artifact descriptors (transcript when runner completes) |
@@ -763,9 +763,10 @@ flag executes again rather than serving a run that saw something else.
 ## Reusing a completed run
 
 A run is cached under everything that decides what it would do: the case, the
-skill and suite digests, the fixture digest, the scenario, the model config, the
-runner and its version, the prompt contract, and the two policies above. Change
-any of them and the run executes again. `--no-cache` skips the lookup entirely.
+skill and suite digests, the fixture digest, the scenario, the attempt, the model
+config, the runner and its version, the prompt contract, and the two policies
+above. Change any of them and the run executes again. `--no-cache` skips the
+lookup entirely.
 
 `--reuse-completed` is the looser lookup, for an operator who wants each case
 answered once while iterating rather than answered again for every model config
@@ -776,6 +777,12 @@ and nothing else, so a reuse that ignored it would answer the baseline with the
 run that had the skill, and the report would show a delta of zero for a skill
 that was never exercised. Each arm keeps its own reusable run, so reusing one
 arm does not cost the other its entry.
+
+It does not forget the attempt either. `--attempts N` asks for N draws of a cell
+because one run of a non-deterministic agent says little about it, so serving the
+second draw a copy of the first would report a spread of zero across attempts
+that was never measured. Each draw is cached and reused under its own number, so
+re-running the same command with the same `--attempts` still costs nothing.
 
 `--reuse-completed` is rejected when more than one `--scenario` is requested in
 a single invocation, for the same reason.
