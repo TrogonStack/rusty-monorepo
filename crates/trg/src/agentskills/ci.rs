@@ -50,6 +50,7 @@ pub struct ReportMetrics {
     pub assertion_results: usize,
     pub passed_assertions: usize,
     pub failed_assertions: usize,
+    pub unsupported_assertions: usize,
     pub pass_rate: f64,
     pub total_tokens: u64,
     pub input_tokens: u64,
@@ -398,7 +399,7 @@ pub fn collect_failed_assertions_in_workspace(
         let content = std::fs::read_to_string(&grading_path)?;
         let grading: GradingForAnnotations = serde_json::from_str(&content)?;
         for (index, result) in grading.assertion_results.iter().enumerate() {
-            if result.passed {
+            if result.passed || result.unsupported.is_some() {
                 continue;
             }
             details.push(FailedAssertionDetail {
@@ -463,6 +464,12 @@ pub fn print_human_summary(check: &CiCheckResult) {
         check.metrics.assertion_results,
         check.metrics.pass_rate * 100.0
     );
+    if check.metrics.unsupported_assertions > 0 {
+        println!(
+            "unsupported: {} (not graded on this runner, excluded from the pass rate)",
+            check.metrics.unsupported_assertions
+        );
+    }
     if !check.violations.is_empty() {
         println!("ci checks: failed ({} violation(s))", check.violations.len());
         for violation in &check.violations {
@@ -478,6 +485,7 @@ fn merge_workspace_metrics(metrics: &mut ReportMetrics, workspace: &WorkspaceChe
     metrics.assertion_results += workspace.assertion_results;
     metrics.passed_assertions += workspace.passed_assertions;
     metrics.failed_assertions += workspace.failed_assertions;
+    metrics.unsupported_assertions += workspace.unsupported_assertions;
 }
 
 fn compute_pass_rate(passed: usize, total: usize) -> f64 {
@@ -502,6 +510,8 @@ struct AssertionForAnnotations {
     #[serde(alias = "text")]
     assertion: String,
     passed: bool,
+    #[serde(default)]
+    unsupported: Option<String>,
 }
 
 #[cfg(test)]
@@ -526,6 +536,7 @@ mod tests {
             assertion_results: total,
             passed_assertions: passed,
             failed_assertions: total - passed,
+            unsupported_assertions: 0,
             pass_rate,
             total_tokens: tokens,
             input_tokens: tokens / 2,
@@ -669,6 +680,42 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_results_are_not_annotated_as_failed_assertions() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            workspace.join("grading.json"),
+            r#"{
+                "schema_version": "trg.skills-eval.grading.v2",
+                "assertion_results": [
+                    {
+                        "assertion": "the skill was engaged",
+                        "passed": false,
+                        "evidence": "runner 'codex' does not expose tool calls",
+                        "grader": {"kind": "declarative"},
+                        "unsupported": "runner 'codex' does not expose tool calls"
+                    },
+                    {
+                        "assertion": "final text mentions the budget",
+                        "passed": false,
+                        "evidence": "final text (12 bytes) does not contain 'budget'",
+                        "grader": {"kind": "declarative"}
+                    }
+                ],
+                "summary": {"passed": 0, "failed": 1, "unsupported": 1, "total": 2, "pass_rate": 0.0}
+            }"#,
+        )
+        .unwrap();
+
+        let mut details = Vec::new();
+        collect_failed_assertions_in_workspace(&workspace, None, "workspace".to_string(), &mut details).unwrap();
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].text, "final text mentions the budget");
+    }
+
+    #[test]
     fn json_output_is_stable() {
         let output = EvalCommandJsonOutput {
             report_dir: "/tmp/report".to_string(),
@@ -684,7 +731,7 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         assert_eq!(
             json,
-            r#"{"report_dir":"/tmp/report","exit_code":0,"check":{"passed":true,"violations":[],"metrics":{"total_runs":1,"failed_runs":0,"skipped_runs":0,"completed_runs":1,"grading_files":1,"assertion_results":10,"passed_assertions":10,"failed_assertions":0,"pass_rate":1.0,"total_tokens":10,"input_tokens":5,"output_tokens":5,"max_duration_ms":20,"total_duration_ms":20}}}"#
+            r#"{"report_dir":"/tmp/report","exit_code":0,"check":{"passed":true,"violations":[],"metrics":{"total_runs":1,"failed_runs":0,"skipped_runs":0,"completed_runs":1,"grading_files":1,"assertion_results":10,"passed_assertions":10,"failed_assertions":0,"unsupported_assertions":0,"pass_rate":1.0,"total_tokens":10,"input_tokens":5,"output_tokens":5,"max_duration_ms":20,"total_duration_ms":20}}}"#
         );
     }
 

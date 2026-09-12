@@ -224,6 +224,7 @@ mod tests {
                 command: None,
             },
             rationale: None,
+            unsupported: None,
         }])
         .unwrap();
 

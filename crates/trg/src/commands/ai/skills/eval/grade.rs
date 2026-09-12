@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agentskills::grading::{grade_report_bundle, GradeOptions, GradeReport, GraderMode};
+use crate::agentskills::judge::JudgeProvider;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
@@ -24,6 +25,14 @@ pub struct GradeArgs {
 
     #[arg(long, value_enum, default_value_t = GraderMode::Auto, help = "Grading strategy")]
     pub grader: GraderMode,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = JudgeProvider::default(),
+        help = "Judge backend for LLM grading. 'compatible' addresses any OpenAI-compatible endpoint through TRG_JUDGE_BASE_URL and TRG_JUDGE_API_KEY."
+    )]
+    pub grader_provider: JudgeProvider,
 
     #[arg(long, value_name = "MODEL", help = "Model identifier for LLM grading")]
     pub grader_model: Option<String>,
@@ -51,6 +60,7 @@ impl GradeArgs {
     pub fn handle(self, _fs: &impl FileSystem) -> i32 {
         let options = GradeOptions {
             grader: self.grader,
+            grader_provider: self.grader_provider,
             grader_model: self.grader_model,
             grader_command: self.grader_command,
             strict: self.strict,
@@ -193,6 +203,7 @@ mod tests {
         let status = GradeArgs {
             report_dir: report_dir.clone(),
             grader: GraderMode::Auto,
+            grader_provider: JudgeProvider::default(),
             grader_model: None,
             grader_command: None,
             strict: false,
@@ -268,6 +279,7 @@ echo '{"passed": true, "evidence": "script confirmed custom check", "rationale":
         let status = GradeArgs {
             report_dir,
             grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
             grader_model: None,
             grader_command: Some(script.to_string_lossy().into_owned()),
             strict: false,

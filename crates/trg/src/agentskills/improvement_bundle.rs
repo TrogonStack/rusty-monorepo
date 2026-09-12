@@ -786,11 +786,13 @@ pub(crate) mod testutil {
                     command: None,
                 },
                 rationale: None,
+                unsupported: None,
             }],
             summary: GradingSummary {
                 passed: usize::from(passed),
                 failed: usize::from(!passed),
                 total: 1,
+                unsupported: 0,
                 pass_rate: if passed { 1.0 } else { 0.0 },
             },
         };

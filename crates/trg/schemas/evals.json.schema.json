@@ -1,6 +1,7 @@
 {
   "$defs": {
     "EvalCase": {
+      "additionalProperties": false,
       "properties": {
         "assertions": {
           "default": [],
@@ -34,6 +35,12 @@
             "object",
             "null"
           ]
+        },
+        "graders": {
+          "items": {
+            "$ref": "#/$defs/Grader"
+          },
+          "type": "array"
         },
         "id": {
           "$ref": "#/$defs/EvalCaseId"
@@ -98,16 +105,210 @@
       ],
       "type": "string"
     },
+    "GradeTarget": {
+      "oneOf": [
+        {
+          "enum": [
+            "final_text",
+            "transcript",
+            "any_output"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "$ref": "#/$defs/RelativeSkillPath"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Grader": {
+      "oneOf": [
+        {
+          "properties": {
+            "negate": {
+              "default": false,
+              "type": "boolean"
+            },
+            "pattern": {
+              "$ref": "#/$defs/RegexPattern"
+            },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
+            "type": {
+              "const": "regex",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "pattern"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/MatchCase"
+                }
+              ],
+              "default": "insensitive"
+            },
+            "negate": {
+              "default": false,
+              "type": "boolean"
+            },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
+            "text": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "type": {
+              "const": "contains",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/RelativeSkillPath"
+            },
+            "type": {
+              "const": "file_exists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "min_calls": {
+              "default": 1,
+              "format": "uint",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "tool": {
+              "$ref": "#/$defs/ToolName"
+            },
+            "type": {
+              "const": "tool_used",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tool"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "tools": {
+              "items": {
+                "$ref": "#/$defs/ToolName"
+              },
+              "minItems": 2,
+              "type": "array"
+            },
+            "type": {
+              "const": "tool_order",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "tools"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "skill_used",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "criterion": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "type": {
+              "const": "llm",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "criterion"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "MatchCase": {
+      "enum": [
+        "insensitive",
+        "sensitive"
+      ],
+      "type": "string"
+    },
     "NonEmptyString": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "RegexPattern": {
+      "format": "regex",
       "minLength": 1,
       "type": "string"
     },
     "RelativeSkillPath": {
       "type": "string"
+    },
+    "ToolName": {
+      "type": "string"
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/evals.json.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "properties": {
     "evals": {
       "items": {

@@ -1,6 +1,7 @@
 {
   "$id": "https://trogonstack.dev/schemas/trg/timing.json.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
   "properties": {
     "cost_usd": {
       "format": "double",

@@ -340,6 +340,7 @@ impl RunArgs {
 
         let grade_options = GradeOptions {
             grader: GraderMode::Auto,
+            grader_provider: crate::agentskills::judge::JudgeProvider::default(),
             grader_model: None,
             grader_command: None,
             strict: false,
@@ -1717,6 +1718,7 @@ mod tests {
             &report_dir,
             GradeOptions {
                 grader: GraderMode::Script,
+                grader_provider: crate::agentskills::judge::JudgeProvider::default(),
                 grader_model: None,
                 grader_command: Some("/nonexistent/grader-binary".into()),
                 strict: false,
