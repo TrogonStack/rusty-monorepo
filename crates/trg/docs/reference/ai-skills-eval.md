@@ -274,7 +274,9 @@ skill gets credit for being present rather than for the work it changed.
 So a grader that presupposes the skill is evaluated and reported in both arms
 and scored in neither. Its result carries `excluded` in `grading.json`, counts
 in `summary.excluded`, and stays out of `summary.pass_rate`. Read it as an
-indicator: whether the run reached for the skill.
+indicator: whether the run reached for the skill. In the without-skill arm the
+answer is no by construction, because that arm stages no skill for a run to
+reach for.
 
 | `arm` | Meaning |
 | ----- | ------- |
@@ -761,7 +763,8 @@ Schema version: `trg.skills-eval.transcript.v1`.
   ],
   "workspace_escapes": [
     { "tool": "read", "path": "/somewhere/outside/notes.md" }
-  ]
+  ],
+  "staged_skill": { "kind": "at", "directory": ".skill/" }
 }
 ```
 
@@ -771,6 +774,8 @@ Schema version: `trg.skills-eval.transcript.v1`.
 | `tool_visibility` | enum | `observed` or `unavailable` |
 | `events[].kind` | enum | `assistant_text`, `tool_call`, or `terminal` |
 | `workspace_escapes[]` | array | Paths the run named that resolve outside its workspace; omitted when empty |
+| `staged_skill.kind` | enum | `at` when the run staged a skill, `nothing` for the without-skill arm; omitted by a transcript written before trg recorded it |
+| `staged_skill.directory` | string | The workspace-relative directory the skill was staged at, present with `at` |
 
 Each of the three supported runners is normalized from event shapes verified
 against that runner's own output:
@@ -798,6 +803,17 @@ without naming one, so it is left unchecked. A path beginning with `~` names the
 host home directory rather than a directory in the workspace, so it is resolved
 against `HOME` before the check. Every escape is also recorded as a run warning
 in `report.json`. Detection is the remedy available here; prevention is not.
+
+`staged_skill` is what `skill_used` is read against. `.skill/`, `.old-skill/`,
+and `skills/<skill-name>/` are where *some* run stages a skill, so reading a
+named path against all of them credits a without-skill run that looked into
+`skills/` with using a skill it was never handed, and that run is the control the
+arm gap is measured from. A run records where it staged, so the without-skill arm
+reports no engagement at all, not even for a harness's own skill tool invoked on a
+skill of the harness's own, and a with-skill run answers only for its own
+directory. What a transcript cannot say is where a command ran, so a relative path
+reached after a `cd`, or a search pattern quoting the staged directory, still reads
+as a path to it.
 
 `events.json` is normalized from the redacted transcript, so it carries no
 secret that `transcript.jsonl` had stripped.

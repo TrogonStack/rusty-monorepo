@@ -29,7 +29,7 @@ use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
 use super::report::{EnvironmentPolicy, ScenarioKind, SkillStaging};
-use super::transcript::{write_normalized_transcript, TranscriptFormat, WorkspaceBoundary};
+use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
 use environment::RunEnvironment;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -307,11 +307,14 @@ pub fn persist_runner_io(
     let stdout = redact_transcript_bytes(&captured.stdout);
     write_transcript(request.transcript_path, &stdout)?;
     write_stderr(request.stderr_path, &captured.stderr)?;
-    let normalized = runner.transcript_format().normalize(
-        runner.program_name(),
-        &stdout,
-        &WorkspaceBoundary::at(request.workspace_dir),
-    );
+    let normalized = runner
+        .transcript_format()
+        .normalize(
+            runner.program_name(),
+            &stdout,
+            &WorkspaceBoundary::at(request.workspace_dir),
+        )
+        .staged_at(staged_skill(request)?);
     write_normalized_transcript(request.transcript_path, &normalized)?;
     Ok(())
 }
@@ -412,6 +415,14 @@ fn skill_to_stage<'a>(request: &'a EvalRunRequest<'a>) -> Result<Option<(&'a Pat
         StagedSkillDir::for_run(request.scenario, request.eval.skill_disclosure, &summary.name)
             .map(|staged_dir| (skill_path, staged_dir)),
     )
+}
+
+/// What this run staged, for the transcript to carry to whoever grades it.
+fn staged_skill(request: &EvalRunRequest) -> Result<StagedSkill, RunnerError> {
+    Ok(match skill_to_stage(request)? {
+        Some((_, directory)) => StagedSkill::At { directory },
+        None => StagedSkill::Nothing,
+    })
 }
 
 fn missing_old_skill_input(field: &str) -> RunnerError {
@@ -791,6 +802,52 @@ mod workspace_tests {
             "staged entries are symlinks so staging stays cheap"
         );
         assert!(workspace.join("evals/files/input.txt").is_file());
+    }
+
+    /// What a run records as staged is read against the paths the run named, so it
+    /// has to be the directory the workspace was staged at rather than a second guess
+    /// at where staging put it.
+    #[test]
+    fn a_run_records_the_directory_it_staged_the_skill_at() {
+        for disclosure in ["announced", "unannounced"] {
+            let temp = tempdir().unwrap();
+            let skill_path = temp.path().join("skill");
+            std::fs::create_dir_all(&skill_path).unwrap();
+            let skill_md = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+            std::fs::write(skill_path.join("SKILL.md"), skill_md).unwrap();
+
+            let workspace = temp.path().join("ws");
+            let transcript = workspace.join("transcript.jsonl");
+            let stderr = workspace.join("stderr.log");
+            let case: EvalCase = serde_json::from_value(serde_json::json!({
+                "id": "case-1",
+                "prompt": "do the thing",
+                "expected_output": "done",
+                "skill_disclosure": disclosure,
+            }))
+            .unwrap();
+            let request = test_request(
+                &case,
+                ScenarioKind::WithSkill,
+                skill_md,
+                &skill_path,
+                &workspace,
+                &transcript,
+                &stderr,
+                None,
+                None,
+            );
+
+            prepare_workspace(&request, Runner::ClaudeCode).unwrap();
+
+            let StagedSkill::At { directory } = staged_skill(&request).unwrap() else {
+                panic!("a with-skill run staged a skill");
+            };
+            assert!(
+                workspace.join(directory.as_str()).join("SKILL.md").is_file(),
+                "{disclosure} recorded {directory:?}, which is not where the skill was staged"
+            );
+        }
     }
 
     /// A triggering case asks whether the run reaches for the skill on its own, so

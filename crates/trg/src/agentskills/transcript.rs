@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::prompt::{SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
+use super::prompt::{StagedSkillDir, SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::RedactedTranscript;
 
 pub const NORMALIZED_TRANSCRIPT_SCHEMA_VERSION: &str = "trg.skills-eval.transcript.v1";
@@ -121,6 +121,45 @@ fn host_path(candidate: &str, home: Option<PathBuf>) -> Option<PathBuf> {
 /// The directories a run's own skill is ever staged at.
 const STAGED_SKILL_DIRS: &[&str] = &[SKILL_LINK_WITH, SKILL_LINK_OLD, SKILL_DIR_UNANNOUNCED];
 
+/// Where the run that produced a transcript staged its own skill.
+///
+/// `STAGED_SKILL_DIRS` says where a run could stage a skill, not where this one
+/// did, so reading a named path against all of them credits an arm that merely
+/// looked at `skills/` with reaching for a skill it was never given, and the arm
+/// that loses its reading is the control the comparison rests on. The run knows
+/// what it staged, so it records it and each reader judges a path against that.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum StagedSkill {
+    /// A transcript from before a run recorded what it staged, which can only be
+    /// read against every directory a run stages at.
+    #[default]
+    Unrecorded,
+    /// The arm that runs without a skill, so no path it named is this run's.
+    Nothing,
+    At {
+        directory: StagedSkillDir,
+    },
+}
+
+impl StagedSkill {
+    fn named_by(&self, token: &str) -> bool {
+        match self {
+            Self::Unrecorded => STAGED_SKILL_DIRS.iter().any(|directory| token.contains(directory)),
+            Self::Nothing => false,
+            Self::At { directory } => token.contains(directory.as_str()),
+        }
+    }
+
+    fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+
+    fn stages_nothing(&self) -> bool {
+        matches!(self, Self::Nothing)
+    }
+}
+
 /// A path a run named that resolves outside the workspace it was given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceEscape {
@@ -174,6 +213,8 @@ pub struct NormalizedTranscript {
     pub events: Vec<TranscriptEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_escapes: Vec<WorkspaceEscape>,
+    #[serde(default, skip_serializing_if = "StagedSkill::is_unrecorded")]
+    pub staged_skill: StagedSkill,
 }
 
 impl NormalizedTranscript {
@@ -184,7 +225,15 @@ impl NormalizedTranscript {
             tool_visibility,
             events,
             workspace_escapes: Vec::new(),
+            staged_skill: StagedSkill::default(),
         }
+    }
+
+    /// What the run staged, which the transcript carries because grading reads the
+    /// transcript back rather than the run that wrote it.
+    pub fn staged_at(mut self, staged_skill: StagedSkill) -> Self {
+        self.staged_skill = staged_skill;
+        self
     }
 
     pub fn escaped_workspace(&self) -> bool {
@@ -215,6 +264,10 @@ impl NormalizedTranscript {
     /// Two signals are harness-agnostic. A harness may expose a first-class skill
     /// tool, and any harness that reports tool inputs reveals engagement when a call
     /// references the path we staged the skill at.
+    ///
+    /// The arm that stages no skill has none to engage, so a native skill tool call
+    /// there is the harness reaching for a skill of its own and not for the one under
+    /// test. Reading it as engagement would cost the comparison its control arm.
     pub fn skill_engagement(&self) -> SkillEngagement {
         if !self.tool_visibility.is_observed() {
             return SkillEngagement::NotObservable;
@@ -223,7 +276,7 @@ impl NormalizedTranscript {
             let TranscriptEvent::ToolCall { tool, paths } = event else {
                 continue;
             };
-            if tool.eq_ignore_case("Skill") {
+            if tool.eq_ignore_case("Skill") && !self.staged_skill.stages_nothing() {
                 return SkillEngagement::NativeSkillTool;
             }
             if paths.iter().any(|path| self.references_staged_skill(path)) {
@@ -237,7 +290,15 @@ impl NormalizedTranscript {
     ///
     /// An unannounced case stages under a plain directory name that also appears
     /// in the harness's own skill install paths, so a path that left the
-    /// workspace is somebody else's skill and never this run's.
+    /// workspace is somebody else's skill and never this run's, and a path inside
+    /// the workspace is read against the one directory this run staged at rather
+    /// than against every directory some run could stage at.
+    ///
+    /// A token is still only the text a tool call carried. A transcript does not
+    /// say which directory a command ran in, so a relative path reached after a
+    /// `cd`, or a search pattern quoting the staged directory, reads as a path to
+    /// it. Resolving the text against the workspace root would not tell those
+    /// apart either, since what is missing is where the run stood.
     ///
     /// A command-style tool records its whole command line, and one command line
     /// can name this run's skill and a host one at once, so each token is judged
@@ -253,7 +314,7 @@ impl NormalizedTranscript {
         named_tokens(named)
             .into_iter()
             .filter(|token| !self.left_the_workspace(token))
-            .any(|token| STAGED_SKILL_DIRS.iter().any(|directory| token.contains(directory)))
+            .any(|token| self.staged_skill.named_by(&token))
     }
 
     fn left_the_workspace(&self, named: &str) -> bool {
@@ -727,7 +788,9 @@ pub fn read_normalized_transcript(transcript_path: &std::path::Path) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::SkillDisclosure;
     use crate::agentskills::redact::redact_transcript_bytes;
+    use crate::agentskills::report::ScenarioKind;
 
     const CURSOR_STREAM: &[u8] = br#"{"type":"system","subtype":"init","cwd":"/w"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll read the skill first."}]}}
@@ -1277,5 +1340,122 @@ mod tests {
         let parsed: NormalizedTranscript = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, transcript);
         assert_eq!(parsed.schema_version, NORMALIZED_TRANSCRIPT_SCHEMA_VERSION);
+    }
+
+    fn staged(disclosure: SkillDisclosure) -> StagedSkill {
+        StagedSkill::At {
+            directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
+        }
+    }
+
+    /// The arm that runs without a skill is the control every comparison rests on.
+    /// `skills/` is where an unannounced run stages a skill, so a control arm that
+    /// looked into one while searching is read as having used a skill it was never
+    /// handed, and the comparison has nothing left to compare against.
+    #[test]
+    fn the_arm_that_staged_no_skill_did_not_reach_for_one() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        )
+        .staged_at(StagedSkill::Nothing);
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    /// A harness carries skills of its own, so its native skill tool can be invoked
+    /// on an arm that was handed none, and what it invoked was never the skill under
+    /// test.
+    #[test]
+    fn a_native_skill_tool_call_is_not_engagement_when_nothing_was_staged() {
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"command":"some-installed-skill"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        )
+        .staged_at(StagedSkill::Nothing);
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    /// Each arm stages at the directory its own scenario and disclosure ask for, so
+    /// the directory a different arm would have staged at is not this run's skill.
+    #[test]
+    fn the_directory_another_arm_would_stage_at_is_not_this_run_s_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        )
+        .staged_at(staged(SkillDisclosure::Announced));
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    #[test]
+    fn the_directory_this_run_staged_at_is_engagement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,240p' skills/demo-skill/SKILL.md\""}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl
+            .normalize(
+                "codex",
+                &redact_transcript_bytes(stdout),
+                &WorkspaceBoundary::at(workspace.path()),
+            )
+            .staged_at(staged(SkillDisclosure::Unannounced));
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// Grading reads the transcript back from disk rather than the run that wrote
+    /// it, so what a run staged has to survive the round trip to be read against.
+    #[test]
+    fn what_a_run_staged_survives_the_transcript_being_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("transcript.jsonl");
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(CLAUDE_STREAM),
+            &WorkspaceBoundary::unknown(),
+        )
+        .staged_at(staged(SkillDisclosure::Announced));
+
+        write_normalized_transcript(&transcript_path, &transcript).unwrap();
+
+        assert_eq!(
+            read_normalized_transcript(&transcript_path).unwrap().staged_skill,
+            staged(SkillDisclosure::Announced)
+        );
+    }
+
+    /// A transcript written before a run recorded what it staged is still read, and
+    /// the only reading left is against every directory a run stages at.
+    #[test]
+    fn a_transcript_that_records_no_staging_is_read_against_every_staged_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+        let json = serde_json::to_value(&transcript).unwrap();
+
+        assert!(
+            json.get("staged_skill").is_none(),
+            "a run that recorded nothing writes no field: {json}"
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
     }
 }

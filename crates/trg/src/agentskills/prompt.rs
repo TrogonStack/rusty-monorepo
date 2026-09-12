@@ -1,3 +1,6 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use super::errors::SkillError;
 use super::evals::{EvalCase, SkillDisclosure};
 use super::models::SkillProperties;
@@ -51,7 +54,8 @@ impl SkillSummary {
 }
 
 /// The workspace-relative directory a run's skill is staged in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
 pub struct StagedSkillDir(String);
 
 impl StagedSkillDir {
