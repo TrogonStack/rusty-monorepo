@@ -266,6 +266,13 @@ impl RunArgs {
             }
         }
 
+        if !self.skill_staging.withholds_the_answer_key() {
+            eprintln!(
+                "Warning: --skill-staging {} stages links into the live skill directory, so a run that follows one reaches the eval suite next to it and can be scored on text it copied. Use the default --skill-staging copy for a score that rules that out.",
+                self.skill_staging.as_str()
+            );
+        }
+
         let iteration = self
             .iteration
             .unwrap_or_else(|| detect_next_iteration(&self.out_dir, &props.name));

@@ -60,6 +60,20 @@ impl SkillStaging {
             Self::Copy => "copy",
         }
     }
+
+    /// Whether a run staged this way is unable to reach the eval suite.
+    ///
+    /// Leaving the suite out of the staged directory only puts it out of reach when every
+    /// path the run can follow stays inside the workspace. A symlink names its target, so
+    /// a run that reads one staged link learns where the skill really lives, and the suite
+    /// sits one directory up from there. Under symlink staging the filtering hides the
+    /// answer key from a listing rather than withholding it.
+    pub fn withholds_the_answer_key(self) -> bool {
+        match self {
+            Self::Symlink => false,
+            Self::Copy => true,
+        }
+    }
 }
 
 /// How much of the operator's machine a run's harness subprocess is allowed to see.
@@ -1050,6 +1064,19 @@ mod tests {
 
         assert_eq!(runs.len(), 2);
         assert!(runs.iter().all(|run| run.skill_revision_id == "old"));
+    }
+
+    #[test]
+    fn only_copy_staging_puts_the_answer_key_out_of_reach() {
+        assert!(SkillStaging::Copy.withholds_the_answer_key());
+        assert!(
+            !SkillStaging::Symlink.withholds_the_answer_key(),
+            "a staged link names the live skill directory, and the suite sits next to it"
+        );
+        assert!(
+            SkillStaging::default().withholds_the_answer_key(),
+            "an operator who says nothing about staging gets a run that cannot read its own answer key"
+        );
     }
 
     #[test]

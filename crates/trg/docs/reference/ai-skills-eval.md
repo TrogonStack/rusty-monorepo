@@ -790,6 +790,11 @@ any run that looks. Because the filter has to skip an entry, it stages `.skill/`
 as a real directory holding one symlink per entry rather than as a single symlink
 to the skill root.
 
+Choosing it prints a warning to stderr naming what the resulting score does not
+rule out, so a report produced under symlink staging is not mistaken for one
+whose runs could not reach the answer key. Every run records the mode it was
+staged under as `skill_staging` in `report.json`.
+
 `--scenario old_skill` requires `--old-skill-dir`. The old skill must carry the
 same `name` as the current one unless you pass `--allow-skill-name-mismatch`,
 which guards against comparing two unrelated skills by accident. Tampering
