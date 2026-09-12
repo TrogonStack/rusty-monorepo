@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::agentskills::cache::{
@@ -158,7 +158,7 @@ pub struct RunArgs {
 
     #[arg(
         long,
-        help = "Reuse any prior completed run for the same eval case, even when scenario or model config differs (still invalidated when skill, evals, or fixtures change)"
+        help = "Reuse any prior completed run for the same eval case, even when scenario or model config differs (still invalidated when skill, evals, or fixtures change). Rejected when more than one --scenario is requested"
     )]
     pub reuse_completed: bool,
 
@@ -223,6 +223,14 @@ impl RunArgs {
         let iteration = self
             .iteration
             .unwrap_or_else(|| detect_next_iteration(&self.out_dir, &props.name));
+
+        let distinct_scenarios: HashSet<ScenarioKind> = self.scenario.iter().copied().collect();
+        if self.reuse_completed && distinct_scenarios.len() > 1 {
+            eprintln!(
+                "--reuse-completed cannot be combined with more than one --scenario: a completed run for one scenario is served to the others, so the scenario delta would compare a run against itself. Run one scenario per invocation, or drop --reuse-completed."
+            );
+            return 1;
+        }
 
         if self.scenario.contains(&ScenarioKind::OldSkill) && self.old_skill_dir.is_none() {
             eprintln!("--old-skill-dir is required when --scenario old_skill is included");
@@ -1406,6 +1414,42 @@ mod tests {
         assert_eq!(cache["hit"], true);
         assert_eq!(cache["source_run_id"], "run-001");
         assert_eq!(first_run_duration(&second_report), 100);
+    }
+
+    #[test]
+    fn reuse_completed_rejects_multiple_scenarios() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_cacheable_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let status = RunArgs {
+            skill_dir,
+            out_dir: out_dir.clone(),
+            model_config: "ci-default".to_string(),
+            scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
+            runner: None,
+            runner_model: None,
+            timeout_secs: None,
+            retries: 0,
+            attempts: 1,
+            force: false,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: false,
+            reuse_completed: true,
+            skill_staging: SkillStaging::Symlink,
+            ci: EvalCiArgs::default(),
+        }
+        .handle(&crate::fs::RealFS);
+
+        assert_eq!(status, 1);
+        assert!(!out_dir.exists());
     }
 
     fn write_timeout_skill(root: &Path, timeout_secs: Option<u32>) -> PathBuf {
