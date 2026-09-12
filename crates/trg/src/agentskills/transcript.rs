@@ -255,6 +255,18 @@ impl NormalizedTranscript {
         self.tool_calls().filter(|tool| tool.eq_ignore_case(name)).count()
     }
 
+    /// Every call the run made, paired with the values that call named.
+    ///
+    /// The values are what a harness reported the call being given, not the JSON
+    /// input it was given: the shape of that JSON belongs to one harness, so a
+    /// reader written against its key names would answer nothing on another.
+    pub fn tool_call_inputs(&self) -> impl Iterator<Item = (&ToolName, &[String])> {
+        self.events.iter().filter_map(|event| match event {
+            TranscriptEvent::ToolCall { tool, paths } => Some((tool, paths.as_slice())),
+            _ => None,
+        })
+    }
+
     pub fn tool_sequence(&self) -> Vec<&ToolName> {
         self.tool_calls().collect()
     }

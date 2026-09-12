@@ -169,6 +169,10 @@ trg ai skills eval verify ./runs/run-001/workspace --mode strict
   point of the case is that the skill must *not* be engaged, write it as
   `{"type": "skill_used", "negate": true, "arm": "both"}`, because failing it is
   then the finding.
+- `{"type": "tool_used", "tool": "Bash"}` asserts that a shell ran, which is
+  rarely the point. Add `"input_match"` to name the command, as in
+  `{"type": "tool_used", "tool": "Bash", "input_match": "npm (run )?test"}`, so
+  the case says which command it meant.
 - To ask whether the skill gets reached for at all, add
   `"skill_disclosure": "unannounced"` to the case. Announced prompts name the
   skill, so the routing decision is made for the run rather than by it.

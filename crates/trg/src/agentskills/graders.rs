@@ -137,6 +137,8 @@ pub enum Grader {
     },
     ToolUsed {
         tool: ToolName,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_match: Option<RegexPattern>,
         #[serde(flatten)]
         calls: CallBounds,
     },
@@ -193,10 +195,20 @@ impl Grader {
                 format!("{target} {verb} '{text}'{suffix}")
             }
             Self::FileExists { path } => format!("file '{path}' exists"),
-            Self::ToolUsed { tool, calls } => match calls.max() {
-                None if calls.min() == 1 => format!("tool '{tool}' was used"),
-                _ => format!("tool '{tool}' was used {calls}"),
-            },
+            Self::ToolUsed {
+                tool,
+                input_match,
+                calls,
+            } => {
+                let counted = match calls.max() {
+                    None if calls.min() == 1 => format!("tool '{tool}' was used"),
+                    _ => format!("tool '{tool}' was used {calls}"),
+                };
+                match input_match {
+                    Some(pattern) => format!("{counted}{}", naming(pattern)),
+                    None => counted,
+                }
+            }
             Self::ToolOrder { tools } => {
                 let names = tools.iter().map(ToolName::as_str).collect::<Vec<_>>().join(" then ");
                 format!("tools were used in order: {names}")
@@ -430,11 +442,16 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                 GraderOutcome::from_bool(found.is_some() != *negate, evidence)
             }
         },
-        Grader::ToolUsed { tool, calls } => with_transcript(input, |transcript| {
-            let observed = transcript.tool_call_count(tool.as_str());
+        Grader::ToolUsed {
+            tool,
+            input_match,
+            calls,
+        } => with_transcript(input, |transcript| {
+            let observed = matching_call_count(transcript, tool, input_match.as_ref());
+            let qualifier = input_match.as_ref().map(naming).unwrap_or_default();
             GraderOutcome::from_bool(
                 calls.admits(observed),
-                format!("'{tool}' was called {observed} time(s), expected {calls}"),
+                format!("'{tool}' was called {observed} time(s){qualifier}, expected {calls}"),
             )
         }),
         Grader::ToolOrder { tools } => with_transcript(input, |transcript| {
@@ -457,6 +474,37 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
             }
         }),
     }
+}
+
+/// How many of a run's calls to a tool named something the case asked for.
+///
+/// Without a pattern the count is every call to the tool, which says no more than
+/// "some tool ran". The pattern is what makes "`npm test` ran" expressible, and it
+/// is tested against the values the call named, one at a time: the paths it was
+/// given, the command lines it ran, and the texts it searched for.
+///
+/// Matching those values rather than the harness's own JSON input is what keeps a
+/// case portable. The key a command arrives under, and whether a skill is even
+/// reached through a tool call, differ per harness, so a pattern written against
+/// one harness's request body would quietly match nothing under another.
+fn matching_call_count(
+    transcript: &NormalizedTranscript,
+    tool: &ToolName,
+    input_match: Option<&RegexPattern>,
+) -> usize {
+    let Some(pattern) = input_match else {
+        return transcript.tool_call_count(tool.as_str());
+    };
+    let matcher = pattern.compile();
+    transcript
+        .tool_call_inputs()
+        .filter(|(called, _)| called.eq_ignore_case(tool.as_str()))
+        .filter(|(_, named)| named.iter().any(|value| matcher.is_match(value)))
+        .count()
+}
+
+fn naming(pattern: &RegexPattern) -> String {
+    format!(" with an argument matching /{pattern}/")
 }
 
 fn with_transcript(input: &GradeInput, grade: impl FnOnce(&NormalizedTranscript) -> GraderOutcome) -> GraderOutcome {
@@ -509,6 +557,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::of(CLAUDE_STREAM)
+        }
+
+        fn of(stream: &[u8]) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let run_dir = dir.path().to_path_buf();
             let workspace_dir = run_dir.join("workspace");
@@ -522,7 +574,7 @@ mod tests {
                 outputs_dir,
                 transcript: normalize_stream_json(
                     "claude",
-                    &redact_transcript_bytes(CLAUDE_STREAM),
+                    &redact_transcript_bytes(stream),
                     &WorkspaceBoundary::unknown(),
                 ),
             }
@@ -670,6 +722,7 @@ mod tests {
         let outcome = evaluate(
             &Grader::ToolUsed {
                 tool: tool("read"),
+                input_match: None,
                 calls: CallBounds::at_least_once(),
             },
             &fixture.input(),
@@ -679,11 +732,91 @@ mod tests {
         let outcome = evaluate(
             &Grader::ToolUsed {
                 tool: tool("Read"),
+                input_match: None,
                 calls: CallBounds::parse(2, None).unwrap(),
             },
             &fixture.input(),
         );
         assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    /// A tool name alone says "some tool ran". Which command ran is what a case about
+    /// routing actually asserts, so only the calls naming it are counted.
+    #[test]
+    fn only_the_calls_that_named_what_a_case_asked_for_are_counted() {
+        let fixture = Fixture::of(
+            br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"npm test"}}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}
+{"type":"result","is_error":false,"result":"done"}
+"#,
+        );
+
+        let ran_the_suite: Grader = serde_json::from_value(serde_json::json!({
+            "type": "tool_used",
+            "tool": "Bash",
+            "input_match": "npm test"
+        }))
+        .unwrap();
+        assert!(matches!(
+            evaluate(&ran_the_suite, &fixture.input()),
+            GraderOutcome::Passed { .. }
+        ));
+
+        let ran_it_twice: Grader = serde_json::from_value(serde_json::json!({
+            "type": "tool_used",
+            "tool": "Bash",
+            "input_match": "npm test",
+            "min_calls": 2
+        }))
+        .unwrap();
+        match evaluate(&ran_it_twice, &fixture.input()) {
+            GraderOutcome::Failed { evidence, .. } => {
+                assert!(evidence.contains("called 1 time(s)"), "{evidence}");
+                assert!(evidence.contains("matching /npm test/"), "{evidence}");
+            }
+            other => panic!("two calls were not made, got {other:?}"),
+        }
+    }
+
+    /// Over-triggering is a claim about one command, not about the tool: a skill may
+    /// legitimately reach for a shell and still must not reach for this.
+    #[test]
+    fn a_command_a_case_forbids_leaves_the_tool_free_for_anything_else() {
+        let grader: Grader = serde_json::from_value(serde_json::json!({
+            "type": "tool_used",
+            "tool": "Bash",
+            "input_match": "rm -rf",
+            "min_calls": 0,
+            "max_calls": 0
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            evaluate(&grader, &Fixture::new().input()),
+            GraderOutcome::Passed { .. }
+        ));
+
+        let deleted = Fixture::of(
+            br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"rm -rf outputs"}}]}}
+{"type":"result","is_error":false,"result":"done"}
+"#,
+        );
+        assert!(matches!(
+            evaluate(&grader, &deleted.input()),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn an_input_pattern_is_rejected_at_parse_time() {
+        let err = serde_json::from_value::<Grader>(serde_json::json!({
+            "type": "tool_used",
+            "tool": "Bash",
+            "input_match": "["
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid regex"), "{err}");
     }
 
     #[test]
@@ -732,6 +865,7 @@ mod tests {
             Grader::SkillUsed { negate: false },
             Grader::ToolUsed {
                 tool: tool("Read"),
+                input_match: None,
                 calls: CallBounds::at_least_once(),
             },
             Grader::ToolOrder {
@@ -771,6 +905,7 @@ mod tests {
             evaluate(
                 &Grader::ToolUsed {
                     tool: tool("command_execution"),
+                    input_match: None,
                     calls: CallBounds::at_least_once(),
                 },
                 &input
@@ -923,9 +1058,18 @@ mod tests {
             (
                 Grader::ToolUsed {
                     tool: tool("Read"),
+                    input_match: None,
                     calls: CallBounds::at_least_once(),
                 },
                 "tool 'Read' was used",
+            ),
+            (
+                Grader::ToolUsed {
+                    tool: tool("Bash"),
+                    input_match: Some(RegexPattern::parse("npm test").unwrap()),
+                    calls: CallBounds::never(),
+                },
+                "tool 'Bash' was used never with an argument matching /npm test/",
             ),
             (
                 Grader::ToolOrder {
