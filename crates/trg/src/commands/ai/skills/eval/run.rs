@@ -1,19 +1,22 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::thread;
 
 use crate::agentskills::cache::{
     apply_cache_hit, compute_fixture_hash, record_completion, runner_kind_label, try_resolve_cache, CacheKey,
     CacheKeyInput, CacheOptions, ReuseKeyInput, PROMPT_CONTRACT_VERSION,
 };
 use crate::agentskills::case_selection::CaseSelection;
+use crate::agentskills::concurrency::RunConcurrency;
 use crate::agentskills::evals::{
     effective_timeout_secs, missing_expected_output_warnings, parse_eval_suite, EvalCase, EvalCheckOptions, EvalSuite,
 };
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::report::{
-    build_report_bundle, write_report_bundle, BuildReportOptions, EnvironmentPolicy, ReportBundle, ScenarioKind,
-    SkillIntegrityReport, SkillStaging, WriteReportOptions,
+    build_report_bundle, write_report_bundle, BuildReportOptions, EnvironmentPolicy, ReportBundle, RunRecord,
+    ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
 };
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
@@ -129,6 +132,15 @@ pub struct RunArgs {
         help = "Repeat each (eval case × scenario) this many times; attempt numbers run 1..N within one iteration"
     )]
     pub attempts: u32,
+
+    #[arg(
+        short = 'j',
+        long,
+        value_name = "N",
+        default_value_t = RunConcurrency::serial(),
+        help = "Execute this many runs at once, 1 to 8. Cuts wall clock, not cost: every run still pays for its own model calls, and the lanes share one account's rate limit"
+    )]
+    pub concurrency: RunConcurrency,
 
     #[arg(
         long,
@@ -369,6 +381,7 @@ impl RunArgs {
                 cache_options,
                 self.skill_staging,
                 self.environment,
+                self.concurrency,
             ) {
                 return code;
             }
@@ -446,6 +459,7 @@ fn execute_runs(
     cache_options: CacheOptions,
     skill_staging: SkillStaging,
     environment: EnvironmentPolicy,
+    concurrency: RunConcurrency,
 ) -> std::result::Result<(), i32> {
     let skill_md = match std::fs::read_to_string(skill_path.join("SKILL.md")) {
         Ok(s) => s,
@@ -483,12 +497,115 @@ fn execute_runs(
     let runner_version = bundle.document.report.runner_version.clone();
     let runner_kind = runner_kind_label(runner).to_string();
 
-    for run in bundle.document.runs.iter_mut() {
-        let case = match case_index.get(&run.eval_case_id) {
+    let execution = RunExecution {
+        runner,
+        runner_model,
+        timeout_secs,
+        retries,
+        skill_path,
+        old_skill_path,
+        out_dir,
+        report_dir,
+        cache_options,
+        skill_staging,
+        environment,
+        skill_md: &skill_md,
+        old_skill_md: old_skill_md.as_deref(),
+        case_index: &case_index,
+        runner_version,
+        runner_kind,
+        skill_hash: bundle.document.suite.skill_hash.clone(),
+        old_skill_hash: bundle.document.suite.old_skill_hash.clone(),
+        evals_hash: bundle.document.suite.evals_hash.clone(),
+    };
+    execution.execute_all(&mut bundle.document.runs, concurrency);
+
+    rebuild_summaries(&mut bundle);
+
+    let report_json = match serde_json::to_string_pretty(&bundle.document) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to re-serialize report.json: {}", e);
+            return Err(1);
+        }
+    };
+    if let Err(e) = std::fs::write(report_dir.join("report.json"), report_json) {
+        eprintln!("Failed to write updated report.json: {}", e);
+        return Err(1);
+    }
+
+    Ok(())
+}
+
+/// Everything the execution of one run needs that does not belong to that run.
+///
+/// Shared by reference across lanes, so nothing here may be specific to a single run.
+struct RunExecution<'a> {
+    runner: Runner,
+    runner_model: Option<&'a str>,
+    timeout_secs: Option<u64>,
+    retries: u32,
+    skill_path: &'a Path,
+    old_skill_path: Option<&'a Path>,
+    out_dir: &'a Path,
+    report_dir: &'a Path,
+    cache_options: CacheOptions,
+    skill_staging: SkillStaging,
+    environment: EnvironmentPolicy,
+    skill_md: &'a str,
+    old_skill_md: Option<&'a str>,
+    case_index: &'a HashMap<String, &'a EvalCase>,
+    runner_version: Option<String>,
+    runner_kind: String,
+    skill_hash: String,
+    old_skill_hash: Option<String>,
+    evals_hash: String,
+}
+
+impl RunExecution<'_> {
+    /// Work through every run, up to `concurrency` of them at a time.
+    ///
+    /// Each lane takes the next run that nobody has claimed, rather than being handed a
+    /// fixed share, because runs are not equally long: one case can take minutes while
+    /// the next is served from cache, and a fixed share would leave lanes idle behind the
+    /// slowest one. Runs keep their order in the report either way, since a lane writes
+    /// only into the run it claimed.
+    fn execute_all(&self, runs: &mut [RunRecord], concurrency: RunConcurrency) {
+        let lanes = concurrency.lanes_for(runs.len());
+        if concurrency.is_serial() || lanes <= 1 {
+            for run in runs.iter_mut() {
+                self.execute(run);
+            }
+            return;
+        }
+
+        let queue = &Mutex::new(runs.iter_mut().collect::<VecDeque<&mut RunRecord>>());
+        thread::scope(|scope| {
+            for _ in 0..lanes {
+                let lane_context = lane_context();
+                scope.spawn(move || {
+                    adopt_lane_context(lane_context);
+                    loop {
+                        let next = queue
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .pop_front();
+                        match next {
+                            Some(run) => self.execute(run),
+                            None => break,
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    fn execute(&self, run: &mut RunRecord) {
+        let case = match self.case_index.get(&run.eval_case_id) {
             Some(case) => *case,
             None => {
                 eprintln!("Skipping run {}: eval case {} not found", run.id, run.eval_case_id);
-                continue;
+                return;
             }
         };
 
@@ -496,72 +613,67 @@ fn execute_runs(
 
         let (integrity_path, old_skill_md_ref, old_skill_path_ref) = match scenario {
             ScenarioKind::OldSkill => {
-                let old_path = match old_skill_path {
+                let old_path = match self.old_skill_path {
                     Some(path) => path,
                     None => {
                         eprintln!("Run {}: old_skill scenario requires --old-skill-dir", run.id);
                         run.status = "failed".to_string();
-                        continue;
+                        return;
                     }
                 };
-                let old_md = match old_skill_md.as_deref() {
+                let old_md = match self.old_skill_md {
                     Some(md) => md,
                     None => {
                         eprintln!("Run {}: old skill SKILL.md is unavailable", run.id);
                         run.status = "failed".to_string();
-                        continue;
+                        return;
                     }
                 };
                 (old_path, Some(old_md), Some(old_path))
             }
-            _ => (skill_path, None, None),
+            _ => (self.skill_path, None, None),
         };
 
-        let workspace_dir = report_dir.join(&run.paths.workspace);
-        let run_dir = workspace_dir.parent().unwrap_or(report_dir).to_path_buf();
+        let workspace_dir = self.report_dir.join(&run.paths.workspace);
+        let run_dir = workspace_dir.parent().unwrap_or(self.report_dir).to_path_buf();
         let transcript_path = run_dir.join("transcript.jsonl");
         let stderr_path = run_dir.join("stderr.log");
 
-        let fixture_hash = match compute_fixture_hash(skill_path, &run.eval_case_id) {
+        let fixture_hash = match compute_fixture_hash(self.skill_path, &run.eval_case_id) {
             Ok(hash) => hash.as_str().to_string(),
             Err(e) => {
                 eprintln!("Run {}: failed to hash fixtures: {}", run.id, e);
                 run.status = "failed".to_string();
-                continue;
+                return;
             }
         };
 
         let skill_hash = match scenario {
-            ScenarioKind::OldSkill => bundle
-                .document
-                .suite
-                .old_skill_hash
-                .clone()
-                .unwrap_or_else(|| bundle.document.suite.skill_hash.clone()),
-            _ => bundle.document.suite.skill_hash.clone(),
+            ScenarioKind::OldSkill => self.old_skill_hash.clone().unwrap_or_else(|| self.skill_hash.clone()),
+            _ => self.skill_hash.clone(),
         };
 
         let key_input = CacheKeyInput {
             eval_case_id: run.eval_case_id.clone(),
             skill_hash,
-            evals_hash: bundle.document.suite.evals_hash.clone(),
+            evals_hash: self.evals_hash.clone(),
             fixture_hash,
             model_config: run.model_config_id.clone(),
-            runner_model: runner_model.map(str::to_string),
-            runner_kind: runner_kind.clone(),
-            runner_version: runner_version.clone(),
+            runner_model: self.runner_model.map(str::to_string),
+            runner_kind: self.runner_kind.clone(),
+            runner_version: self.runner_version.clone(),
             scenario,
             attempt: run.attempt,
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
-            environment,
-            skill_staging,
+            environment: self.environment,
+            skill_staging: self.skill_staging,
         };
         let reuse_input = ReuseKeyInput::of(&key_input);
         let cache_key = CacheKey::from_input(&key_input);
 
-        if let Some(pointer) = try_resolve_cache(out_dir, cache_options, &key_input, &reuse_input) {
-            match apply_cache_hit(run, &cache_key, &pointer, report_dir) {
-                Ok(()) => continue,
+        if let Some(pointer) = try_resolve_cache(self.out_dir, self.cache_options, &key_input, &reuse_input) {
+            match apply_cache_hit(run, &cache_key, &pointer, self.report_dir) {
+                Ok(()) => return,
                 Err(e) => {
                     eprintln!("Run {}: cache reuse failed, re-executing: {}", run.id, e);
                 }
@@ -571,17 +683,17 @@ fn execute_runs(
         let request = EvalRunRequest {
             eval: case,
             scenario,
-            skill_md: &skill_md,
-            skill_path,
+            skill_md: self.skill_md,
+            skill_path: self.skill_path,
             old_skill_md: old_skill_md_ref,
             old_skill_path: old_skill_path_ref,
             workspace_dir: &workspace_dir,
             transcript_path: &transcript_path,
             stderr_path: &stderr_path,
-            runner_model,
-            timeout_secs: effective_timeout_secs(case, timeout_secs),
-            skill_staging,
-            environment,
+            runner_model: self.runner_model,
+            timeout_secs: effective_timeout_secs(case, self.timeout_secs),
+            skill_staging: self.skill_staging,
+            environment: self.environment,
         };
 
         let digest_before = match compute_skill_digest(integrity_path) {
@@ -592,13 +704,13 @@ fn execute_runs(
             }
         };
 
-        let max_attempts = retries.saturating_add(1);
+        let max_attempts = self.retries.saturating_add(1);
         let mut invocations = 0u32;
         let mut last_outcome = None;
 
         for _ in 0..max_attempts {
             invocations += 1;
-            match invoke_runner(runner, &request) {
+            match invoke_runner(self.runner, &request) {
                 Ok(outcome) => {
                     if !outcome.is_transient_failure() || invocations >= max_attempts {
                         apply_outcome(
@@ -607,7 +719,7 @@ fn execute_runs(
                             &outcome,
                             &transcript_path,
                             &stderr_path,
-                            report_dir,
+                            self.report_dir,
                             &workspace_dir,
                         );
                         run.runner_invocations = invocations;
@@ -634,14 +746,14 @@ fn execute_runs(
                 &outcome,
                 &transcript_path,
                 &stderr_path,
-                report_dir,
+                self.report_dir,
                 &workspace_dir,
             );
             run.runner_invocations = invocations;
         }
 
-        if cache_options.enabled && run.status == "completed" {
-            if let Err(e) = record_completion(out_dir, &cache_key, &key_input, report_dir, &run.id) {
+        if self.cache_options.enabled && run.status == "completed" {
+            if let Err(e) = record_completion(self.out_dir, &cache_key, &key_input, self.report_dir, &run.id) {
                 eprintln!("Run {}: failed to record cache entry: {}", run.id, e);
             }
         }
@@ -661,70 +773,144 @@ fn execute_runs(
             }
         }
     }
+}
 
-    rebuild_summaries(&mut bundle);
+/// What a lane has to install before it can run anything.
+///
+/// Nothing, outside tests. The fake runner lives in thread-local state so tests running
+/// side by side cannot see each other's counters, and a lane is a different thread, so it
+/// has to be handed the state explicitly or it would reach for a real harness.
+#[cfg(not(test))]
+struct LaneContext;
 
-    let report_json = match serde_json::to_string_pretty(&bundle.document) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to re-serialize report.json: {}", e);
-            return Err(1);
-        }
-    };
-    if let Err(e) = std::fs::write(report_dir.join("report.json"), report_json) {
-        eprintln!("Failed to write updated report.json: {}", e);
-        return Err(1);
-    }
+#[cfg(test)]
+type LaneContext = Option<std::sync::Arc<fake_runner::FakeState>>;
 
-    Ok(())
+#[cfg(not(test))]
+fn lane_context() -> LaneContext {
+    LaneContext
+}
+
+#[cfg(test)]
+fn lane_context() -> LaneContext {
+    fake_runner::export()
+}
+
+#[cfg(not(test))]
+fn adopt_lane_context(_context: LaneContext) {}
+
+#[cfg(test)]
+fn adopt_lane_context(context: LaneContext) {
+    fake_runner::adopt(context);
 }
 
 #[cfg(test)]
 mod fake_runner {
-    use std::cell::Cell;
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
 
     use crate::agentskills::runner::{EvalRunOutcome, EvalRunRequest, RunStatus};
 
+    /// How long a lane waits for the lanes a test expects alongside it.
+    ///
+    /// Bounded so a serial implementation fails the expectation instead of hanging on it.
+    const LANE_RENDEZVOUS: Duration = Duration::from_secs(2);
+
+    /// The fake runner's state for one test.
+    ///
+    /// Shared behind an `Arc` rather than held in thread-local cells alone, because a run
+    /// executed in a lane is executed on another thread and still has to count against
+    /// the same test.
+    #[derive(Default)]
+    pub struct FakeState {
+        enabled: AtomicBool,
+        invocations: AtomicUsize,
+        last_timeout_secs: Mutex<Option<u64>>,
+        lanes: Mutex<LaneCensus>,
+        joined: Condvar,
+    }
+
+    #[derive(Default)]
+    struct LaneCensus {
+        in_flight: usize,
+        peak: usize,
+        expected: usize,
+    }
+
     thread_local! {
-        static ENABLED: Cell<bool> = const { Cell::new(false) };
-        static INVOCATIONS: Cell<usize> = const { Cell::new(0) };
-        static LAST_TIMEOUT_SECS: Cell<Option<u64>> = const { Cell::new(None) };
+        static STATE: RefCell<Option<Arc<FakeState>>> = const { RefCell::new(None) };
+    }
+
+    fn state() -> Arc<FakeState> {
+        STATE.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            cell.get_or_insert_with(|| Arc::new(FakeState::default())).clone()
+        })
     }
 
     pub fn enable() {
-        ENABLED.with(|enabled| enabled.set(true));
+        state().enabled.store(true, Ordering::SeqCst);
     }
 
     pub fn disable() {
-        ENABLED.with(|enabled| enabled.set(false));
+        state().enabled.store(false, Ordering::SeqCst);
     }
 
     pub fn reset() {
-        INVOCATIONS.with(|count| count.set(0));
-        LAST_TIMEOUT_SECS.with(|timeout| timeout.set(None));
+        let state = state();
+        state.invocations.store(0, Ordering::SeqCst);
+        *state.last_timeout_secs.lock().expect("fake timeout") = None;
+        *state.lanes.lock().expect("fake lanes") = LaneCensus::default();
+    }
+
+    /// Hold every run until this many are in flight, so a test can tell lanes that
+    /// overlapped from runs that merely happened to be fast.
+    pub fn expect_lanes(lanes: usize) {
+        state().lanes.lock().expect("fake lanes").expected = lanes;
+    }
+
+    /// The most runs that were ever in flight at once.
+    pub fn peak_lanes() -> usize {
+        state().lanes.lock().expect("fake lanes").peak
     }
 
     pub fn last_timeout_secs() -> Option<u64> {
-        LAST_TIMEOUT_SECS.with(|timeout| timeout.get())
+        *state().last_timeout_secs.lock().expect("fake timeout")
     }
 
     pub fn enabled() -> bool {
-        ENABLED.with(|enabled| enabled.get())
+        STATE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|state| state.enabled.load(Ordering::SeqCst))
+        })
+    }
+
+    /// The state a lane has to adopt to stand in for the thread that started it.
+    pub fn export() -> Option<Arc<FakeState>> {
+        STATE.with(|cell| cell.borrow().clone())
+    }
+
+    pub fn adopt(state: Option<Arc<FakeState>>) {
+        STATE.with(|cell| *cell.borrow_mut() = state);
     }
 
     pub fn next_outcome(request: &EvalRunRequest) -> EvalRunOutcome {
-        LAST_TIMEOUT_SECS.with(|timeout| timeout.set(request.timeout_secs));
-        let count = INVOCATIONS.with(|counter| {
-            let next = counter.get() + 1;
-            counter.set(next);
-            next
-        });
+        let state = state();
+        *state.last_timeout_secs.lock().expect("fake timeout") = request.timeout_secs;
+        let count = state.invocations.fetch_add(1, Ordering::SeqCst) + 1;
+        enter_lane(&state);
+
         std::fs::create_dir_all(request.workspace_dir).expect("workspace dir");
         let outputs_dir = request.workspace_dir.join(crate::agentskills::outputs::OUTPUTS_DIR);
         if std::fs::create_dir_all(&outputs_dir).is_ok() {
             let _ = std::fs::write(outputs_dir.join("out.json"), r#"{"ok":true}"#);
         }
         std::fs::write(request.transcript_path, format!(r#"{{"invocation":{count}}}"#)).expect("transcript");
+
+        leave_lane(&state);
 
         EvalRunOutcome {
             status: RunStatus::Completed,
@@ -737,6 +923,26 @@ mod fake_runner {
             cost_usd: None,
             final_text: format!("run-{count}"),
         }
+    }
+
+    fn enter_lane(state: &FakeState) {
+        let mut census = state.lanes.lock().expect("fake lanes");
+        census.in_flight += 1;
+        census.peak = census.peak.max(census.in_flight);
+        if census.in_flight >= census.expected {
+            state.joined.notify_all();
+            return;
+        }
+        let (guard, _) = state
+            .joined
+            .wait_timeout_while(census, LANE_RENDEZVOUS, |census| census.in_flight < census.expected)
+            .expect("fake lanes");
+        drop(guard);
+    }
+
+    fn leave_lane(state: &FakeState) {
+        let mut census = state.lanes.lock().expect("fake lanes");
+        census.in_flight -= 1;
     }
 }
 
@@ -983,6 +1189,7 @@ mod tests {
             force: false,
             iteration: Some(1),
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
             output_format: OutputFormat::Text,
@@ -1119,6 +1326,7 @@ mod tests {
             force: false,
             iteration: None,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             old_skill_dir: Some(old_skill_dir),
             allow_skill_name_mismatch: false,
             output_format: OutputFormat::Text,
@@ -1160,6 +1368,7 @@ mod tests {
             force: false,
             iteration: None,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             old_skill_dir: Some(old_skill_dir),
             allow_skill_name_mismatch: true,
             output_format: OutputFormat::Text,
@@ -1217,6 +1426,7 @@ mod tests {
             force: false,
             iteration: None,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
             output_format: OutputFormat::Text,
@@ -1323,6 +1533,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1372,6 +1583,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1421,6 +1633,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1462,6 +1675,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1505,6 +1719,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 2,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1543,6 +1758,91 @@ mod tests {
         assert_eq!(second_report["runs"][1]["metrics"]["duration_ms"], 200);
     }
 
+    /// A pass costs a model call per case, per scenario and per attempt, so the lanes are
+    /// the difference between minutes and hours. What they may not change is the report:
+    /// a reader compares runs by position across passes, so the order has to come from
+    /// the suite rather than from which lane finished first.
+    #[test]
+    fn lanes_execute_runs_at_once_and_still_report_them_in_suite_order() {
+        super::fake_runner::reset();
+        super::fake_runner::expect_lanes(2);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            skill_dir: skill_dir.clone(),
+            out_dir: out_dir.clone(),
+            model_config: "ci-default".to_string(),
+            scenario: vec![ScenarioKind::WithSkill],
+            runner: Some(Runner::Codex),
+            runner_model: None,
+            timeout_secs: None,
+            retries: 0,
+            attempts: 1,
+            concurrency: RunConcurrency::parse(2).unwrap(),
+            force: true,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: false,
+            reuse_completed: false,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            ci: EvalCiArgs::default(),
+        }));
+
+        assert_eq!(
+            super::fake_runner::peak_lanes(),
+            2,
+            "both runs have to be in flight at once for the lanes to buy anything"
+        );
+        assert_eq!(report["runs"][0]["eval_case_id"], "one");
+        assert_eq!(report["runs"][1]["eval_case_id"], "two");
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(report["runs"][1]["status"], "completed");
+    }
+
+    fn write_two_case_skill(root: &Path) -> PathBuf {
+        let skill_dir = root.join("lane-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: lane-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "lane-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "first prompt",
+                        "expected_output": "first output",
+                        "assertions": ["checks first"]
+                    },
+                    {
+                        "id": "two",
+                        "prompt": "second prompt",
+                        "expected_output": "second output",
+                        "assertions": ["checks second"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
     #[test]
     fn reuse_completed_serves_the_same_arm_produced_under_another_model_config() {
         super::fake_runner::reset();
@@ -1560,6 +1860,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1588,6 +1889,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1633,6 +1935,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1661,6 +1964,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1703,6 +2007,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: false,
             iteration: None,
             old_skill_dir: None,
@@ -1775,6 +2080,7 @@ mod tests {
             timeout_secs: Some(99),
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1841,6 +2147,7 @@ mod tests {
             timeout_secs: None,
             retries: 0,
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -1932,6 +2239,7 @@ mod tests {
             force: true,
             iteration: Some(1),
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
             output_format: OutputFormat::Text,
@@ -1972,6 +2280,7 @@ mod tests {
                 force: false,
                 iteration: Some(1),
                 attempts: 1,
+                concurrency: RunConcurrency::serial(),
                 old_skill_dir: None,
                 allow_skill_name_mismatch: false,
                 output_format: OutputFormat::Text,
@@ -2037,6 +2346,7 @@ mod tests {
             force: false,
             iteration: Some(1),
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
             output_format: OutputFormat::Text,
@@ -2082,6 +2392,7 @@ mod tests {
             force: true,
             iteration: Some(1),
             attempts: 1,
+            concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
             output_format: OutputFormat::Text,
