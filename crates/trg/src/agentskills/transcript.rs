@@ -118,6 +118,9 @@ fn host_path(candidate: &str, home: Option<PathBuf>) -> Option<PathBuf> {
     }
 }
 
+/// The directories a run's own skill is ever staged at.
+const STAGED_SKILL_DIRS: &[&str] = &[SKILL_LINK_WITH, SKILL_LINK_OLD, SKILL_DIR_UNANNOUNCED];
+
 /// A path a run named that resolves outside the workspace it was given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceEscape {
@@ -230,20 +233,25 @@ impl NormalizedTranscript {
         SkillEngagement::NotEngaged
     }
 
-    /// Whether a path the run named is the skill this run staged.
+    /// Whether what the run named is the skill this run staged.
     ///
     /// An unannounced case stages under a plain directory name that also appears
     /// in the harness's own skill install paths, so a path that left the
     /// workspace is somebody else's skill and never this run's.
-    fn references_staged_skill(&self, path: &str) -> bool {
-        let staged = [SKILL_LINK_WITH, SKILL_LINK_OLD, SKILL_DIR_UNANNOUNCED]
-            .iter()
-            .any(|directory| path.contains(directory));
-        staged && !self.left_the_workspace(path)
+    ///
+    /// A command-style tool records its whole command line, and one command line
+    /// can name this run's skill and a host one at once, so the paths that left
+    /// the workspace are struck out of the text before it is read rather than
+    /// disqualifying everything else the call named.
+    fn references_staged_skill(&self, named: &str) -> bool {
+        let inside = self.without_paths_that_left_the_workspace(named);
+        STAGED_SKILL_DIRS.iter().any(|directory| inside.contains(directory))
     }
 
-    fn left_the_workspace(&self, path: &str) -> bool {
-        self.workspace_escapes.iter().any(|escape| escape.path == path)
+    fn without_paths_that_left_the_workspace(&self, named: &str) -> String {
+        self.workspace_escapes
+            .iter()
+            .fold(named.to_string(), |named, escape| named.replace(&escape.path, " "))
     }
 }
 
@@ -953,6 +961,36 @@ mod tests {
         );
 
         assert!(!transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    #[test]
+    fn a_shell_read_of_a_host_skill_is_not_read_as_reaching_for_the_staged_one() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cat ~/.codex/skills/demo/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    #[test]
+    fn a_command_that_reads_both_skills_still_counts_as_reaching_for_the_staged_one() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cat skills/demo/SKILL.md ~/.codex/skills/demo/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
         assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
     }
 
