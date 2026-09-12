@@ -75,12 +75,44 @@ pub struct CacheKeyInput {
     pub skill_staging: SkillStaging,
 }
 
+/// What a completed run has to match to be served to a run that asked for any completed
+/// one.
+///
+/// `--reuse-completed` deliberately forgets the model config, the runner, and the version
+/// of it a run was produced with, because an operator iterating on a skill wants each case
+/// answered once. It cannot forget the scenario. Two arms of the same case differ in
+/// nothing else, so serving one arm's run to the other compares a run against itself and
+/// reports a delta of zero for a skill that was never exercised.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReuseKeyInput {
     pub eval_case_id: String,
     pub skill_hash: String,
     pub evals_hash: String,
     pub fixture_hash: String,
+    pub scenario: ScenarioKind,
+}
+
+impl ReuseKeyInput {
+    pub fn of(key_input: &CacheKeyInput) -> Self {
+        Self {
+            eval_case_id: key_input.eval_case_id.clone(),
+            skill_hash: key_input.skill_hash.clone(),
+            evals_hash: key_input.evals_hash.clone(),
+            fixture_hash: key_input.fixture_hash.clone(),
+            scenario: key_input.scenario,
+        }
+    }
+
+    /// The directory this run's reuse pointer lives in.
+    ///
+    /// One slot per case and scenario. A single slot per case would let each arm evict the
+    /// other's pointer, so a comparison would re-execute every run it was told to reuse.
+    fn slot(&self, out_dir: &Path) -> PathBuf {
+        cache_root(out_dir)
+            .join(REUSE_DIR)
+            .join(sanitize_dir_name(&self.eval_case_id))
+            .join(self.scenario.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -170,7 +202,7 @@ pub fn try_resolve_cache(
         return Some(pointer);
     }
     if options.reuse_completed {
-        return lookup_reuse(out_dir, &reuse_input.eval_case_id, reuse_input);
+        return lookup_reuse(out_dir, reuse_input);
     }
     None
 }
@@ -195,11 +227,8 @@ pub fn lookup_exact(out_dir: &Path, key: &CacheKey, current: &CacheKeyInput) -> 
     read_pointer_if_fresh(&cache_root(out_dir).join(key.as_str()), current)
 }
 
-pub fn lookup_reuse(out_dir: &Path, eval_case_id: &str, current: &ReuseKeyInput) -> Option<CachePointer> {
-    let path = cache_root(out_dir)
-        .join(REUSE_DIR)
-        .join(sanitize_dir_name(eval_case_id));
-    read_reuse_pointer_if_fresh(&path, current)
+pub fn lookup_reuse(out_dir: &Path, current: &ReuseKeyInput) -> Option<CachePointer> {
+    read_reuse_pointer_if_fresh(&current.slot(out_dir), current)
 }
 
 fn read_pointer_if_fresh(dir: &Path, current: &CacheKeyInput) -> Option<CachePointer> {
@@ -214,13 +243,7 @@ fn read_pointer_if_fresh(dir: &Path, current: &CacheKeyInput) -> Option<CachePoi
 
 fn read_reuse_pointer_if_fresh(dir: &Path, current: &ReuseKeyInput) -> Option<CachePointer> {
     let pointer = read_pointer(dir)?;
-    let reuse = ReuseKeyInput {
-        eval_case_id: pointer.key_input.eval_case_id.clone(),
-        skill_hash: pointer.key_input.skill_hash.clone(),
-        evals_hash: pointer.key_input.evals_hash.clone(),
-        fixture_hash: pointer.key_input.fixture_hash.clone(),
-    };
-    if reuse == *current {
+    if ReuseKeyInput::of(&pointer.key_input) == *current {
         Some(pointer)
     } else {
         let _ = fs::remove_dir_all(dir);
@@ -253,12 +276,7 @@ pub fn record_completion(
         key_input: key_input.clone(),
     };
     write_pointer(&cache_root(out_dir).join(key.as_str()), &pointer)?;
-    write_pointer(
-        &cache_root(out_dir)
-            .join(REUSE_DIR)
-            .join(sanitize_dir_name(&key_input.eval_case_id)),
-        &pointer,
-    )
+    write_pointer(&ReuseKeyInput::of(key_input).slot(out_dir), &pointer)
 }
 
 fn write_pointer(dir: &Path, pointer: &CachePointer) -> io::Result<()> {
@@ -552,12 +570,7 @@ mod tests {
         record_completion(&out_dir, &CacheKey::from_input(&first), &first, &report_a, "run-001").unwrap();
 
         let second = sample_key_input_for_case("two", ScenarioKind::WithSkill, "sha256:skill", empty_fixtures.as_str());
-        let reuse_second = ReuseKeyInput {
-            eval_case_id: "two".to_string(),
-            skill_hash: "sha256:skill".to_string(),
-            evals_hash: "sha256:evals".to_string(),
-            fixture_hash: empty_fixtures.as_str().to_string(),
-        };
+        let reuse_second = ReuseKeyInput::of(&second);
         let options = CacheOptions {
             enabled: true,
             reuse_completed: true,
@@ -670,17 +683,46 @@ mod tests {
         let key = CacheKey::from_input(&stored);
         record_completion(&out_dir, &key, &stored, &report_a, "run-001").unwrap();
 
-        let reuse_current = ReuseKeyInput {
-            eval_case_id: "one".to_string(),
-            skill_hash: "sha256:skill".to_string(),
-            evals_hash: "sha256:evals".to_string(),
-            fixture_hash: "sha256:fixtures-new".to_string(),
-        };
-        assert!(lookup_reuse(&out_dir, "one", &reuse_current).is_none());
+        let current = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixtures-new");
+        assert!(lookup_reuse(&out_dir, &ReuseKeyInput::of(&current)).is_none());
     }
 
+    /// The two arms of a case differ in the scenario and nothing else, so a reuse that
+    /// forgot it would answer the baseline with the with-skill run and report a delta of
+    /// zero for a skill that was never exercised.
     #[test]
-    fn reuse_completed_matches_across_scenarios() {
+    fn reuse_completed_does_not_serve_one_arm_of_a_case_to_the_other() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run(&report_a, "run-001", "one", ScenarioKind::WithSkill);
+
+        let with_skill = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        record_completion(
+            &out_dir,
+            &CacheKey::from_input(&with_skill),
+            &with_skill,
+            &report_a,
+            "run-001",
+        )
+        .unwrap();
+
+        let without_skill = sample_key_input(
+            ScenarioKind::WithoutSkill,
+            "sha256:skill",
+            FixtureHash::empty().as_str(),
+        );
+        assert!(lookup_reuse(&out_dir, &ReuseKeyInput::of(&without_skill)).is_none());
+
+        let pointer = lookup_reuse(&out_dir, &ReuseKeyInput::of(&with_skill)).unwrap();
+        assert_eq!(pointer.run_id, "run-001");
+    }
+
+    /// What `--reuse-completed` is for: the run that answered this case under a different
+    /// model config is still the run that answered this case.
+    #[test]
+    fn reuse_completed_serves_a_run_produced_under_another_model_config() {
         let temp = tempdir().unwrap();
         let out_dir = temp.path().join("out");
         let report_a = out_dir.join("demo/report-a");
@@ -688,23 +730,64 @@ mod tests {
         write_completed_run(&report_a, "run-001", "one", ScenarioKind::WithSkill);
 
         let stored = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
-        let key = CacheKey::from_input(&stored);
-        record_completion(&out_dir, &key, &stored, &report_a, "run-001").unwrap();
+        record_completion(&out_dir, &CacheKey::from_input(&stored), &stored, &report_a, "run-001").unwrap();
 
+        let other_config = CacheKeyInput {
+            model_config: "hand-tuned".to_string(),
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str())
+        };
+        assert!(lookup_exact(&out_dir, &CacheKey::from_input(&other_config), &other_config).is_none());
+
+        let pointer = lookup_reuse(&out_dir, &ReuseKeyInput::of(&other_config)).unwrap();
+        assert_eq!(pointer.run_id, "run-001");
+    }
+
+    /// One slot per case would let each arm evict the other, so a comparison would
+    /// re-execute every run it was told to reuse.
+    #[test]
+    fn each_arm_of_a_case_keeps_its_own_completed_run() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+
+        let with_report = out_dir.join("demo/report-with");
+        fs::create_dir_all(&with_report).unwrap();
+        write_completed_run(&with_report, "run-001", "one", ScenarioKind::WithSkill);
+        let with_skill = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        record_completion(
+            &out_dir,
+            &CacheKey::from_input(&with_skill),
+            &with_skill,
+            &with_report,
+            "run-001",
+        )
+        .unwrap();
+
+        let without_report = out_dir.join("demo/report-without");
+        fs::create_dir_all(&without_report).unwrap();
+        write_completed_run(&without_report, "run-002", "one", ScenarioKind::WithoutSkill);
         let without_skill = sample_key_input(
             ScenarioKind::WithoutSkill,
             "sha256:skill",
             FixtureHash::empty().as_str(),
         );
-        assert!(lookup_exact(&out_dir, &CacheKey::from_input(&without_skill), &without_skill).is_none());
+        record_completion(
+            &out_dir,
+            &CacheKey::from_input(&without_skill),
+            &without_skill,
+            &without_report,
+            "run-002",
+        )
+        .unwrap();
 
-        let reuse_current = ReuseKeyInput {
-            eval_case_id: "one".to_string(),
-            skill_hash: "sha256:skill".to_string(),
-            evals_hash: "sha256:evals".to_string(),
-            fixture_hash: FixtureHash::empty().as_str().to_string(),
-        };
-        let pointer = lookup_reuse(&out_dir, "one", &reuse_current).unwrap();
-        assert_eq!(pointer.run_id, "run-001");
+        assert_eq!(
+            lookup_reuse(&out_dir, &ReuseKeyInput::of(&with_skill)).unwrap().run_id,
+            "run-001"
+        );
+        assert_eq!(
+            lookup_reuse(&out_dir, &ReuseKeyInput::of(&without_skill))
+                .unwrap()
+                .run_id,
+            "run-002"
+        );
     }
 }

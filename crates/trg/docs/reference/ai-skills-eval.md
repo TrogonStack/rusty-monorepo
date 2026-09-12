@@ -45,6 +45,8 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 | `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
+| `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
+| `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 
@@ -755,6 +757,28 @@ run directory, with secret-looking values left out.
 The policy is part of a run's cache identity, alongside `--skill-staging`. A
 completed run answers only for what it was allowed to see, so switching either
 flag executes again rather than serving a run that saw something else.
+
+---
+
+## Reusing a completed run
+
+A run is cached under everything that decides what it would do: the case, the
+skill and suite digests, the fixture digest, the scenario, the model config, the
+runner and its version, the prompt contract, and the two policies above. Change
+any of them and the run executes again. `--no-cache` skips the lookup entirely.
+
+`--reuse-completed` is the looser lookup, for an operator who wants each case
+answered once while iterating rather than answered again for every model config
+they try. It forgets the model config, the runner, and the runner version.
+
+It does not forget the scenario. The arms of a comparison differ in the scenario
+and nothing else, so a reuse that ignored it would answer the baseline with the
+run that had the skill, and the report would show a delta of zero for a skill
+that was never exercised. Each arm keeps its own reusable run, so reusing one
+arm does not cost the other its entry.
+
+`--reuse-completed` is rejected when more than one `--scenario` is requested in
+a single invocation, for the same reason.
 
 ---
 
