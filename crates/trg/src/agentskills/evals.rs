@@ -12,6 +12,13 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
+/// Directory, relative to the skill root, that holds the eval suite and its fixtures.
+///
+/// This directory is the answer key. It must never be staged into a run's workspace:
+/// see `runner::is_withheld_from_staging`.
+pub const EVAL_SUITE_DIR_NAME: &str = "evals";
+pub const EVAL_SUITE_MANIFEST_NAME: &str = "evals.json";
+
 pub const SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION: u32 = 3;
 pub const TYPED_GRADERS_MIN_SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_MAX_FIXTURE_BYTES: u64 = 5 * 1024 * 1024;
@@ -426,7 +433,7 @@ pub struct WorkspaceCheckReport {
 }
 
 pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSuite> {
-    let suite_path = skill_path.join("evals").join("evals.json");
+    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
     let content = fs.read_to_string(&suite_path)?;
     parse_eval_suite(&content)
 }
@@ -478,14 +485,14 @@ pub fn scaffold_eval_suite(skill_name: &str) -> EvalSuite {
 }
 
 pub fn write_eval_suite(fs: &impl FileSystem, skill_path: &Path, suite: &EvalSuite) -> Result<()> {
-    let suite_path = skill_path.join("evals").join("evals.json");
+    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
     let json = serde_json::to_string_pretty(suite)?;
     fs.write(&suite_path, &json)?;
     Ok(())
 }
 
 pub fn write_eval_manifest_scaffold(fs: &impl FileSystem, skill_path: &Path, skill_name: &str) -> Result<()> {
-    let suite_path = skill_path.join("evals").join("evals.json");
+    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
     fs.write(&suite_path, &eval_manifest_scaffold_json(skill_name))?;
     Ok(())
 }
@@ -651,7 +658,7 @@ pub fn check_eval_suite(
     expected_skill_name: &str,
     options: EvalCheckOptions,
 ) -> Result<EvalCheckReport> {
-    let suite_path = skill_path.join("evals").join("evals.json");
+    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
     let content = fs.read_to_string(&suite_path)?;
     let suite = parse_eval_suite(&content)?;
 

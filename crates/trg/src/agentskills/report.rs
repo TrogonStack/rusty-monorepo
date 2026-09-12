@@ -21,12 +21,32 @@ use super::validation::ValidationError;
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.report.v1";
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize, Deserialize, JsonSchema,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    clap::ValueEnum,
+    Serialize,
+    Deserialize,
+    JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SkillStaging {
+    /// Stage one symlink per entry, pointing into the live skill directory.
+    ///
+    /// A staged symlink names where it came from, so a run that reads it learns
+    /// the skill's real location and can reach the eval suite sitting next to
+    /// it. Cheap, and only as private as the tree it points into.
     #[value(name = "symlink")]
     Symlink,
+    /// Copy the skill's entries into the workspace, so every path a run can
+    /// follow stays inside the workspace.
+    #[default]
     #[value(name = "copy")]
     Copy,
 }
@@ -95,7 +115,7 @@ impl Default for BuildReportOptions {
             runner: None,
             runner_binary: None,
             runner_version: None,
-            skill_staging: SkillStaging::Symlink,
+            skill_staging: SkillStaging::default(),
         }
     }
 }

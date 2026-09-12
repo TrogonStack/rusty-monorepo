@@ -469,9 +469,50 @@ scenarios recorded separately in the same record.
 
 | Kind | CLI value | Runner behavior |
 | ---- | --------- | --------------- |
-| With skill | `with_skill` | Symlinks skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
-| Without skill | `without_skill` | Raw eval prompt; no skill symlink |
+| With skill | `with_skill` | Stages skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
+| Without skill | `without_skill` | Raw eval prompt; nothing staged |
 | Old skill | `old_skill` | Stages the `--old-skill-dir` revision to `.old-skill/` in the workspace; prompt prefixed with that revision's frontmatter |
+
+### The eval suite is withheld from the workspace
+
+The staged directory holds the skill under test minus its top-level `evals/`
+directory. The suite is the answer key: it carries each case's
+`expected_output`, its natural-language assertions, and its graders' literal
+`contains` text and `regex` patterns. A run that could read it could be scored
+on text it copied rather than work it did, and the with-skill prompt points the
+agent straight at `.skill/`, so the suite is staged in neither
+`--skill-staging copy` nor `--skill-staging symlink`.
+
+This costs a case nothing. The fixtures a case names in `files` are staged
+separately into the workspace root, and they are the only part of `evals/` a
+run is meant to see. Only the top level is filtered, so a nested `evals/`
+deeper in the skill tree is treated as the skill's own content and staged
+normally.
+
+A top-level version control directory (`.git`, `.jj`, `.hg`, `.svn`) is
+withheld for the same reason. When the skill is its own checkout, its history
+holds every revision of the suite, so a run handed the working tree without
+`evals/` could ask version control for the answer key instead. No run needs a
+skill's history to do its work.
+
+Copying dereferences links, which is what makes the staged copy self-contained,
+so a link inside the skill decides what ends up in the workspace. A link that
+resolves into the withheld suite, or out of the skill altogether, is left out
+the same way the suite is, rather than delivering its target into the run's own
+directory with no link left to give it away. A skill that keeps content behind
+such a link is staged without it under `--skill-staging copy`.
+
+Leaving the suite out of the staged directory keeps it out of a listing, which
+is all a symlink can offer. A symlink names the path it points at, so a run that
+reads one learns where the skill really lives, and the suite it was not given is
+one directory over. `--skill-staging copy` is the default for that reason: every
+path a run can follow out of a copied `.skill/` stays inside the workspace.
+
+`--skill-staging symlink` remains available for a skill large enough that copying
+it per run costs real time, at the price of disclosing the skill's location to
+any run that looks. Because the filter has to skip an entry, it stages `.skill/`
+as a real directory holding one symlink per entry rather than as a single symlink
+to the skill root.
 
 `--scenario old_skill` requires `--old-skill-dir`. The old skill must carry the
 same `name` as the current one unless you pass `--allow-skill-name-mismatch`,

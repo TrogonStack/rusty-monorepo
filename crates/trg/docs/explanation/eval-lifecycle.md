@@ -99,7 +99,7 @@ When `--runner` is provided, the CLI invokes the agent for each run:
 
 | Step | What happens |
 | ---- | ------------ |
-| Prepare workspace | Stage fixtures; stage skill to `.skill/` or `.old-skill/` via symlink (default) or copy (`--skill-staging`) |
+| Prepare workspace | Stage fixtures; stage skill to `.skill/` or `.old-skill/` via copy (default) or symlink (`--skill-staging`) |
 | Build prompt | Task + fixture paths + frontmatter summary + output constraints (`prompt` contract v1) |
 | Invoke runner | Spawn `cursor-agent`, `claude`, or `codex` with stream-json output |
 | Capture output | Write `transcript.jsonl`, `timing.json`; update run status and metrics |
@@ -234,7 +234,7 @@ index, CLI workflow, and several policy defaults.
 | `feedback.json` | Defined in spec | Scaffolded via `eval feedback init`; not auto-written |
 | `comparison.json` | Standalone comparison records | Optional via `eval compare --emit-comparison-json`; `comparisons` also merged into `report.json` |
 | Model config capture | Full parameter capture | `capture_status: "partial"`; label only |
-| Skill staging | Spec-defined layout | Symlink to `.skill/` (default) or copy with `--skill-staging copy` |
+| Skill staging | Spec-defined layout | Copy into `.skill/` (default) or `--skill-staging symlink` |
 | Docs layout aliases | Primary tree under `iteration-N/` | Canonical `runs/run-NNN/` plus symlink mirror and `alias-index.json` |
 | Skill integrity | Not in spec | SHA-256 before/after tamper detection |
 | CI metadata | Not in spec | Auto-captured from GitHub Actions env vars |
@@ -280,15 +280,17 @@ file changes without updating the hash used for caching.
 
 | Scenario | Workspace skill link | Prompt carries |
 | -------- | -------------------- | -------------- |
-| `with_skill` | Symlink or copy → `.skill/` | Frontmatter `name` + `description` only |
-| `old_skill` | Symlink or copy → `.old-skill/` | Old skill frontmatter only |
+| `with_skill` | Copy or symlink → `.skill/` | Frontmatter `name` + `description` only |
+| `old_skill` | Copy or symlink → `.old-skill/` | Old skill frontmatter only |
 | `without_skill` | No skill link | No skill lines at all |
 
-Use `--skill-staging symlink` (default) to share the live skill directory with
-the run workspace. Use `--skill-staging copy` when you need isolation from
-mid-run edits to the source skill or to prevent symlink traversal outside the
-skill tree (external symlinks in the skill are copied as links, not followed).
-The chosen mode is recorded per run in `report.json` as `skill_staging`.
+`--skill-staging copy` (default) gives the run its own copy of the skill, so no
+path it can follow leads out of the workspace and mid-run edits to the source
+skill cannot reach it (external symlinks in the skill are copied as links, not
+followed). `--skill-staging symlink` shares the live skill directory instead,
+which is cheaper for a large skill and tells any run that reads a staged link
+where the skill, and the eval suite next to it, actually live. The chosen mode
+is recorded per run in `report.json` as `skill_staging`.
 
 Baseline (`without_skill`) prompts must not mention skills, `.skill/`, or
 `.old-skill/`. `old_skill` prompts must reference `.old-skill/` only and must not
