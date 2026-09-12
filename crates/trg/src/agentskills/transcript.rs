@@ -430,7 +430,7 @@ impl ToolArguments {
 /// which is enough for the escapes that matter here: a run that reaches a skill or
 /// a host file through a shell instead of a file tool.
 fn command_operands(command: &str) -> Vec<String> {
-    const INTERPRETER_FLAGS: &[&str] = &["-c", "-lc", "-ic", "-lic", "-li", "-l"];
+    const INTERPRETER_FLAGS: &[&str] = &["-c", "-lc", "-ic", "-lic"];
 
     let mut operands = Vec::new();
     let mut skip_program = true;
@@ -989,6 +989,7 @@ mod tests {
             vec!["../../elsewhere".to_string()]
         );
         assert_eq!(command_operands("python3 -c 'print(1)'"), Vec::<String>::new());
+        assert_eq!(command_operands("ls -l /etc/hosts"), vec!["/etc/hosts".to_string()]);
         assert_eq!(command_operands("ls outputs"), Vec::<String>::new());
     }
 
