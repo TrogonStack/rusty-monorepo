@@ -76,31 +76,73 @@ $ jq '.summaries.by_scenario' \
 ]
 ```
 
-> **Status: planned** — `passed_runs` reflects runner completion status today,
-> not assertion pass/fail. Once the grading PR populates `assertion_results`,
-> summaries will track assertion outcomes.
+`passed_runs` counts runs the runner completed, not assertions that passed. A
+run that finished and then failed every assertion still counts as passed here.
+For assertion outcomes, grade the bundle and read `benchmark.json`.
 
-## 3. Compare metrics manually
-
-Timing data is available per run today:
+## 3. Grade both scenarios
 
 ```shell
-$ jq -s '.' \
-    ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd/runs/run-001/timing.json \
-    ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd/runs/run-002/timing.json
-[
-  { "duration_ms": 3200, "total_tokens": 4100 },
-  { "duration_ms": 2800, "total_tokens": 2900 }
-]
+$ trg ai skills eval grade ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 ```
 
-## 4. Automated comparison (future)
+Or add `--grade` to the `eval run` above to do it in the same invocation. Each
+run workspace then holds a `grading.json`:
 
-> **Status: planned** — the `comparisons` array in `report.json` and standalone
-> `comparison.json` files are scaffolded but empty. A future comparison PR will
-> compute assertion deltas and metric deltas between scenarios automatically.
+```shell
+$ jq '.summary' \
+    ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd/runs/run-001/workspace/grading.json
+{
+  "passed": 3,
+  "failed": 1,
+  "total": 4,
+  "unsupported": 0,
+  "pass_rate": 0.75
+}
+```
 
-Until then, diff workspace outputs or grading files side by side:
+## 4. Read the scenario delta
+
+`eval benchmark` aggregates the graded runs into per-scenario buckets and
+computes the delta between them:
+
+```shell
+$ trg ai skills eval benchmark ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
+$ jq '.deltas.with_skill_vs_without_skill' \
+    ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd/benchmark.json
+{
+  "assertion_pass_rate": 0.375,
+  "run_pass_rate": 0.5,
+  "duration_ms_mean": 400.0,
+  "tokens_total": 1200
+}
+```
+
+A positive `assertion_pass_rate` means the skill helped. `duration_ms_mean` and
+`tokens_total` are the cost of that help. Per-scenario percentiles live under
+`scenarios.with_skill.completed.duration_ms` (`mean`, `p50`, `p95`).
+
+Run the whole chain in one invocation with
+`eval run --grade --benchmark`.
+
+## 5. Ask a judge which output is better
+
+Pass-rate deltas do not capture output quality. `eval compare` puts the two
+outputs in front of a judge under blind labels:
+
+```shell
+$ trg ai skills eval compare ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd \
+    --pair with_skill:without_skill \
+    --judge llm \
+    --judge-model gpt-4o
+```
+
+Records merge into the `comparisons` array in `report.json`. `--judge none` is
+the default and emits nothing, so the flag is required for this step. See
+[Compare with-skill vs old-skill](./compare-with-skill-vs-old-skill.md#3-compare-outcomes)
+for the record shape and the script judge contract.
+
+To eyeball the raw difference instead, diff the workspaces:
 
 ```shell
 $ diff -ru \

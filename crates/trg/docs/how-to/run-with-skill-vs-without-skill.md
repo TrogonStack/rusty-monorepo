@@ -90,25 +90,26 @@ Written under `runs/run-001/grading.json` after `eval grade`:
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v1",
+  "schema_version": "trg.skills-eval.grading.v2",
   "assertion_results": [
     {
-      "assertion": "The workspace contains a summary file",
+      "assertion": "file 'summary.md' exists",
       "passed": true,
-      "evidence": "Found summary.md (142 lines)",
-      "grader": { "kind": "mechanical" }
+      "evidence": "'.../workspace/summary.md' exists and holds 142 bytes",
+      "grader": { "kind": "declarative" }
     },
     {
       "assertion": "The summary mentions total revenue for May",
       "passed": true,
-      "evidence": "Line 12 contains \"May revenue: 10000\"",
-      "grader": { "kind": "mechanical" }
+      "evidence": "summary.md (142 bytes) contains 'May revenue: 10000' at byte 318",
+      "grader": { "kind": "declarative" }
     }
   ],
   "summary": {
     "passed": 2,
     "failed": 0,
     "total": 2,
+    "unsupported": 0,
     "pass_rate": 1.0
   }
 }

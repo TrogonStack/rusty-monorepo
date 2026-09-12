@@ -71,7 +71,7 @@ docs-shaped files beside it:
 
 | Artifact | Shape relative to spec | Writer |
 | -------- | ---------------------- | ------ |
-| `report.json` | **Superset** — iteration, attempts, cache, runner metadata, dimensions, summaries, optional `iteration_summary` | `eval run` (+ merge from grade/benchmark) |
+| `report.json` | **Superset**: iteration, attempts, cache, runner metadata, dimensions, summaries, optional `iteration_summary` | `eval run` (+ merge from grade/benchmark) |
 | `benchmark.json` | Docs-compatible aggregate; `failed_runs_mode` documents runner-failure policy | `eval benchmark` |
 | `grading.json` | Docs-compatible per-run grading | `eval grade` |
 | `timing.json` | Docs-compatible run metrics | Runner / `eval run` |
@@ -92,11 +92,13 @@ semantics may evolve within a major version only when backward compatible;
 breaking changes require a new version constant.
 
 **Consumers must gate on `schema_version`.** Do not assume a field exists
-because the agentskills.io guide mentions it — check the version your file
+because the agentskills.io guide mentions it. Check the version your file
 carries.
 
-Planned example: structured assertion objects (see below) will appear only when
-`schema_version >= trg.skills-eval.report.v2`.
+Worked example: `summary.unsupported` in `grading.json` appears only from
+`trg.skills-eval.grading.v2` onward, and `graders` on an eval case requires
+manifest `schema_version: 3`. A consumer that reads either without checking the
+version will misread older bundles.
 
 ### Backward-compatibility contract
 
@@ -109,7 +111,7 @@ The repo commits frozen `report.json` fixtures under
 
 If you depend on `report.json` programmatically, treat these tests as the
 compatibility contract for `trg.skills-eval.report.v1`. A failing snapshot test
-means either a bug or an intentional version bump — look for a new
+means either a bug or an intentional version bump. Look for a new
 `schema_version`.
 
 ---
@@ -134,7 +136,7 @@ run `status` to `failed` or `timeout` with `failure_kind: "runner"`. They are
 **not** mixed into assertion pass rate by default.
 
 `eval benchmark` exposes a separate **`failed` bucket** per scenario (timing
-and token stats only — no assertion pass rate). Default mode is `bucket`
+and token stats only, no assertion pass rate). Default mode is `bucket`
 (`failed_runs_mode: "bucket"`). Alternatives:
 
 | Mode | CLI flag | Effect |
@@ -218,12 +220,12 @@ There is no single "run everything" command; compose `run` → `grade` →
 
 These are `trg` additions, not spec divergences:
 
-- **Skill integrity** — SHA-256 before/after tamper detection on the skill
+- **Skill integrity.** SHA-256 before/after tamper detection on the skill
   directory during runner execution.
-- **CI metadata** — Auto-captured GitHub Actions context in `report.ci`.
-- **Prompt contract** — Versioned runner prompts (`PROMPT_CONTRACT_VERSION`);
+- **CI metadata.** Auto-captured GitHub Actions context in `report.ci`.
+- **Prompt contract.** Versioned runner prompts (`PROMPT_CONTRACT_VERSION`);
   skill body not duplicated in prompt when symlinked (token efficiency).
-- **Transcript format** — Raw runner stream-json (`transcript.jsonl`), not a
+- **Transcript format.** Raw runner stream-json (`transcript.jsonl`), not a
   normalized spec envelope.
 
 ---

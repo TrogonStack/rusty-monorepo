@@ -18,20 +18,20 @@ flowchart LR
   E --> F[Report]
 ```
 
-On `yordis/eval-2`, **Validate**, **Scaffold**, and **Execute** are
-implemented. **Grade** and **Compare** are implemented as standalone commands
-(`eval grade`, `eval compare`); `eval run` can chain grading and benchmark
-aggregation via `--grade` and `--benchmark`. **Report** aggregation is partial:
-`benchmark.json` and `iteration_summary` are written and merged into the bundle,
-but compare, feedback, and a single end-to-end report step remain separate.
+**Validate**, **Scaffold**, and **Execute** run inside `eval run`. **Grade**
+and **Compare** are also standalone commands (`eval grade`, `eval compare`), and
+`eval run` can chain grading and benchmark aggregation via `--grade` and
+`--benchmark`. **Report** aggregation is partial: `benchmark.json` and
+`iteration_summary` are written and merged into the bundle, but compare,
+feedback, and a single end-to-end report step remain separate.
 
 ## Phase 1: Validate
 
 Triggered at the start of `eval run`.
 
-1. **Skill validation** — `SKILL.md` frontmatter (`name`, `description`) must
+1. **Skill validation.** `SKILL.md` frontmatter (`name`, `description`) must
    parse and satisfy Agent Skills conventions.
-2. **Eval suite validation** — `evals/evals.json` is parsed with
+2. **Eval suite validation.** `evals/evals.json` is parsed with
    `deny_unknown_fields`. Checks include:
    - `skill_name` matches frontmatter `name`
    - At least one eval case with unique IDs
@@ -59,7 +59,7 @@ Canonical run outputs live under `runs/run-NNN/workspace`. The
 layout as a **presentation layer only**: scenario directories are symlinks
 back to the canonical workspaces so artifacts are not duplicated. When the
 symlink call fails (e.g. read-only filesystem), the leaf gets a
-`.workspace-ref` JSON file and the run still succeeds —
+`.workspace-ref` JSON file and the run still succeeds:
 `alias-index.json` records the mapping either way.
 
 `alias-index.json` maps each `eval-<slug>` to scenario run directories:
@@ -83,8 +83,8 @@ Each run record starts with:
 - Empty `artifacts` and `metrics`
 - A workspace directory (initially empty)
 
-The report captures **dimensions** — eval cases, assertions, scenarios, model
-config label, and skill revision hash — so downstream graders and comparators
+The report captures **dimensions** (eval cases, assertions, scenarios, model
+config label, and skill revision hash) so downstream graders and comparators
 have stable IDs to reference.
 
 ### Run ordering
@@ -117,7 +117,7 @@ After all runs, summaries are rebuilt and `report.json` is rewritten in place.
 
 ## Phase 4: Grade
 
-> **Status: implemented** — `eval grade` and `eval run --grade` write
+> `eval grade` and `eval run --grade` write
 > `grading.json` per run and merge `assertion_results` into `report.json`.
 > Default `--grader auto` applies mechanical checks; assertions with no
 > mechanical pattern are marked `needs_llm` until re-run with `--grader llm`
@@ -133,7 +133,7 @@ Flow:
 
 ## Phase 5: Compare
 
-> **Status: implemented** — `eval compare` pairs runs that share an eval case but
+> `eval compare` pairs runs that share an eval case but
 > differ by scenario, runs blind A/B judging with `--judge script` or
 > `--judge llm`, and merges records into `report.json` `comparisons`. Use
 > `--emit-comparison-json` for standalone per-case files. Requires `--pair` and
@@ -203,14 +203,14 @@ report.json          ← session-level index (always written)
 
 Typical skill author loop:
 
-1. **Write eval cases** — add prompts, fixtures, and assertions to
+1. **Write eval cases.** Add prompts, fixtures, graders, and assertions to
    `evals/evals.json`.
-2. **Scaffold** — `eval run` without `--runner` to validate structure cheaply.
-3. **Execute** — `eval run --runner cursor-agent` to get agent outputs.
-4. **Grade** — `eval grade` or `eval run --grade`; then `eval verify --mode strict`.
-5. **Iterate skill** — edit `SKILL.md`, re-run from step 2.
-6. **Compare** — `eval compare --pair with_skill:without_skill --judge script` (or `--judge llm`).
-7. **CI** — wire run, grade, and benchmark into a pipeline on every PR.
+2. **Scaffold.** `eval run` without `--runner` to validate structure cheaply.
+3. **Execute.** `eval run --runner cursor-agent` to get agent outputs.
+4. **Grade.** `eval grade` or `eval run --grade`; then `eval verify --mode strict`.
+5. **Iterate skill.** Edit `SKILL.md`, re-run from step 2.
+6. **Compare.** `eval compare --pair with_skill:without_skill --judge script` (or `--judge llm`).
+7. **CI.** Wire run, grade, and benchmark into a pipeline on every PR.
 
 Each iteration produces a new `<report_id>` directory. Hashes in `report.json`
 let you detect when the skill or eval suite changed between runs.
@@ -224,8 +224,8 @@ defines a portable eval format. `trg` follows the manifest and companion
 artifact shapes but differs in workspace layout, `report.json` as a superset
 index, CLI workflow, and several policy defaults.
 
-| Topic | agentskills.io | `trg` on `yordis/eval-2` |
-| ----- | -------------- | ------------------------ |
+| Topic | agentskills.io | `trg` |
+| ----- | -------------- | ----- |
 | Report schema | Spec-defined report format | Custom `trg.skills-eval.report.v1` schema |
 | Scenario names | `with_skill`, `without_skill`, `with_old_skill` | `with_skill`, `without_skill`, `old_skill` (no `with_` prefix on old) |
 | Old skill execution | Supported | Supported with `--old-skill-dir` when `--scenario old_skill` is included |
@@ -261,8 +261,8 @@ so benchmark comparisons stay repeatable across CLI releases.
 | ------- | ------------ | --------------- | ----------- |
 | Task prompt (verbatim from `evals.json`) | yes | yes | yes |
 | Input file paths (staged fixture relatives) | when listed | when listed | when listed |
-| Skill path hint | `.skill/` | — | `.old-skill/` |
-| Skill summary (frontmatter only) | current skill | — | old skill |
+| Skill path hint | `.skill/` | n/a | `.old-skill/` |
+| Skill summary (frontmatter only) | current skill | n/a | old skill |
 | Output constraints | yes | yes | yes |
 
 Output constraints are always:
