@@ -428,6 +428,11 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             }
         };
 
+        if stopped_by_cost_ceiling(run) {
+            report.run_statuses.record(&run.status);
+            continue;
+        }
+
         let ctx = run_context(report_dir, run);
         let mut assertion_results = Vec::with_capacity(case.assertions.len() + case.graders.len());
 
@@ -634,6 +639,16 @@ fn grade_declaratively(
 /// A case whose every check is arm-scoped would otherwise measure nothing at
 /// all, which is never what the author meant by writing it, so the exclusions
 /// are lifted and the case is scored as declared.
+/// Whether the cost ceiling stopped this run before it started.
+///
+/// Such a run has no workspace and no transcript, so there is nothing for a grader
+/// to read. Grading it anyway would read the absence as a wrong answer and fail every
+/// assertion, turning a spending decision into a reported regression, and an LLM judge
+/// would bill the pass that has already run out of money to do it.
+fn stopped_by_cost_ceiling(run: &RunRecord) -> bool {
+    run.failure_kind.as_deref() == Some(crate::agentskills::budget::FAILURE_KIND_BUDGET)
+}
+
 fn restore_when_nothing_would_be_scored(results: &mut [AssertionGradeResult]) {
     let scored = results.iter().filter(|result| result.is_scored()).count();
     if scored > 0 || !results.iter().any(AssertionGradeResult::is_excluded) {

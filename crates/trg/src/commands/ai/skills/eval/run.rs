@@ -450,14 +450,14 @@ impl RunArgs {
             return exit_code;
         }
 
-        let code = finish_eval_output(
+        finish_eval_output(
             &report_dir,
             self.output_format,
             self.ci.policy(),
             &self.ci.thresholds(),
             None,
-        );
-        exit_code_with_budget(code, budget_exhausted)
+            budget_exhausted,
+        )
     }
 }
 
@@ -474,7 +474,7 @@ impl RunArgs {
 /// all the work and paid what it said it would.
 const EXIT_BUDGET_EXHAUSTED: i32 = 2;
 
-fn exit_code_with_budget(code: i32, budget_exhausted: bool) -> i32 {
+pub(super) fn exit_code_with_budget(code: i32, budget_exhausted: bool) -> i32 {
     if code != 0 {
         code
     } else if budget_exhausted {
@@ -910,6 +910,7 @@ impl RunExecution<'_> {
             invocations += 1;
             match invoke_runner(self.runner, &request) {
                 Ok(outcome) => {
+                    self.cost_ledger.record(outcome.cost_usd);
                     if !outcome.is_transient_failure() || invocations >= max_attempts {
                         apply_outcome(
                             run,
@@ -970,8 +971,6 @@ impl RunExecution<'_> {
                 }
             }
         }
-
-        self.cost_ledger.record(run.metrics.cost_usd);
     }
 }
 
@@ -1033,6 +1032,7 @@ mod fake_runner {
         tamper_case: Mutex<Option<String>>,
         remove_case: Mutex<Option<String>>,
         cost_usd: Mutex<Option<f64>>,
+        transient_failures: AtomicUsize,
     }
 
     #[derive(Default)]
@@ -1069,6 +1069,7 @@ mod fake_runner {
         *state.tamper_case.lock().expect("fake tamper") = None;
         *state.remove_case.lock().expect("fake remove") = None;
         *state.cost_usd.lock().expect("fake cost") = None;
+        state.transient_failures.store(0, Ordering::SeqCst);
     }
 
     /// Have this case's run rewrite the skill directory it was handed, standing in for an
@@ -1087,6 +1088,12 @@ mod fake_runner {
     /// prices what it did.
     pub fn set_cost_usd(cost_usd: f64) {
         *state().cost_usd.lock().expect("fake cost") = Some(cost_usd);
+    }
+
+    /// Have the next runs fail the way a flaky harness does, so a test can tell what a
+    /// retried run cost in total from what the attempt that finally stuck cost.
+    pub fn fail_transiently_times(times: usize) {
+        state().transient_failures.store(times, Ordering::SeqCst);
     }
 
     /// Hold every run until this many are in flight, so a test can tell lanes that
@@ -1160,6 +1167,24 @@ mod fake_runner {
         leave_lane(&state);
 
         let cost_usd = *state.cost_usd.lock().expect("fake cost");
+
+        let transient = state
+            .transient_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+            .is_ok();
+        if transient {
+            return EvalRunOutcome {
+                status: RunStatus::Failed,
+                failure_kind: Some(crate::agentskills::runner::FAILURE_KIND_RUNNER),
+                duration_ms: count as u64 * 100,
+                exit_code: Some(1),
+                total_tokens: Some(count as u64),
+                input_tokens: Some(count as u64),
+                output_tokens: Some(0),
+                cost_usd,
+                final_text: format!("transient-{count}"),
+            };
+        }
 
         EvalRunOutcome {
             status: RunStatus::Completed,
@@ -2711,6 +2736,49 @@ mod tests {
         skill_dir
     }
 
+    fn write_two_case_gradable_skill(root: &Path) -> PathBuf {
+        let skill_dir = root.join("gradable-pair");
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: gradable-pair\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "gradable-pair",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "create output",
+                        "expected_output": "done",
+                        "assertions": ["file \"out.json\" exists"]
+                    },
+                    {
+                        "id": "two",
+                        "prompt": "create output again",
+                        "expected_output": "done",
+                        "assertions": ["file \"out.json\" exists"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
+    fn count_grading_json(report_dir: &Path) -> usize {
+        let runs_dir = report_dir.join("runs");
+        let Ok(entries) = std::fs::read_dir(&runs_dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().join("grading.json").is_file())
+            .count()
+    }
+
     fn find_grading_json(report_dir: &Path) -> Option<PathBuf> {
         let runs_dir = report_dir.join("runs");
         if !runs_dir.is_dir() {
@@ -2998,6 +3066,38 @@ mod tests {
         assert_eq!(report["budget"]["runs_skipped"], 1);
     }
 
+    /// Grading a run that never started reads the empty workspace as a wrong answer, and
+    /// every assertion fails. That turns a spending decision into a reported regression,
+    /// and the resulting exit 1 hides the exit 2 that would have told an operator to raise
+    /// the ceiling rather than go looking for a bug in the skill.
+    #[test]
+    fn a_run_the_ceiling_refused_is_not_graded_as_a_failure() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(5.0);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_gradable_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            grade: true,
+            max_cost_usd: Some(CostCeiling::parse(5.0).unwrap()),
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][1]["status"], "skipped");
+        assert_eq!(report["runs"][1]["failure_kind"], "budget");
+        assert_eq!(
+            count_grading_json(&report_dir),
+            1,
+            "only the run that produced a workspace has anything to grade"
+        );
+        assert_eq!(
+            status, 2,
+            "the pass reports that it ran out of money, not that the skill got something wrong"
+        );
+    }
+
     /// Spend reaching the ceiling is not the same as spend passing it. A pass whose last
     /// run lands exactly on the ceiling refused nothing and paid no more than it said it
     /// would, so it has nothing to report that an operator did not already agree to. A
@@ -3029,6 +3129,69 @@ mod tests {
         assert_eq!(
             report["budget"]["exhausted"], true,
             "the ledger would admit nothing further, and the report still says so"
+        );
+    }
+
+    /// A pass that prints its result reports the same code it exits with. A reader
+    /// parsing the JSON and a shell reading `$?` are asking the same question, and a
+    /// budget stop the JSON does not mention is a green result in every dashboard
+    /// built on it.
+    #[test]
+    fn the_exit_code_in_the_json_carries_the_budget_stop_the_process_exits_with() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_fake_runner_reporting_status(base_run_args(&skill_dir, &out_dir));
+        assert_eq!(
+            status, 0,
+            "the pass itself is clean, so only the budget can move the code"
+        );
+
+        let ci = EvalCiArgs::default();
+        let stopped = super::super::eval_output(&report_dir, ci.policy(), &ci.thresholds(), None, true)
+            .expect("the report is readable");
+        assert_eq!(
+            stopped.exit_code, 2,
+            "a pass the ceiling cut short reports the budget code in the document it prints"
+        );
+
+        let ran_fully = super::super::eval_output(&report_dir, ci.policy(), &ci.thresholds(), None, false)
+            .expect("the report is readable");
+        assert_eq!(
+            ran_fully.exit_code, 0,
+            "and reports nothing when the ceiling took nothing"
+        );
+    }
+
+    /// A run the ceiling refused cost money it never spent, once. Retries are invisible in
+    /// the report, which keeps only the attempt that stuck, so a ledger fed from the report
+    /// prices a flaky pass at a fraction of what it actually billed and lets a ceiling
+    /// be walked straight through.
+    #[test]
+    fn the_ledger_counts_the_attempts_that_were_thrown_away() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(1.0);
+        super::fake_runner::fail_transiently_times(2);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (_status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            retries: 2,
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(
+            report["runs"][0]["runner_invocations"], 3,
+            "the first case was invoked three times before one stuck"
+        );
+        assert_eq!(report["runs"][1]["runner_invocations"], 1);
+        assert_eq!(
+            report["budget"]["spent_usd"], 4.0,
+            "every invocation was billed, not only the two the report kept"
         );
     }
 

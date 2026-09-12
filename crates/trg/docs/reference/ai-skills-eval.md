@@ -429,7 +429,7 @@ subcommands run.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `ceiling_usd` | number | Value of `--max-cost-usd`. Absent when the pass ran with no ceiling |
-| `spent_usd` | number | Total reported cost across every run in the pass |
+| `spent_usd` | number | Total reported cost across every runner invocation in the pass, including attempts `--retries` discarded |
 | `exhausted` | bool | Whether spend had reached the ceiling by the time the pass finished |
 | `runs_skipped` | integer | Runs not started because the ledger had already refused them |
 
@@ -979,11 +979,17 @@ flight cost when the check last passed. That is the price of a check cheap
 enough to run before every one of them rather than one that has to coordinate
 every lane in flight to answer.
 
+Every invocation is charged to it, including the attempts `--retries` threw
+away. The report keeps only the attempt that stuck, so a ceiling that counted
+what the report shows would let a flaky pass bill several times over what it
+was allowed.
+
 A run the ledger refuses is recorded with `status: skipped` and
 `failure_kind: budget`, carrying a warning naming what the pass had spent and
 the ceiling it hit. It is not a failed run: nothing was asked of the runner and
-nothing about the skill was measured, so it does not count against a pass rate
-or a `--require-assertions` gate. A run already served from cache is unaffected
+nothing about the skill was measured, so `grade` passes over it rather than
+reading its empty workspace as a wrong answer, and it does not count against a
+pass rate. A run already served from cache is unaffected
 by the ceiling, since a cache hit costs nothing and reusing it is exactly what
 a budget is for.
 
