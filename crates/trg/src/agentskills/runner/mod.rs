@@ -404,11 +404,20 @@ fn skill_error_to_runner(err: SkillError) -> RunnerError {
 /// separately into the workspace root by `stage_eval_file`, which is the only part of the
 /// suite directory a run is meant to see.
 ///
+/// A version control directory is withheld for the same reason. When the skill is its own
+/// checkout, its history still holds every revision of the suite, so a run that was handed
+/// the working tree without `evals/` could ask git for the answer key instead. No eval run
+/// needs a skill's history to do its work, so withholding it costs a case nothing.
+///
 /// Only the top level is filtered. A nested `evals/` deeper in the tree is the skill's own
 /// content, not this suite, so it stages like anything else.
 fn is_withheld_from_staging(entry_name: &std::ffi::OsStr) -> bool {
-    entry_name == std::ffi::OsStr::new(EVAL_SUITE_DIR_NAME)
+    WITHHELD_FROM_STAGING
+        .iter()
+        .any(|withheld| entry_name == std::ffi::OsStr::new(withheld))
 }
+
+const WITHHELD_FROM_STAGING: &[&str] = &[EVAL_SUITE_DIR_NAME, ".git", ".jj", ".hg", ".svn"];
 
 fn stage_skill_into_workspace(
     skill_path: &Path,
@@ -932,6 +941,45 @@ mod workspace_tests {
         assert_eq!(
             std::fs::read_to_string(workspace.join(".skill/reference/evals/guide.md")).unwrap(),
             "keep me"
+        );
+    }
+
+    #[test]
+    fn staging_withholds_the_history_the_eval_suite_is_recorded_in() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::create_dir_all(skill_path.join(".git/objects")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("evals/evals.json"), "{}").unwrap();
+        std::fs::write(skill_path.join(".git/objects/answer-key"), "expected_output").unwrap();
+
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let case = make_case(vec![]);
+        let mut request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+        request.skill_staging = SkillStaging::Copy;
+
+        prepare_workspace(&request).unwrap();
+
+        assert!(
+            !workspace.join(".skill/.git").exists(),
+            "a skill that is its own checkout keeps every revision of the withheld suite in its history"
         );
     }
 

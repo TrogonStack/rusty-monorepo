@@ -489,6 +489,12 @@ run is meant to see. Only the top level is filtered, so a nested `evals/`
 deeper in the skill tree is treated as the skill's own content and staged
 normally.
 
+A top-level version control directory (`.git`, `.jj`, `.hg`, `.svn`) is
+withheld for the same reason. When the skill is its own checkout, its history
+holds every revision of the suite, so a run handed the working tree without
+`evals/` could ask version control for the answer key instead. No run needs a
+skill's history to do its work.
+
 Leaving the suite out of the staged directory keeps it out of a listing, which
 is all a symlink can offer. A symlink names the path it points at, so a run that
 reads one learns where the skill really lives, and the suite it was not given is
