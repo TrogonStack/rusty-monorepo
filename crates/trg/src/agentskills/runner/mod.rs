@@ -24,9 +24,9 @@ use super::errors::SkillError;
 use super::evals::{EvalCase, EvalError};
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SKILL_LINK_OLD, SKILL_LINK_WITH};
-use super::redact::{redact_transcript_bytes, RedactedCommandLine};
+use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
 use super::report::{ScenarioKind, SkillStaging};
-use super::transcript::{write_normalized_transcript, TranscriptFormat};
+use super::transcript::{write_normalized_transcript, TranscriptFormat, WorkspaceBoundary};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum Runner {
@@ -285,11 +285,14 @@ pub fn persist_runner_io(
     request: &EvalRunRequest,
     captured: &CapturedProcess,
 ) -> Result<(), RunnerError> {
-    write_transcript(request.transcript_path, &captured.stdout)?;
+    let stdout = redact_transcript_bytes(&captured.stdout);
+    write_transcript(request.transcript_path, &stdout)?;
     write_stderr(request.stderr_path, &captured.stderr)?;
-    let normalized = runner
-        .transcript_format()
-        .normalize(runner.program_name(), &captured.stdout);
+    let normalized = runner.transcript_format().normalize(
+        runner.program_name(),
+        &stdout,
+        &WorkspaceBoundary::at(request.workspace_dir),
+    );
     write_normalized_transcript(request.transcript_path, &normalized)?;
     Ok(())
 }
@@ -481,12 +484,11 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn write_transcript(transcript_path: &Path, raw_stdout: &[u8]) -> std::io::Result<()> {
+pub fn write_transcript(transcript_path: &Path, stdout: &RedactedTranscript) -> std::io::Result<()> {
     if let Some(parent) = transcript_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let redacted = redact_transcript_bytes(raw_stdout);
-    std::fs::write(transcript_path, redacted.into_inner())
+    std::fs::write(transcript_path, stdout.as_str())
 }
 
 pub fn write_stderr(stderr_path: &Path, raw_stderr: &[u8]) -> std::io::Result<()> {
@@ -840,14 +842,14 @@ mod workspace_tests {
     }
 
     #[test]
-    fn write_transcript_redacts_bearer_aws_github_and_jwt_tokens() {
+    fn a_persisted_transcript_holds_no_bearer_aws_github_or_jwt_token() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("transcript.jsonl");
         let github = "ghp_123456789012345678901234567890123456";
         let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
         let raw =
             format!("Authorization: Bearer abcdefghijklmnop\nkeys AKIAIOSFODNN7EXAMPLE and {github}\ntoken={jwt}\n");
-        write_transcript(&path, raw.as_bytes()).unwrap();
+        write_transcript(&path, &redact_transcript_bytes(raw.as_bytes())).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("Bearer abcdefghijklmnop"));
         assert!(!written.contains("AKIAIOSFODNN7EXAMPLE"));

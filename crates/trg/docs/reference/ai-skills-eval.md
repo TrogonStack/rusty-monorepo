@@ -91,7 +91,7 @@ $ trg ai skills eval run \
         └── runs/
             └── run-001/
                 ├── workspace/          # agent working directory
-                ├── transcript.jsonl    # raw runner stdout (when --runner set)
+                ├── transcript.jsonl    # redacted runner stdout (when --runner set)
                 └── timing.json         # run metrics (when --runner set)
 ```
 
@@ -242,11 +242,20 @@ that matches nowhere reports against the workspace candidate.
 
 ### Graders that depend on the transcript
 
-`tool_used`, `tool_order`, and `skill_used` read the normalized transcript, and
-not every runner exposes one. When the runner cannot be observed, the result is
-recorded as **unsupported**: neither passed nor failed, and excluded from
-`pass_rate`. This keeps a harness that hides its tool calls from silently
-reading as a regression. See [Transcript artifact](#transcript-artifact).
+`tool_used`, `tool_order`, and `skill_used` read the normalized transcript.
+`claude-code`, `codex`, and `cursor-agent` all expose their tool calls, so all
+three answer these graders. When a runner emits no readable stream at all, the
+result is recorded as **unsupported**: neither passed nor failed, and excluded
+from `pass_rate`, which keeps an unobservable harness from reading as a
+regression.
+
+Tool *names* stay in each harness's own vocabulary, because renaming one
+harness's tools into another's would assert an equivalence the harness never
+made. `codex` reaches the filesystem through a shell, so it reports
+`command_execution` and `file_change` rather than `Read` and `Write`. A suite
+that must run on every harness should prefer `skill_used`, which is defined in
+terms of the staged skill path and answers everywhere. See
+[Transcript artifact](#transcript-artifact).
 
 ### The LLM judge
 
@@ -366,9 +375,9 @@ scored has no pass rate and reporting `0.0` reads as a total failure.
     {
       "assertion": "the skill was engaged",
       "passed": false,
-      "evidence": "runner 'codex' does not expose tool calls in a form trg can read",
+      "evidence": "runner 'mystery-runner' does not expose tool calls in a form trg can read",
       "grader": { "kind": "declarative" },
-      "unsupported": "runner 'codex' does not expose tool calls in a form trg can read"
+      "unsupported": "runner 'mystery-runner' does not expose tool calls in a form trg can read"
     }
   ],
   "summary": {
@@ -473,8 +482,8 @@ detection is scoped to the old skill directory for these runs.
 
 ## Transcript artifact
 
-When `--runner` is set, raw runner stdout is written to
-`runs/<run-id>/transcript.jsonl`. A descriptor is appended to the run's
+When `--runner` is set, runner stdout is written to
+`runs/<run-id>/transcript.jsonl` with secrets redacted. A descriptor is appended to the run's
 `artifacts` array in `report.json`:
 
 ```json
@@ -485,7 +494,7 @@ Format is runner-specific stream-json (one JSON object per line).
 
 ### Normalized transcript (`events.json`)
 
-Alongside the raw transcript, each run gets
+Alongside the redacted transcript, each run gets
 `runs/<run-id>/events.json`: the same turn reduced to one event vocabulary, so a
 grader is written once rather than once per harness.
 
@@ -500,19 +509,44 @@ Schema version: `trg.skills-eval.transcript.v1`.
     { "kind": "tool_call", "tool": "Read", "paths": [".skill/SKILL.md"] },
     { "kind": "assistant_text", "text": "..." },
     { "kind": "terminal", "ok": true }
+  ],
+  "workspace_escapes": [
+    { "tool": "read", "path": "/somewhere/outside/notes.md" }
   ]
 }
 ```
 
 | Field | Type | Notes |
 | ----- | ---- | ----- |
-| `runner` | string | The program that produced the raw transcript |
+| `runner` | string | The program that produced the transcript |
 | `tool_visibility` | enum | `observed` or `unavailable` |
 | `events[].kind` | enum | `assistant_text`, `tool_call`, or `terminal` |
+| `workspace_escapes[]` | array | Paths the run named that resolve outside its workspace; omitted when empty |
 
-`tool_visibility` is the honest part. Tool-call events are normalized for the
-Anthropic stream-json vocabulary, which is what `claude-code` emits. For
-`codex` and `cursor-agent`, trg records only their verified terminal events and
-reports `unavailable`, rather than guessing at an event shape it has not
-verified. A grader that needs tool calls then returns **unsupported** on those
-runners instead of a fabricated pass or fail; text-based graders are unaffected.
+Each of the three supported runners is normalized from event shapes verified
+against that runner's own output:
+
+| Runner | Events read | Tool vocabulary |
+| ------ | ----------- | --------------- |
+| `claude-code` | `assistant` blocks, `result` | its own tool names, such as `Read` and `Write` |
+| `cursor-agent` | `assistant` blocks, `tool_call` (`started`), `result` | the tool-call member name, such as `read`, `glob`, `edit` |
+| `codex` | `item.completed`/`agent_message`, `item.started`/`command_execution`, `item.started`/`file_change`, `turn.completed` | `command_execution` and `file_change` |
+
+`tool_visibility` is the honest part. A runner whose stream trg cannot read at
+all reports `unavailable`, and a grader that needs tool calls then returns
+**unsupported** rather than a fabricated pass or fail.
+
+`workspace_escapes` is the other honest part. trg invokes each harness's own
+CLI, which means it cannot confine that CLI's filesystem access: `cursor-agent`
+runs with `--force` and `claude-code` has no sandbox flag, so a run can read a
+file from anywhere the invoking user can. What is checked is what a tool named as
+a path: a file argument, and the operands of a shell command that name a path
+outright, so `cat ~/.codex/skills/demo/SKILL.md` is reported while the
+interpreter in `/bin/zsh -lc '...'` is not. A search pattern can mention a path
+without naming one, so it is left unchecked. A path beginning with `~` names the
+host home directory rather than a directory in the workspace, so it is resolved
+against `HOME` before the check. Every escape is also recorded as a run warning
+in `report.json`. Detection is the remedy available here; prevention is not.
+
+`events.json` is normalized from the redacted transcript, so it carries no
+secret that `transcript.jsonl` had stripped.
