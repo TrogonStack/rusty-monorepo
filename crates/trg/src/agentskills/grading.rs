@@ -34,11 +34,15 @@ use super::report::{ReportDocument, RunRecord};
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
-pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v2";
+pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v3";
+const GRADING_SCHEMA_VERSION_V2: &str = "trg.skills-eval.grading.v2";
 const GRADING_SCHEMA_VERSION_V1: &str = "trg.skills-eval.grading.v1";
 
 pub fn grading_schema_version_is_supported(version: &str) -> bool {
-    version == GRADING_SCHEMA_VERSION || version == GRADING_SCHEMA_VERSION_V1
+    matches!(
+        version,
+        GRADING_SCHEMA_VERSION | GRADING_SCHEMA_VERSION_V2 | GRADING_SCHEMA_VERSION_V1
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -105,9 +109,11 @@ pub struct GradingSummary {
     #[serde(default)]
     pub unsupported: usize,
     /// Over the scored assertions only, so an ungradable property cannot drag a
-    /// skill's score down on a runner that simply cannot be observed.
+    /// skill's score down on a runner that simply cannot be observed. `null` when
+    /// nothing was scored at all, because no assertion answered is not the same
+    /// result as every assertion failed.
     #[schemars(range(min = 0.0, max = 1.0))]
-    pub pass_rate: f64,
+    pub pass_rate: Option<f64>,
 }
 
 /// The single place the grading arithmetic lives, so the writer and both
@@ -137,11 +143,11 @@ impl GradingCounts {
         self.total - self.unsupported
     }
 
-    pub fn pass_rate(self) -> f64 {
+    pub fn pass_rate(self) -> Option<f64> {
         if self.scored() == 0 {
-            0.0
+            None
         } else {
-            self.passed as f64 / self.scored() as f64
+            Some(self.passed as f64 / self.scored() as f64)
         }
     }
 
@@ -153,6 +159,21 @@ impl GradingCounts {
             unsupported: self.unsupported,
             pass_rate: self.pass_rate(),
         }
+    }
+}
+
+pub fn pass_rate_matches(reported: Option<f64>, expected: Option<f64>) -> bool {
+    match (reported, expected) {
+        (None, None) => true,
+        (Some(reported), Some(expected)) => (reported - expected).abs() <= 0.0001,
+        _ => false,
+    }
+}
+
+pub fn describe_pass_rate(rate: Option<f64>) -> String {
+    match rate {
+        Some(rate) => format!("{rate}"),
+        None => "not scored".to_string(),
     }
 }
 
@@ -1200,8 +1221,8 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
         errors.push(ValidationError::for_field(
             "schema_version",
             format!(
-                "expected '{}' or '{}', got '{}'",
-                GRADING_SCHEMA_VERSION, GRADING_SCHEMA_VERSION_V1, grading.schema_version
+                "expected '{}', '{}' or '{}', got '{}'",
+                GRADING_SCHEMA_VERSION, GRADING_SCHEMA_VERSION_V2, GRADING_SCHEMA_VERSION_V1, grading.schema_version
             ),
         ));
     }
@@ -1276,13 +1297,13 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
         ));
     }
 
-    let expected_rate = counts.pass_rate();
-    if (grading.summary.pass_rate - expected_rate).abs() > 0.0001 {
+    if !pass_rate_matches(grading.summary.pass_rate, counts.pass_rate()) {
         errors.push(ValidationError::for_field(
             "summary.pass_rate",
             format!(
-                "{} does not match computed rate {expected_rate}",
-                grading.summary.pass_rate
+                "{} does not match computed rate {}",
+                describe_pass_rate(grading.summary.pass_rate),
+                describe_pass_rate(counts.pass_rate())
             ),
         ));
     }
@@ -1645,7 +1666,33 @@ mod tests {
         assert_eq!(counts.passed, 1);
         assert_eq!(counts.failed, 0);
         assert_eq!(counts.scored(), 1);
-        assert_eq!(counts.pass_rate(), 1.0);
+        assert_eq!(counts.pass_rate(), Some(1.0));
+    }
+
+    #[test]
+    fn a_summary_with_nothing_scored_reports_no_pass_rate_rather_than_zero() {
+        let counts = GradingCounts::tally(&[AssertionGradeResult {
+            assertion: "the skill was engaged".to_string(),
+            passed: false,
+            evidence: "runner 'codex' does not expose tool calls".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Declarative,
+                model: None,
+                command: None,
+            },
+            rationale: None,
+            unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
+        }]);
+
+        assert_eq!(counts.scored(), 0);
+        assert_eq!(counts.pass_rate(), None);
+
+        let summary = counts.summary();
+        assert_eq!(summary.pass_rate, None);
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap()["pass_rate"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
@@ -1675,7 +1722,7 @@ mod tests {
         assert_eq!(grading.summary.unsupported, 1);
         assert_eq!(grading.summary.passed, 1);
         assert_eq!(grading.summary.failed, 0);
-        assert_eq!(grading.summary.pass_rate, 1.0);
+        assert_eq!(grading.summary.pass_rate, Some(1.0));
 
         let unsupported = grading
             .assertion_results
@@ -1962,7 +2009,7 @@ mod tests {
                 failed: 0,
                 total: 1,
                 unsupported: 0,
-                pass_rate: 1.0,
+                pass_rate: Some(1.0),
             },
         };
 

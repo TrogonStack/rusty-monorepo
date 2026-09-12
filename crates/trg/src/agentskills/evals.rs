@@ -420,7 +420,9 @@ pub struct WorkspaceCheckReport {
     pub failed_assertions: usize,
     #[serde(default)]
     pub unsupported_assertions: usize,
-    pub pass_rate: f64,
+    /// `null` when the workspace produced no scored assertion at all, so an
+    /// unobservable runner is not reported as a total failure.
+    pub pass_rate: Option<f64>,
 }
 
 pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSuite> {
@@ -786,9 +788,9 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
     }
 
     let pass_rate = if assertion_results == 0 {
-        0.0
+        None
     } else {
-        passed_assertions as f64 / assertion_results as f64
+        Some(passed_assertions as f64 / assertion_results as f64)
     };
 
     Ok(WorkspaceCheckReport {
@@ -946,13 +948,13 @@ fn validate_grading_file(
         ));
     }
 
-    let expected_rate = counts.pass_rate();
-    if (grading.summary.pass_rate - expected_rate).abs() > 0.0001 {
+    if !grading::pass_rate_matches(grading.summary.pass_rate, counts.pass_rate()) {
         errors.push(ValidationError::for_field(
             format!("{} summary.pass_rate", file_label),
             format!(
                 "{} does not match computed pass rate {}",
-                grading.summary.pass_rate, expected_rate
+                grading::describe_pass_rate(grading.summary.pass_rate),
+                grading::describe_pass_rate(counts.pass_rate())
             ),
         ));
     }
@@ -1246,7 +1248,7 @@ mod tests {
         assert_eq!(report.assertion_results, 2);
         assert_eq!(report.passed_assertions, 1);
         assert_eq!(report.failed_assertions, 1);
-        assert_eq!(report.pass_rate, 0.5);
+        assert_eq!(report.pass_rate, Some(0.5));
     }
 
     #[test]
