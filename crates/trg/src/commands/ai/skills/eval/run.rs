@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
@@ -24,6 +24,7 @@ use crate::agentskills::runner::{
     SkillDigest,
 };
 use crate::agentskills::sampling::AttemptCount;
+use crate::agentskills::scenario_selection::ScenarioSelection;
 use crate::agentskills::workspace_scaffold::ScaffoldPermission;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
@@ -70,8 +71,7 @@ pub struct RunArgs {
         long,
         value_enum,
         value_name = "KIND",
-        default_values_t = [ScenarioKind::WithSkill],
-        help = "Scenario kind to include (repeatable)"
+        help = "Scenario kind to include (repeatable). Unset runs with_skill and without_skill together, so the pass has a baseline to compare against; under --reuse-completed, unset runs with_skill alone"
     )]
     pub scenario: Vec<ScenarioKind>,
 
@@ -285,15 +285,15 @@ impl RunArgs {
             .iteration
             .unwrap_or_else(|| detect_next_iteration(&self.out_dir, &props.name));
 
-        let distinct_scenarios: HashSet<ScenarioKind> = self.scenario.iter().copied().collect();
-        if self.reuse_completed && distinct_scenarios.len() > 1 {
-            eprintln!(
-                "--reuse-completed cannot be combined with more than one --scenario: a completed run for one scenario is served to the others, so the scenario delta would compare a run against itself. Run one scenario per invocation, or drop --reuse-completed."
-            );
-            return 1;
-        }
+        let scenario_selection = match ScenarioSelection::resolve(&self.scenario, self.reuse_completed) {
+            Ok(selection) => selection,
+            Err(error) => {
+                eprintln!("{error}");
+                return 1;
+            }
+        };
 
-        if self.scenario.contains(&ScenarioKind::OldSkill) && self.old_skill_dir.is_none() {
+        if scenario_selection.contains(ScenarioKind::OldSkill) && self.old_skill_dir.is_none() {
             eprintln!("--old-skill-dir is required when --scenario old_skill is included");
             return 1;
         }
@@ -362,7 +362,7 @@ impl RunArgs {
             &self.skill_dir,
             &props.name,
             &self.model_config,
-            &self.scenario,
+            scenario_selection.scenarios(),
             build_options,
         ) {
             Ok(bundle) => bundle,
@@ -1553,6 +1553,103 @@ mod tests {
         );
         assert!(report_dir.join("iteration-1/benchmark.json").is_file());
         assert!(report_dir.join("iteration-1/alias-index.json").is_file());
+    }
+
+    fn run_with_scenario_selection(
+        skill_dir: PathBuf,
+        out_dir: PathBuf,
+        scenario: Vec<ScenarioKind>,
+        reuse_completed: bool,
+    ) -> (i32, PathBuf) {
+        let status = RunArgs {
+            skill_dir,
+            out_dir: out_dir.clone(),
+            model_config: "ci-default".to_string(),
+            scenario,
+            runner: None,
+            runner_model: None,
+            timeout_secs: None,
+            retries: 0,
+            force: false,
+            iteration: Some(1),
+            attempts: AttemptCount::single(),
+            concurrency: RunConcurrency::serial(),
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: false,
+            reuse_completed,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            max_cost_usd: None,
+            ci: EvalCiArgs::default(),
+        }
+        .handle(&crate::fs::RealFS);
+
+        let report_dirs: Vec<_> = std::fs::read_dir(out_dir.join("fixture-skill"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        let report_dir = report_dirs.into_iter().next().unwrap();
+        (status, report_dir)
+    }
+
+    fn scenario_ids(report_dir: &Path) -> Vec<String> {
+        let report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let mut ids: Vec<String> = report["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["scenario_id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    #[test]
+    fn a_pass_that_names_no_scenario_runs_both_arms() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_fixture_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_scenario_selection(skill_dir, out_dir, Vec::new(), false);
+        assert_eq!(status, 0);
+        assert_eq!(
+            scenario_ids(&report_dir),
+            vec!["with_skill".to_string(), "without_skill".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_pass_that_names_one_scenario_runs_only_that_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_fixture_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) =
+            run_with_scenario_selection(skill_dir, out_dir, vec![ScenarioKind::WithoutSkill], false);
+        assert_eq!(status, 0);
+        assert_eq!(scenario_ids(&report_dir), vec!["without_skill".to_string()]);
+    }
+
+    #[test]
+    fn a_pass_that_names_no_scenario_under_reuse_completed_runs_the_with_skill_arm_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_fixture_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_scenario_selection(skill_dir, out_dir, Vec::new(), true);
+        assert_eq!(status, 0);
+        assert_eq!(scenario_ids(&report_dir), vec!["with_skill".to_string()]);
     }
 
     fn write_named_skill(root: &Path, dir_name: &str, skill_name: &str) -> PathBuf {

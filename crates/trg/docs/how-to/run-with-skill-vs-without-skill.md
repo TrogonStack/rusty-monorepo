@@ -12,19 +12,20 @@ assertion pass rates, not just runner completion.
 
 ## 1. Run both scenarios
 
-Pass `--scenario` twice to include `with_skill` and `without_skill`:
+`with_skill` and `without_skill` run together unless you name `--scenario`
+yourself, so the plain command already produces both arms:
 
 ```shell
 $ trg ai skills eval run \
     --skill-dir ./skills/csv-analyzer \
     --out-dir ./artifacts \
-    --runner cursor-agent \
-    --scenario with_skill \
-    --scenario without_skill
+    --runner cursor-agent
 ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 ```
 
-For two eval cases this produces four runs: each case once per scenario.
+For two eval cases this produces four runs: each case once per scenario. Name
+`--scenario` explicitly, once or twice, when you want fewer arms or a
+particular order; see [Choosing which scenarios run](../reference/ai-skills-eval.md#choosing-which-scenarios-run).
 
 ## 2. Grade completed runs
 

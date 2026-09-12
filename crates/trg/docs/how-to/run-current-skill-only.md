@@ -10,13 +10,14 @@ loaded, without spending tokens on baseline or old-skill scenarios.
 
 ## 1. Scaffold the report bundle
 
-The default scenario is `with_skill`, so you only need `--skill-dir` and
-`--out-dir`:
+Naming no scenario runs `with_skill` and `without_skill` together, so name
+`--scenario with_skill` to spend on the one arm:
 
 ```shell
 $ trg ai skills eval run \
     --skill-dir ./skills/csv-analyzer \
-    --out-dir ./artifacts
+    --out-dir ./artifacts \
+    --scenario with_skill
 ./artifacts/csv-analyzer/20260526T143022Z-7f3a2b1c
 ```
 
@@ -48,6 +49,7 @@ Pass `--runner` to invoke the agent for each eval case:
 $ trg ai skills eval run \
     --skill-dir ./skills/csv-analyzer \
     --out-dir ./artifacts \
+    --scenario with_skill \
     --runner cursor-agent \
     --runner-model sonnet-4 \
     --force
@@ -105,8 +107,9 @@ Use `--mode strict` in CI to turn a missing `grading.json` or a failed assertion
 
 ## Tips
 
-- Explicitly pass `--scenario with_skill` if your shell aliases or scripts set
-  other scenarios by default.
+- `--scenario with_skill` is what keeps the pass to one arm. Leaving it off
+  runs the baseline too, which is the right default for judging a skill but not
+  what this page is for.
 - Use `--model-config prod-sonnet-4` to label the model configuration in
   `report.json` for later comparison across runs.
 - Re-run with `--force` to overwrite a report directory with the same ID.
