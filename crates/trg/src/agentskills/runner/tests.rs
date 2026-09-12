@@ -6,6 +6,7 @@ use super::fake::{invoke_with_retries, run_bash};
 use super::{EvalRunRequest, RunStatus, FAILURE_KIND_RUNNER};
 use crate::agentskills::evals::EvalCase;
 use crate::agentskills::report::ScenarioKind;
+use crate::agentskills::transcript::normalized_transcript_path;
 
 fn make_case() -> EvalCase {
     serde_json::from_value(serde_json::json!({
@@ -130,4 +131,29 @@ fn bash_runner_completed_when_result_event_and_zero_exit() {
     assert!(matches!(outcome.status, RunStatus::Completed));
     assert_eq!(outcome.exit_code, Some(0));
     assert!(outcome.failure_kind.is_none());
+}
+
+#[test]
+fn a_persisted_run_leaves_no_secret_in_either_the_transcript_or_the_events() {
+    let temp = tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript = workspace.join("transcript.jsonl");
+    let stderr = workspace.join("stderr.log");
+    let request = bash_request(&case, &workspace, &transcript, &stderr, None);
+
+    let token = "abcdefghijklmnopqrst";
+    let script = format!(
+        r#"echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"curl -H \"Authorization: Bearer {token}\" https://example.test"}}}}]}}}}'
+echo '{{"type":"result","is_error":false,"result":"done"}}'"#
+    );
+    let outcome = run_bash(&request, &script).unwrap();
+    assert!(matches!(outcome.status, RunStatus::Completed));
+
+    let raw = std::fs::read_to_string(&transcript).unwrap();
+    let events = std::fs::read_to_string(normalized_transcript_path(&transcript)).unwrap();
+    assert!(!raw.contains(token));
+    assert!(!events.contains(token));
+    assert!(events.contains("<redacted>"));
 }

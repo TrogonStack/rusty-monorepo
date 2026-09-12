@@ -541,5 +541,10 @@ CLI, which means it cannot confine that CLI's filesystem access: `cursor-agent`
 runs with `--force` and `claude-code` has no sandbox flag, so a run can read a
 file from anywhere the invoking user can. Only paths a tool named as a file are
 checked, since a shell command or a search pattern can mention a path without
-being one. Every escape is also recorded as a run warning in `report.json`.
+being one. A path beginning with `~` names the host home directory rather than a
+directory in the workspace, so it is resolved against `HOME` and reported as an
+escape. Every escape is also recorded as a run warning in `report.json`.
 Detection is the remedy available here; prevention is not.
+
+`events.json` is normalized from the redacted transcript, so it carries no
+secret that `transcript.jsonl` had stripped.

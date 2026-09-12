@@ -862,6 +862,7 @@ fn rebuild_summaries(bundle: &mut ReportBundle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::redact::redact_transcript_bytes;
     use crate::agentskills::report::ScenarioKind;
     use crate::agentskills::transcript::{
         ToolName, ToolVisibility, TranscriptFormat, WorkspaceBoundary, WorkspaceEscape,
@@ -891,7 +892,7 @@ mod tests {
 "#;
         let transcript = TranscriptFormat::CursorStreamJson.normalize(
             "cursor-agent",
-            stdout,
+            &redact_transcript_bytes(stdout),
             &WorkspaceBoundary::at(workspace.path()),
         );
         assert_eq!(workspace_escape_warning(&transcript), None);

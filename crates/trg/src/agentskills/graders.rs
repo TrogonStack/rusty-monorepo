@@ -390,6 +390,7 @@ fn is_subsequence(expected: &[ToolName], observed: &[&ToolName]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::redact::redact_transcript_bytes;
     use crate::agentskills::transcript::{normalize_stream_json, TranscriptFormat, WorkspaceBoundary};
 
     const CLAUDE_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}
@@ -419,7 +420,11 @@ mod tests {
                 run_dir,
                 workspace_dir,
                 outputs_dir,
-                transcript: normalize_stream_json("claude", CLAUDE_STREAM, &WorkspaceBoundary::unknown()),
+                transcript: normalize_stream_json(
+                    "claude",
+                    &redact_transcript_bytes(CLAUDE_STREAM),
+                    &WorkspaceBoundary::unknown(),
+                ),
             }
         }
 
@@ -645,8 +650,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
             "codex",
-            br#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,240p' .skill/SKILL.md\""}}
-{"type":"turn.completed"}"#,
+            &redact_transcript_bytes(br#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,240p' .skill/SKILL.md\""}}
+{"type":"turn.completed"}"#),
             &WorkspaceBoundary::unknown(),
         );
         let input = GradeInput {
@@ -679,7 +684,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
             "codex",
-            br#"{"type":"turn.completed"}"#,
+            &redact_transcript_bytes(br#"{"type":"turn.completed"}"#),
             &WorkspaceBoundary::unknown(),
         );
         let input = GradeInput {

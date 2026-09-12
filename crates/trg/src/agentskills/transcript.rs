@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::prompt::{SKILL_LINK_OLD, SKILL_LINK_WITH};
+use super::redact::RedactedTranscript;
 
 pub const NORMALIZED_TRANSCRIPT_SCHEMA_VERSION: &str = "trg.skills-eval.transcript.v1";
 pub const NORMALIZED_TRANSCRIPT_FILE: &str = "events.json";
@@ -82,9 +83,38 @@ impl WorkspaceBoundary {
         if self.roots.is_empty() {
             return true;
         }
+        let Some(candidate) = host_path(candidate, home_dir()) else {
+            return false;
+        };
         self.roots
             .iter()
-            .any(|root| lexical_resolve(root, Path::new(candidate)).starts_with(root))
+            .any(|root| lexical_resolve(root, &candidate).starts_with(root))
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| !home.as_os_str().is_empty())
+}
+
+/// The path a named argument refers to on the host, or `None` when it names a
+/// home directory that cannot be located.
+///
+/// A leading `~` names the host home directory, so joining it onto the workspace
+/// root would read `~/.cursor/plugins/x/SKILL.md` as a file inside the workspace
+/// and hide the very escape this boundary exists to report. A home that cannot be
+/// located is not inside the workspace either, so it stays outside the boundary
+/// rather than resolving to it.
+fn host_path(candidate: &str, home: Option<PathBuf>) -> Option<PathBuf> {
+    let Some(rest) = candidate.strip_prefix('~') else {
+        return Some(PathBuf::from(candidate));
+    };
+    match rest.strip_prefix('/') {
+        Some(tail) => Some(home?.join(tail)),
+        None if rest.is_empty() => home,
+        // `~other/...` names another user's home, which is never the workspace.
+        None => None,
     }
 }
 
@@ -253,7 +283,15 @@ impl TranscriptFormat {
         }
     }
 
-    pub fn normalize(self, runner: &str, stdout: &[u8], boundary: &WorkspaceBoundary) -> NormalizedTranscript {
+    /// Normalizing takes the redacted transcript rather than the runner's raw
+    /// bytes, so `events.json` cannot carry a secret that `transcript.jsonl`
+    /// already had stripped.
+    pub fn normalize(
+        self,
+        runner: &str,
+        stdout: &RedactedTranscript,
+        boundary: &WorkspaceBoundary,
+    ) -> NormalizedTranscript {
         match self {
             Self::AnthropicStreamJson => normalize_stream_json(runner, stdout, boundary),
             Self::CursorStreamJson => normalize_cursor_stream_json(runner, stdout, boundary),
@@ -369,11 +407,10 @@ impl ToolArguments {
     }
 }
 
-pub fn ndjson_values(stdout: &[u8]) -> Vec<serde_json::Value> {
-    let Ok(text) = std::str::from_utf8(stdout) else {
-        return Vec::new();
-    };
-    text.lines()
+pub fn ndjson_values(stdout: &RedactedTranscript) -> Vec<serde_json::Value> {
+    stdout
+        .as_str()
+        .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_str(line).ok())
@@ -391,7 +428,11 @@ fn content_blocks(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> 
 ///
 /// Only the shapes this repository already relies on are recognized. Anything
 /// unrecognized is skipped rather than guessed at.
-pub fn normalize_stream_json(runner: &str, stdout: &[u8], boundary: &WorkspaceBoundary) -> NormalizedTranscript {
+pub fn normalize_stream_json(
+    runner: &str,
+    stdout: &RedactedTranscript,
+    boundary: &WorkspaceBoundary,
+) -> NormalizedTranscript {
     const PATH_KEYS: &[&str] = &["file_path", "path", "notebook_path"];
     const TEXT_KEYS: &[&str] = &["command", "pattern", "skill"];
 
@@ -434,7 +475,11 @@ pub fn normalize_stream_json(runner: &str, stdout: &[u8], boundary: &WorkspaceBo
 /// A `tool_call` event carries exactly one `<name>ToolCall` member, and that
 /// member name is the tool's own name. Only the `started` subtype is read, since
 /// `completed` repeats the same call with its result attached.
-pub fn normalize_cursor_stream_json(runner: &str, stdout: &[u8], boundary: &WorkspaceBoundary) -> NormalizedTranscript {
+pub fn normalize_cursor_stream_json(
+    runner: &str,
+    stdout: &RedactedTranscript,
+    boundary: &WorkspaceBoundary,
+) -> NormalizedTranscript {
     const CALL_SUFFIX: &str = "ToolCall";
     const PATH_KEYS: &[&str] = &["path", "targetDirectory"];
     const TEXT_KEYS: &[&str] = &["command", "globPattern", "pattern"];
@@ -483,7 +528,11 @@ pub fn normalize_cursor_stream_json(runner: &str, stdout: &[u8], boundary: &Work
 /// tools, so its tool vocabulary is `command_execution` and `file_change`. Only
 /// `file_change` names paths the boundary can be checked against; a command is
 /// kept as text.
-pub fn normalize_codex_thread_jsonl(runner: &str, stdout: &[u8], boundary: &WorkspaceBoundary) -> NormalizedTranscript {
+pub fn normalize_codex_thread_jsonl(
+    runner: &str,
+    stdout: &RedactedTranscript,
+    boundary: &WorkspaceBoundary,
+) -> NormalizedTranscript {
     let mut builder = TranscriptBuilder::new(boundary);
 
     for value in ndjson_values(stdout) {
@@ -562,6 +611,7 @@ pub fn read_normalized_transcript(transcript_path: &std::path::Path) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::redact::redact_transcript_bytes;
 
     const CURSOR_STREAM: &[u8] = br#"{"type":"system","subtype":"init","cwd":"/w"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll read the skill first."}]}}
@@ -596,7 +646,11 @@ mod tests {
 
     #[test]
     fn normalizes_claude_stream_into_ordered_events() {
-        let transcript = normalize_stream_json("claude", CLAUDE_STREAM, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(CLAUDE_STREAM),
+            &WorkspaceBoundary::unknown(),
+        );
 
         assert_eq!(transcript.tool_visibility, ToolVisibility::Observed);
         assert_eq!(
@@ -617,7 +671,11 @@ mod tests {
 
     #[test]
     fn staged_skill_path_counts_as_engagement() {
-        let transcript = normalize_stream_json("claude", CLAUDE_STREAM, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(CLAUDE_STREAM),
+            &WorkspaceBoundary::unknown(),
+        );
         assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
         assert_eq!(transcript.skill_engagement().engaged(), Some(true));
     }
@@ -626,7 +684,11 @@ mod tests {
     fn native_skill_tool_counts_as_engagement() {
         let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"demo-skill"}}]}}
 "#;
-        let transcript = normalize_stream_json("claude", stdout, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        );
         assert_eq!(transcript.skill_engagement(), SkillEngagement::NativeSkillTool);
     }
 
@@ -634,7 +696,11 @@ mod tests {
     fn tools_without_skill_reference_are_not_engagement() {
         let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"outputs/report.md"}}]}}
 "#;
-        let transcript = normalize_stream_json("claude", stdout, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        );
         assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
         assert_eq!(transcript.skill_engagement().engaged(), Some(false));
     }
@@ -652,7 +718,11 @@ mod tests {
 {"type":"mystery_future_event","payload":1}
 {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}
 "#;
-        let transcript = normalize_stream_json("claude", stdout, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        );
         assert_eq!(transcript.events.len(), 1);
         assert_eq!(transcript.tool_call_count("Read"), 1);
     }
@@ -661,7 +731,11 @@ mod tests {
     fn error_terminal_is_recorded_as_not_ok() {
         let stdout = br#"{"type":"result","is_error":true,"result":"boom"}
 "#;
-        let transcript = normalize_stream_json("claude", stdout, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        );
         assert!(matches!(
             transcript.events.first(),
             Some(TranscriptEvent::Terminal { ok: false })
@@ -670,8 +744,11 @@ mod tests {
 
     #[test]
     fn codex_thread_events_are_normalized_in_the_shell_vocabulary_codex_uses() {
-        let transcript =
-            TranscriptFormat::CodexThreadJsonl.normalize("codex", CODEX_THREAD, &WorkspaceBoundary::unknown());
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(CODEX_THREAD),
+            &WorkspaceBoundary::unknown(),
+        );
 
         assert_eq!(transcript.tool_visibility, ToolVisibility::Observed);
         assert_eq!(
@@ -698,15 +775,22 @@ mod tests {
         let stdout = br#"{"type":"thread.started","thread_id":"abc"}
 {"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40}}
 "#;
-        let transcript = TranscriptFormat::CodexThreadJsonl.normalize("codex", stdout, &WorkspaceBoundary::unknown());
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        );
         assert_eq!(transcript.events, vec![TranscriptEvent::Terminal { ok: true }]);
         assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
     }
 
     #[test]
     fn cursor_tool_calls_are_normalized_from_their_member_name() {
-        let transcript =
-            TranscriptFormat::CursorStreamJson.normalize("cursor-agent", CURSOR_STREAM, &WorkspaceBoundary::unknown());
+        let transcript = TranscriptFormat::CursorStreamJson.normalize(
+            "cursor-agent",
+            &redact_transcript_bytes(CURSOR_STREAM),
+            &WorkspaceBoundary::unknown(),
+        );
 
         assert_eq!(transcript.tool_visibility, ToolVisibility::Observed);
         assert_eq!(
@@ -730,8 +814,11 @@ mod tests {
         let stdout = br#"{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"args":{"path":".skill/SKILL.md"}}}}
 {"type":"tool_call","subtype":"completed","tool_call":{"readToolCall":{"args":{"path":".skill/SKILL.md"},"result":{"success":{"content":"..."}}}}}
 "#;
-        let transcript =
-            TranscriptFormat::CursorStreamJson.normalize("cursor-agent", stdout, &WorkspaceBoundary::unknown());
+        let transcript = TranscriptFormat::CursorStreamJson.normalize(
+            "cursor-agent",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        );
         assert_eq!(transcript.tool_call_count("read"), 1);
     }
 
@@ -745,7 +832,7 @@ mod tests {
 "#;
         let transcript = TranscriptFormat::CursorStreamJson.normalize(
             "cursor-agent",
-            stdout,
+            &redact_transcript_bytes(stdout),
             &WorkspaceBoundary::at(workspace.path()),
         );
 
@@ -767,11 +854,60 @@ mod tests {
         let stdout =
             br#"{"type":"item.started","item":{"type":"command_execution","command":"sed -n '1,240p' .skill/SKILL.md"}}
 "#;
-        let transcript =
-            TranscriptFormat::CodexThreadJsonl.normalize("codex", stdout, &WorkspaceBoundary::at(workspace.path()));
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
 
         assert!(!transcript.escaped_workspace());
         assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    #[test]
+    fn a_path_under_the_host_home_directory_is_reported_as_outside_the_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"args":{"path":"~/.cursor/plugins/demo/SKILL.md"}}}}
+"#;
+        let transcript = TranscriptFormat::CursorStreamJson.normalize(
+            "cursor-agent",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.workspace_escapes[0].path, "~/.cursor/plugins/demo/SKILL.md");
+    }
+
+    #[test]
+    fn a_home_relative_path_resolves_against_the_home_directory_never_the_workspace() {
+        let home = Some(PathBuf::from("/home/agent"));
+        assert_eq!(
+            host_path("~/.cursor/plugins/demo/SKILL.md", home.clone()),
+            Some(PathBuf::from("/home/agent/.cursor/plugins/demo/SKILL.md"))
+        );
+        assert_eq!(host_path("~", home.clone()), home);
+        assert_eq!(host_path("~/.cursor/plugins/demo/SKILL.md", None), None);
+        assert_eq!(host_path("~other/plugins/demo/SKILL.md", home), None);
+        assert_eq!(
+            host_path("outputs/summary.md", None),
+            Some(PathBuf::from("outputs/summary.md"))
+        );
+    }
+
+    #[test]
+    fn events_carry_no_secret_the_raw_transcript_had_redacted() {
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"curl -H 'Authorization: Bearer abcdefghijklmnopqrst' https://example.test"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        );
+
+        let serialized = serde_json::to_string(&transcript).unwrap();
+        assert!(!serialized.contains("abcdefghijklmnopqrst"));
+        assert!(serialized.contains("<redacted>"));
     }
 
     #[test]
@@ -784,16 +920,18 @@ mod tests {
     fn cursor_terminal_event_carries_its_error_flag() {
         let ok = TranscriptFormat::CursorStreamJson.normalize(
             "cursor-agent",
-            br#"{"type":"system","subtype":"init"}
+            &redact_transcript_bytes(
+                br#"{"type":"system","subtype":"init"}
 {"type":"result","is_error":false,"result":"hello"}
 "#,
+            ),
             &WorkspaceBoundary::unknown(),
         );
         assert_eq!(ok.events, vec![TranscriptEvent::Terminal { ok: true }]);
 
         let failed = TranscriptFormat::CursorStreamJson.normalize(
             "cursor-agent",
-            br#"{"type":"result","is_error":true,"result":"boom"}"#,
+            &redact_transcript_bytes(br#"{"type":"result","is_error":true,"result":"boom"}"#),
             &WorkspaceBoundary::unknown(),
         );
         assert_eq!(failed.events, vec![TranscriptEvent::Terminal { ok: false }]);
@@ -803,7 +941,11 @@ mod tests {
     fn normalized_transcript_is_persisted_beside_the_raw_transcript() {
         let dir = tempfile::tempdir().unwrap();
         let transcript_path = dir.path().join("transcript.jsonl");
-        let transcript = normalize_stream_json("claude", CLAUDE_STREAM, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(CLAUDE_STREAM),
+            &WorkspaceBoundary::unknown(),
+        );
 
         write_normalized_transcript(&transcript_path, &transcript).unwrap();
 
@@ -816,7 +958,11 @@ mod tests {
 
     #[test]
     fn normalized_transcript_round_trips_as_json() {
-        let transcript = normalize_stream_json("claude", CLAUDE_STREAM, &WorkspaceBoundary::unknown());
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(CLAUDE_STREAM),
+            &WorkspaceBoundary::unknown(),
+        );
         let json = serde_json::to_string(&transcript).unwrap();
         let parsed: NormalizedTranscript = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, transcript);
