@@ -45,6 +45,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 | `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
+| `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
@@ -786,6 +787,39 @@ re-running the same command with the same `--attempts` still costs nothing.
 
 `--reuse-completed` is rejected when more than one `--scenario` is requested in
 a single invocation, for the same reason.
+
+---
+
+## Running more than one run at a time
+
+A pass executes one run per case, per `--scenario` and per `--attempts` draw,
+and each of those waits on a live agent. Serially, the wall clock is the product
+of all four, which is how a suite small enough to read in a minute takes an hour
+to execute. `-j N` keeps N runs in flight instead.
+
+It cuts wall clock, not cost. Every run still pays for its own model calls, and
+the lanes draw on the same account, so N is capped at 8: past that the requests
+queue behind the provider's rate limit rather than the local CPU, and a run that
+waits long enough there is indistinguishable from a slow one.
+
+Each lane takes the next run nobody has claimed rather than a fixed share of
+them, because runs are not equally long: one case can spend minutes with the
+agent while the next is served from cache. Runs keep their suite order in
+`report.json` whatever order the lanes finish in, so the same command compared
+across two passes lines its runs up by position.
+
+One thing changes meaning with more than one lane. `skill_integrity` reports
+whether the skill directory a run was handed still holds what it held before,
+and every lane reads the same directory, so a run that rewrites the skill
+rewrites it for every lane still reading it. With `-j 1` the check is hashed
+around each run and names that run. With `-j N` it is hashed once around the
+whole pass, the finding is recorded on every run that executed, and each of
+those runs carries a warning saying the change cannot be charged to it alone.
+
+Either window can also fail to read the directory back, which is what a run that
+deleted the skill leaves behind. That is reported as `tampered: true` with no
+`tampered_files` and a warning naming the read failure, because a hash that
+never came back is not a comparison that passed.
 
 ---
 
