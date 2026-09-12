@@ -47,7 +47,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
 | `--attempts` | integer | `3` | Draw each (case × scenario) cell this many times. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
-| `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. Accepts a finite amount greater than zero; a ceiling of zero or less could admit nothing and is refused. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
+| `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. Accepts a finite amount greater than zero; a ceiling of zero or less could admit nothing and is refused, as is any ceiling over a runner that publishes no price. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
@@ -450,7 +450,7 @@ subcommands run.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `ceiling_usd` | number | Value of `--max-cost-usd`, always greater than zero. Absent when the pass ran with no ceiling |
-| `spent_usd` | number | Total reported cost across every runner invocation in the pass, including attempts `--retries` discarded |
+| `spent` | object | What the pass spent, or why nobody can say. `{"kind": "priced", "usd": N}` when the runner publishes a price for a run, totalling every runner invocation in the pass including attempts `--retries` discarded. `{"kind": "unpriced", "harness": "codex"}` when it publishes none, since a zero there would report a free pass rather than an unpriced one |
 | `exhausted` | bool | Whether spend had reached the ceiling by the time the pass finished |
 | `runs_skipped` | integer | Runs not started because the ledger had already refused them |
 
@@ -1041,9 +1041,13 @@ pass rate. A run already served from cache is unaffected
 by the ceiling, since a cache hit costs nothing and reusing it is exactly what
 a budget is for.
 
-Only the `claude-code` runner reports what a run cost today, so `--max-cost-usd`
-never binds a `codex` or `cursor-agent` pass: nothing accumulates against the
-ledger, so it never refuses a run.
+Only the `claude-code` runner publishes what a run cost today. A ceiling over
+`codex` or `cursor-agent` would sit at zero spend for the life of the pass,
+admit every run, and leave the operator believing a limit was holding while the
+bill grew, so `--max-cost-usd` on either is refused at the command line before
+a report exists to be read as bounded. Those passes still run without a
+ceiling, and their `budget.spent` says `unpriced` and names the harness rather
+than reporting a total of zero that nobody measured.
 
 `trg` exits `2` instead of `0` when the pass got less than it asked for or paid
 more than it allowed: either a run was refused, or spend went strictly past the

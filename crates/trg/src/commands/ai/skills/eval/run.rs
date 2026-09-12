@@ -332,6 +332,17 @@ impl RunArgs {
             None
         };
 
+        let cost_ledger = match self.runner {
+            Some(runner) => match CostLedger::open(self.max_cost_usd, runner.pricing()) {
+                Ok(ledger) => Some(ledger),
+                Err(error) => {
+                    eprintln!("{error}");
+                    return 1;
+                }
+            },
+            None => None,
+        };
+
         let cases = match CaseSelection::parse(&self.cases, &self.tags) {
             Ok(cases) => cases,
             Err(error) => {
@@ -388,12 +399,11 @@ impl RunArgs {
         };
 
         let mut budget_exhausted = false;
-        if let Some(runner) = self.runner {
+        if let (Some(runner), Some(cost_ledger)) = (self.runner, cost_ledger.as_ref()) {
             let cache_options = CacheOptions {
                 enabled: !self.no_cache,
                 reuse_completed: self.reuse_completed,
             };
-            let cost_ledger = CostLedger::new(self.max_cost_usd);
             match execute_runs(
                 runner,
                 self.runner_model.as_deref(),
@@ -409,7 +419,7 @@ impl RunArgs {
                 self.environment,
                 ScaffoldPermission::granted(self.allow_scaffold),
                 self.concurrency,
-                &cost_ledger,
+                cost_ledger,
             ) {
                 Ok(runs_skipped) => budget_exhausted = runs_skipped > 0 || cost_ledger.overspent(),
                 Err(code) => return code,
@@ -593,7 +603,7 @@ fn execute_runs(
         .count();
     bundle.document.budget = Some(BudgetReport {
         ceiling_usd: cost_ledger.ceiling().map(CostCeiling::usd),
-        spent_usd: cost_ledger.spent_usd(),
+        spent: cost_ledger.spend(),
         exhausted: cost_ledger.exhausted(),
         runs_skipped,
     });
@@ -2335,7 +2345,7 @@ mod tests {
             out_dir: out_dir.to_path_buf(),
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
-            runner: Some(Runner::Codex),
+            runner: Some(Runner::ClaudeCode),
             runner_model: None,
             timeout_secs: None,
             retries: 0,
@@ -3160,7 +3170,7 @@ mod tests {
         );
 
         assert_eq!(report["budget"]["ceiling_usd"], 5.0);
-        assert_eq!(report["budget"]["spent_usd"], 5.0);
+        assert_eq!(report["budget"]["spent"]["usd"], 5.0);
         assert_eq!(report["budget"]["exhausted"], true);
         assert_eq!(report["budget"]["runs_skipped"], 1);
     }
@@ -3219,7 +3229,7 @@ mod tests {
         let report = read_report(&report_dir);
         assert_eq!(report["runs"][0]["status"], "completed");
         assert_eq!(report["runs"][1]["status"], "completed");
-        assert_eq!(report["budget"]["spent_usd"], 10.0);
+        assert_eq!(report["budget"]["spent"]["usd"], 10.0);
         assert_eq!(report["budget"]["ceiling_usd"], 10.0);
         assert_eq!(
             report["budget"]["runs_skipped"], 0,
@@ -3289,7 +3299,7 @@ mod tests {
         );
         assert_eq!(report["runs"][1]["runner_invocations"], 1);
         assert_eq!(
-            report["budget"]["spent_usd"], 4.0,
+            report["budget"]["spent"]["usd"], 4.0,
             "every invocation was billed, not only the two the report kept"
         );
     }
@@ -3339,7 +3349,7 @@ mod tests {
             out_dir: out_dir.clone(),
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
-            runner: Some(Runner::Codex),
+            runner: Some(Runner::ClaudeCode),
             runner_model: None,
             timeout_secs: None,
             retries: 0,
@@ -3416,7 +3426,7 @@ mod tests {
         assert_eq!(report["runs"][0]["status"], "completed");
         assert_eq!(report["runs"][1]["status"], "completed");
         assert_eq!(report["budget"]["ceiling_usd"], serde_json::Value::Null);
-        assert_eq!(report["budget"]["spent_usd"], 100.0);
+        assert_eq!(report["budget"]["spent"]["usd"], 100.0);
         assert_eq!(report["budget"]["exhausted"], false);
         assert_eq!(report["budget"]["runs_skipped"], 0);
     }
@@ -3441,9 +3451,57 @@ mod tests {
             report["runs"][1]["status"], "completed",
             "an uncosted run must not be mistaken for one the ledger had to refuse"
         );
-        assert_eq!(report["budget"]["spent_usd"], 0.0);
+        assert_eq!(report["budget"]["spent"]["usd"], 0.0);
         assert_eq!(report["budget"]["exhausted"], false);
         assert_eq!(report["budget"]["runs_skipped"], 0);
+    }
+
+    /// A harness that publishes no price still spends money, so the total it leaves
+    /// behind is zero for a reason that has nothing to do with thrift. A reader adding
+    /// spend across harnesses has to see the difference between a free pass and one
+    /// nobody can price.
+    #[test]
+    fn a_pass_no_harness_could_price_reports_no_total_rather_than_a_free_one() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(2.0);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            runner: Some(Runner::Codex),
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        assert_eq!(report["budget"]["spent"]["kind"], "unpriced");
+        assert_eq!(report["budget"]["spent"]["harness"], "codex");
+        assert!(report["budget"]["spent"]["usd"].is_null());
+    }
+
+    /// A ceiling over a harness that publishes no price never moves off zero, so it
+    /// admits every run while the operator believes a limit is holding. It is refused
+    /// at the command line, before a report exists to be read as bounded.
+    #[test]
+    fn a_ceiling_over_a_harness_that_publishes_no_price_is_refused() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        super::fake_runner::enable();
+        let status = RunArgs {
+            runner: Some(Runner::Codex),
+            max_cost_usd: Some(CostCeiling::parse(5.0).unwrap()),
+            ..base_run_args(&skill_dir, &out_dir)
+        }
+        .handle(&crate::fs::RealFS);
+        super::fake_runner::disable();
+
+        assert_eq!(status, 1);
+        assert!(
+            !out_dir.exists(),
+            "the pass was refused before it wrote a report that would have claimed a ceiling"
+        );
     }
 
     /// The ledger is shared across every lane a pass spawns, so what it reports after a
@@ -3472,7 +3530,7 @@ mod tests {
         assert_eq!(report["runs"][0]["status"], "completed");
         assert_eq!(report["runs"][1]["status"], "completed");
         assert_eq!(
-            report["budget"]["spent_usd"], 6.0,
+            report["budget"]["spent"]["usd"], 6.0,
             "two lanes each recording $3 must add to $6, not lose a write to the other"
         );
         assert_eq!(report["budget"]["runs_skipped"], 0);
