@@ -6,6 +6,7 @@ pub mod errors;
 pub mod eval_suite_drift;
 pub mod evals;
 pub mod feedback;
+pub mod graders;
 pub mod grading;
 pub mod improvement_bundle;
 pub mod iteration_summary;

@@ -27,15 +27,25 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::evals::{parse_eval_suite, EvalCase, EvalError, EvalSuite, Result};
+use super::graders::{self, GradeInput, Grader, GraderOutcome};
+use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
+use super::outputs::FINAL_MD;
 use super::report::{ReportDocument, RunRecord};
+use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
-pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v1";
+pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v2";
+const GRADING_SCHEMA_VERSION_V1: &str = "trg.skills-eval.grading.v1";
+
+pub fn grading_schema_version_is_supported(version: &str) -> bool {
+    version == GRADING_SCHEMA_VERSION || version == GRADING_SCHEMA_VERSION_V1
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraderKind {
     Mechanical,
+    Declarative,
     Llm,
     Script,
     NeedsLlm,
@@ -70,6 +80,21 @@ pub struct AssertionGradeResult {
     pub grader: GraderInfo,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// Present when the property cannot be observed on the runner that produced
+    /// the run. Such a result is neither a pass nor a failure, so it is excluded
+    /// from `summary.pass_rate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported: Option<String>,
+}
+
+impl AssertionGradeResult {
+    pub fn is_unsupported(&self) -> bool {
+        self.unsupported.is_some()
+    }
+
+    pub fn is_scored(&self) -> bool {
+        !self.is_unsupported()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -77,8 +102,58 @@ pub struct GradingSummary {
     pub passed: usize,
     pub failed: usize,
     pub total: usize,
+    #[serde(default)]
+    pub unsupported: usize,
+    /// Over the scored assertions only, so an ungradable property cannot drag a
+    /// skill's score down on a runner that simply cannot be observed.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub pass_rate: f64,
+}
+
+/// The single place the grading arithmetic lives, so the writer and both
+/// validators cannot drift from one another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GradingCounts {
+    pub passed: usize,
+    pub failed: usize,
+    pub unsupported: usize,
+    pub total: usize,
+}
+
+impl GradingCounts {
+    pub fn tally(results: &[AssertionGradeResult]) -> Self {
+        let unsupported = results.iter().filter(|r| r.is_unsupported()).count();
+        let passed = results.iter().filter(|r| r.is_scored() && r.passed).count();
+        let total = results.len();
+        Self {
+            passed,
+            failed: total - passed - unsupported,
+            unsupported,
+            total,
+        }
+    }
+
+    pub fn scored(self) -> usize {
+        self.total - self.unsupported
+    }
+
+    pub fn pass_rate(self) -> f64 {
+        if self.scored() == 0 {
+            0.0
+        } else {
+            self.passed as f64 / self.scored() as f64
+        }
+    }
+
+    pub fn summary(self) -> GradingSummary {
+        GradingSummary {
+            passed: self.passed,
+            failed: self.failed,
+            total: self.total,
+            unsupported: self.unsupported,
+            pass_rate: self.pass_rate(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -92,6 +167,7 @@ pub struct GradingFile {
 #[derive(Debug, Clone, Default)]
 pub struct GradeOptions {
     pub grader: GraderMode,
+    pub grader_provider: JudgeProvider,
     pub grader_model: Option<String>,
     pub grader_command: Option<String>,
     pub strict: bool,
@@ -104,6 +180,8 @@ pub struct GradeReport {
     pub passed: usize,
     pub failed: usize,
     pub needs_llm: usize,
+    #[serde(default)]
+    pub unsupported: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +190,71 @@ struct RunContext {
     workspace_dir: PathBuf,
     outputs_dir: PathBuf,
     transcript_path: PathBuf,
+}
+
+/// The grading options plus the judge they resolve to, resolved once per
+/// bundle so a missing credential is reported before any run is graded rather
+/// than part way through one.
+#[derive(Debug)]
+struct GradeSession<'a> {
+    options: &'a GradeOptions,
+    judge: Option<JudgeEndpoint>,
+}
+
+impl<'a> GradeSession<'a> {
+    fn open(options: &'a GradeOptions, suite: &EvalSuite) -> Result<Self> {
+        let judge = if suite_needs_a_judge(options, suite) {
+            let model = options
+                .grader_model
+                .as_deref()
+                .and_then(JudgeModel::new)
+                .ok_or_else(|| {
+                    EvalError::Validation(
+                        ValidationError::for_field(
+                            "--grader-model",
+                            "is required to grade with an LLM judge; pass it or drop the llm graders",
+                        )
+                        .into(),
+                    )
+                })?;
+            Some(JudgeEndpoint::resolve(
+                options.grader_provider,
+                &model,
+                "--grader-model",
+            )?)
+        } else {
+            None
+        };
+
+        Ok(Self { options, judge })
+    }
+
+    fn endpoint(&self) -> Result<&JudgeEndpoint> {
+        self.judge.as_ref().ok_or_else(|| {
+            EvalError::Validation(
+                ValidationError::for_field("--grader-model", "no LLM judge was resolved for this run").into(),
+            )
+        })
+    }
+}
+
+/// Whether anything in the suite can reach the LLM judge under these options.
+///
+/// `--grader llm` always can. Under `auto` only a declared `llm` grader or a
+/// free-text assertion that no mechanical pattern recognizes can, so a suite
+/// of typed graders is graded without a credential.
+fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
+    match options.grader {
+        GraderMode::Llm => true,
+        GraderMode::None | GraderMode::Script => false,
+        GraderMode::Auto => suite.evals.iter().any(|case| {
+            case.graders.iter().any(|grader| matches!(grader, Grader::Llm { .. }))
+                || case
+                    .assertions
+                    .iter()
+                    .any(|assertion| parse_mechanical_kind(assertion.as_str()).is_none())
+        }),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +300,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
 
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
 
+    let session = GradeSession::open(&options, &suite)?;
     let grader_config = build_grader_config(&options);
     if document.dimensions.graders.is_empty() {
         document.dimensions.graders.push(grader_config.clone());
@@ -168,6 +312,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         passed: 0,
         failed: 0,
         needs_llm: 0,
+        unsupported: 0,
     };
 
     let runs = document.runs.clone();
@@ -186,20 +331,29 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         };
 
         let ctx = run_context(report_dir, run);
-        let mut assertion_results = Vec::with_capacity(case.assertions.len());
+        let mut assertion_results = Vec::with_capacity(case.assertions.len() + case.graders.len());
+
+        let declarative = DeclarativeContext::load(&ctx);
+        for grader in &case.graders {
+            assertion_results.push(grade_declaratively(grader, case, &declarative, &ctx, &session)?);
+        }
 
         for assertion in &case.assertions {
-            let result = grade_assertion(assertion.as_str(), case, &ctx, &options)?;
+            assertion_results.push(grade_assertion(assertion.as_str(), case, &ctx, &session)?);
+        }
+
+        for result in &assertion_results {
             if result.grader.kind == GraderKind::NeedsLlm {
                 report.needs_llm += 1;
             }
-            if result.passed {
+            if result.is_unsupported() {
+                report.unsupported += 1;
+            } else if result.passed {
                 report.passed += 1;
             } else {
                 report.failed += 1;
             }
             report.assertions_graded += 1;
-            assertion_results.push(result);
         }
 
         let grading = build_grading_file(assertion_results)?;
@@ -243,6 +397,7 @@ fn run_context(report_dir: &Path, run: &RunRecord) -> RunContext {
 fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
     serde_json::json!({
         "mode": format!("{:?}", options.grader).to_lowercase(),
+        "provider": options.grader_provider.as_str(),
         "model": options.grader_model,
         "command": options.grader_command,
         "strict": options.strict,
@@ -253,11 +408,12 @@ fn grade_assertion(
     assertion: &str,
     eval_case: &EvalCase,
     ctx: &RunContext,
-    options: &GradeOptions,
+    session: &GradeSession,
 ) -> Result<AssertionGradeResult> {
+    let options = session.options;
     match options.grader {
         GraderMode::Script => grade_with_script(assertion, eval_case, ctx, options),
-        GraderMode::Llm => grade_with_llm(assertion, ctx, options),
+        GraderMode::Llm => grade_with_llm(assertion, ctx, session),
         GraderMode::None | GraderMode::Auto => {
             if let Some(kind) = parse_mechanical_kind(assertion) {
                 let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
@@ -271,6 +427,7 @@ fn grade_assertion(
                         command: None,
                     },
                     rationale: None,
+                    unsupported: None,
                 })
             } else if options.grader == GraderMode::None {
                 Ok(needs_llm_result(
@@ -287,6 +444,84 @@ fn grade_assertion(
     }
 }
 
+/// The run artifacts a declarative grader reads, loaded once per run.
+struct DeclarativeContext {
+    final_text: String,
+    raw_transcript: String,
+    transcript: Option<NormalizedTranscript>,
+}
+
+impl DeclarativeContext {
+    fn load(ctx: &RunContext) -> Self {
+        Self {
+            final_text: std::fs::read_to_string(ctx.outputs_dir.join(FINAL_MD)).unwrap_or_default(),
+            raw_transcript: std::fs::read_to_string(&ctx.transcript_path).unwrap_or_default(),
+            transcript: read_normalized_transcript(&ctx.transcript_path).ok(),
+        }
+    }
+
+    fn input<'a>(&'a self, ctx: &'a RunContext) -> GradeInput<'a> {
+        GradeInput {
+            final_text: &self.final_text,
+            run_dir: &ctx.run_dir,
+            workspace_dir: &ctx.workspace_dir,
+            outputs_dir: &ctx.outputs_dir,
+            raw_transcript: &self.raw_transcript,
+            transcript: self.transcript.as_ref(),
+        }
+    }
+}
+
+fn grade_declaratively(
+    grader: &Grader,
+    eval_case: &EvalCase,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    session: &GradeSession,
+) -> Result<AssertionGradeResult> {
+    let options = session.options;
+    let assertion = grader.describe();
+    let outcome = graders::evaluate(grader, &declarative.input(ctx));
+
+    let declarative_info = GraderInfo {
+        kind: GraderKind::Declarative,
+        model: None,
+        command: None,
+    };
+
+    Ok(match outcome {
+        GraderOutcome::Passed { evidence } => AssertionGradeResult {
+            assertion,
+            passed: true,
+            evidence,
+            grader: declarative_info,
+            rationale: None,
+            unsupported: None,
+        },
+        GraderOutcome::Failed { evidence } => AssertionGradeResult {
+            assertion,
+            passed: false,
+            evidence,
+            grader: declarative_info,
+            rationale: None,
+            unsupported: None,
+        },
+        GraderOutcome::Unsupported { reason } => AssertionGradeResult {
+            assertion,
+            passed: false,
+            evidence: reason.clone(),
+            grader: declarative_info,
+            rationale: None,
+            unsupported: Some(reason),
+        },
+        GraderOutcome::Deferred { criterion } => match options.grader {
+            GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, ctx, session)?,
+            GraderMode::Script => grade_with_script(&criterion, eval_case, ctx, options)?,
+            GraderMode::None => needs_llm_result(&criterion, "grader mode is none, so no judge was consulted"),
+        },
+    })
+}
+
 fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
     AssertionGradeResult {
         assertion: assertion.to_string(),
@@ -298,6 +533,7 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
             command: None,
         },
         rationale: None,
+        unsupported: None,
     }
 }
 
@@ -366,6 +602,7 @@ fn grade_with_script(
                 command: Some(command.to_string()),
             },
             rationale: None,
+            unsupported: None,
         });
     }
 
@@ -389,6 +626,7 @@ fn grade_with_script(
             command: Some(command.to_string()),
         },
         rationale: parsed.rationale,
+        unsupported: None,
     })
 }
 
@@ -400,11 +638,7 @@ struct ScriptGraderResponse {
     rationale: Option<String>,
 }
 
-fn grade_with_llm(assertion: &str, ctx: &RunContext, options: &GradeOptions) -> Result<AssertionGradeResult> {
-    let model = options.grader_model.as_deref().ok_or_else(|| {
-        EvalError::Validation(ValidationError::for_field("--grader-model", "is required when --grader llm").into())
-    })?;
-
+fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> Result<AssertionGradeResult> {
     if let Some(kind) = parse_mechanical_kind(assertion) {
         let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
         return Ok(AssertionGradeResult {
@@ -417,19 +651,83 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, options: &GradeOptions) -> 
                 command: None,
             },
             rationale: None,
+            unsupported: None,
         });
     }
 
-    Err(EvalError::Validation(
-        ValidationError::for_field(
-            "--grader llm",
-            format!(
-                "LLM grading for assertion '{}' requires API integration (model: {model})",
-                assertion
-            ),
-        )
-        .into(),
-    ))
+    let endpoint = session.endpoint()?;
+    let request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, llm_grader_payload(assertion, ctx)?);
+    let reply = judge::judge(endpoint, &request, "--grader-model")?;
+    let parsed: LlmGraderResponse = judge::parse_json_reply(&reply, "--grader-model")?;
+
+    Ok(AssertionGradeResult {
+        assertion: assertion.to_string(),
+        passed: parsed.passed,
+        evidence: parsed.evidence,
+        grader: GraderInfo {
+            kind: GraderKind::Llm,
+            model: Some(endpoint.model.to_string()),
+            command: None,
+        },
+        rationale: parsed.rationale,
+        unsupported: None,
+    })
+}
+
+const LLM_GRADER_SYSTEM_PROMPT: &str = "You are grading one assertion about the output of a single agent run. \
+     Decide only whether the assertion holds for the material you are given. \
+     Quote the material in `evidence`; do not restate the assertion as its own evidence. \
+     Respond with JSON: {\"passed\": true|false, \"evidence\": \"...\", \"rationale\": \"...\"}.";
+
+/// How much of one artifact the judge is shown.
+///
+/// Bounded so a run that wrote a large file does not turn one assertion into an
+/// unbounded request.
+const LLM_GRADER_EXCERPT_BYTES: usize = 8_000;
+
+fn llm_grader_payload(assertion: &str, ctx: &RunContext) -> Result<String> {
+    let final_text = std::fs::read_to_string(ctx.outputs_dir.join(FINAL_MD)).unwrap_or_default();
+    let mut outputs = serde_json::Map::new();
+    if let Ok(entries) = std::fs::read_dir(&ctx.outputs_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == FINAL_MD {
+                continue;
+            }
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                outputs.insert(name, serde_json::Value::String(excerpt(&text)));
+            }
+        }
+    }
+
+    Ok(serde_json::to_string(&serde_json::json!({
+        "assertion": assertion,
+        "final_text": excerpt(&final_text),
+        "outputs": outputs,
+    }))?)
+}
+
+fn excerpt(text: &str) -> String {
+    if text.len() <= LLM_GRADER_EXCERPT_BYTES {
+        return text.to_string();
+    }
+    let mut end = LLM_GRADER_EXCERPT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n[truncated after {end} bytes]", &text[..end])
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmGraderResponse {
+    passed: bool,
+    evidence: String,
+    #[serde(default)]
+    rationale: Option<String>,
 }
 
 pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
@@ -869,20 +1167,12 @@ fn read_jpeg_dimensions(bytes: &[u8]) -> std::result::Result<(u32, u32), String>
 }
 
 pub fn build_grading_file(assertion_results: Vec<AssertionGradeResult>) -> Result<GradingFile> {
-    let passed = assertion_results.iter().filter(|r| r.passed).count();
-    let failed = assertion_results.len() - passed;
-    let total = assertion_results.len();
-    let pass_rate = if total == 0 { 0.0 } else { passed as f64 / total as f64 };
+    let summary = GradingCounts::tally(&assertion_results).summary();
 
     Ok(GradingFile {
         schema_version: GRADING_SCHEMA_VERSION.to_string(),
         assertion_results,
-        summary: GradingSummary {
-            passed,
-            failed,
-            total,
-            pass_rate,
-        },
+        summary,
     })
 }
 
@@ -906,12 +1196,12 @@ fn normalize_for_compare(value: &str) -> String {
 pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<()> {
     let mut errors = ValidationErrors::new();
 
-    if grading.schema_version != GRADING_SCHEMA_VERSION {
+    if !grading_schema_version_is_supported(&grading.schema_version) {
         errors.push(ValidationError::for_field(
             "schema_version",
             format!(
-                "expected '{}', got '{}'",
-                GRADING_SCHEMA_VERSION, grading.schema_version
+                "expected '{}' or '{}', got '{}'",
+                GRADING_SCHEMA_VERSION, GRADING_SCHEMA_VERSION_V1, grading.schema_version
             ),
         ));
     }
@@ -923,8 +1213,9 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
         ));
     }
 
-    let passed = grading.assertion_results.iter().filter(|r| r.passed).count();
-    let failed = grading.assertion_results.len() - passed;
+    let counts = GradingCounts::tally(&grading.assertion_results);
+    let passed = counts.passed;
+    let failed = counts.failed;
 
     for (index, result) in grading.assertion_results.iter().enumerate() {
         if result.assertion.trim().is_empty() {
@@ -939,7 +1230,7 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
                 "must be a non-empty string",
             ));
         }
-        if result.passed && evidence_is_trivial(&result.assertion, &result.evidence) {
+        if result.passed && result.is_scored() && evidence_is_trivial(&result.assertion, &result.evidence) {
             errors.push(ValidationError::for_field(
                 format!("assertion_results[{index}].evidence"),
                 "passed assertions must include non-trivial evidence",
@@ -965,6 +1256,15 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
             format!("{} does not match {failed} failed results", grading.summary.failed),
         ));
     }
+    if grading.summary.unsupported != counts.unsupported {
+        errors.push(ValidationError::for_field(
+            "summary.unsupported",
+            format!(
+                "{} does not match {} unsupported results",
+                grading.summary.unsupported, counts.unsupported
+            ),
+        ));
+    }
     if grading.summary.total != grading.assertion_results.len() {
         errors.push(ValidationError::for_field(
             "summary.total",
@@ -976,11 +1276,7 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
         ));
     }
 
-    let expected_rate = if grading.summary.total == 0 {
-        0.0
-    } else {
-        passed as f64 / grading.summary.total as f64
-    };
+    let expected_rate = counts.pass_rate();
     if (grading.summary.pass_rate - expected_rate).abs() > 0.0001 {
         errors.push(ValidationError::for_field(
             "summary.pass_rate",
@@ -1065,14 +1361,18 @@ fn update_report_after_grading(
         }
         let grading: GradingFile = serde_json::from_str(&std::fs::read_to_string(&grading_path)?)?;
         for result in &grading.assertion_results {
-            document.assertion_results.push(serde_json::json!({
+            let mut flattened = serde_json::json!({
                 "run_id": run.id,
                 "eval_case_id": run.eval_case_id,
                 "assertion": result.assertion,
                 "passed": result.passed,
                 "evidence": result.evidence,
                 "grader": result.grader,
-            }));
+            });
+            if let Some(reason) = &result.unsupported {
+                flattened["unsupported"] = serde_json::Value::String(reason.clone());
+            }
+            document.assertion_results.push(flattened);
         }
     }
 
@@ -1150,8 +1450,251 @@ fn extract_regex_pattern(lower: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::report::{
+        build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
+    };
+    use crate::agentskills::transcript::write_normalized_transcript;
+    use crate::fs::testutil::MemFS;
     use std::fs;
     use tempfile::tempdir;
+
+    const UNOBSERVABLE_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "skill_used"},
+                    {"type": "contains", "text": "all done"}
+                ]
+            }
+        ]
+    }"#;
+
+    fn unobservable_report_dir(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        let skill_dir = temp.path().join("demo-skill");
+        fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: d\n---\n",
+        )
+        .unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), UNOBSERVABLE_SUITE).unwrap();
+
+        let mem = MemFS::new();
+        let mem_skill = Path::new("demo-skill");
+        mem.insert(
+            mem_skill.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: d\n---\n",
+        );
+        mem.insert(mem_skill.join("evals/evals.json"), UNOBSERVABLE_SUITE);
+
+        let bundle = build_report_bundle(
+            &mem,
+            mem_skill,
+            &skill_dir,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                report_id: Some("report-unsupported".to_string()),
+                generated_at: Some("2026-05-26T12:00:00Z".to_string()),
+                runner: Some("codex".to_string()),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        let report_dir = write_report_bundle(&temp.path().join("out"), &bundle, WriteReportOptions::default()).unwrap();
+
+        let workspace = report_dir.join(&bundle.document.runs[0].paths.workspace);
+        let run_dir = workspace.parent().unwrap().to_path_buf();
+        fs::write(workspace.join("outputs").join(FINAL_MD), "all done\n").unwrap();
+        let transcript_path = run_dir.join("transcript.jsonl");
+        fs::write(&transcript_path, "{\"type\":\"turn.completed\"}\n").unwrap();
+        write_normalized_transcript(&transcript_path, &NormalizedTranscript::unavailable("codex")).unwrap();
+
+        (report_dir, run_dir)
+    }
+
+    fn suite_from(json: &str) -> EvalSuite {
+        crate::agentskills::evals::parse_eval_suite(json).unwrap()
+    }
+
+    #[test]
+    fn a_suite_of_typed_graders_needs_no_judge_under_auto() {
+        let suite = suite_from(UNOBSERVABLE_SUITE);
+        let options = GradeOptions {
+            grader: GraderMode::Auto,
+            ..GradeOptions::default()
+        };
+
+        assert!(!suite_needs_a_judge(&options, &suite));
+        assert!(GradeSession::open(&options, &suite).unwrap().judge.is_none());
+    }
+
+    #[test]
+    fn a_declared_llm_grader_needs_a_judge_under_auto() {
+        let suite = suite_from(
+            r#"{
+                "schema_version": 3,
+                "skill_name": "demo-skill",
+                "evals": [
+                    {
+                        "id": "case-a",
+                        "prompt": "p",
+                        "expected_output": "o",
+                        "graders": [{"type": "llm", "criterion": "the summary reads well"}]
+                    }
+                ]
+            }"#,
+        );
+        let options = GradeOptions {
+            grader: GraderMode::Auto,
+            ..GradeOptions::default()
+        };
+
+        assert!(suite_needs_a_judge(&options, &suite));
+        let err = GradeSession::open(&options, &suite).unwrap_err();
+        assert!(err.to_string().contains("--grader-model"), "{err}");
+    }
+
+    #[test]
+    fn a_free_text_assertion_no_mechanical_pattern_recognizes_needs_a_judge_under_auto() {
+        let suite = suite_from(
+            r#"{
+                "schema_version": 3,
+                "skill_name": "demo-skill",
+                "evals": [
+                    {
+                        "id": "case-a",
+                        "prompt": "p",
+                        "expected_output": "o",
+                        "assertions": ["the tone is appropriate for an executive"]
+                    }
+                ]
+            }"#,
+        );
+        let options = GradeOptions {
+            grader: GraderMode::Auto,
+            ..GradeOptions::default()
+        };
+
+        assert!(suite_needs_a_judge(&options, &suite));
+    }
+
+    #[test]
+    fn script_mode_never_resolves_a_judge() {
+        let suite = suite_from(
+            r#"{
+                "schema_version": 3,
+                "skill_name": "demo-skill",
+                "evals": [
+                    {
+                        "id": "case-a",
+                        "prompt": "p",
+                        "expected_output": "o",
+                        "graders": [{"type": "llm", "criterion": "the summary reads well"}]
+                    }
+                ]
+            }"#,
+        );
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_command: Some("./grade.sh".to_string()),
+            ..GradeOptions::default()
+        };
+
+        assert!(!suite_needs_a_judge(&options, &suite));
+    }
+
+    #[test]
+    fn pass_rate_ignores_unsupported_results_so_an_unobservable_runner_cannot_lower_it() {
+        let counts = GradingCounts::tally(&[
+            AssertionGradeResult {
+                assertion: "contains 'all done'".to_string(),
+                passed: true,
+                evidence: "matched".to_string(),
+                grader: GraderInfo {
+                    kind: GraderKind::Declarative,
+                    model: None,
+                    command: None,
+                },
+                rationale: None,
+                unsupported: None,
+            },
+            AssertionGradeResult {
+                assertion: "the skill was engaged".to_string(),
+                passed: false,
+                evidence: String::new(),
+                grader: GraderInfo {
+                    kind: GraderKind::Declarative,
+                    model: None,
+                    command: None,
+                },
+                rationale: None,
+                unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
+            },
+        ]);
+
+        assert_eq!(counts.total, 2);
+        assert_eq!(counts.unsupported, 1);
+        assert_eq!(counts.passed, 1);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.scored(), 1);
+        assert_eq!(counts.pass_rate(), 1.0);
+    }
+
+    #[test]
+    fn grading_a_run_from_an_unobservable_runner_reports_unsupported_instead_of_failed() {
+        let temp = tempdir().unwrap();
+        let (report_dir, run_dir) = unobservable_report_dir(&temp);
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                grader_provider: JudgeProvider::default(),
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.assertions_graded, 2);
+        assert_eq!(report.unsupported, 1);
+        assert_eq!(report.passed, 1);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.needs_llm, 0);
+
+        let grading: GradingFile =
+            serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+        assert_eq!(grading.summary.total, 2);
+        assert_eq!(grading.summary.unsupported, 1);
+        assert_eq!(grading.summary.passed, 1);
+        assert_eq!(grading.summary.failed, 0);
+        assert_eq!(grading.summary.pass_rate, 1.0);
+
+        let unsupported = grading
+            .assertion_results
+            .iter()
+            .find(|result| result.is_unsupported())
+            .unwrap();
+        assert!(unsupported.unsupported.as_deref().unwrap().contains("codex"));
+
+        let document: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let flattened = document["assertion_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| result.get("unsupported").is_some())
+            .expect("report.json carries the unsupported reason forward");
+        assert_eq!(flattened["passed"], false);
+        assert!(flattened["unsupported"].as_str().unwrap().contains("codex"));
+    }
 
     fn ctx_with_outputs(dir: &Path) -> RunContext {
         let run_dir = dir.join("runs/run-001");
@@ -1412,11 +1955,13 @@ mod tests {
                     command: None,
                 },
                 rationale: None,
+                unsupported: None,
             }],
             summary: GradingSummary {
                 passed: 1,
                 failed: 0,
                 total: 1,
+                unsupported: 0,
                 pass_rate: 1.0,
             },
         };
@@ -1444,6 +1989,7 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
 
         let options = GradeOptions {
             grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
             grader_model: None,
             grader_command: Some(script.to_string_lossy().into_owned()),
             strict: false,

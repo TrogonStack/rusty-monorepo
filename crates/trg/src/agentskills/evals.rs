@@ -1,5 +1,7 @@
+use super::graders::Grader;
 use super::grading::{self, GradingFile};
 use super::outputs::guess_mime_type;
+use super::runner::TimingFile;
 use super::validation::{ValidationError, ValidationErrors};
 use crate::fs::FileSystem;
 use schemars::JsonSchema;
@@ -10,12 +12,25 @@ use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
-pub const SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION: u32 = 3;
+pub const TYPED_GRADERS_MIN_SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_MAX_FIXTURE_BYTES: u64 = 5 * 1024 * 1024;
 const FIXTURE_BINARY_SAMPLE_BYTES: usize = 8 * 1024;
 
 const SUITE_V1_FIELDS: &[&str] = &["schema_version", "skill_name", "evals"];
 const CASE_V1_FIELDS: &[&str] = &["id", "prompt", "expected_output", "files", "assertions"];
+const CASE_V2_FIELDS: &[&str] = &[
+    "id",
+    "prompt",
+    "expected_output",
+    "files",
+    "assertions",
+    "tags",
+    "priority",
+    "timeout_secs",
+    "expected_output_files",
+    "grader_hints",
+];
 
 #[derive(Error, Debug)]
 pub enum EvalError {
@@ -211,6 +226,7 @@ pub enum EvalPriority {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EvalSuite {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
@@ -220,6 +236,7 @@ pub struct EvalSuite {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EvalCase {
     pub id: EvalCaseId,
     pub prompt: NonEmptyString,
@@ -238,6 +255,16 @@ pub struct EvalCase {
     pub expected_output_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grader_hints: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graders: Vec<Grader>,
+}
+
+impl EvalCase {
+    /// Whether the case states any checkable property at all, in either the
+    /// legacy natural-language form or the typed form.
+    pub fn has_checks(&self) -> bool {
+        !self.assertions.is_empty() || !self.graders.is_empty()
+    }
 }
 
 pub fn parse_eval_suite(content: &str) -> Result<EvalSuite> {
@@ -276,11 +303,20 @@ fn validate_eval_manifest_version(value: &serde_json::Value) -> Result<()> {
         ));
     }
 
+    let case_fields = match schema_version {
+        1 => Some(CASE_V1_FIELDS),
+        2 => Some(CASE_V2_FIELDS),
+        _ => None,
+    };
+
     if schema_version == 1 {
-        reject_unknown_fields(value, "manifest", SUITE_V1_FIELDS)?;
+        reject_unknown_fields(value, "manifest", schema_version, SUITE_V1_FIELDS)?;
+    }
+
+    if let Some(allowed) = case_fields {
         if let Some(evals) = value.get("evals").and_then(|evals| evals.as_array()) {
             for (index, eval) in evals.iter().enumerate() {
-                reject_unknown_fields(eval, &format!("evals[{index}]"), CASE_V1_FIELDS)?;
+                reject_unknown_fields(eval, &format!("evals[{index}]"), schema_version, allowed)?;
             }
         }
     }
@@ -288,18 +324,19 @@ fn validate_eval_manifest_version(value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-fn reject_unknown_fields(value: &serde_json::Value, label: &str, allowed: &[&str]) -> Result<()> {
+fn reject_unknown_fields(value: &serde_json::Value, label: &str, schema_version: u32, allowed: &[&str]) -> Result<()> {
     let Some(object) = value.as_object() else {
         return Ok(());
     };
 
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
+            let known = allowed.join(", ");
             return Err(EvalError::Validation(
                 ValidationError::for_field(
                     label,
                     format!(
-                        "unknown field '{key}' is not allowed in schema_version 1 manifests; omit it or set schema_version to 2"
+                        "unknown field '{key}' is not allowed in schema_version {schema_version} manifests (known fields: {known}); omit it or set schema_version to {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}"
                     ),
                 )
                 .into(),
@@ -318,7 +355,14 @@ fn deserialize_evals<'de, D>(deserializer: D) -> std::result::Result<Vec<EvalCas
 where
     D: Deserializer<'de>,
 {
-    let evals: Vec<EvalCase> = Vec::deserialize(deserializer)?;
+    let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+    let mut evals = Vec::with_capacity(raw.len());
+    for (index, case) in raw.into_iter().enumerate() {
+        evals.push(
+            serde_json::from_value::<EvalCase>(case)
+                .map_err(|error| de::Error::custom(format!("evals[{index}]: {error}")))?,
+        );
+    }
     if evals.is_empty() {
         return Err(de::Error::custom("evals must contain at least one test case"));
     }
@@ -369,18 +413,14 @@ pub struct WorkspaceCheckOptions {
 pub struct WorkspaceCheckReport {
     pub grading_files: usize,
     pub timing_files: usize,
+    /// Scored results only: results the runner could not answer are counted in
+    /// `unsupported_assertions` and kept out of `pass_rate`.
     pub assertion_results: usize,
     pub passed_assertions: usize,
     pub failed_assertions: usize,
-    pub pass_rate: f64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TimingFile {
     #[serde(default)]
-    total_tokens: Option<u64>,
-    duration_ms: u64,
+    pub unsupported_assertions: usize,
+    pub pass_rate: f64,
 }
 
 pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSuite> {
@@ -393,33 +433,38 @@ pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
     let skill_name_json = serde_json::to_string(skill_name).expect("string serialization to JSON is infallible");
     format!(
         r#"{{
-  "schema_version": 2,
+  "schema_version": 3,
   "skill_name": {skill_name_json},
   "evals": [
     {{
-      "id": "example",
-      "prompt": "Complete the example task using the skill guidance.",
-      "expected_output": "A concise response that demonstrates the skill.",
+      "id": "produces-a-summary",
+      "prompt": "Summarize the sample task using the skill guidance and write the result to outputs/summary.md with a top-level Markdown heading.",
+      "expected_output": "outputs/summary.md exists and opens with a top-level Markdown heading.",
       "files": [],
-      "assertions": [
-        "The response follows the skill instructions"
+      "graders": [
+        {{ "type": "file_exists", "path": "summary.md" }},
+        {{
+          "type": "regex",
+          "pattern": "^#[ \\t]+\\S",
+          "target": {{ "file": "summary.md" }}
+        }},
+        {{
+          "type": "contains",
+          "text": "TODO",
+          "target": {{ "file": "summary.md" }},
+          "negate": true
+        }}
       ]
     }},
     {{
-      "id": "metadata-example",
-      "prompt": "Optional metadata fields (schema_version >= 2) — delete this case or merge fields into your evals.",
-      "expected_output": "Demonstrates optional eval-level metadata.",
+      "id": "triggers-the-skill",
+      "prompt": "Carry out the sample task described in the skill without being told which skill to use.",
+      "expected_output": "The run reaches for the skill rather than improvising.",
       "files": [],
-      "assertions": [
-        "Optional metadata example only"
-      ],
-      "tags": ["smoke", "docs"],
-      "priority": "high",
-      "timeout_secs": 120,
-      "expected_output_files": ["summary.md"],
-      "grader_hints": {{
-        "strict_json": true
-      }}
+      "tags": ["triggering"],
+      "graders": [
+        {{ "type": "skill_used" }}
+      ]
     }}
   ]
 }}"#
@@ -480,10 +525,10 @@ pub fn lint_eval_suite(suite: &EvalSuite, options: EvalLintOptions) -> Vec<EvalL
             }
         }
 
-        if !options.allow_empty_assertions && eval.assertions.is_empty() {
+        if !options.allow_empty_assertions && !eval.has_checks() {
             warnings.push(EvalLintWarning {
                 eval_id,
-                message: "assertions are empty".to_string(),
+                message: "neither assertions nor graders are declared".to_string(),
             });
         }
     }
@@ -625,10 +670,10 @@ pub fn check_eval_suite(
     for eval in &suite.evals {
         let label = format!("evals id '{}'", eval.id);
 
-        if options.require_assertions && eval.assertions.is_empty() {
+        if options.require_assertions && !eval.has_checks() {
             errors.push(ValidationError::for_field(
                 label.clone(),
-                "must define at least one assertion",
+                "must define at least one assertion or grader",
             ));
         }
 
@@ -711,6 +756,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
     let mut assertion_results = 0;
     let mut passed_assertions = 0;
     let mut failed_assertions = 0;
+    let mut unsupported_assertions = 0;
 
     if options.require_grading && grading_files.is_empty() {
         errors.push(ValidationError::for_field(
@@ -723,14 +769,11 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         let grading = read_grading_file(grading_path)?;
         validate_grading_file(grading_path, &grading, options, &mut errors);
 
-        for result in &grading.assertion_results {
-            assertion_results += 1;
-            if result.passed {
-                passed_assertions += 1;
-            } else {
-                failed_assertions += 1;
-            }
-        }
+        let counts = grading::GradingCounts::tally(&grading.assertion_results);
+        assertion_results += counts.scored();
+        passed_assertions += counts.passed;
+        failed_assertions += counts.failed;
+        unsupported_assertions += counts.unsupported;
     }
 
     for timing_path in &timing_files {
@@ -754,6 +797,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         assertion_results,
         passed_assertions,
         failed_assertions,
+        unsupported_assertions,
         pass_rate,
     })
 }
@@ -838,8 +882,9 @@ fn validate_grading_file(
         ));
     }
 
-    let passed = grading.assertion_results.iter().filter(|result| result.passed).count();
-    let failed = grading.assertion_results.len() - passed;
+    let counts = grading::GradingCounts::tally(&grading.assertion_results);
+    let passed = counts.passed;
+    let failed = counts.failed;
 
     for (index, result) in grading.assertion_results.iter().enumerate() {
         validate_non_empty(
@@ -852,7 +897,7 @@ fn validate_grading_file(
             &format!("{} assertion_results[{index}].evidence", file_label),
             errors,
         );
-        if result.passed && grading::evidence_is_trivial(&result.assertion, &result.evidence) {
+        if result.passed && result.is_scored() && grading::evidence_is_trivial(&result.assertion, &result.evidence) {
             errors.push(ValidationError::for_field(
                 format!("{} assertion_results[{index}].evidence", file_label),
                 "passed assertions must include non-trivial evidence",
@@ -891,11 +936,17 @@ fn validate_grading_file(
         ));
     }
 
-    let expected_rate = if grading.summary.total == 0 {
-        0.0
-    } else {
-        passed as f64 / grading.summary.total as f64
-    };
+    if grading.summary.unsupported != counts.unsupported {
+        errors.push(ValidationError::for_field(
+            format!("{} summary.unsupported", file_label),
+            format!(
+                "{} does not match {} unsupported assertion results",
+                grading.summary.unsupported, counts.unsupported
+            ),
+        ));
+    }
+
+    let expected_rate = counts.pass_rate();
     if (grading.summary.pass_rate - expected_rate).abs() > 0.0001 {
         errors.push(ValidationError::for_field(
             format!("{} summary.pass_rate", file_label),
@@ -935,6 +986,7 @@ fn validate_timing_file(path: &Path, timing: &TimingFile, errors: &mut Validatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus};
     use crate::fs::testutil::MemFS;
     use std::fs;
     use tempfile::tempdir;
@@ -1113,16 +1165,16 @@ mod tests {
         fs::write(
             run_dir.join("grading.json"),
             r#"{
-  "schema_version": "trg.skills-eval.grading.v1",
+  "schema_version": "trg.skills-eval.grading.v2",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",
       "passed": true,
       "evidence": "'summary.md' exists and holds 20 bytes",
-      "grader": { "kind": "mechanical" }
+      "grader": { "kind": "declarative" }
     }
   ],
-  "summary": { "passed": 1, "failed": 0, "total": 1, "pass_rate": 1.0 }
+  "summary": { "passed": 1, "failed": 0, "total": 1, "unsupported": 0, "pass_rate": 1.0 }
 }"#,
         )
         .unwrap();
@@ -1198,6 +1250,44 @@ mod tests {
     }
 
     #[test]
+    fn read_timing_file_accepts_runner_written_timing_file() {
+        let tmp = tempdir().unwrap();
+        let timing_path = tmp.path().join("run").join("timing.json");
+        let outcome = EvalRunOutcome {
+            status: RunStatus::Completed,
+            failure_kind: None,
+            duration_ms: 2500,
+            exit_code: Some(0),
+            total_tokens: Some(1000),
+            input_tokens: Some(700),
+            output_tokens: Some(300),
+            cost_usd: Some(0.42),
+            final_text: "done".to_string(),
+        };
+
+        write_timing_file(&timing_path, &outcome).unwrap();
+        let timing = read_timing_file(&timing_path).unwrap();
+
+        assert_eq!(timing.duration_ms, 2500);
+        assert_eq!(timing.exit_code, Some(0));
+        assert_eq!(timing.total_tokens, Some(1000));
+        assert_eq!(timing.input_tokens, Some(700));
+        assert_eq!(timing.output_tokens, Some(300));
+        assert_eq!(timing.cost_usd, Some(0.42));
+    }
+
+    #[test]
+    fn read_timing_file_rejects_unknown_fields() {
+        let tmp = tempdir().unwrap();
+        let timing_path = tmp.path().join("timing.json");
+        fs::write(&timing_path, r#"{ "duration_ms": 2500, "wall_clock_ms": 2500 }"#).unwrap();
+
+        let error = read_timing_file(&timing_path).unwrap_err();
+
+        assert!(error.to_string().contains("wall_clock_ms"));
+    }
+
+    #[test]
     fn check_workspace_can_fail_on_failed_assertions() {
         let tmp = tempdir().unwrap();
         let run = tmp.path().join("iteration-1").join("eval-one").join("with_skill");
@@ -1251,6 +1341,7 @@ mod tests {
             timeout_secs: None,
             expected_output_files: None,
             grader_hints: None,
+            graders: vec![],
         }
     }
 
@@ -1314,7 +1405,21 @@ mod tests {
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
         assert!(warnings
             .iter()
-            .any(|warning| warning.message.contains("assertions are empty")));
+            .any(|warning| warning.message.contains("neither assertions nor graders")));
+    }
+
+    #[test]
+    fn lint_eval_suite_does_not_warn_when_only_typed_graders_are_declared() {
+        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
+        eval.assertions = vec![];
+        eval.graders = vec![serde_json::from_value(serde_json::json!({
+            "type": "file_exists",
+            "path": "summary.md"
+        }))
+        .unwrap()];
+        let suite = sample_suite_with_eval(eval);
+
+        assert!(lint_eval_suite(&suite, EvalLintOptions::default()).is_empty());
     }
 
     #[test]
@@ -1332,7 +1437,7 @@ mod tests {
         );
         assert!(!warnings
             .iter()
-            .any(|warning| warning.message.contains("assertions are empty")));
+            .any(|warning| warning.message.contains("neither assertions nor graders")));
     }
 
     #[test]
@@ -1340,12 +1445,45 @@ mod tests {
         let suite = scaffold_eval_suite("demo-skill");
         let json = serde_json::to_string_pretty(&suite).unwrap();
         let parsed = parse_eval_suite(&json).unwrap();
-        assert_eq!(parsed.schema_version, 2);
+        assert_eq!(parsed.schema_version, SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION);
         assert_eq!(parsed.skill_name.as_str(), "demo-skill");
         assert_eq!(parsed.evals.len(), 2);
-        assert_eq!(parsed.evals[0].id.as_str(), "example");
-        assert!(!parsed.evals[0].assertions.is_empty());
-        assert_eq!(parsed.evals[1].priority, Some(EvalPriority::High));
+        assert_eq!(parsed.evals[0].id.as_str(), "produces-a-summary");
+        assert_eq!(parsed.evals[1].id.as_str(), "triggers-the-skill");
+        assert!(parsed.evals.iter().all(EvalCase::has_checks));
+    }
+
+    #[test]
+    fn scaffold_declares_only_typed_graders_so_nothing_needs_string_sniffing() {
+        let suite = scaffold_eval_suite("demo-skill");
+        assert!(suite.evals.iter().all(|eval| eval.assertions.is_empty()));
+        assert!(suite.evals.iter().all(|eval| !eval.graders.is_empty()));
+    }
+
+    #[test]
+    fn typed_graders_are_rejected_before_the_schema_version_that_introduced_them() {
+        let json = format!(
+            r#"{{
+  "schema_version": {},
+  "skill_name": "demo-skill",
+  "evals": [
+    {{
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "graders": [{{ "type": "skill_used" }}]
+    }}
+  ]
+}}"#,
+            TYPED_GRADERS_MIN_SCHEMA_VERSION - 1
+        );
+
+        let err = parse_eval_suite(&json).unwrap_err().to_string();
+        assert!(err.contains("graders"), "{err}");
+        assert!(
+            err.contains(&format!("schema_version to {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}")),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1433,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_v2_manifest_allows_unknown_fields() {
+    fn parse_v2_manifest_rejects_unknown_suite_fields() {
         let json = r#"{
   "schema_version": 2,
   "skill_name": "demo-skill",
@@ -1442,13 +1580,81 @@ mod tests {
     {
       "id": "one",
       "prompt": "A sufficiently long prompt here",
-      "expected_output": "A detailed analysis output",
-      "future_case_field": "ok"
+      "expected_output": "A detailed analysis output"
     }
   ]
 }"#;
 
-        parse_eval_suite(json).unwrap();
+        let err = parse_eval_suite(json).unwrap_err();
+        assert!(err.to_string().contains("future_suite_field"));
+    }
+
+    #[test]
+    fn parse_v2_manifest_rejects_a_misspelled_field_with_a_version_scoped_message() {
+        let json = r#"{
+  "schema_version": 2,
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "assertion": [
+        "The response follows the skill instructions"
+      ]
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err().to_string();
+        assert!(err.contains("unknown field 'assertion'"), "{err}");
+        assert!(err.contains("known fields: "), "{err}");
+    }
+
+    #[test]
+    fn parse_current_version_manifest_rejects_unknown_suite_fields() {
+        let json = r#"{
+  "schema_version": 3,
+  "skill_name": "demo-skill",
+  "future_suite_field": true,
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err().to_string();
+        assert!(err.contains("future_suite_field"), "{err}");
+    }
+
+    #[test]
+    fn parse_current_version_manifest_rejects_misspelled_case_fields() {
+        let json = r#"{
+  "schema_version": 3,
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    },
+    {
+      "id": "two",
+      "prompt": "Another sufficiently long prompt",
+      "expected_output": "Another detailed analysis output",
+      "grader": [
+        { "type": "skill_used" }
+      ]
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err().to_string();
+        assert!(err.contains("grader"), "{err}");
+        assert!(err.contains("evals[1]"), "{err}");
     }
 
     #[test]

@@ -127,10 +127,13 @@ mod tests {
         let suite = load_eval_suite(&crate::fs::RealFS, &skill_dir).unwrap();
         assert_eq!(suite.skill_name.as_str(), "demo-skill");
         assert_eq!(suite.evals.len(), 2);
-        assert_eq!(suite.evals[0].id.as_str(), "example");
-        assert!(!suite.evals[0].assertions.is_empty());
-        assert_eq!(suite.evals[1].id.as_str(), "metadata-example");
-        assert_eq!(suite.schema_version, 2);
+        assert_eq!(suite.evals[0].id.as_str(), "produces-a-summary");
+        assert!(!suite.evals[0].graders.is_empty());
+        assert_eq!(suite.evals[1].id.as_str(), "triggers-the-skill");
+        assert_eq!(
+            suite.schema_version,
+            crate::agentskills::evals::SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION
+        );
     }
 
     #[test]

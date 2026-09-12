@@ -20,6 +20,13 @@
             "string",
             "null"
           ]
+        },
+        "unsupported": {
+          "description": "Present when the property cannot be observed on the runner that produced\nthe run. Such a result is neither a pass nor a failure, so it is excluded\nfrom `summary.pass_rate`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -56,6 +63,7 @@
     "GraderKind": {
       "enum": [
         "mechanical",
+        "declarative",
         "llm",
         "script",
         "needs_llm",
@@ -71,6 +79,7 @@
           "type": "integer"
         },
         "pass_rate": {
+          "description": "Over the scored assertions only, so an ungradable property cannot drag a\nskill's score down on a runner that simply cannot be observed.",
           "format": "double",
           "maximum": 1.0,
           "minimum": 0.0,
@@ -82,6 +91,12 @@
           "type": "integer"
         },
         "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unsupported": {
+          "default": 0,
           "format": "uint",
           "minimum": 0,
           "type": "integer"
