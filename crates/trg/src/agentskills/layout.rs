@@ -564,6 +564,7 @@ mod tests {
     #[test]
     fn mirror_layout_disambiguates_multiple_attempts() {
         use crate::agentskills::report::{BuildReportOptions, ScenarioKind};
+        use crate::agentskills::sampling::AttemptCount;
 
         let temp = tempfile::tempdir().unwrap();
         let fs = MemFS::new();
@@ -592,7 +593,7 @@ mod tests {
             BuildReportOptions {
                 report_id: Some("attempts-report".to_string()),
                 iteration: Some(1),
-                attempts: 2,
+                attempts: AttemptCount::parse(2).unwrap(),
                 ..BuildReportOptions::default()
             },
         )

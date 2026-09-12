@@ -22,6 +22,7 @@ use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
     SkillDigest,
 };
+use crate::agentskills::sampling::AttemptCount;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
@@ -129,10 +130,10 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "N",
-        default_value_t = 1,
-        help = "Repeat each (eval case × scenario) this many times; attempt numbers run 1..N within one iteration"
+        default_value_t = AttemptCount::recommended(),
+        help = "Draw each (eval case × scenario) this many times; attempt numbers run 1..N within one iteration. More than one draw is what makes a score a measurement rather than a sample of size one"
     )]
-    pub attempts: u32,
+    pub attempts: AttemptCount,
 
     #[arg(
         short = 'j',
@@ -319,7 +320,7 @@ impl RunArgs {
 
         let build_options = BuildReportOptions {
             iteration: Some(iteration),
-            attempts: self.attempts.max(1),
+            attempts: self.attempts,
             old_skill_path: self.old_skill_dir.clone(),
             user_old_skill_path: self.old_skill_dir.clone(),
             runner: self.runner.map(Runner::display_name).map(str::to_string),
@@ -1322,7 +1323,7 @@ mod tests {
             retries: 0,
             force: false,
             iteration: Some(1),
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
@@ -1459,7 +1460,7 @@ mod tests {
             retries: 0,
             force: false,
             iteration: None,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             old_skill_dir: Some(old_skill_dir),
             allow_skill_name_mismatch: false,
@@ -1501,7 +1502,7 @@ mod tests {
             retries: 0,
             force: false,
             iteration: None,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             old_skill_dir: Some(old_skill_dir),
             allow_skill_name_mismatch: true,
@@ -1559,7 +1560,7 @@ mod tests {
             retries: 0,
             force: false,
             iteration: None,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
@@ -1666,7 +1667,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -1716,7 +1717,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -1766,7 +1767,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -1808,7 +1809,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -1852,7 +1853,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 2,
+            attempts: AttemptCount::parse(2).unwrap(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -1913,7 +1914,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::parse(2).unwrap(),
             force: true,
             iteration: None,
@@ -2073,7 +2074,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -2092,6 +2093,69 @@ mod tests {
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
         }
+    }
+
+    /// The default decides what almost every pass measures, and a pass that draws each
+    /// cell once reports a number with no spread attached: any delta it prints against
+    /// another pass, or against a baseline, is as likely to be the agent's own variance
+    /// as it is to be the skill.
+    #[test]
+    fn a_pass_that_says_nothing_about_attempts_still_samples_each_cell() {
+        use clap::Parser;
+
+        let cli = crate::cli::Cli::try_parse_from([
+            "trg",
+            "ai",
+            "skills",
+            "eval",
+            "run",
+            "--skill-dir",
+            "skill",
+            "--out-dir",
+            "out",
+        ])
+        .expect("parses");
+
+        let crate::commands::Commands::Ai {
+            command: crate::commands::ai::AiCommands::Skills { command },
+        } = cli.command
+        else {
+            panic!("expected an ai skills command");
+        };
+        let crate::commands::ai::skills::SkillsCommands::Eval(eval) = command else {
+            panic!("expected an eval command");
+        };
+        let super::super::EvalCommands::Run(args) = eval.command else {
+            panic!("expected an eval run command");
+        };
+
+        assert_eq!(args.attempts, AttemptCount::recommended());
+        assert!(
+            !args.attempts.is_single(),
+            "a default of one draw reports a sample of size one as a measurement"
+        );
+    }
+
+    /// A cell nobody draws is a row the report cannot fill in, so the count is refused at
+    /// the boundary rather than quietly raised to one later.
+    #[test]
+    fn an_attempt_count_of_zero_is_refused_at_the_command_line() {
+        use clap::Parser;
+
+        assert!(crate::cli::Cli::try_parse_from([
+            "trg",
+            "ai",
+            "skills",
+            "eval",
+            "run",
+            "--skill-dir",
+            "skill",
+            "--out-dir",
+            "out",
+            "--attempts",
+            "0",
+        ])
+        .is_err());
     }
 
     fn write_two_case_skill(root: &Path) -> PathBuf {
@@ -2143,7 +2207,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -2172,7 +2236,7 @@ mod tests {
             runner_model: Some("gpt-test".to_string()),
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -2218,7 +2282,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -2247,7 +2311,7 @@ mod tests {
             runner_model: Some("gpt-test".to_string()),
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -2290,7 +2354,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: false,
             iteration: None,
@@ -2363,7 +2427,7 @@ mod tests {
             runner_model: None,
             timeout_secs: Some(99),
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -2430,7 +2494,7 @@ mod tests {
             runner_model: None,
             timeout_secs: None,
             retries: 0,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             force: true,
             iteration: None,
@@ -2522,7 +2586,7 @@ mod tests {
             retries: 0,
             force: true,
             iteration: Some(1),
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
@@ -2563,7 +2627,7 @@ mod tests {
                 retries: 0,
                 force: false,
                 iteration: Some(1),
-                attempts: 1,
+                attempts: AttemptCount::single(),
                 concurrency: RunConcurrency::serial(),
                 old_skill_dir: None,
                 allow_skill_name_mismatch: false,
@@ -2629,7 +2693,7 @@ mod tests {
             retries: 0,
             force: false,
             iteration: Some(1),
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
@@ -2675,7 +2739,7 @@ mod tests {
             retries: 0,
             force: true,
             iteration: Some(1),
-            attempts: 1,
+            attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
             old_skill_dir: None,
             allow_skill_name_mismatch: false,
