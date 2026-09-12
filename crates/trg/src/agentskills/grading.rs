@@ -29,12 +29,14 @@ use serde::{Deserialize, Serialize};
 use super::evals::{parse_eval_suite, EvalCase, EvalError, EvalSuite, Result};
 use super::graders::{self, CaseGrader, GradeInput, Grader, GraderOutcome};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
+use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
 use super::report::{ReportDocument, RunRecord};
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
-pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v4";
+pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v5";
+const GRADING_SCHEMA_VERSION_V4: &str = "trg.skills-eval.grading.v4";
 const GRADING_SCHEMA_VERSION_V3: &str = "trg.skills-eval.grading.v3";
 const GRADING_SCHEMA_VERSION_V2: &str = "trg.skills-eval.grading.v2";
 const GRADING_SCHEMA_VERSION_V1: &str = "trg.skills-eval.grading.v1";
@@ -42,7 +44,11 @@ const GRADING_SCHEMA_VERSION_V1: &str = "trg.skills-eval.grading.v1";
 pub fn grading_schema_version_is_supported(version: &str) -> bool {
     matches!(
         version,
-        GRADING_SCHEMA_VERSION | GRADING_SCHEMA_VERSION_V3 | GRADING_SCHEMA_VERSION_V2 | GRADING_SCHEMA_VERSION_V1
+        GRADING_SCHEMA_VERSION
+            | GRADING_SCHEMA_VERSION_V4
+            | GRADING_SCHEMA_VERSION_V3
+            | GRADING_SCHEMA_VERSION_V2
+            | GRADING_SCHEMA_VERSION_V1
     )
 }
 
@@ -96,6 +102,10 @@ pub struct AssertionGradeResult {
     /// work and not the premise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded: Option<String>,
+    /// How a panel of judges split, present only when more than one opinion was taken.
+    /// A single opinion has no split to report, and `passed` already carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub votes: Option<JudgeVoteTally>,
 }
 
 impl AssertionGradeResult {
@@ -211,6 +221,7 @@ pub struct GradeOptions {
     pub grader_provider: JudgeProvider,
     pub grader_model: Option<String>,
     pub grader_command: Option<String>,
+    pub grader_votes: JudgeVotes,
     pub strict: bool,
 }
 
@@ -504,6 +515,7 @@ fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
         "provider": options.grader_provider.as_str(),
         "model": options.grader_model,
         "command": options.grader_command,
+        "votes": options.grader_votes.count(),
         "strict": options.strict,
     })
 }
@@ -533,6 +545,7 @@ fn grade_assertion(
                     rationale: None,
                     unsupported: None,
                     excluded: None,
+                    votes: None,
                 })
             } else if options.grader == GraderMode::None {
                 Ok(needs_llm_result(
@@ -605,6 +618,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            votes: None,
         },
         GraderOutcome::Failed { evidence } => AssertionGradeResult {
             assertion,
@@ -614,6 +628,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            votes: None,
         },
         GraderOutcome::Unsupported { reason } => AssertionGradeResult {
             assertion,
@@ -623,6 +638,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: Some(reason),
             excluded,
+            votes: None,
         },
         GraderOutcome::Deferred { criterion } => {
             let mut result = match options.grader {
@@ -672,6 +688,7 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
         rationale: None,
         unsupported: None,
         excluded: None,
+        votes: None,
     }
 }
 
@@ -742,6 +759,7 @@ fn grade_with_script(
             rationale: None,
             unsupported: None,
             excluded: None,
+            votes: None,
         });
     }
 
@@ -767,6 +785,7 @@ fn grade_with_script(
         rationale: parsed.rationale,
         unsupported: None,
         excluded: None,
+        votes: None,
     })
 }
 
@@ -793,26 +812,40 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
             rationale: None,
             unsupported: None,
             excluded: None,
+            votes: None,
         });
     }
 
     let endpoint = session.endpoint()?;
     let request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, llm_grader_payload(assertion, ctx)?);
-    let reply = judge::judge(endpoint, &request, "--grader-model")?;
-    let parsed: LlmGraderResponse = judge::parse_json_reply(&reply, "--grader-model")?;
+
+    let votes = session.options.grader_votes;
+    let mut opinions = Vec::with_capacity(votes.count() as usize);
+    for _ in votes.ballots() {
+        let reply = judge::judge(endpoint, &request, "--grader-model")?;
+        let parsed: LlmGraderResponse = judge::parse_json_reply(&reply, "--grader-model")?;
+        opinions.push((parsed.passed, parsed));
+    }
+
+    let verdict = tally_opinions(opinions).ok_or_else(|| {
+        EvalError::Validation(
+            ValidationError::for_field("--grader-votes", "no judge opinion was taken for this assertion").into(),
+        )
+    })?;
 
     Ok(AssertionGradeResult {
         assertion: assertion.to_string(),
-        passed: parsed.passed,
-        evidence: parsed.evidence,
+        passed: verdict.tally.majority_passed(),
+        evidence: verdict.opinion.evidence,
         grader: GraderInfo {
             kind: GraderKind::Llm,
             model: Some(endpoint.model.to_string()),
             command: None,
         },
-        rationale: parsed.rationale,
+        rationale: verdict.opinion.rationale,
         unsupported: None,
         excluded: None,
+        votes: (!votes.is_single()).then_some(verdict.tally),
     })
 }
 
@@ -1342,8 +1375,9 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
         errors.push(ValidationError::for_field(
             "schema_version",
             format!(
-                "expected '{}', '{}', '{}' or '{}', got '{}'",
+                "expected '{}', '{}', '{}', '{}' or '{}', got '{}'",
                 GRADING_SCHEMA_VERSION,
+                GRADING_SCHEMA_VERSION_V4,
                 GRADING_SCHEMA_VERSION_V3,
                 GRADING_SCHEMA_VERSION_V2,
                 GRADING_SCHEMA_VERSION_V1,
@@ -1855,6 +1889,18 @@ mod tests {
     }
 
     #[test]
+    fn the_recorded_grader_config_tells_a_panel_from_a_single_opinion() {
+        let single = build_grader_config(&GradeOptions::default());
+        let panel = build_grader_config(&GradeOptions {
+            grader_votes: JudgeVotes::parse(3).unwrap(),
+            ..GradeOptions::default()
+        });
+
+        assert_eq!(single["votes"], serde_json::json!(1));
+        assert_eq!(panel["votes"], serde_json::json!(3));
+    }
+
+    #[test]
     fn a_suite_of_typed_graders_needs_no_judge_under_auto() {
         let suite = suite_from(UNOBSERVABLE_SUITE);
         let options = GradeOptions {
@@ -1956,6 +2002,7 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                votes: None,
             },
             AssertionGradeResult {
                 assertion: "the skill was engaged".to_string(),
@@ -1969,6 +2016,7 @@ mod tests {
                 rationale: None,
                 unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
                 excluded: None,
+                votes: None,
             },
         ]);
 
@@ -1994,6 +2042,7 @@ mod tests {
             rationale: None,
             unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
             excluded: None,
+            votes: None,
         }]);
 
         assert_eq!(counts.scored(), 0);
@@ -2345,6 +2394,7 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                votes: None,
             }],
             summary: GradingSummary {
                 passed: 1,
@@ -2382,6 +2432,7 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             grader_provider: JudgeProvider::default(),
             grader_model: None,
             grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
             strict: false,
         };
 
@@ -2397,5 +2448,56 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         assert!(result.passed);
         assert_eq!(result.grader.kind, GraderKind::Script);
         assert!(result.evidence.contains("script verified"));
+    }
+
+    fn result_with_votes(votes: Option<JudgeVoteTally>) -> AssertionGradeResult {
+        AssertionGradeResult {
+            assertion: "the summary reads well".to_string(),
+            passed: true,
+            evidence: "the summary names every column".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Llm,
+                model: Some("judge-model".to_string()),
+                command: None,
+            },
+            rationale: None,
+            unsupported: None,
+            excluded: None,
+            votes,
+        }
+    }
+
+    /// A reader who never asked for a panel should see the same grading.json they saw
+    /// before panels existed, so the field has to stay away rather than report a
+    /// one-vote panel that says nothing.
+    #[test]
+    fn a_result_no_panel_decided_reports_no_split() {
+        let json = serde_json::to_value(result_with_votes(None)).unwrap();
+        assert!(json.get("votes").is_none());
+    }
+
+    #[test]
+    fn a_result_a_divided_panel_decided_carries_the_split() {
+        let json = serde_json::to_value(result_with_votes(Some(JudgeVoteTally { passed: 2, failed: 1 }))).unwrap();
+        assert_eq!(json["votes"]["passed"], 2);
+        assert_eq!(json["votes"]["failed"], 1);
+
+        let parsed: AssertionGradeResult = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.votes, Some(JudgeVoteTally { passed: 2, failed: 1 }));
+        assert!(!parsed.votes.unwrap().is_unanimous());
+    }
+
+    /// A grading.json written before panels existed still has to parse, since a report
+    /// bundle outlives the pass that produced it.
+    #[test]
+    fn a_result_written_before_panels_existed_still_parses() {
+        let parsed: AssertionGradeResult = serde_json::from_value(serde_json::json!({
+            "assertion": "the summary reads well",
+            "passed": true,
+            "evidence": "the summary names every column",
+            "grader": {"kind": "llm", "model": "judge-model"}
+        }))
+        .unwrap();
+        assert!(parsed.votes.is_none());
     }
 }

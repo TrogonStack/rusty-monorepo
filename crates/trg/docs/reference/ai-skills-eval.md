@@ -378,6 +378,7 @@ assertion to a judge. `compare --judge llm` uses the same machinery.
 | ---- | ------- | ----------- |
 | `--grader-provider` / `--judge-provider` | `openai` | `openai`, `anthropic`, or `compatible` |
 | `--grader-model` / `--judge-model` | *(unset)* | Required whenever a judge is needed |
+| `--grader-votes` | `1` | Opinions taken per assertion, decided by majority. Odd values only. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
 
 | Variable | Description |
 | -------- | ----------- |
@@ -391,6 +392,26 @@ Anthropic judge, or a `claude-code` run with a local OpenAI-compatible endpoint,
 are both ordinary. Under `--grader auto` a suite of typed graders needs no
 credential at all, and the endpoint is resolved once up front so a missing
 credential is reported before any run is graded.
+
+### Asking the judge more than once
+
+A model asked whether an assertion holds does not answer the same way every
+time. An assertion whose material sits near the edge of the judge's decision
+flips between passes for reasons that have nothing to do with the run, and a
+single opinion cannot tell that assertion apart from one the judge is sure
+about: both arrive as a flat `passed` value.
+
+`--grader-votes N` takes `N` opinions on every assertion the judge decides and
+reports the majority, and writes the split into the result's `votes`. A divided
+panel is a statement about the assertion rather than about the run: it says the
+material admits both readings, which is a reason to write the assertion more
+precisely. The evidence shown is evidence for the answer reported, never for the
+side that lost.
+
+`N` must be odd, because a panel that ties has decided nothing, and it costs one
+judge request per vote per LLM-graded assertion. Mechanical, declarative, and
+script graders are unaffected: they answer the same way every time, so there is
+nothing for a second opinion to settle.
 
 ---
 
@@ -481,15 +502,17 @@ Run ordering: eval cases in manifest order, then scenarios in flag order.
 `runs/<run-id>/grading.json`. `verify` discovers these recursively under a
 workspace tree.
 
-Schema version: `trg.skills-eval.grading.v4`. `v3`, `v2` and `v1` are still
-accepted on read. `v2` added `unsupported` and narrowed `pass_rate` to scored
-results only; `v3` makes `pass_rate` nullable, because a run where nothing could
-be scored has no pass rate and reporting `0.0` reads as a total failure; `v4`
-adds `excluded`, which takes an arm-scoped grader out of the score in both arms.
+Schema version: `trg.skills-eval.grading.v5`. `v4`, `v3`, `v2` and `v1` are
+still accepted on read. `v2` added `unsupported` and narrowed `pass_rate` to
+scored results only; `v3` makes `pass_rate` nullable, because a run where nothing
+could be scored has no pass rate and reporting `0.0` reads as a total failure;
+`v4` adds `excluded`, which takes an arm-scoped grader out of the score in both
+arms; `v5` adds `votes`, which is present only when a panel of judges decided the
+result.
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v4",
+  "schema_version": "trg.skills-eval.grading.v5",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",
@@ -532,6 +555,7 @@ adds `excluded`, which takes an arm-scoped grader out of the score in both arms.
 | `assertion_results[].rationale` | string | Optional judge reasoning |
 | `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |
+| `assertion_results[].votes` | object | Present only under `--grader-votes N` with `N` above 1. `{passed, failed}` opinions behind this result. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
 | `summary.passed` | integer | Must equal the count of scored, passing results |
 | `summary.failed` | integer | Must equal the count of scored, failing results |
 | `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` and not `excluded` |

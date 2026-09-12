@@ -226,6 +226,7 @@ mod tests {
             rationale: None,
             unsupported: None,
             excluded: None,
+            votes: None,
         }])
         .unwrap();
 

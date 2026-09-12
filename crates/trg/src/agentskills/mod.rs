@@ -15,6 +15,7 @@ pub mod grading;
 pub mod improvement_bundle;
 pub mod iteration_summary;
 pub mod judge;
+pub mod judge_votes;
 pub mod layout;
 pub mod models;
 pub mod outputs;

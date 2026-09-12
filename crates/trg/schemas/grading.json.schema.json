@@ -34,6 +34,17 @@
             "string",
             "null"
           ]
+        },
+        "votes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeVoteTally"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a panel of judges split, present only when more than one opinion was taken.\nA single opinion has no split to report, and `passed` already carries it."
         }
       },
       "required": [
@@ -122,6 +133,26 @@
         "passed",
         "failed",
         "total"
+      ],
+      "type": "object"
+    },
+    "JudgeVoteTally": {
+      "description": "How a panel of judges split on one assertion.\n\nRecorded so a reader can tell an assertion the judge was sure about from one it was\ndivided on. A divided panel is a statement about the assertion, not about the run: it\nsays the material admits both readings, which is a prompt to write the assertion more\nprecisely rather than to go looking at the skill.",
+      "properties": {
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed"
       ],
       "type": "object"
     }

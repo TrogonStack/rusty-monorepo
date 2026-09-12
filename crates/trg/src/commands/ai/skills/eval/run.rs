@@ -421,6 +421,7 @@ impl RunArgs {
             grader_provider: crate::agentskills::judge::JudgeProvider::default(),
             grader_model: None,
             grader_command: None,
+            grader_votes: crate::agentskills::judge_votes::JudgeVotes::single(),
             strict: false,
         };
 
@@ -2990,6 +2991,7 @@ mod tests {
                 grader_provider: crate::agentskills::judge::JudgeProvider::default(),
                 grader_model: None,
                 grader_command: Some("/nonexistent/grader-binary".into()),
+                grader_votes: crate::agentskills::judge_votes::JudgeVotes::single(),
                 strict: false,
             },
             OutputFormat::Text,
