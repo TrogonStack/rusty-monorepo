@@ -17,6 +17,7 @@ use super::feedback::{
 };
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
 use super::outputs::OUTPUTS_DIR;
+use super::sampling::AttemptCount;
 use super::validation::ValidationError;
 
 pub const SCHEMA_VERSION: &str = "trg.skills-eval.report.v1";
@@ -137,7 +138,7 @@ pub struct BuildReportOptions {
     pub report_id: Option<String>,
     pub generated_at: Option<String>,
     pub iteration: Option<u32>,
-    pub attempts: u32,
+    pub attempts: AttemptCount,
     /// Filesystem path used to read the old skill directory (for hashing).
     pub old_skill_path: Option<PathBuf>,
     /// User-supplied path recorded in report metadata.
@@ -162,7 +163,7 @@ impl Default for BuildReportOptions {
             report_id: None,
             generated_at: None,
             iteration: None,
-            attempts: 1,
+            attempts: AttemptCount::single(),
             old_skill_path: None,
             user_old_skill_path: None,
             runner: None,
@@ -449,7 +450,7 @@ pub fn build_report_bundle(
     let case_selection = options.cases.record(suite.evals.len(), declared_case_ids);
     let eval_slugs = slugs_for_suite(&suite);
     let iteration = options.iteration.unwrap_or(1);
-    let attempts = options.attempts.max(1);
+    let attempts = options.attempts;
 
     let user_skill_path_str = path_to_string(user_skill_path);
     let evals_path_str = format!("{user_skill_path_str}/evals/evals.json");
@@ -705,7 +706,7 @@ fn build_runs(
     scenarios: &[ScenarioKind],
     model_config_label: &str,
     iteration: u32,
-    attempts: u32,
+    attempts: AttemptCount,
     eval_slugs: &std::collections::HashMap<String, String>,
     _skill_staging: SkillStaging,
 ) -> (Vec<RunRecord>, Vec<String>) {
@@ -720,12 +721,17 @@ fn build_runs(
             .unwrap_or_else(|| super::layout::eval_slug(eval_case.id.as_str()));
 
         for scenario in scenarios {
-            for attempt in 1..=attempts {
+            for attempt in attempts.draws() {
                 let run_id = format!("run-{run_number:03}");
                 let workspace_path = format!("runs/{run_id}/workspace");
                 let outputs_path = format!("{workspace_path}/{OUTPUTS_DIR}");
-                let mirror_path =
-                    super::layout::scenario_mirror_path(iteration, &eval_slug, scenario.as_str(), attempt, attempts);
+                let mirror_path = super::layout::scenario_mirror_path(
+                    iteration,
+                    &eval_slug,
+                    scenario.as_str(),
+                    attempt,
+                    attempts.count(),
+                );
                 workspace_dirs.push(workspace_path.clone());
                 runs.push(RunRecord {
                     id: run_id,
@@ -761,8 +767,8 @@ fn build_runs(
     (runs, workspace_dirs)
 }
 
-fn build_summaries(scenarios: &[ScenarioKind], eval_count: usize, attempts: u32) -> SummariesSection {
-    let total_per_scenario = eval_count * attempts.max(1) as usize;
+fn build_summaries(scenarios: &[ScenarioKind], eval_count: usize, attempts: AttemptCount) -> SummariesSection {
+    let total_per_scenario = attempts.runs_for(eval_count);
     SummariesSection {
         by_scenario: scenarios
             .iter()
@@ -770,7 +776,7 @@ fn build_summaries(scenarios: &[ScenarioKind], eval_count: usize, attempts: u32)
                 scenario_id: *scenario,
                 total_runs: total_per_scenario,
                 passed_runs: 0,
-                skipped_runs: eval_count,
+                skipped_runs: total_per_scenario,
                 failed_runs: 0,
             })
             .collect(),
@@ -883,7 +889,15 @@ mod tests {
         let suite = sample_suite();
         let slugs = crate::agentskills::layout::assign_eval_slugs(&suite.evals);
         let scenarios = [ScenarioKind::WithSkill];
-        let (runs, workspace_dirs) = build_runs(&suite, &scenarios, "ci-default", 1, 3, &slugs, SkillStaging::Symlink);
+        let (runs, workspace_dirs) = build_runs(
+            &suite,
+            &scenarios,
+            "ci-default",
+            1,
+            AttemptCount::parse(3).unwrap(),
+            &slugs,
+            SkillStaging::Symlink,
+        );
 
         assert_eq!(runs.len(), 6);
         assert_eq!(workspace_dirs.len(), 6);
@@ -913,7 +927,7 @@ mod tests {
             &[ScenarioKind::WithSkill],
             "ci-default",
             1,
-            1,
+            AttemptCount::single(),
             &slugs,
             SkillStaging::Symlink,
         );
@@ -926,7 +940,15 @@ mod tests {
         let suite = sample_suite();
         let slugs = crate::agentskills::layout::assign_eval_slugs(&suite.evals);
         let scenarios = [ScenarioKind::WithSkill, ScenarioKind::WithoutSkill];
-        let (runs, workspace_dirs) = build_runs(&suite, &scenarios, "ci-default", 2, 1, &slugs, SkillStaging::Symlink);
+        let (runs, workspace_dirs) = build_runs(
+            &suite,
+            &scenarios,
+            "ci-default",
+            2,
+            AttemptCount::single(),
+            &slugs,
+            SkillStaging::Symlink,
+        );
 
         assert_eq!(runs.len(), 4);
         assert_eq!(runs[0].id, "run-001");
@@ -956,9 +978,32 @@ mod tests {
         assert!(runs.iter().all(|run| run.status == "skipped"));
     }
 
+    /// Every run is scaffolded as skipped, so more draws of a cell means more skipped
+    /// runs. A summary that still counted cells would undercount the pass it describes,
+    /// and a pass with no runner never rebuilds it, so the undercount is what ships.
+    #[test]
+    fn build_summaries_counts_every_drawn_run_as_skipped() {
+        let summaries = build_summaries(
+            &[ScenarioKind::WithSkill],
+            2,
+            AttemptCount::parse(3).expect("three attempts"),
+        );
+
+        let scenario = &summaries.by_scenario[0];
+        assert_eq!(scenario.total_runs, 6);
+        assert_eq!(
+            scenario.skipped_runs, scenario.total_runs,
+            "nothing has run yet, so every drawn run is still skipped"
+        );
+    }
+
     #[test]
     fn build_summaries_counts_skipped_runs_per_scenario() {
-        let summaries = build_summaries(&[ScenarioKind::WithSkill, ScenarioKind::OldSkill], 2, 1);
+        let summaries = build_summaries(
+            &[ScenarioKind::WithSkill, ScenarioKind::OldSkill],
+            2,
+            AttemptCount::single(),
+        );
 
         assert_eq!(summaries.by_scenario.len(), 2);
         assert_eq!(summaries.by_scenario[0].scenario_id, ScenarioKind::WithSkill);
@@ -998,7 +1043,7 @@ mod tests {
             &[ScenarioKind::OldSkill],
             "ci-default",
             1,
-            1,
+            AttemptCount::single(),
             &eval_slugs,
             SkillStaging::Symlink,
         );

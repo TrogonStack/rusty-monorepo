@@ -73,9 +73,9 @@ symlink call fails (e.g. read-only filesystem), the leaf gets a
 }
 ```
 
-With `--attempts` > 1, each scenario nests attempts under
+With `--attempts` > 1, which is the default, each scenario nests attempts under
 `eval-<slug>/<scenario>/attempt-K/` and the index uses per-attempt keys
-(`attempt-1`, `attempt-2`, …).
+(`attempt-1`, `attempt-2`, …). `--attempts 1` produces the flat layout above.
 
 Each run record starts with:
 

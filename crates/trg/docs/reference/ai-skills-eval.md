@@ -45,6 +45,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 | `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
+| `--attempts` | integer | `3` | Draw each (case × scenario) cell this many times. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
@@ -787,6 +788,43 @@ re-running the same command with the same `--attempts` still costs nothing.
 
 `--reuse-completed` is rejected when more than one `--scenario` is requested in
 a single invocation, for the same reason.
+
+---
+
+## How many times a cell is drawn
+
+`--attempts` defaults to `3`: every (case × scenario) cell is executed three
+times, and each draw is its own run record with its own `attempt` number.
+
+The default is not caution about flakiness, it is what makes the numbers
+readable. An agent asked the same question twice does not answer it the same way
+twice, so a single run of a case is one draw from a distribution rather than a
+measurement of the skill. With one draw per cell, `benchmark.json` reports a
+spread of zero because none was measured, a pass rate that moved between two
+passes cannot be told apart from the agent's own variance, and a regression
+flagged against `--baseline` is as likely to be noise as it is to be the skill.
+
+Three is the smallest count that answers the question. One reports no spread,
+two cannot say which of the pair was the outlier, and three shows that a cell is
+unstable at all. `benchmark.json` reports mean, minimum, maximum and standard
+deviation across the draws of each cell, and `iteration-summary` names the
+assertions that flipped between them.
+
+`--attempts 1` asks for a single draw, which is the right choice while writing a
+case and reading its transcript. `--attempts 0` is refused, because a cell
+nobody draws is a row the report cannot fill in.
+
+This is the flag that decides the size of a pass, so it is the one to pair with
+[`-j`](#running-more-than-one-run-at-a-time): three draws of two arms is six
+times the work of a single arm drawn once, and the lanes are what keep that
+inside a wall clock an operator will wait through. The cost is not reduced by
+either flag. Each draw is also cached and reused under its own attempt number,
+so re-running the same command does not pay for the draws again. See
+[Reusing a completed run](#reusing-a-completed-run).
+
+`--retries` is not a substitute. It re-invokes the harness only when a run
+failed in transit, meaning a non-zero exit with no result or a timeout, and
+never because an assertion failed, so it adds no draws to the distribution.
 
 ---
 

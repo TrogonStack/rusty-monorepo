@@ -21,6 +21,7 @@ pub mod prompt;
 pub mod redact;
 pub mod report;
 pub mod runner;
+pub mod sampling;
 pub mod schemas;
 pub mod transcript;
 pub mod validation;
