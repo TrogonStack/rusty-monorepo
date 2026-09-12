@@ -241,6 +241,17 @@
         "prompt": {
           "$ref": "#/$defs/NonEmptyString"
         },
+        "scaffold": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceScaffold"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The state this case is asking about, for a case that is not asking about an empty\ndirectory."
+        },
         "skill_disclosure": {
           "$ref": "#/$defs/SkillDisclosure"
         },
@@ -371,6 +382,14 @@
     },
     "ToolName": {
       "type": "string"
+    },
+    "WorkspaceScaffold": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RelativeSkillPath"
+        }
+      ],
+      "description": "A script a case runs in its own workspace before any agent starts.\n\nA skill whose work depends on the state of a directory cannot be asked about that work\nin an empty one. A case that reaches for a lockfile, a repository mid-rebase, or a file\nthat is already wrong is asking a question the empty workspace does not contain, and\nwithout a way to say so the case can only be written as if every skill were used on a\nblank slate, which is not how any of them are used.\n\ntrg runs the script itself rather than asking a harness to, which is what keeps the\nstatement portable: the same case puts the same directory in front of every harness,\nand none of them needs a setup mechanism of its own for it to work."
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/evals.json.schema.json",

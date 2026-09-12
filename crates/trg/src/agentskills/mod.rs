@@ -27,6 +27,7 @@ pub mod schemas;
 pub mod transcript;
 pub mod validation;
 pub mod validator;
+pub mod workspace_scaffold;
 
 pub(crate) fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
     use std::fmt::Write;

@@ -80,6 +80,14 @@ pub struct CacheKeyInput {
     pub environment: EnvironmentPolicy,
     #[serde(default)]
     pub skill_staging: SkillStaging,
+    /// What the case's workspace scaffold said, for a case that declares one.
+    ///
+    /// The script decides the directory the run worked in, and `skill_hash` is the digest of
+    /// `SKILL.md` alone, so nothing else here would notice the script being edited. A case
+    /// that declares no scaffold serializes as it always did, which leaves entries written
+    /// before this field readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaffold_hash: Option<String>,
 }
 
 /// What a completed run has to match to be served to a run that asked for any completed
@@ -92,6 +100,10 @@ pub struct CacheKeyInput {
 /// arm's run to the other compares a run against itself and reports a delta of zero for a
 /// skill that was never exercised; two attempts of one arm differ in nothing at all, and
 /// the point of asking for a second one is to get a second sample rather than a copy.
+///
+/// It cannot forget the scaffold either, for the same reason it cannot forget the fixtures:
+/// both decide what was in the directory the run worked in, and a run answers only for the
+/// directory it was handed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReuseKeyInput {
     pub eval_case_id: String,
@@ -100,6 +112,8 @@ pub struct ReuseKeyInput {
     pub fixture_hash: String,
     pub scenario: ScenarioKind,
     pub attempt: u32,
+    #[serde(default)]
+    pub scaffold_hash: Option<String>,
 }
 
 impl ReuseKeyInput {
@@ -111,6 +125,7 @@ impl ReuseKeyInput {
             fixture_hash: key_input.fixture_hash.clone(),
             scenario: key_input.scenario,
             attempt: key_input.attempt,
+            scaffold_hash: key_input.scaffold_hash.clone(),
         }
     }
 
@@ -456,7 +471,51 @@ mod tests {
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             environment: EnvironmentPolicy::default(),
             skill_staging: SkillStaging::default(),
+            scaffold_hash: None,
         }
+    }
+
+    /// A run set up by another script worked in another directory, so it answers another
+    /// question. `skill_hash` is the digest of `SKILL.md` alone and would not notice.
+    #[test]
+    fn a_run_from_another_scaffold_is_a_different_run() {
+        let base = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture");
+        let seeded = CacheKeyInput {
+            scaffold_hash: Some("sha256:seeded".to_string()),
+            ..base.clone()
+        };
+        let edited = CacheKeyInput {
+            scaffold_hash: Some("sha256:edited".to_string()),
+            ..base.clone()
+        };
+
+        assert_ne!(
+            CacheKey::from_input(&seeded),
+            CacheKey::from_input(&edited),
+            "the state a run was handed belongs in its identity"
+        );
+        assert_ne!(
+            CacheKey::from_input(&seeded),
+            CacheKey::from_input(&base),
+            "a run handed a scaffolded directory is not the run that got an empty one"
+        );
+        assert_ne!(
+            ReuseKeyInput::of(&seeded),
+            ReuseKeyInput::of(&edited),
+            "--reuse-completed cannot forget it either"
+        );
+    }
+
+    /// A case that declares no scaffold has to key exactly as it did before the field
+    /// existed, or every entry already on disk is evicted for nothing.
+    #[test]
+    fn a_case_with_no_scaffold_keys_as_it_did_before() {
+        let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture");
+        let serialized = serde_json::to_string(&input).unwrap();
+        assert!(
+            !serialized.contains("scaffold_hash"),
+            "an absent scaffold must not reach the key: {serialized}"
+        );
     }
 
     /// A run that inherited this machine is not the run a scrubbed invocation asked

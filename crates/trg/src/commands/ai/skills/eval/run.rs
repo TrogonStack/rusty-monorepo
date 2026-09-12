@@ -23,6 +23,7 @@ use crate::agentskills::runner::{
     SkillDigest,
 };
 use crate::agentskills::sampling::AttemptCount;
+use crate::agentskills::workspace_scaffold::ScaffoldPermission;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
@@ -210,6 +211,12 @@ pub struct RunArgs {
     )]
     pub environment: EnvironmentPolicy,
 
+    #[arg(
+        long,
+        help = "Run the workspace scaffold a case declares. The script is author-supplied code that runs with your own reach, so a case that declares one fails its runs until this is passed"
+    )]
+    pub allow_scaffold: bool,
+
     #[command(flatten)]
     pub ci: EvalCiArgs,
 }
@@ -383,6 +390,7 @@ impl RunArgs {
                 cache_options,
                 self.skill_staging,
                 self.environment,
+                ScaffoldPermission::granted(self.allow_scaffold),
                 self.concurrency,
             ) {
                 return code;
@@ -461,6 +469,7 @@ fn execute_runs(
     cache_options: CacheOptions,
     skill_staging: SkillStaging,
     environment: EnvironmentPolicy,
+    scaffold_permission: ScaffoldPermission,
     concurrency: RunConcurrency,
 ) -> std::result::Result<(), i32> {
     let skill_md = match std::fs::read_to_string(skill_path.join("SKILL.md")) {
@@ -511,6 +520,7 @@ fn execute_runs(
         cache_options,
         skill_staging,
         environment,
+        scaffold_permission,
         skill_md: &skill_md,
         old_skill_md: old_skill_md.as_deref(),
         case_index: &case_index,
@@ -567,6 +577,7 @@ struct RunExecution<'a> {
     cache_options: CacheOptions,
     skill_staging: SkillStaging,
     environment: EnvironmentPolicy,
+    scaffold_permission: ScaffoldPermission,
     skill_md: &'a str,
     old_skill_md: Option<&'a str>,
     case_index: &'a HashMap<String, &'a EvalCase>,
@@ -746,6 +757,22 @@ impl RunExecution<'_> {
             _ => self.skill_hash.clone(),
         };
 
+        let scaffold_hash = match self
+            .case_index
+            .get(&run.eval_case_id)
+            .and_then(|case| case.scaffold.as_ref())
+        {
+            None => None,
+            Some(scaffold) => match scaffold.digest(self.skill_path) {
+                Ok(digest) => Some(digest.as_str().to_string()),
+                Err(e) => {
+                    eprintln!("Run {}: {}", run.id, e);
+                    run.status = "failed".to_string();
+                    return;
+                }
+            },
+        };
+
         let key_input = CacheKeyInput {
             eval_case_id: run.eval_case_id.clone(),
             skill_hash,
@@ -760,6 +787,7 @@ impl RunExecution<'_> {
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             environment: self.environment,
             skill_staging: self.skill_staging,
+            scaffold_hash,
         };
         let reuse_input = ReuseKeyInput::of(&key_input);
         let cache_key = CacheKey::from_input(&key_input);
@@ -787,6 +815,7 @@ impl RunExecution<'_> {
             timeout_secs: effective_timeout_secs(case, self.timeout_secs),
             skill_staging: self.skill_staging,
             environment: self.environment,
+            scaffold_permission: self.scaffold_permission,
         };
 
         let digest_before = match integrity {
@@ -1338,6 +1367,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs {
@@ -1475,6 +1505,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1517,6 +1548,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1575,6 +1607,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1682,6 +1715,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1732,6 +1766,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1782,6 +1817,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1824,6 +1860,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1868,6 +1905,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -1929,6 +1967,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2076,6 +2115,7 @@ mod tests {
             retries: 0,
             attempts: AttemptCount::single(),
             concurrency: RunConcurrency::serial(),
+            allow_scaffold: false,
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -2222,6 +2262,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2251,6 +2292,7 @@ mod tests {
             reuse_completed: true,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2297,6 +2339,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2326,6 +2369,7 @@ mod tests {
             reuse_completed: true,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2369,6 +2413,7 @@ mod tests {
             reuse_completed: true,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2442,6 +2487,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2509,6 +2555,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2599,6 +2646,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2640,6 +2688,7 @@ mod tests {
                 reuse_completed: false,
                 skill_staging: SkillStaging::Symlink,
                 environment: EnvironmentPolicy::Scrubbed,
+                allow_scaffold: false,
                 cases: Vec::new(),
                 tags: Vec::new(),
                 ci: EvalCiArgs::default(),
@@ -2706,6 +2755,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),
@@ -2752,6 +2802,7 @@ mod tests {
             reuse_completed: false,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
             ci: EvalCiArgs::default(),

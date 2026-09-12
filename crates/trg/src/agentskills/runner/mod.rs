@@ -30,6 +30,7 @@ use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkil
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
 use super::report::{EnvironmentPolicy, ScenarioKind, SkillStaging};
 use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
+use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
 use environment::RunEnvironment;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -95,6 +96,7 @@ pub struct EvalRunRequest<'a> {
     pub timeout_secs: Option<u64>,
     pub skill_staging: SkillStaging,
     pub environment: EnvironmentPolicy,
+    pub scaffold_permission: ScaffoldPermission,
 }
 
 impl EvalRunRequest<'_> {
@@ -348,8 +350,20 @@ pub struct PreparedRun {
 }
 
 pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<PreparedRun, RunnerError> {
-    std::fs::create_dir_all(request.workspace_dir)?;
+    reset_workspace(request.workspace_dir)?;
     ensure_outputs_dir(request.workspace_dir)?;
+
+    // The scaffold goes first because it describes the directory the case is asking about,
+    // and the skill and the case's fixtures are then staged into that directory. Running it
+    // last would let it overwrite what the case declared, which is the opposite of what a
+    // declaration is for.
+    scaffold_workspace(
+        request.eval.scaffold.as_ref(),
+        request.scaffold_permission,
+        request.skill_path,
+        request.workspace_dir,
+    )
+    .map_err(scaffold_error_to_runner)?;
 
     if let Some((skill_path, staged_dir)) = skill_to_stage(request)? {
         stage_skill_into_workspace(
@@ -377,6 +391,29 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
         prompt: prompt.into_string(),
         environment,
     })
+}
+
+fn scaffold_error_to_runner(err: ScaffoldFailure) -> RunnerError {
+    RunnerError::InvalidOutput {
+        program: "trg".to_string(),
+        detail: err.to_string(),
+    }
+}
+
+/// Empty the workspace before anything is staged into it.
+///
+/// A retry is another run of the same case, and a case that declares state declares a
+/// directory rather than a point to pile onto: replaying the scaffold over what the last
+/// attempt left behind sets up a repository that is already half done, and scores a
+/// directory nobody asked about. Removing the tree unlinks the staged skill's symlinks
+/// instead of following them, so the clearing stops at the workspace.
+fn reset_workspace(workspace_dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(workspace_dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    std::fs::create_dir_all(workspace_dir)
 }
 
 fn skill_error_to_runner(err: SkillError) -> RunnerError {
@@ -751,7 +788,289 @@ mod workspace_tests {
             timeout_secs: None,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            scaffold_permission: ScaffoldPermission::Withheld,
         }
+    }
+
+    const SCAFFOLD_SKILL_MD: &str = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+
+    fn make_scaffolded_case(script: &str) -> EvalCase {
+        serde_json::from_value(serde_json::json!({
+            "id": "case-1",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "assertions": [],
+            "scaffold": script,
+        }))
+        .unwrap()
+    }
+
+    fn write_scaffold(skill_path: &Path, relative: &str, body: &str) {
+        let script = skill_path.join(relative);
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn scaffold_fixture(body: &str) -> (tempfile::TempDir, PathBuf, EvalCase) {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(&skill_path).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        write_scaffold(&skill_path, "evals/scaffold.sh", body);
+        (temp, skill_path, make_scaffolded_case("evals/scaffold.sh"))
+    }
+
+    fn prepare_scaffolded(
+        temp: &tempfile::TempDir,
+        skill_path: &Path,
+        case: &EvalCase,
+        permission: ScaffoldPermission,
+    ) -> (PathBuf, Result<PreparedRun, RunnerError>) {
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = EvalRunRequest {
+            scaffold_permission: permission,
+            ..test_request(
+                case,
+                ScenarioKind::WithSkill,
+                "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+                skill_path,
+                &workspace,
+                &transcript,
+                &stderr,
+                None,
+                None,
+            )
+        };
+        let prepared = prepare_workspace(&request, Runner::ClaudeCode);
+        (workspace, prepared)
+    }
+
+    /// A case that says what state it is asking about gets that state, and gets it from trg
+    /// rather than from a harness, so the same case states the same thing to every one.
+    #[test]
+    fn a_case_that_declares_state_runs_in_that_state() {
+        let (temp, skill_path, case) = scaffold_fixture("#!/bin/sh\nmkdir -p repo\necho seeded > repo/README.md\n");
+
+        let (workspace, prepared) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Granted);
+
+        prepared.expect("a granted scaffold runs");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("repo/README.md")).unwrap(),
+            "seeded\n"
+        );
+    }
+
+    /// A case scored against a workspace it never asked for reads as an answer about the
+    /// skill when it is an answer about the wrong directory, so the run fails instead.
+    #[test]
+    fn a_declared_scaffold_nobody_allowed_fails_the_run_rather_than_running_without_it() {
+        let (temp, skill_path, case) = scaffold_fixture("#!/bin/sh\nmkdir -p repo\n");
+
+        let (workspace, prepared) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Withheld);
+
+        let error = prepared.expect_err("a withheld scaffold refuses the run");
+        let message = error.to_string();
+        assert!(
+            message.contains("--allow-scaffold"),
+            "expected the flag to be named: {message}"
+        );
+        assert!(
+            message.contains("evals/scaffold.sh"),
+            "expected the script to be named: {message}"
+        );
+        assert!(
+            !workspace.join("repo").exists(),
+            "nothing the script asked for was created"
+        );
+    }
+
+    /// A scaffold that did not finish leaves a directory nobody described, so the run it was
+    /// setting up cannot be reported as an answer about anything.
+    #[test]
+    fn a_scaffold_that_failed_fails_the_run_it_was_setting_up() {
+        let (temp, skill_path, case) = scaffold_fixture("#!/bin/sh\necho 'no disk' >&2\nexit 3\n");
+
+        let (_workspace, prepared) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Granted);
+
+        let message = prepared.expect_err("a failing scaffold refuses the run").to_string();
+        assert!(message.contains("exit code 3"), "expected the exit code: {message}");
+        assert!(
+            message.contains("no disk"),
+            "expected the script's own words: {message}"
+        );
+    }
+
+    /// The case's own fixtures are staged after the scaffold, so a file the case declared is
+    /// the file the run gets even when the script wrote to the same path.
+    #[test]
+    fn what_a_case_declares_outlives_what_its_scaffold_wrote() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals/files")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("evals/files/input.txt"), "declared").unwrap();
+        write_scaffold(
+            &skill_path,
+            "evals/scaffold.sh",
+            "#!/bin/sh\nmkdir -p evals/files\necho scaffolded > evals/files/input.txt\n",
+        );
+        let case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "case-1",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "files": ["evals/files/input.txt"],
+            "assertions": [],
+            "scaffold": "evals/scaffold.sh",
+        }))
+        .unwrap();
+
+        let (workspace, prepared) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Granted);
+
+        prepared.expect("a granted scaffold runs");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("evals/files/input.txt")).unwrap(),
+            "declared"
+        );
+    }
+
+    /// The script is spawned as a path under the skill directory while the child changes
+    /// into the workspace first, so a skill directory given relative to where trg was run
+    /// has to be resolved before that change of directory rather than after it.
+    #[test]
+    fn a_scaffold_runs_when_the_skill_directory_is_a_relative_path() {
+        let nearby = tempfile::TempDir::new_in(".").unwrap();
+        let skill_path =
+            PathBuf::from(nearby.path().file_name().expect("a name under the current directory")).join("skill");
+        assert!(skill_path.is_relative(), "the point of the test is the relative path");
+        std::fs::create_dir_all(&skill_path).unwrap();
+        std::fs::write(skill_path.join("SKILL.md"), SCAFFOLD_SKILL_MD).unwrap();
+        write_scaffold(
+            &skill_path,
+            "evals/scaffold.sh",
+            "#!/bin/sh\necho seeded > seeded.txt\n",
+        );
+        let case = make_scaffolded_case("evals/scaffold.sh");
+
+        let elsewhere = tempdir().unwrap();
+        let workspace = elsewhere.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = EvalRunRequest {
+            scaffold_permission: ScaffoldPermission::Granted,
+            ..test_request(
+                &case,
+                ScenarioKind::WithSkill,
+                SCAFFOLD_SKILL_MD,
+                &skill_path,
+                &workspace,
+                &transcript,
+                &stderr,
+                None,
+                None,
+            )
+        };
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("a relative skill directory still finds its scaffold");
+
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("seeded.txt")).unwrap(),
+            "seeded\n"
+        );
+    }
+
+    /// A retry is another run of the same case, so it is handed the state the case declared
+    /// and not whatever the attempt before it left in the directory.
+    #[test]
+    fn a_workspace_prepared_again_does_not_keep_what_the_last_attempt_left() {
+        let (temp, skill_path, case) = scaffold_fixture("#!/bin/sh\nmkdir -p repo\necho seeded > repo/README.md\n");
+
+        let (workspace, prepared) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Granted);
+        prepared.expect("a granted scaffold runs");
+        std::fs::write(workspace.join("repo/README.md"), "rewritten by the agent").unwrap();
+        std::fs::write(workspace.join("half-done.txt"), "from the attempt that failed").unwrap();
+
+        let (_, again) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Granted);
+
+        again.expect("the retry prepares the same workspace");
+        assert!(
+            !workspace.join("half-done.txt").exists(),
+            "the retry asks the same question, so it starts from the same directory"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("repo/README.md")).unwrap(),
+            "seeded\n"
+        );
+    }
+
+    /// Clearing the workspace has to stop at the workspace. The staged skill is a tree of
+    /// symlinks into the skill directory, and following them would take the skill down with
+    /// the attempt that failed.
+    #[test]
+    fn clearing_a_workspace_does_not_reach_the_skill_it_staged() {
+        let (temp, skill_path, case) = scaffold_fixture("#!/bin/sh\n:\n");
+
+        let (_, prepared) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Granted);
+        prepared.expect("a granted scaffold runs");
+        let (_, again) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Granted);
+
+        again.expect("the retry prepares the same workspace");
+        assert!(
+            skill_path.join("SKILL.md").exists(),
+            "the skill the next attempt reads is still there"
+        );
+        assert!(skill_path.join("evals/scaffold.sh").exists());
+    }
+
+    /// A case that declares nothing is untouched by any of this, and the permission it was
+    /// never asked for does not decide whether it runs.
+    #[test]
+    fn a_case_that_declares_no_state_is_unaffected_by_the_permission() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(&skill_path).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        let case = make_case(vec![]);
+
+        let (_workspace, prepared) = prepare_scaffolded(&temp, &skill_path, &case, ScaffoldPermission::Withheld);
+
+        prepared.expect("a case with no scaffold needs no permission");
+    }
+
+    /// A scaffold outside the skill directory is refused when the manifest is read, not when
+    /// a run reaches for it.
+    #[test]
+    fn a_scaffold_that_leaves_the_skill_directory_is_refused_at_parse_time() {
+        let error = serde_json::from_value::<EvalCase>(serde_json::json!({
+            "id": "case-1",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "assertions": [],
+            "scaffold": "../../etc/setup.sh",
+        }))
+        .expect_err("a path that escapes is refused");
+        assert!(
+            error.to_string().contains("must stay inside the skill directory"),
+            "got: {error}"
+        );
     }
 
     #[test]
