@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::errors::SkillError;
+use super::evals::EVAL_SUITE_DIR_NAME;
 use super::evals::{EvalCase, EvalError};
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SKILL_LINK_OLD, SKILL_LINK_WITH};
@@ -391,6 +392,24 @@ fn skill_error_to_runner(err: SkillError) -> RunnerError {
     }
 }
 
+/// Is this top-level skill entry withheld from every run's workspace?
+///
+/// The eval suite is the answer key: it carries each case's `expected_output`, its
+/// natural-language assertions, and its graders' literal `contains` text and `regex`
+/// patterns. Staging it would let a run be scored on text it copied rather than work it
+/// did, and the with-skill prompt points the agent straight at the staged directory, so
+/// the suite is withheld in both staging modes.
+///
+/// Withholding costs a case nothing: the fixtures a case declares in `files` are staged
+/// separately into the workspace root by `stage_eval_file`, which is the only part of the
+/// suite directory a run is meant to see.
+///
+/// Only the top level is filtered. A nested `evals/` deeper in the tree is the skill's own
+/// content, not this suite, so it stages like anything else.
+fn is_withheld_from_staging(entry_name: &std::ffi::OsStr) -> bool {
+    entry_name == std::ffi::OsStr::new(EVAL_SUITE_DIR_NAME)
+}
+
 fn stage_skill_into_workspace(
     skill_path: &Path,
     workspace_dir: &Path,
@@ -421,13 +440,29 @@ fn remove_staged_skill(path: &Path) -> std::io::Result<()> {
 /// staged fixture paths or with a `skill/` directory the agent might create itself —
 /// the workspace is the agent's task space; the skill is sidecar reference material.
 fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_name: &str) -> std::io::Result<()> {
-    let link = workspace_dir.join(link_name.trim_end_matches('/'));
+    let dest = workspace_dir.join(link_name.trim_end_matches('/'));
     let absolute = std::fs::canonicalize(skill_path)?;
-    std::os::unix::fs::symlink(absolute, link)
+    std::fs::create_dir_all(&dest)?;
+    for entry in std::fs::read_dir(&absolute)? {
+        let entry = entry?;
+        if is_withheld_from_staging(&entry.file_name()) {
+            continue;
+        }
+        std::os::unix::fs::symlink(entry.path(), dest.join(entry.file_name()))?;
+    }
+    Ok(())
 }
 
 fn copy_skill_into_workspace(skill_path: &Path, dest: &Path) -> std::io::Result<()> {
-    copy_skill_tree(skill_path, dest)
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(skill_path)? {
+        let entry = entry?;
+        if is_withheld_from_staging(&entry.file_name()) {
+            continue;
+        }
+        copy_skill_tree(&entry.path(), &dest.join(entry.file_name()))?;
+    }
+    Ok(())
 }
 
 /// Copy a skill directory, dereferencing symlinks so the destination is fully self-contained.
@@ -667,9 +702,122 @@ mod workspace_tests {
         assert!(workspace.join("outputs").is_dir());
 
         let link = workspace.join(".skill");
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(link.is_dir());
         assert!(link.join("SKILL.md").is_file());
+        assert!(
+            link.join("SKILL.md")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "staged entries are symlinks so staging stays cheap"
+        );
         assert!(workspace.join("evals/files/input.txt").is_file());
+    }
+
+    /// The suite carries every case's expected output and its graders' literal patterns.
+    /// A run that can read it can be scored on text it copied, so neither staging mode may
+    /// put it in the workspace.
+    #[test]
+    fn staging_withholds_the_eval_suite_from_the_workspace() {
+        for staging in [SkillStaging::Symlink, SkillStaging::Copy] {
+            let temp = tempdir().unwrap();
+            let skill_path = temp.path().join("skill");
+            std::fs::create_dir_all(skill_path.join("evals/files")).unwrap();
+            std::fs::write(
+                skill_path.join("SKILL.md"),
+                "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+            )
+            .unwrap();
+            std::fs::write(skill_path.join("evals/files/input.txt"), "hello").unwrap();
+            std::fs::write(
+                skill_path.join("evals/evals.json"),
+                r#"{"skill_name":"test-skill","evals":[{"id":"a","prompt":"p","expected_output":"the answer key"}]}"#,
+            )
+            .unwrap();
+            std::fs::create_dir_all(skill_path.join("evals/a/fixtures")).unwrap();
+            std::fs::write(skill_path.join("evals/a/fixtures/seed.txt"), "seed").unwrap();
+
+            let workspace = temp.path().join("ws");
+            let transcript = workspace.join("transcript.jsonl");
+            let stderr = workspace.join("stderr.log");
+            let case = make_case(vec!["evals/files/input.txt".to_string()]);
+            let mut request = test_request(
+                &case,
+                ScenarioKind::WithSkill,
+                "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+                &skill_path,
+                &workspace,
+                &transcript,
+                &stderr,
+                None,
+                None,
+            );
+            request.skill_staging = staging;
+
+            prepare_workspace(&request).unwrap();
+
+            let staged_suite_dir = workspace.join(".skill/evals");
+            assert!(
+                !staged_suite_dir.exists(),
+                "{staging:?}: the eval suite directory must not be staged"
+            );
+            assert!(
+                std::fs::read_to_string(workspace.join(".skill/evals/evals.json")).is_err(),
+                "{staging:?}: the manifest must be unreadable through the staged skill"
+            );
+
+            // The skill itself, and the fixture the case declared, are still there.
+            assert!(
+                workspace.join(".skill/SKILL.md").is_file(),
+                "{staging:?}: the skill under test must still be staged"
+            );
+            assert!(
+                workspace.join("evals/files/input.txt").is_file(),
+                "{staging:?}: a declared fixture is staged separately and must survive"
+            );
+        }
+    }
+
+    /// A nested `evals/` belongs to the skill's own content, so only the top level is filtered.
+    #[test]
+    fn staging_withholds_only_the_top_level_eval_suite() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::create_dir_all(skill_path.join("reference/evals")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("evals/evals.json"), "{}").unwrap();
+        std::fs::write(skill_path.join("reference/evals/guide.md"), "keep me").unwrap();
+
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let case = make_case(vec![]);
+        let mut request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+        request.skill_staging = SkillStaging::Copy;
+
+        prepare_workspace(&request).unwrap();
+
+        assert!(!workspace.join(".skill/evals").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".skill/reference/evals/guide.md")).unwrap(),
+            "keep me"
+        );
     }
 
     #[test]
@@ -751,9 +899,9 @@ mod workspace_tests {
         assert!(!prepared.prompt.contains("# Current"));
 
         let link = workspace.join(".old-skill");
-        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        let target = std::fs::read_link(&link).unwrap();
-        assert_eq!(target, std::fs::canonicalize(&old_skill).unwrap());
+        assert!(link.is_dir());
+        let target = std::fs::read_link(link.join("SKILL.md")).unwrap();
+        assert_eq!(target, std::fs::canonicalize(old_skill.join("SKILL.md")).unwrap());
         assert_eq!(
             std::fs::read_to_string(link.join("SKILL.md")).unwrap(),
             "---\nname: old-skill\ndescription: Old skill\n---\n# Old\n"

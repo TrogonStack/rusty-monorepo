@@ -469,9 +469,30 @@ scenarios recorded separately in the same record.
 
 | Kind | CLI value | Runner behavior |
 | ---- | --------- | --------------- |
-| With skill | `with_skill` | Symlinks skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
-| Without skill | `without_skill` | Raw eval prompt; no skill symlink |
+| With skill | `with_skill` | Stages skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
+| Without skill | `without_skill` | Raw eval prompt; nothing staged |
 | Old skill | `old_skill` | Stages the `--old-skill-dir` revision to `.old-skill/` in the workspace; prompt prefixed with that revision's frontmatter |
+
+### The eval suite is withheld from the workspace
+
+The staged directory holds the skill under test minus its top-level `evals/`
+directory. The suite is the answer key: it carries each case's
+`expected_output`, its natural-language assertions, and its graders' literal
+`contains` text and `regex` patterns. A run that could read it could be scored
+on text it copied rather than work it did, and the with-skill prompt points the
+agent straight at `.skill/`, so the suite is withheld under both
+`--skill-staging symlink` and `--skill-staging copy`.
+
+This costs a case nothing. The fixtures a case names in `files` are staged
+separately into the workspace root, and they are the only part of `evals/` a
+run is meant to see. Only the top level is filtered, so a nested `evals/`
+deeper in the skill tree is treated as the skill's own content and staged
+normally.
+
+Because the filter has to skip an entry, `--skill-staging symlink` stages
+`.skill/` as a real directory holding one symlink per entry rather than as a
+single symlink to the skill root. Staging stays as cheap as it was; a run
+reading `.skill/SKILL.md` sees no difference.
 
 `--scenario old_skill` requires `--old-skill-dir`. The old skill must carry the
 same `name` as the current one unless you pass `--allow-skill-name-mismatch`,
