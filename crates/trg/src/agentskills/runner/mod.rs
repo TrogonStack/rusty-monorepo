@@ -779,6 +779,121 @@ mod workspace_tests {
         }
     }
 
+    fn staged_symlinks(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.symlink_metadata().unwrap().file_type().is_symlink() {
+                found.push(path);
+            } else if path.is_dir() {
+                found.extend(staged_symlinks(&path));
+            }
+        }
+        found
+    }
+
+    /// Keeping the suite out of the staged directory keeps it out of a listing, not out
+    /// of the run: a staged symlink names the live skill directory, and the suite sits
+    /// next to it, so following one entry is enough to read every expected output. The
+    /// default mode has to leave nothing to follow.
+    #[test]
+    fn the_default_staging_mode_leaves_no_path_out_of_the_workspace() {
+        assert_eq!(
+            SkillStaging::default(),
+            SkillStaging::Copy,
+            "the mode a run gets without asking must be the hermetic one"
+        );
+
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("reference")).unwrap();
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("reference/guide.md"), "guide").unwrap();
+        std::fs::write(
+            skill_path.join("evals/evals.json"),
+            r#"{"skill_name":"test-skill","evals":[{"id":"a","prompt":"p","expected_output":"the answer key"}]}"#,
+        )
+        .unwrap();
+
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let case = make_case(vec![]);
+        let mut request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+        request.skill_staging = SkillStaging::default();
+
+        prepare_workspace(&request).unwrap();
+
+        let staged = workspace.join(".skill");
+        assert!(
+            staged_symlinks(&staged).is_empty(),
+            "the default mode must stage nothing that names a path outside the workspace"
+        );
+        assert!(
+            !staged.canonicalize().unwrap().join("../evals/evals.json").exists(),
+            "walking out of the staged directory must not reach the suite"
+        );
+    }
+
+    /// Why the cheap mode is the one you have to ask for.
+    #[test]
+    fn symlink_staging_tells_the_run_where_the_suite_lives() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_path.join("evals/evals.json"),
+            r#"{"skill_name":"test-skill","evals":[{"id":"a","prompt":"p","expected_output":"the answer key"}]}"#,
+        )
+        .unwrap();
+
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let case = make_case(vec![]);
+        let mut request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+        request.skill_staging = SkillStaging::Symlink;
+
+        prepare_workspace(&request).unwrap();
+
+        let staged_skill_md = workspace.join(".skill/SKILL.md");
+        let target = std::fs::read_link(&staged_skill_md).unwrap();
+        assert!(
+            target.parent().unwrap().join("evals/evals.json").exists(),
+            "symlink staging is documented as disclosing the skill's real location; if that stopped being true, make it the default"
+        );
+    }
+
     /// A nested `evals/` belongs to the skill's own content, so only the top level is filtered.
     #[test]
     fn staging_withholds_only_the_top_level_eval_suite() {

@@ -480,8 +480,8 @@ directory. The suite is the answer key: it carries each case's
 `expected_output`, its natural-language assertions, and its graders' literal
 `contains` text and `regex` patterns. A run that could read it could be scored
 on text it copied rather than work it did, and the with-skill prompt points the
-agent straight at `.skill/`, so the suite is withheld under both
-`--skill-staging symlink` and `--skill-staging copy`.
+agent straight at `.skill/`, so the suite is staged in neither
+`--skill-staging copy` nor `--skill-staging symlink`.
 
 This costs a case nothing. The fixtures a case names in `files` are staged
 separately into the workspace root, and they are the only part of `evals/` a
@@ -489,10 +489,17 @@ run is meant to see. Only the top level is filtered, so a nested `evals/`
 deeper in the skill tree is treated as the skill's own content and staged
 normally.
 
-Because the filter has to skip an entry, `--skill-staging symlink` stages
-`.skill/` as a real directory holding one symlink per entry rather than as a
-single symlink to the skill root. Staging stays as cheap as it was; a run
-reading `.skill/SKILL.md` sees no difference.
+Leaving the suite out of the staged directory keeps it out of a listing, which
+is all a symlink can offer. A symlink names the path it points at, so a run that
+reads one learns where the skill really lives, and the suite it was not given is
+one directory over. `--skill-staging copy` is the default for that reason: every
+path a run can follow out of a copied `.skill/` stays inside the workspace.
+
+`--skill-staging symlink` remains available for a skill large enough that copying
+it per run costs real time, at the price of disclosing the skill's location to
+any run that looks. Because the filter has to skip an entry, it stages `.skill/`
+as a real directory holding one symlink per entry rather than as a single symlink
+to the skill root.
 
 `--scenario old_skill` requires `--old-skill-dir`. The old skill must carry the
 same `name` as the current one unless you pass `--allow-skill-name-mismatch`,

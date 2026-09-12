@@ -167,8 +167,8 @@ pub struct RunArgs {
         long,
         value_enum,
         value_name = "MODE",
-        default_value_t = SkillStaging::Symlink,
-        help = "How to stage the skill into run workspaces: symlink (default) or copy for stricter isolation"
+        default_value_t = SkillStaging::Copy,
+        help = "How to stage the skill into run workspaces: copy (default) keeps every path a run can follow inside the workspace; symlink is cheaper but tells the run where the skill really lives, and the eval suite sits next to it"
     )]
     pub skill_staging: SkillStaging,
 
