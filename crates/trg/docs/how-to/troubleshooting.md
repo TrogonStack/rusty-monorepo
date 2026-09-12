@@ -136,6 +136,25 @@ Bundle verified
   script (see
   [write-mechanical-grader-scripts.md](./write-mechanical-grader-scripts.md)).
 
+### `grade` reports `assertions: 0/N passed`
+
+A run that never produced a workspace still gets graded, and every assertion
+against a missing output fails. That looks the same as a skill that ran and got
+every answer wrong, so `grade` names the run dispositions behind the tally:
+
+```shell
+$ trg ai skills eval grade ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+Graded 2 run(s)
+  assertions: 0/4 passed
+  runs not completed: 2 (2 failed), so an empty workspace grades as a failure
+```
+
+**Fix:** Nothing is wrong with the skill here. Read `report.json` for the
+per-run `status` and `error`, fix the runner (authentication, installation, or
+timeout), and grade again. Only `completed` runs carry a verdict about the
+skill.
+
 ### `must contain at least one grading.json` (strict mode)
 
 ```shell
@@ -214,6 +233,7 @@ automatically; manual edits must respect the constraint.
 | All runs `failed` | Is the runner CLI installed and authenticated? |
 | Empty workspace after run | Runner may have failed before writing output; check stderr |
 | `pass_rate: null` | Nothing was scored: every result is `unsupported`, or there is no `grading.json` |
+| `assertions: 0/N passed` | Check `runs not completed` in the same output before blaming the skill |
 | Duplicate scenario error | Remove duplicate `--scenario` flags |
 | CI missing context in report | Set `GITHUB_ACTIONS=true` (automatic on GitHub Actions) |
 
