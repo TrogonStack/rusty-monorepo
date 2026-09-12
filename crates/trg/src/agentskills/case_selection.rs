@@ -141,10 +141,18 @@ impl CaseSelection {
     /// `declared` names the suite the selection was taken from, not just its size,
     /// because a later reader comparing two reports has to tell a case the suite lost
     /// from one this run merely did not select.
+    ///
+    /// A selection that ends up covering every case the suite declares covered the whole
+    /// suite, however it was written, so there is no narrowing to report: the field is
+    /// what tells a narrowed report from a full one, and one present on a full run says a
+    /// narrowing happened that did not.
     pub fn record(&self, covered: usize, declared: Vec<String>) -> Option<CaseSelectionRecord> {
         let Self::Narrowed { patterns, tags } = self else {
             return None;
         };
+        if covered == declared.len() {
+            return None;
+        }
         Some(CaseSelectionRecord {
             cases: patterns.iter().map(|pattern| pattern.as_str().to_string()).collect(),
             tags: tags.iter().map(|tag| tag.as_str().to_string()).collect(),
@@ -281,6 +289,16 @@ mod tests {
     fn an_empty_pattern_is_refused_rather_than_matching_nothing() {
         assert!(CaseSelection::parse(&["   ".to_string()], &[]).is_err());
         assert!(CaseSelection::parse(&[], &["".to_string()]).is_err());
+    }
+
+    /// The field is what tells a narrowed report from a full one, so a pattern that
+    /// happens to match every case the suite declares has no narrowing to record.
+    #[test]
+    fn a_selection_that_matched_every_case_records_no_narrowing() {
+        let selection = CaseSelection::parse(&["analyze-*".to_string()], &[]).unwrap();
+        let declared = vec!["analyze-sales".to_string(), "analyze-refunds".to_string()];
+
+        assert!(selection.record(declared.len(), declared).is_none());
     }
 
     #[test]

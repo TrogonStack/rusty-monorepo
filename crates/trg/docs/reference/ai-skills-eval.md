@@ -571,7 +571,8 @@ A narrowed run records what it covered under `suite.case_selection` in `report.j
 
 `evals_hash` covers the whole manifest either way, so without this field a narrowed run
 and a full one are indistinguishable to anyone comparing two reports. The field is absent
-when the run covered every case the suite declares.
+when the run covered every case the suite declares, however the selection was written: a
+pattern that happens to match the whole suite narrowed nothing.
 
 `declared` names the whole suite the selection was taken from, since `dimensions.eval_cases`
 lists only what the run covered. Suite drift is diffed against `declared`, so a case a run
