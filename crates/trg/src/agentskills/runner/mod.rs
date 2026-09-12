@@ -26,6 +26,7 @@ use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine};
 use super::report::{ScenarioKind, SkillStaging};
+use super::transcript::{write_normalized_transcript, TranscriptFormat};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum Runner {
@@ -64,6 +65,14 @@ impl Runner {
             Self::CursorAgent => "cursor-agent",
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+        }
+    }
+
+    pub fn transcript_format(self) -> TranscriptFormat {
+        match self {
+            Self::CursorAgent => TranscriptFormat::CursorStreamJson,
+            Self::ClaudeCode => TranscriptFormat::AnthropicStreamJson,
+            Self::Codex => TranscriptFormat::CodexThreadJsonl,
         }
     }
 }
@@ -271,9 +280,17 @@ pub fn completed_outcome(
     }
 }
 
-pub fn persist_runner_io(request: &EvalRunRequest, captured: &CapturedProcess) -> Result<(), RunnerError> {
+pub fn persist_runner_io(
+    runner: Runner,
+    request: &EvalRunRequest,
+    captured: &CapturedProcess,
+) -> Result<(), RunnerError> {
     write_transcript(request.transcript_path, &captured.stdout)?;
     write_stderr(request.stderr_path, &captured.stderr)?;
+    let normalized = runner
+        .transcript_format()
+        .normalize(runner.program_name(), &captured.stdout);
+    write_normalized_transcript(request.transcript_path, &normalized)?;
     Ok(())
 }
 
