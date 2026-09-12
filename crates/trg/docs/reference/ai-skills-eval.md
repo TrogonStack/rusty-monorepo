@@ -1032,6 +1032,14 @@ away. The report keeps only the attempt that stuck, so a ceiling that counted
 what the report shows would let a flaky pass bill several times over what it
 was allowed.
 
+Charged, that is, whenever the invocation came back with a price. An attempt
+that timed out or died in the runner never reaches the event that carries one,
+so there is no figure to charge and the ledger adds nothing: a missing price is
+not a free run, it is one nobody can bill yet. A pass flaky enough to burn most
+of its attempts that way can therefore spend past its ceiling without the
+ledger seeing it. Nothing here can close that, since the only harness that
+publishes a price publishes it once, at the end of a run that finished.
+
 A run the ledger refuses is recorded with `status: skipped` and
 `failure_kind: budget`, carrying a warning naming what the pass had spent and
 the ceiling it hit. It is not a failed run: nothing was asked of the runner and
