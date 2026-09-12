@@ -701,10 +701,11 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         ));
     }
 
+    let search_root = ArtifactSearchRoot::for_workspace(workspace_path);
     let mut grading_files = Vec::new();
     let mut timing_files = Vec::new();
-    collect_named_files(workspace_path, "grading.json", &mut grading_files)?;
-    collect_named_files(workspace_path, "timing.json", &mut timing_files)?;
+    collect_named_files(search_root.as_path(), "grading.json", &mut grading_files)?;
+    collect_named_files(search_root.as_path(), "timing.json", &mut timing_files)?;
 
     let mut errors = ValidationErrors::new();
     let mut assertion_results = 0;
@@ -760,6 +761,33 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
 fn validate_non_empty(value: &str, field: &str, errors: &mut ValidationErrors) {
     if value.trim().is_empty() {
         errors.push(ValidationError::for_field(field, "must be a non-empty string"));
+    }
+}
+
+/// Where verification looks for the companion artifacts of a run.
+///
+/// `eval grade` writes `grading.json` into the run directory rather than the
+/// workspace, because the verdict is about the run and not about the files the
+/// agent happened to leave behind. Pointing `verify` at the workspace is the
+/// documented habit, so a workspace path widens to its run directory instead of
+/// reporting a graded run as ungraded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactSearchRoot(PathBuf);
+
+impl ArtifactSearchRoot {
+    const WORKSPACE_DIR_NAME: &'static str = "workspace";
+
+    pub fn for_workspace(path: &Path) -> Self {
+        if path.file_name().and_then(|name| name.to_str()) == Some(Self::WORKSPACE_DIR_NAME) {
+            if let Some(run_dir) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                return Self(run_dir.to_path_buf());
+            }
+        }
+        Self(path.to_path_buf())
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -1074,6 +1102,56 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("must define at least one assertion"));
+    }
+
+    #[test]
+    fn verifying_a_workspace_path_sees_the_grading_written_beside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("runs").join("run-001");
+        let workspace = run_dir.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            run_dir.join("grading.json"),
+            r#"{
+  "schema_version": "trg.skills-eval.grading.v1",
+  "assertion_results": [
+    {
+      "assertion": "file 'summary.md' exists",
+      "passed": true,
+      "evidence": "'summary.md' exists and holds 20 bytes",
+      "grader": { "kind": "mechanical" }
+    }
+  ],
+  "summary": { "passed": 1, "failed": 0, "total": 1, "pass_rate": 1.0 }
+}"#,
+        )
+        .unwrap();
+
+        let report = check_workspace(
+            &workspace,
+            WorkspaceCheckOptions {
+                require_grading: true,
+                fail_on_failed_assertions: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.grading_files, 1);
+        assert_eq!(report.passed_assertions, 1);
+    }
+
+    #[test]
+    fn a_directory_that_is_not_a_workspace_is_searched_as_given() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sibling = tmp.path().join("sibling");
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&sibling).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(sibling.join("grading.json"), "{}").unwrap();
+
+        let root = ArtifactSearchRoot::for_workspace(&target);
+
+        assert_eq!(root.as_path(), target.as_path());
     }
 
     #[test]
