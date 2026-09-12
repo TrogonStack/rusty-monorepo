@@ -114,17 +114,23 @@ jobs:
 
 ## Strict vs lenient verification
 
-| Mode | Missing `grading.json` | Failed assertions |
-| ---- | ---------------------- | ----------------- |
-| `lenient` (default) | allowed | reported, exit 0 |
-| `strict` | error | error |
+| Mode | Missing `grading.json` | Failed assertions | Bundle conforms to the schemas |
+| ---- | ---------------------- | ----------------- | ------------------------------ |
+| `lenient` (default) | allowed | reported, exit 0 | not checked |
+| `strict` | error | error | error |
 
 Use `--mode strict` once every run in the bundle is graded:
 
 ```shell
 $ trg ai skills eval verify ./runs/run-001/workspace --mode strict
-# exits 1 if any assertion failed or grading.json is missing
+# exits 1 if the bundle does not conform to the schemas, if any assertion
+# failed, or if grading.json is missing
 ```
+
+Conformance is checked before the score is read, so a bundle no schema describes
+is reported on a red suite and on an ungraded one too. That is a question about
+the writer that produced the bundle, and the answer does not depend on how the
+suite did.
 
 ## Pass-rate thresholds
 
