@@ -505,6 +505,7 @@ fn execute_runs(
         };
 
         let key_input = CacheKeyInput {
+            eval_case_id: run.eval_case_id.clone(),
             skill_hash: skill_hash.clone(),
             evals_hash: bundle.document.suite.evals_hash.clone(),
             fixture_hash: fixture_hash.clone(),
@@ -604,7 +605,7 @@ fn execute_runs(
         }
 
         if cache_options.enabled && run.status == "completed" {
-            if let Err(e) = record_completion(out_dir, &cache_key, &key_input, &run.eval_case_id, report_dir, &run.id) {
+            if let Err(e) = record_completion(out_dir, &cache_key, &key_input, report_dir, &run.id) {
                 eprintln!("Run {}: failed to record cache entry: {}", run.id, e);
             }
         }
