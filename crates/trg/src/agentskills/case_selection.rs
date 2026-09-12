@@ -137,7 +137,11 @@ impl CaseSelection {
     }
 
     /// What a report records about a run that covered part of its suite.
-    pub fn record(&self, covered: usize, of: usize) -> Option<CaseSelectionRecord> {
+    ///
+    /// `declared` names the suite the selection was taken from, not just its size,
+    /// because a later reader comparing two reports has to tell a case the suite lost
+    /// from one this run merely did not select.
+    pub fn record(&self, covered: usize, declared: Vec<String>) -> Option<CaseSelectionRecord> {
         let Self::Narrowed { patterns, tags } = self else {
             return None;
         };
@@ -145,7 +149,7 @@ impl CaseSelection {
             cases: patterns.iter().map(|pattern| pattern.as_str().to_string()).collect(),
             tags: tags.iter().map(|tag| tag.as_str().to_string()).collect(),
             covered,
-            of,
+            declared,
         })
     }
 
@@ -183,7 +187,8 @@ pub struct CaseSelectionRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     pub covered: usize,
-    pub of: usize,
+    /// Every case ID the suite declared, covered by this run or not.
+    pub declared: Vec<String>,
 }
 
 fn selection_error(field: &str, message: impl Into<String>) -> EvalError {
@@ -208,7 +213,7 @@ mod tests {
     fn no_flags_covers_the_whole_suite() {
         let selection = CaseSelection::parse(&[], &[]).unwrap();
         assert!(selection.covers(&case("anything", &[])));
-        assert!(selection.record(1, 1).is_none());
+        assert!(selection.record(1, vec!["anything".to_string()]).is_none());
     }
 
     #[test]
@@ -279,12 +284,14 @@ mod tests {
     }
 
     #[test]
-    fn a_narrowed_run_records_what_it_covered() {
+    fn a_narrowed_run_records_the_suite_it_selected_from() {
         let selection = CaseSelection::parse(&["analyze-*".to_string()], &["smoke".to_string()]).unwrap();
-        let record = selection.record(2, 9).unwrap();
+        let declared = vec!["analyze-sales".to_string(), "typo-check".to_string()];
+        let record = selection.record(1, declared.clone()).unwrap();
 
         assert_eq!(record.cases, vec!["analyze-*"]);
         assert_eq!(record.tags, vec!["smoke"]);
-        assert_eq!((record.covered, record.of), (2, 9));
+        assert_eq!(record.covered, 1);
+        assert_eq!(record.declared, declared);
     }
 }

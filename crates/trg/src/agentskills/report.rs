@@ -423,9 +423,9 @@ pub fn build_report_bundle(
     let evals_content = fs.read_to_string(&evals_path)?;
     let evals_hash = sha256_digest(&evals_content);
     let mut suite: EvalSuite = parse_eval_suite(&evals_content)?;
-    let declared_cases = suite.evals.len();
+    let declared_case_ids: Vec<String> = suite.evals.iter().map(|case| case.id.to_string()).collect();
     suite.evals = options.cases.apply(suite.evals)?;
-    let case_selection = options.cases.record(suite.evals.len(), declared_cases);
+    let case_selection = options.cases.record(suite.evals.len(), declared_case_ids);
     let eval_slugs = slugs_for_suite(&suite);
     let iteration = options.iteration.unwrap_or(1);
     let attempts = options.attempts.max(1);
@@ -1142,7 +1142,7 @@ mod tests {
         let record = bundle.document.suite.case_selection.as_ref().unwrap();
         assert_eq!(record.cases, vec!["parse-*".to_string()]);
         assert_eq!(record.covered, 2);
-        assert_eq!(record.of, 3);
+        assert_eq!(record.declared, vec!["parse-csv", "parse-json", "render-chart"]);
     }
 
     #[test]

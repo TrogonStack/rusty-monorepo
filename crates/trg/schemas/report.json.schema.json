@@ -33,10 +33,12 @@
           "minimum": 0,
           "type": "integer"
         },
-        "of": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
+        "declared": {
+          "description": "Every case ID the suite declared, covered by this run or not.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "tags": {
           "items": {
@@ -47,7 +49,7 @@
       },
       "required": [
         "covered",
-        "of"
+        "declared"
       ],
       "type": "object"
     },

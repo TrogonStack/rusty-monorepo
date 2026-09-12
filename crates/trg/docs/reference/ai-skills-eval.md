@@ -563,7 +563,7 @@ A narrowed run records what it covered under `suite.case_selection` in `report.j
       "cases": ["analyze-*"],
       "tags": ["smoke"],
       "covered": 2,
-      "of": 9
+      "declared": ["analyze-refunds", "analyze-sales", "summarize-quarter"]
     }
   }
 }
@@ -572,6 +572,11 @@ A narrowed run records what it covered under `suite.case_selection` in `report.j
 `evals_hash` covers the whole manifest either way, so without this field a narrowed run
 and a full one are indistinguishable to anyone comparing two reports. The field is absent
 when the run covered every case the suite declares.
+
+`declared` names the whole suite the selection was taken from, since `dimensions.eval_cases`
+lists only what the run covered. Suite drift is diffed against `declared`, so a case a run
+skipped is not reported as one the suite lost, nor as one it gained the next time a run
+covers it.
 
 ## Measuring triggering
 
