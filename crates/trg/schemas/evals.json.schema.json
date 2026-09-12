@@ -219,6 +219,9 @@
         "prompt": {
           "$ref": "#/$defs/NonEmptyString"
         },
+        "skill_disclosure": {
+          "$ref": "#/$defs/SkillDisclosure"
+        },
         "tags": {
           "items": {
             "type": "string"
@@ -328,6 +331,21 @@
     },
     "RelativeSkillPath": {
       "type": "string"
+    },
+    "SkillDisclosure": {
+      "description": "Whether a case's prompt names the skill that is staged for it.\n\nA prompt that names the skill asks how well a run uses a skill it has already\nbeen handed. It cannot also ask whether the skill's own description wins the\nrun's routing decision, because the prompt made that decision for the run.\nThose are two different questions, so a case has to say which one it asks.",
+      "oneOf": [
+        {
+          "const": "announced",
+          "description": "Name the skill, the directory it is staged in, and its description.",
+          "type": "string"
+        },
+        {
+          "const": "unannounced",
+          "description": "Stage the skill where a listing of the workspace shows it and say nothing\nabout it, so both arms of a comparison get the same prompt and a run has\nto reach for the skill on its own.",
+          "type": "string"
+        }
+      ]
     },
     "ToolName": {
       "type": "string"

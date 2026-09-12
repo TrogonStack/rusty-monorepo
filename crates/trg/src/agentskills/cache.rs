@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use super::report::{EnvironmentPolicy, RunRecord, ScenarioKind, SkillStaging};
 use super::runner::Runner;
 
-pub const PROMPT_CONTRACT_VERSION: &str = "v1";
+pub use super::prompt::PROMPT_CONTRACT_VERSION;
 
 const POINTER_FILE: &str = "pointer.json";
 const REUSE_DIR: &str = "reuse";

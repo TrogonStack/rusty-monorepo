@@ -207,6 +207,7 @@ only accepted from the `schema_version` that introduced it.
 | `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
 | `graders` | object[] | no | Typed checks (see below). Requires `schema_version` 3 |
+| `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
 | `tags` | string[] | no | Free-form labels |
 | `priority` | enum | no | `low`, `normal`, `high`, or `critical` |
 | `timeout_secs` | integer | no | Per-case runner timeout override |
@@ -273,7 +274,9 @@ skill gets credit for being present rather than for the work it changed.
 So a grader that presupposes the skill is evaluated and reported in both arms
 and scored in neither. Its result carries `excluded` in `grading.json`, counts
 in `summary.excluded`, and stays out of `summary.pass_rate`. Read it as an
-indicator: whether the run reached for the skill.
+indicator: whether the run reached for the skill. In the without-skill arm the
+answer is no by construction, because that arm stages no skill for a run to
+reach for.
 
 | `arm` | Meaning |
 | ----- | ------- |
@@ -294,7 +297,10 @@ If every check in a case would be excluded, the case would measure nothing at
 all, which is never what writing it meant. The exclusions are lifted and the
 case is scored as declared, so a suite whose only check is `skill_used` still
 produces a score. Such a case does widen the arm gap, and that is the author's
-declared intent rather than an accident of scaffolding.
+declared intent rather than an accident of scaffolding: a triggering case is
+asking exactly whether the skill was reached for. Write it with
+`"skill_disclosure": "unannounced"` so the answer is the run's own, not the
+prompt's. See [Measuring triggering](#measuring-triggering).
 
 ### The LLM judge
 
@@ -516,11 +522,49 @@ scenarios recorded separately in the same record.
 
 ---
 
+## Measuring triggering
+
+A prompt that names the skill measures how well a run uses a skill it was
+handed. It cannot also measure whether the skill's own `description` wins the
+run's routing decision, because the prompt already made that decision. Those
+are two different questions, and `skill_disclosure` says which one a case asks.
+
+| `skill_disclosure` | Prompt | Skill staged at |
+| ------------------ | ------ | --------------- |
+| `announced` (default) | Names the staged directory, the skill `name`, and its `description` | `.skill/`, or `.old-skill/` in the `old_skill` arm |
+| `unannounced` | Says nothing about the skill | `skills/<skill-name>/` |
+
+An unannounced case gets the same prompt in both arms, so the only difference
+between them is whether the skill is in the workspace. It is staged under a
+plain directory rather than the dot-prefixed link because a run that was told
+nothing can only find what a listing of its workspace reports.
+
+State the expectation with `skill_used`, which answers on every runner. A
+`tool_used` grader naming one harness's skill-invocation tool cannot: `codex`
+and `cursor-agent` have no such tool, so the same case would be unanswerable in
+two of three columns. What trg observes is a native skill tool call or a tool
+call that names the staged directory. A path that left the workspace is never
+counted, so reading a skill the harness installed elsewhere does not pass.
+
+What this does not do is register the staged skill with a harness's own skill
+discovery mechanism. A harness that has one would offer the skill from its own
+system prompt, which is a stronger measurement than discovery from the working
+tree. trg stages the same way for all three runners instead, so the number
+means the same thing in every column.
+
+`eval run` and `eval verify` both warn when a case checks `skill_used` while
+announcing the skill, because such a case cannot pass or fail for the reason it
+was written. The `init` scaffold's `triggers-the-skill` case is unannounced for
+that reason, and its prompt is a placeholder: replace it with the words a user
+would actually use, naming neither the skill nor where it lives.
+
+---
+
 ## Scenario kinds
 
 | Kind | CLI value | Runner behavior |
 | ---- | --------- | --------------- |
-| With skill | `with_skill` | Stages skill to `.skill/` in workspace; prompt prefixed with skill frontmatter |
+| With skill | `with_skill` | Stages skill to `.skill/` in workspace; prompt prefixed with skill frontmatter. An unannounced case stages to `skills/<skill-name>/` and prefixes nothing |
 | Without skill | `without_skill` | Raw eval prompt; nothing staged |
 | Old skill | `old_skill` | Stages the `--old-skill-dir` revision to `.old-skill/` in the workspace; prompt prefixed with that revision's frontmatter |
 
@@ -719,7 +763,8 @@ Schema version: `trg.skills-eval.transcript.v1`.
   ],
   "workspace_escapes": [
     { "tool": "read", "path": "/somewhere/outside/notes.md" }
-  ]
+  ],
+  "staged_skill": { "kind": "at", "directory": ".skill/" }
 }
 ```
 
@@ -729,6 +774,8 @@ Schema version: `trg.skills-eval.transcript.v1`.
 | `tool_visibility` | enum | `observed` or `unavailable` |
 | `events[].kind` | enum | `assistant_text`, `tool_call`, or `terminal` |
 | `workspace_escapes[]` | array | Paths the run named that resolve outside its workspace; omitted when empty |
+| `staged_skill.kind` | enum | `at` when the run staged a skill, `nothing` for the without-skill arm; omitted by a transcript written before trg recorded it |
+| `staged_skill.directory` | string | The workspace-relative directory the skill was staged at, present with `at` |
 
 Each of the three supported runners is normalized from event shapes verified
 against that runner's own output:
@@ -749,11 +796,24 @@ runs with `--force` and `claude-code` has no sandbox flag, so a run can read a
 file from anywhere the invoking user can. What is checked is what a tool named as
 a path: a file argument, and the operands of a shell command that name a path
 outright, so `cat ~/.codex/skills/demo/SKILL.md` is reported while the
-interpreter in `/bin/zsh -lc '...'` is not. A search pattern can mention a path
+interpreter in `/bin/zsh -lc '...'` is not. Quoting says where an operand ends, so
+a quoted path is one path however many spaces it holds, and the payload of an
+interpreter flag is read as the command line it is. A search pattern can mention a path
 without naming one, so it is left unchecked. A path beginning with `~` names the
 host home directory rather than a directory in the workspace, so it is resolved
 against `HOME` before the check. Every escape is also recorded as a run warning
 in `report.json`. Detection is the remedy available here; prevention is not.
+
+`staged_skill` is what `skill_used` is read against. `.skill/`, `.old-skill/`,
+and `skills/<skill-name>/` are where *some* run stages a skill, so reading a
+named path against all of them credits a without-skill run that looked into
+`skills/` with using a skill it was never handed, and that run is the control the
+arm gap is measured from. A run records where it staged, so the without-skill arm
+reports no engagement at all, not even for a harness's own skill tool invoked on a
+skill of the harness's own, and a with-skill run answers only for its own
+directory. What a transcript cannot say is where a command ran, so a relative path
+reached after a `cd`, or a search pattern quoting the staged directory, still reads
+as a path to it.
 
 `events.json` is normalized from the redacted transcript, so it carries no
 secret that `transcript.jsonl` had stripped.

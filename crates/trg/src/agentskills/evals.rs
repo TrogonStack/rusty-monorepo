@@ -232,6 +232,41 @@ pub enum EvalPriority {
     Critical,
 }
 
+/// Whether a case's prompt names the skill that is staged for it.
+///
+/// A prompt that names the skill asks how well a run uses a skill it has already
+/// been handed. It cannot also ask whether the skill's own description wins the
+/// run's routing decision, because the prompt made that decision for the run.
+/// Those are two different questions, so a case has to say which one it asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillDisclosure {
+    /// Name the skill, the directory it is staged in, and its description.
+    #[default]
+    Announced,
+    /// Stage the skill where a listing of the workspace shows it and say nothing
+    /// about it, so both arms of a comparison get the same prompt and a run has
+    /// to reach for the skill on its own.
+    Unannounced,
+}
+
+impl SkillDisclosure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Announced => "announced",
+            Self::Unannounced => "unannounced",
+        }
+    }
+
+    pub fn announces_the_skill(self) -> bool {
+        matches!(self, Self::Announced)
+    }
+}
+
+fn is_announced(disclosure: &SkillDisclosure) -> bool {
+    disclosure.announces_the_skill()
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvalSuite {
@@ -264,6 +299,8 @@ pub struct EvalCase {
     pub grader_hints: Option<HashMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub graders: Vec<CaseGrader>,
+    #[serde(default, skip_serializing_if = "is_announced")]
+    pub skill_disclosure: SkillDisclosure,
 }
 
 impl EvalCase {
@@ -271,6 +308,14 @@ impl EvalCase {
     /// legacy natural-language form or the typed form.
     pub fn has_checks(&self) -> bool {
         !self.assertions.is_empty() || !self.graders.is_empty()
+    }
+
+    /// Whether any of the case's checks is about the run reaching for the skill,
+    /// which is the one question an announcing prompt answers for it.
+    pub fn checks_skill_engagement(&self) -> bool {
+        self.graders
+            .iter()
+            .any(|declared| declared.grader.presupposes_the_skill())
     }
 }
 
@@ -470,10 +515,11 @@ pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
     }},
     {{
       "id": "triggers-the-skill",
-      "prompt": "Carry out the sample task described in the skill without being told which skill to use.",
-      "expected_output": "The run reaches for the skill rather than improvising.",
+      "prompt": "Replace this with the request a user would make in their own words for the work this skill does, mentioning neither the skill nor where it lives.",
+      "expected_output": "The run finds the skill and follows it rather than improvising.",
       "files": [],
       "tags": ["triggering"],
+      "skill_disclosure": "unannounced",
       "graders": [
         {{ "type": "skill_used" }}
       ]
@@ -535,6 +581,16 @@ pub fn lint_eval_suite(suite: &EvalSuite, options: EvalLintOptions) -> Vec<EvalL
                     message: format!("duplicate fixture path '{}'", file),
                 });
             }
+        }
+
+        if eval.checks_skill_engagement() && eval.skill_disclosure.announces_the_skill() {
+            warnings.push(EvalLintWarning {
+                eval_id: eval_id.clone(),
+                message: format!(
+                    "the case checks whether the run reaches for the skill, but the prompt names the skill and its directory; set \"skill_disclosure\": \"{}\" to leave the routing decision to the run",
+                    SkillDisclosure::Unannounced.as_str()
+                ),
+            });
         }
 
         if !options.allow_empty_assertions && !eval.has_checks() {
@@ -1367,6 +1423,7 @@ mod tests {
             expected_output_files: None,
             grader_hints: None,
             graders: vec![],
+            skill_disclosure: SkillDisclosure::default(),
         }
     }
 
@@ -1463,6 +1520,47 @@ mod tests {
         assert!(!warnings
             .iter()
             .any(|warning| warning.message.contains("neither assertions nor graders")));
+    }
+
+    /// The contradiction this lint exists to catch: a case that checks whether the
+    /// run reaches for the skill, in a prompt that hands it the skill.
+    #[test]
+    fn a_case_that_checks_triggering_while_announcing_the_skill_is_linted() {
+        let eval: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "triggers",
+            "prompt": "Turn the staged sales file into a summary for the finance team.",
+            "expected_output": "The run reaches for the skill rather than improvising.",
+            "graders": [{ "type": "skill_used" }],
+        }))
+        .unwrap();
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("skill_disclosure")));
+    }
+
+    #[test]
+    fn the_scaffolds_triggering_case_can_measure_triggering() {
+        let suite = scaffold_eval_suite("demo-skill");
+        let triggering = suite
+            .evals
+            .iter()
+            .find(|eval| eval.id.as_str() == "triggers-the-skill")
+            .expect("the scaffold declares a triggering case");
+
+        assert_eq!(triggering.skill_disclosure, SkillDisclosure::Unannounced);
+        assert!(triggering.checks_skill_engagement());
+        assert!(!triggering.prompt.as_str().contains("demo-skill"));
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.message.contains("skill_disclosure")),
+            "the shipped scaffold must not trip its own lint: {warnings:?}"
+        );
     }
 
     #[test]

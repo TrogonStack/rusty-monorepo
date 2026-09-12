@@ -51,8 +51,8 @@ Run run-001: runner 'cursor-agent' reached 1 path(s) outside the workspace, whic
 ```
 
 **Fix:** Read the named paths before trusting the result. A run that read a
-skill from somewhere other than `.skill/` was not graded against the skill
-revision you staged, and the `without_skill` arm of a comparison is worthless if
+skill from somewhere other than the directory trg staged it in was not graded
+against the skill revision you staged, and the `without_skill` arm of a comparison is worthless if
 the agent found the skill elsewhere on the host. The same escapes are recorded
 under `runs[].warnings` in `report.json` and under `workspace_escapes` in
 `runs/<run-id>/events.json`.

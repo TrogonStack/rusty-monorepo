@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::prompt::{SKILL_LINK_OLD, SKILL_LINK_WITH};
+use super::prompt::{StagedSkillDir, SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::RedactedTranscript;
 
 pub const NORMALIZED_TRANSCRIPT_SCHEMA_VERSION: &str = "trg.skills-eval.transcript.v1";
@@ -118,6 +118,48 @@ fn host_path(candidate: &str, home: Option<PathBuf>) -> Option<PathBuf> {
     }
 }
 
+/// The directories a run's own skill is ever staged at.
+const STAGED_SKILL_DIRS: &[&str] = &[SKILL_LINK_WITH, SKILL_LINK_OLD, SKILL_DIR_UNANNOUNCED];
+
+/// Where the run that produced a transcript staged its own skill.
+///
+/// `STAGED_SKILL_DIRS` says where a run could stage a skill, not where this one
+/// did, so reading a named path against all of them credits an arm that merely
+/// looked at `skills/` with reaching for a skill it was never given, and the arm
+/// that loses its reading is the control the comparison rests on. The run knows
+/// what it staged, so it records it and each reader judges a path against that.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum StagedSkill {
+    /// A transcript from before a run recorded what it staged, which can only be
+    /// read against every directory a run stages at.
+    #[default]
+    Unrecorded,
+    /// The arm that runs without a skill, so no path it named is this run's.
+    Nothing,
+    At {
+        directory: StagedSkillDir,
+    },
+}
+
+impl StagedSkill {
+    fn named_by(&self, token: &str) -> bool {
+        match self {
+            Self::Unrecorded => STAGED_SKILL_DIRS.iter().any(|directory| token.contains(directory)),
+            Self::Nothing => false,
+            Self::At { directory } => token.contains(directory.as_str()),
+        }
+    }
+
+    fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+
+    fn stages_nothing(&self) -> bool {
+        matches!(self, Self::Nothing)
+    }
+}
+
 /// A path a run named that resolves outside the workspace it was given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkspaceEscape {
@@ -171,6 +213,8 @@ pub struct NormalizedTranscript {
     pub events: Vec<TranscriptEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_escapes: Vec<WorkspaceEscape>,
+    #[serde(default, skip_serializing_if = "StagedSkill::is_unrecorded")]
+    pub staged_skill: StagedSkill,
 }
 
 impl NormalizedTranscript {
@@ -181,7 +225,15 @@ impl NormalizedTranscript {
             tool_visibility,
             events,
             workspace_escapes: Vec::new(),
+            staged_skill: StagedSkill::default(),
         }
+    }
+
+    /// What the run staged, which the transcript carries because grading reads the
+    /// transcript back rather than the run that wrote it.
+    pub fn staged_at(mut self, staged_skill: StagedSkill) -> Self {
+        self.staged_skill = staged_skill;
+        self
     }
 
     pub fn escaped_workspace(&self) -> bool {
@@ -212,6 +264,10 @@ impl NormalizedTranscript {
     /// Two signals are harness-agnostic. A harness may expose a first-class skill
     /// tool, and any harness that reports tool inputs reveals engagement when a call
     /// references the path we staged the skill at.
+    ///
+    /// The arm that stages no skill has none to engage, so a native skill tool call
+    /// there is the harness reaching for a skill of its own and not for the one under
+    /// test. Reading it as engagement would cost the comparison its control arm.
     pub fn skill_engagement(&self) -> SkillEngagement {
         if !self.tool_visibility.is_observed() {
             return SkillEngagement::NotObservable;
@@ -220,19 +276,50 @@ impl NormalizedTranscript {
             let TranscriptEvent::ToolCall { tool, paths } = event else {
                 continue;
             };
-            if tool.eq_ignore_case("Skill") {
+            if tool.eq_ignore_case("Skill") && !self.staged_skill.stages_nothing() {
                 return SkillEngagement::NativeSkillTool;
             }
-            if paths.iter().any(|path| references_staged_skill(path)) {
+            if paths.iter().any(|path| self.references_staged_skill(path)) {
                 return SkillEngagement::StagedPathReference;
             }
         }
         SkillEngagement::NotEngaged
     }
-}
 
-fn references_staged_skill(path: &str) -> bool {
-    path.contains(SKILL_LINK_WITH) || path.contains(SKILL_LINK_OLD)
+    /// Whether what the run named is the skill this run staged.
+    ///
+    /// An unannounced case stages under a plain directory name that also appears
+    /// in the harness's own skill install paths, so a path that left the
+    /// workspace is somebody else's skill and never this run's, and a path inside
+    /// the workspace is read against the one directory this run staged at rather
+    /// than against every directory some run could stage at.
+    ///
+    /// A token is still only the text a tool call carried. A transcript does not
+    /// say which directory a command ran in, so a relative path reached after a
+    /// `cd`, or a search pattern quoting the staged directory, reads as a path to
+    /// it. Resolving the text against the workspace root would not tell those
+    /// apart either, since what is missing is where the run stood.
+    ///
+    /// A command-style tool records its whole command line, and one command line
+    /// can name this run's skill and a host one at once, so each token is judged
+    /// on its own. Cutting the escaping paths out of the text instead would let
+    /// one short escape decide the reading of every other call: an escape of `/`
+    /// takes the separator that `STAGED_SKILL_DIRS` is written in out of the
+    /// text, and an escape of `~` leaves the rest of a host skill path behind to
+    /// be counted as this run's.
+    fn references_staged_skill(&self, named: &str) -> bool {
+        if self.left_the_workspace(named) {
+            return false;
+        }
+        named_tokens(named)
+            .into_iter()
+            .filter(|token| !self.left_the_workspace(token))
+            .any(|token| self.staged_skill.named_by(&token))
+    }
+
+    fn left_the_workspace(&self, named: &str) -> bool {
+        self.workspace_escapes.iter().any(|escape| escape.path == named)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -421,6 +508,9 @@ impl ToolArguments {
     }
 }
 
+/// The flags after which a command line carries another command line.
+const INTERPRETER_FLAGS: &[&str] = &["-c", "-lc", "-ic", "-lic"];
+
 /// The operands of a command that name a path on the host.
 ///
 /// This is not a shell parse. The program is skipped, since `/bin/zsh -lc '...'`
@@ -430,27 +520,63 @@ impl ToolArguments {
 /// which is enough for the escapes that matter here: a run that reaches a skill or
 /// a host file through a shell instead of a file tool.
 fn command_operands(command: &str) -> Vec<String> {
-    const INTERPRETER_FLAGS: &[&str] = &["-c", "-lc", "-ic", "-lic"];
-
     let mut operands = Vec::new();
     let mut skip_program = true;
-    for token in command.split_whitespace() {
-        let token = token.trim_matches(|c| c == '\'' || c == '"' || c == '`');
-        if token.is_empty() {
-            continue;
-        }
+    for token in named_tokens(command) {
         if std::mem::take(&mut skip_program) {
             continue;
         }
-        if INTERPRETER_FLAGS.contains(&token) {
+        if INTERPRETER_FLAGS.contains(&token.as_str()) {
             skip_program = true;
             continue;
         }
         if token.starts_with('/') || token.starts_with('~') || token.starts_with("..") {
-            operands.push(token.to_string());
+            operands.push(token);
         }
     }
     operands
+}
+
+/// The tokens of a named argument, each stripped of the quoting a command line
+/// carries around it.
+///
+/// One argument can name several paths, since a command-style tool records its
+/// whole command line, and the tokens are how they are told apart. The quoting is
+/// what says where a token ends: whitespace alone tears a quoted path that holds a
+/// space in two, and the tail of a torn host skill path still reads as a skill
+/// directory of this run's own. The payload of an interpreter flag is a command
+/// line in its own right, so it is opened into its own tokens and a path reached
+/// through a shell is a token like any other. Every reader tokenizes the same way,
+/// so a token that named a path can be compared against a recorded escape by
+/// equality.
+fn named_tokens(named: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote: Option<char> = None;
+    let mut nested = false;
+    for character in named.chars() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => token.push(character),
+            None if character == '\'' || character == '"' || character == '`' => quote = Some(character),
+            None if character.is_whitespace() => push_token(&mut tokens, std::mem::take(&mut token), &mut nested),
+            None => token.push(character),
+        }
+    }
+    push_token(&mut tokens, token, &mut nested);
+    tokens
+}
+
+fn push_token(tokens: &mut Vec<String>, token: String, nested: &mut bool) {
+    if token.is_empty() {
+        return;
+    }
+    if std::mem::take(nested) {
+        tokens.extend(named_tokens(&token));
+        return;
+    }
+    *nested = INTERPRETER_FLAGS.contains(&token.as_str());
+    tokens.push(token);
 }
 
 pub fn ndjson_values(stdout: &RedactedTranscript) -> Vec<serde_json::Value> {
@@ -662,7 +788,9 @@ pub fn read_normalized_transcript(transcript_path: &std::path::Path) -> std::io:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::SkillDisclosure;
     use crate::agentskills::redact::redact_transcript_bytes;
+    use crate::agentskills::report::ScenarioKind;
 
     const CURSOR_STREAM: &[u8] = br#"{"type":"system","subtype":"init","cwd":"/w"}
 {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll read the skill first."}]}}
@@ -741,6 +869,35 @@ mod tests {
             &WorkspaceBoundary::unknown(),
         );
         assert_eq!(transcript.skill_engagement(), SkillEngagement::NativeSkillTool);
+    }
+
+    #[test]
+    fn an_unannounced_staged_skill_path_counts_as_engagement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// A harness keeps its own skills in a directory named the same way, and
+    /// reading one of those is not this run reaching for the skill under test.
+    #[test]
+    fn a_skill_installed_outside_the_workspace_is_not_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/opt/harness/skills/other/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
     }
 
     #[test]
@@ -916,6 +1073,125 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_read_of_a_host_skill_is_not_read_as_reaching_for_the_staged_one() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cat ~/.codex/skills/demo/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    #[test]
+    fn a_command_that_reads_both_skills_still_counts_as_reaching_for_the_staged_one() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cat skills/demo/SKILL.md ~/.codex/skills/demo/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// A run that reads the filesystem root records `/` as a path that left the
+    /// workspace, and `/` is the separator every staged skill directory is
+    /// written with, so one such read must not decide how the rest of the
+    /// transcript is read.
+    #[test]
+    fn a_read_of_the_filesystem_root_does_not_hide_a_later_reach_for_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"ls /"}}
+{"type":"item.started","item":{"type":"command_execution","command":"cat .skill/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert_eq!(
+            transcript
+                .workspace_escapes
+                .iter()
+                .map(|escape| escape.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/"]
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// A file tool names one path however many spaces it holds, so the argument
+    /// is judged whole before its tokens are, or the tail of a host path would
+    /// read as a directory of this run's own.
+    #[test]
+    fn a_host_skill_path_holding_a_space_is_not_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"args":{"path":"/opt/my harness/skills/other/SKILL.md"}}}}
+"#;
+        let transcript = TranscriptFormat::CursorStreamJson.normalize(
+            "cursor-agent",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    /// A command line quotes a path that holds a space, so the quoting says where
+    /// the path ends. Read to the next space instead, the tail of a host skill path
+    /// is a directory of this run's own and a run that never opened the staged skill
+    /// is graded as having reached for it.
+    #[test]
+    fn a_quoted_host_skill_path_holding_a_space_is_not_the_staged_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cat \"/opt/my harness/skills/other/SKILL.md\""}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert_eq!(
+            transcript
+                .workspace_escapes
+                .iter()
+                .map(|escape| escape.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/opt/my harness/skills/other/SKILL.md"]
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    /// The home directory and a skill installed under it are two paths that left
+    /// the workspace, and neither of them is this run's skill, however the tokens
+    /// of the command they were named in overlap.
+    #[test]
+    fn a_command_that_names_the_home_directory_and_a_host_skill_is_not_engagement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"cd ~ && cat ~/.codex/skills/demo/SKILL.md"}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl.normalize(
+            "codex",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+
+        assert!(transcript.escaped_workspace());
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    #[test]
     fn a_path_under_the_host_home_directory_is_reported_as_outside_the_workspace() {
         let workspace = tempfile::tempdir().unwrap();
         let stdout = br#"{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"args":{"path":"~/.cursor/plugins/demo/SKILL.md"}}}}
@@ -993,6 +1269,20 @@ mod tests {
         assert_eq!(command_operands("ls outputs"), Vec::<String>::new());
     }
 
+    /// A quoted operand is one path however many spaces it holds, and the payload of
+    /// an interpreter flag is still read as the command line it is.
+    #[test]
+    fn a_quoted_operand_is_one_path_however_many_spaces_it_holds() {
+        assert_eq!(
+            command_operands("cat \"/opt/my harness/skills/other/SKILL.md\""),
+            vec!["/opt/my harness/skills/other/SKILL.md".to_string()]
+        );
+        assert_eq!(
+            command_operands("/bin/zsh -lc \"cat '/opt/my harness/notes.md'\""),
+            vec!["/opt/my harness/notes.md".to_string()]
+        );
+    }
+
     #[test]
     fn an_unknown_boundary_reports_nothing_as_outside_it() {
         let boundary = WorkspaceBoundary::unknown();
@@ -1050,5 +1340,122 @@ mod tests {
         let parsed: NormalizedTranscript = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, transcript);
         assert_eq!(parsed.schema_version, NORMALIZED_TRANSCRIPT_SCHEMA_VERSION);
+    }
+
+    fn staged(disclosure: SkillDisclosure) -> StagedSkill {
+        StagedSkill::At {
+            directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
+        }
+    }
+
+    /// The arm that runs without a skill is the control every comparison rests on.
+    /// `skills/` is where an unannounced run stages a skill, so a control arm that
+    /// looked into one while searching is read as having used a skill it was never
+    /// handed, and the comparison has nothing left to compare against.
+    #[test]
+    fn the_arm_that_staged_no_skill_did_not_reach_for_one() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        )
+        .staged_at(StagedSkill::Nothing);
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    /// A harness carries skills of its own, so its native skill tool can be invoked
+    /// on an arm that was handed none, and what it invoked was never the skill under
+    /// test.
+    #[test]
+    fn a_native_skill_tool_call_is_not_engagement_when_nothing_was_staged() {
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"command":"some-installed-skill"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::unknown(),
+        )
+        .staged_at(StagedSkill::Nothing);
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    /// Each arm stages at the directory its own scenario and disclosure ask for, so
+    /// the directory a different arm would have staged at is not this run's skill.
+    #[test]
+    fn the_directory_another_arm_would_stage_at_is_not_this_run_s_skill() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        )
+        .staged_at(staged(SkillDisclosure::Announced));
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NotEngaged);
+    }
+
+    #[test]
+    fn the_directory_this_run_staged_at_is_engagement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"item.started","item":{"type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,240p' skills/demo-skill/SKILL.md\""}}
+"#;
+        let transcript = TranscriptFormat::CodexThreadJsonl
+            .normalize(
+                "codex",
+                &redact_transcript_bytes(stdout),
+                &WorkspaceBoundary::at(workspace.path()),
+            )
+            .staged_at(staged(SkillDisclosure::Unannounced));
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    /// Grading reads the transcript back from disk rather than the run that wrote
+    /// it, so what a run staged has to survive the round trip to be read against.
+    #[test]
+    fn what_a_run_staged_survives_the_transcript_being_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript_path = dir.path().join("transcript.jsonl");
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(CLAUDE_STREAM),
+            &WorkspaceBoundary::unknown(),
+        )
+        .staged_at(staged(SkillDisclosure::Announced));
+
+        write_normalized_transcript(&transcript_path, &transcript).unwrap();
+
+        assert_eq!(
+            read_normalized_transcript(&transcript_path).unwrap().staged_skill,
+            staged(SkillDisclosure::Announced)
+        );
+    }
+
+    /// A transcript written before a run recorded what it staged is still read, and
+    /// the only reading left is against every directory a run stages at.
+    #[test]
+    fn a_transcript_that_records_no_staging_is_read_against_every_staged_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let stdout = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}
+"#;
+        let transcript = normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout),
+            &WorkspaceBoundary::at(workspace.path()),
+        );
+        let json = serde_json::to_value(&transcript).unwrap();
+
+        assert!(
+            json.get("staged_skill").is_none(),
+            "a run that recorded nothing writes no field: {json}"
+        );
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
     }
 }

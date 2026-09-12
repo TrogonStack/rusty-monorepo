@@ -160,3 +160,8 @@ Written at `iteration-1/benchmark.json` (and report root) after `eval benchmark`
 | `without_skill` | Not present | Raw eval prompt only |
 
 Both scenarios stage fixture files listed in each eval case's `files` array.
+
+A case that declares `"skill_disclosure": "unannounced"` is staged to
+`skills/<skill-name>/` and gets the raw eval prompt in both scenarios, so the
+delta it reports is what the skill changed when the run had to find it
+unaided.

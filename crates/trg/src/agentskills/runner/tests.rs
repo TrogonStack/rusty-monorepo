@@ -6,7 +6,9 @@ use super::fake::{invoke_with_retries, run_bash};
 use super::{EvalRunRequest, RunStatus, FAILURE_KIND_RUNNER};
 use crate::agentskills::evals::EvalCase;
 use crate::agentskills::report::ScenarioKind;
-use crate::agentskills::transcript::normalized_transcript_path;
+use crate::agentskills::transcript::{
+    normalized_transcript_path, read_normalized_transcript, SkillEngagement, StagedSkill,
+};
 
 fn make_case() -> EvalCase {
     serde_json::from_value(serde_json::json!({
@@ -157,6 +159,30 @@ echo '{{"type":"result","is_error":false,"result":"done"}}'"#
     assert!(!raw.contains(token));
     assert!(!events.contains(token));
     assert!(events.contains("<redacted>"));
+}
+
+/// The harness writes a transcript of what the run did, never of what it was given,
+/// so a run records what it staged into the transcript itself for whoever grades it.
+/// Without that, the control arm's own look into `skills/` is graded as having used a
+/// skill it was never handed.
+#[test]
+fn a_persisted_control_arm_run_records_that_it_staged_no_skill() {
+    let temp = tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript = workspace.join("transcript.jsonl");
+    let stderr = workspace.join("stderr.log");
+    let request = bash_request(&case, &workspace, &transcript, &stderr, None);
+
+    let script = r#"echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"skills/demo-skill/SKILL.md"}}]}}'
+echo '{"type":"result","is_error":false,"result":"done"}'"#;
+    let outcome = run_bash(&request, script).unwrap();
+    assert!(matches!(outcome.status, RunStatus::Completed));
+
+    let persisted = read_normalized_transcript(&transcript).unwrap();
+    assert_eq!(persisted.staged_skill, StagedSkill::Nothing);
+    assert_eq!(persisted.skill_engagement(), SkillEngagement::NotEngaged);
 }
 
 fn env_policy_request<'a>(
