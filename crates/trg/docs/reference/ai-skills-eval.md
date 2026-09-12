@@ -134,7 +134,7 @@ the grading for that run.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: require at least one `grading.json` and fail on failed assertions |
+| `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: hold every artifact against its schema, require at least one `grading.json`, and fail on failed assertions. Refused outright on a build compiled without the `schema-validation` feature. See [What strict mode needs from the build](#what-strict-mode-needs-from-the-build) |
 | `--require-assertions` | bool | `false` | Fail when an eval case declares neither an assertion nor a grader |
 | `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
@@ -142,6 +142,19 @@ the grading for that run.
 `verify` also accepts the threshold and regression flags (`--min-pass-rate`,
 `--max-tokens`, `--baseline`, `--strict-ci`, and the `--fail-on-*` family). See
 [Pass-rate thresholds](../how-to/run-in-ci.md#pass-rate-thresholds).
+
+### What strict mode needs from the build
+
+Schema validation is the Cargo feature `schema-validation`, on by default, so an
+ordinary `cargo build` and every released binary can validate. A build made with
+`--no-default-features` compiles the validator out, and every artifact then
+passes without being read.
+
+That is the one failure a verification command must not have quietly, so
+`--mode strict` refuses to run on such a build rather than exiting clean on a
+bundle nothing examined. `--mode lenient` never claimed to check a schema and is
+unaffected. If you see the refusal, rebuild with the feature; do not reach for
+`--mode lenient` and read its clean exit as conformance.
 
 ### Example (text)
 

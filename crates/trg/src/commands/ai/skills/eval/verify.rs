@@ -8,7 +8,7 @@ use crate::agentskills::evals::{
     check_eval_suite, check_workspace, lint_eval_suite_fixtures, print_eval_lint_warnings, EvalCheckOptions,
     EvalLintOptions, WorkspaceCheckOptions,
 };
-use crate::agentskills::schemas::validate_report_bundle_schemas;
+use crate::agentskills::schemas::{validate_report_bundle_schemas, SchemaValidation};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::{Args, ValueEnum};
@@ -40,6 +40,22 @@ impl VerifyMode {
 
     fn requires_assertions(self) -> bool {
         matches!(self, Self::Strict)
+    }
+
+    /// Why this build cannot honour the mode it was asked for, when it cannot.
+    ///
+    /// Strict mode's whole claim is that the bundle was held against the schemas that
+    /// describe it. A build with the validator compiled out would pass every artifact
+    /// without reading one and still exit clean, so the operator would take a verdict
+    /// nobody reached. Refusing says which of the two happened.
+    fn refusal(self, validation: SchemaValidation) -> Option<String> {
+        match (self, validation) {
+            (Self::Strict, SchemaValidation::Absent) => Some(
+                "--mode strict cannot verify this bundle: this build of trg was compiled without the 'schema-validation' feature, so every artifact would pass unexamined and a clean exit would say nothing about the bundle. Rebuild with the feature to verify, or use --mode lenient and do not read its result as a schema check."
+                    .to_string(),
+            ),
+            _ => None,
+        }
     }
 }
 
@@ -86,6 +102,11 @@ impl VerifyArgs {
     pub fn handle(self, fs: &impl FileSystem) -> i32 {
         if self.workspace.is_none() && self.skill_dir.is_none() {
             eprintln!("Either WORKSPACE or --skill-dir is required");
+            return 1;
+        }
+
+        if let Some(refusal) = self.mode.refusal(SchemaValidation::of_this_build()) {
+            eprintln!("{refusal}");
             return 1;
         }
 
@@ -228,5 +249,38 @@ impl VerifyArgs {
         ));
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A validator that cannot say it is not validating is worse than none: strict mode
+    /// would exit clean on a bundle nothing had read, and the operator would take that
+    /// for conformance.
+    #[test]
+    fn strict_refuses_a_build_that_compiled_the_validator_out() {
+        let refusal = VerifyMode::Strict.refusal(SchemaValidation::Absent);
+        assert!(refusal.is_some());
+        assert!(refusal.unwrap().contains("schema-validation"));
+    }
+
+    #[test]
+    fn strict_runs_on_a_build_that_can_validate() {
+        assert!(VerifyMode::Strict.refusal(SchemaValidation::Compiled).is_none());
+    }
+
+    /// Lenient mode never claimed to check a schema, so a build without the validator
+    /// takes nothing away from it and it keeps running.
+    #[test]
+    fn lenient_is_unaffected_by_a_build_that_cannot_validate() {
+        assert!(VerifyMode::Lenient.refusal(SchemaValidation::Absent).is_none());
+        assert!(VerifyMode::Lenient.refusal(SchemaValidation::Compiled).is_none());
+    }
+
+    #[test]
+    fn a_build_with_the_feature_on_reports_that_it_can_validate() {
+        assert!(SchemaValidation::of_this_build().is_compiled());
     }
 }
