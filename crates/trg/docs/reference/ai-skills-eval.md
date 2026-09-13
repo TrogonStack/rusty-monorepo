@@ -289,7 +289,7 @@ every reader and to every runner.
 | `contains` | `text`, `target`, `case`, `negate` | The target contains the text. `case` is `insensitive` (default) or `sensitive` |
 | `file_exists` | `path`, `exists` | The run produced a file at `path`, which may be a glob. `exists` defaults to `true`; set it to `false` to assert that nothing matches |
 | `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
-| `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
+| `tool_order` | `tools`, or `before`/`after` | The observed tool sequence contains the listed tools in order, as a subsequence; or, with `before`/`after`, some call to `before` precedes some later call to `after` |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
 | `llm` | `criterion`, `target` | Handed to the LLM judge, which is the only grader that costs a request |
 | `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
@@ -443,6 +443,33 @@ legitimately reach for a shell and still must not reach for this.
 Tool names belong to one harness's vocabulary, so the portable form of "the
 skill must not be reached for" is `skill_used` with `negate`, which answers on
 every runner. See [Arm-scoped graders](#arm-scoped-graders).
+
+### Ordering two specific calls, not a whole sequence
+
+`tools` asks for a subsequence, which is the right shape when a case cares
+about several steps happening in order. When it only cares that one call
+happened before another, `before`/`after` says that directly instead of
+padding `tools` out to two entries:
+
+```json
+{ "type": "tool_order", "before": "Read", "after": "Write" }
+```
+
+Either side accepts the qualified form `tool_used` does, to ask about a
+specific call rather than any call to that tool:
+
+```json
+{
+  "type": "tool_order",
+  "before": { "tool": "Read", "input_match": "config\\.json$" },
+  "after": { "tool": "Bash", "input_match": "npm test" }
+}
+```
+
+The check holds when some call matching `before` is followed, later in the
+transcript, by some call matching `after`; neither needs to be the only call
+to its tool. `tools` and `before`/`after` are mutually exclusive, and
+`before`/`after` must both be given together.
 
 ### Graders that depend on the transcript
 

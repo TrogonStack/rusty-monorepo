@@ -141,12 +141,35 @@
         },
         {
           "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "tools": {
               "items": {
                 "$ref": "#/$defs/ToolName"
               },
               "minItems": 2,
-              "type": "array"
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "type": {
               "const": "tool_order",
@@ -154,8 +177,7 @@
             }
           },
           "required": [
-            "type",
-            "tools"
+            "type"
           ],
           "type": "object"
         },
@@ -503,6 +525,29 @@
     },
     "ToolName": {
       "type": "string"
+    },
+    "ToolReference": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolName"
+        },
+        {
+          "properties": {
+            "input_match": {
+              "$ref": "#/$defs/RegexPattern"
+            },
+            "tool": {
+              "$ref": "#/$defs/ToolName"
+            }
+          },
+          "required": [
+            "tool",
+            "input_match"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A tool a `tool_order` pair names: either just its name, or its name\ntogether with a pattern the call's arguments must match.\n\nFolding the qualified shape into an object rather than adding a second\n`input_match` field to `ToolOrderCheck` is what lets `before` and `after`\neach carry their own pattern independently."
     },
     "WorkspaceScaffold": {
       "allOf": [
