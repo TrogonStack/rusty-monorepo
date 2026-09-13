@@ -8,6 +8,7 @@ pub trait FileSystem {
     fn exists(&self, path: &Path) -> bool;
     fn is_file(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
+    fn is_symlink(&self, path: &Path) -> bool;
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
 }
 
@@ -36,6 +37,12 @@ impl FileSystem for RealFS {
 
     fn is_dir(&self, path: &Path) -> bool {
         path.is_dir()
+    }
+
+    fn is_symlink(&self, path: &Path) -> bool {
+        std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
     }
 
     fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -108,6 +115,10 @@ pub mod testutil {
                 .borrow()
                 .keys()
                 .any(|candidate| candidate != path && candidate.starts_with(path))
+        }
+
+        fn is_symlink(&self, _path: &Path) -> bool {
+            false
         }
 
         fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {

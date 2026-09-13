@@ -249,7 +249,23 @@ fn collect_case_files(fs: &impl FileSystem, case_dir: &Path) -> Result<Vec<PathB
                 continue;
             };
             let relative_entry = relative_dir.join(name);
-            if fs.is_dir(&entry) {
+            // Checked ahead of is_dir/is_file: a symlink to a directory reads as a
+            // directory too, and following it can recurse without bound (a link back
+            // to one of its own ancestors) or fold bytes the suite does not own into
+            // the digest that is supposed to be a function of the suite's own bytes.
+            if fs.is_symlink(&entry) {
+                return Err(EvalError::Validation(
+                    ValidationError::for_field(
+                        "evals",
+                        format!(
+                            "eval case directories may not contain symlinks, but '{}' is one; \
+                             the suite digest must cover only the suite's own bytes",
+                            path_to_slash_string(&relative_entry)
+                        ),
+                    )
+                    .into(),
+                ));
+            } else if fs.is_dir(&entry) {
                 pending.push(relative_entry);
             } else if fs.is_file(&entry) {
                 files.push(relative_entry);
@@ -502,5 +518,47 @@ mod tests {
         let error = resolve_eval_suite(&fs, Path::new("/skill")).unwrap_err();
 
         assert!(matches!(error, EvalError::Io(_)));
+    }
+
+    // MemFS has no symlinks (see `FileSystem::is_symlink` there), so a symlink can only
+    // be expressed against the real filesystem. Without the `is_symlink` check this
+    // does not error: `fixtures/loop` points back at `fixtures`, and the walk chases it
+    // until the OS's own symlink-resolution limit kicks in, at which point `is_dir` and
+    // `is_file` (which swallow their errors) both read as false and the entry is
+    // silently dropped, so `resolve_eval_suite` returns `Ok` with an incomplete digest
+    // instead of rejecting the suite.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_a_case_directory_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("skill");
+        std::fs::create_dir_all(skill_dir.join("evals/one/fixtures")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: A demo skill.\n---\n\n# Body\n",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("evals/one/prompt.md"), "Do the thing.\n").unwrap();
+        std::fs::write(
+            skill_dir.join("evals/one/case.json"),
+            r#"{"expected_output": "The thing is done."}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            skill_dir.join("evals/one/fixtures"),
+            skill_dir.join("evals/one/fixtures/loop"),
+        )
+        .unwrap();
+
+        let error = resolve_eval_suite(&crate::fs::RealFS, &skill_dir).unwrap_err();
+
+        match error {
+            EvalError::Validation(errors) => {
+                let message = errors.to_string();
+                assert!(message.contains("symlink"), "{message}");
+                assert!(message.contains("fixtures/loop"), "{message}");
+            }
+            other => panic!("expected a validation error naming the symlink, got {other:?}"),
+        }
     }
 }
