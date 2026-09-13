@@ -231,7 +231,11 @@ impl GlobPattern {
                 "pattern '{value}' must not contain '{c}': only *, **, and ? are supported"
             ));
         }
-        Ok(GlobPattern(value))
+        let normalized = normalize_glob(&value);
+        if normalized.is_empty() {
+            return Err(format!("pattern '{value}' names no path"));
+        }
+        Ok(GlobPattern(normalized))
     }
 
     pub fn as_str(&self) -> &str {
@@ -252,6 +256,21 @@ impl GlobPattern {
     pub fn compile(&self) -> Regex {
         Regex::new(&format!("^{}$", glob_to_regex_source(&self.0))).expect("glob was validated at construction")
     }
+}
+
+/// Drops the `./` segments `validate_relative_path` allows, so a pattern has one
+/// spelling by the time it is compiled. The walk that a glob is matched against
+/// yields paths relative to a directory, which never carry a `./` prefix, and a
+/// dot compiled as the literal it is would quietly match nothing at all.
+fn normalize_glob(value: &str) -> String {
+    Path::new(value)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Translates the supported glob dialect (`*`, `**`, `?`) into a regex
