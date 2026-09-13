@@ -481,6 +481,19 @@
           "const": "created_files",
           "description": "The set of files the run created under `outputs/`, one per line. Backed by\nthe same index the report itself is built from, so \"the agent created a\nfile called X\" is checkable without walking the directory a second time.",
           "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The contents of every file under `outputs/` whose path matches a glob, in\npath order and each labelled with the path it came from.\n\nThis narrows `any_output`, it does not widen it: the same tree, restricted\nto the files the pattern names. A pattern that matches nothing is a target\nthat is missing rather than one that is empty.",
+          "properties": {
+            "files": {
+              "$ref": "#/$defs/GlobPattern"
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "type": "object"
         }
       ]
     },

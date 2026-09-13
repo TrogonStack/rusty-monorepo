@@ -1434,7 +1434,7 @@ fn llm_grader_payload(
         GradeTarget::AnyOutput => {
             legacy_structured_payload(assertion, declarative, ctx, OutputScope::Nested).map(JudgePayload::text_only)
         }
-        GradeTarget::Transcript | GradeTarget::File(_) | GradeTarget::CreatedFiles => {
+        GradeTarget::Transcript | GradeTarget::File(_) | GradeTarget::CreatedFiles | GradeTarget::Files(_) => {
             single_target_payload(assertion, target, declarative, ctx)
         }
     }
