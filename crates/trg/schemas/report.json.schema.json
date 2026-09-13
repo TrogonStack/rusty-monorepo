@@ -829,6 +829,13 @@
         "paths": {
           "$ref": "#/$defs/RunPaths"
         },
+        "read_only_fixture_violations": {
+          "description": "Read-only fixture paths whose staged copy did not match its source after the run.\n\nKept apart from `skill_integrity` because that field describes the skill directory,\nnot the fixtures staged alongside it, and because grading needs to fail a case over\nthis without also having to interpret a report meant as diagnostic-only.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "runner_invocations": {
           "default": 1,
           "format": "uint32",

@@ -46,11 +46,16 @@ pub enum Runner {
 
 impl Runner {
     pub fn invoke(self, request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
-        match self {
+        let mut outcome = match self {
             Self::CursorAgent => cursor_agent::run(request),
             Self::ClaudeCode => claude_code::run(request),
             Self::Codex => codex::run(request),
-        }
+        }?;
+        // Checked here, once, regardless of which backend ran: permissions are only a
+        // courtesy (an agent can delete a read-only file and recreate it in its place),
+        // so content is re-verified against the source after every invocation.
+        outcome.read_only_fixture_violations = verify_read_only_fixtures(request);
+        Ok(outcome)
     }
 
     pub fn check_available(self) -> Result<(), EvalError> {
@@ -153,6 +158,8 @@ pub struct EvalRunOutcome {
     pub output_tokens: Option<u64>,
     pub cost_usd: Option<f64>,
     pub final_text: String,
+    /// Read-only fixture paths whose staged copy no longer matches its source.
+    pub read_only_fixture_violations: Vec<String>,
 }
 
 impl EvalRunOutcome {
@@ -279,6 +286,7 @@ pub fn runner_failure_outcome(duration_ms: u64, exit_code: Option<i32>, final_te
         output_tokens: None,
         cost_usd: None,
         final_text,
+        read_only_fixture_violations: Vec::new(),
     }
 }
 
@@ -293,6 +301,7 @@ pub fn timeout_outcome(timeout_ms: u64, exit_code: Option<i32>) -> EvalRunOutcom
         output_tokens: None,
         cost_usd: None,
         final_text: String::new(),
+        read_only_fixture_violations: Vec::new(),
     }
 }
 
@@ -315,6 +324,7 @@ pub fn completed_outcome(
         output_tokens,
         cost_usd,
         final_text,
+        read_only_fixture_violations: Vec::new(),
     }
 }
 
@@ -391,8 +401,11 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
         )?;
     }
 
-    for relative in &request.eval.files {
-        stage_eval_file(request.skill_path, request.workspace_dir, relative.as_str())?;
+    for fixture in &request.eval.files {
+        stage_eval_file(request.skill_path, request.workspace_dir, fixture.as_str())?;
+        if fixture.is_read_only() {
+            lock_fixture_permissions(&request.workspace_dir.join(fixture.as_path()))?;
+        }
     }
 
     let prompt = build_eval_prompt(EvalPromptInput {
@@ -646,6 +659,38 @@ fn stage_eval_file(skill_path: &Path, workspace_dir: &Path, relative: &str) -> s
     Ok(())
 }
 
+/// Clear write bits on a staged read-only fixture's file(s), leaving directories alone.
+///
+/// Directories are left writable on purpose: `reset_workspace` removes the whole workspace
+/// between attempts by unlinking each entry, and unlinking an entry needs write permission
+/// on the directory that holds it, not on the entry itself. Locking a fixture's own
+/// directory down would make the next attempt's cleanup fail instead of protecting anything,
+/// since a file's content is what this guards, not the tree that holds it.
+fn lock_fixture_permissions(dest: &Path) -> std::io::Result<()> {
+    lock_fixture_permissions_platform(dest)
+}
+
+#[cfg(unix)]
+fn lock_fixture_permissions_platform(dest: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::symlink_metadata(dest)?;
+    if metadata.is_dir() {
+        for entry in std::fs::read_dir(dest)? {
+            let entry = entry?;
+            lock_fixture_permissions_platform(&entry.path())?;
+        }
+    } else if metadata.is_file() {
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o444))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn lock_fixture_permissions_platform(_dest: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(src)? {
@@ -733,14 +778,57 @@ fn walk_and_hash(root: &Path, dir: &Path, digest: &mut SkillDigest) -> std::io::
         if file_type.is_dir() {
             walk_and_hash(root, &path, digest)?;
         } else if file_type.is_file() {
-            let bytes = std::fs::read(&path)?;
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
             let relative = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-            digest.insert(relative, format!("sha256:{}", super::hex_encode(hasher.finalize())));
+            digest.insert(relative, hash_file(&path)?);
         }
     }
     Ok(())
+}
+
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("sha256:{}", super::hex_encode(hasher.finalize())))
+}
+
+/// Digest a fixture path, whether it is a single file or a directory, keyed the same way
+/// `compute_skill_digest` keys a skill directory so the two sides can be compared with the
+/// same `detect_tampering`.
+fn hash_fixture(path: &Path) -> std::io::Result<SkillDigest> {
+    let mut digest = BTreeMap::new();
+    if path.is_dir() {
+        walk_and_hash(path, path, &mut digest)?;
+    } else {
+        digest.insert(String::new(), hash_file(path)?);
+    }
+    Ok(digest)
+}
+
+/// Verify every read-only fixture's staged copy still matches its source after a run.
+///
+/// Permissions are only a courtesy: an agent that wants to change a read-only fixture can
+/// delete it and write a fresh file in its place, which does not touch the mode of anything
+/// that survives. Comparing content by hash is the guarantee that actually holds regardless
+/// of how the mismatch came about, and reuses `detect_tampering`'s changed/missing/added
+/// shape rather than inventing a second way to describe the same three outcomes.
+fn verify_read_only_fixtures(request: &EvalRunRequest) -> Vec<String> {
+    let mut violations = Vec::new();
+    for fixture in &request.eval.files {
+        if !fixture.is_read_only() {
+            continue;
+        }
+        let source = request.skill_path.join(fixture.as_path());
+        let staged = request.workspace_dir.join(fixture.as_path());
+        let unchanged = match (hash_fixture(&source), hash_fixture(&staged)) {
+            (Ok(before), Ok(after)) => detect_tampering(&before, &after).is_empty(),
+            _ => false,
+        };
+        if !unchanged {
+            violations.push(fixture.as_str().to_string());
+        }
+    }
+    violations
 }
 
 pub fn detect_tampering(before: &SkillDigest, after: &SkillDigest) -> Vec<String> {
@@ -1876,5 +1964,201 @@ mod workspace_tests {
 
         std::env::remove_var(secret_key);
         std::env::remove_var("TRG_REDACT_TEST_SAFE");
+    }
+
+    const SKILL_MD: &str = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+
+    fn make_case_with_files(files: serde_json::Value) -> EvalCase {
+        serde_json::from_value(serde_json::json!({
+            "id": "case-1",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "files": files,
+            "assertions": [],
+        }))
+        .unwrap()
+    }
+
+    fn skill_with_fixture(relative: &str, contents: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join(Path::new(relative).parent().unwrap())).unwrap();
+        std::fs::write(skill_path.join(relative), contents).unwrap();
+        std::fs::write(skill_path.join("SKILL.md"), SKILL_MD).unwrap();
+        (temp, skill_path)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_fixture_is_staged_without_write_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let relative = "evals/files/input.csv";
+        let (temp, skill_path) = skill_with_fixture(relative, "a,b\n1,2\n");
+        let case = make_case_with_files(serde_json::json!([{ "path": relative, "mode": "read_only" }]));
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            SKILL_MD,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("workspace prepares");
+
+        let staged = workspace.join(relative);
+        let mode = std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444, "the staged fixture must carry no write bits");
+    }
+
+    /// A retry resets the workspace before staging again. If clearing a read-only fixture's
+    /// write bits also locked its directory, that reset would fail instead of clearing the
+    /// stale fixture, which is a worse defect than the tampering this feature detects.
+    #[test]
+    fn reset_workspace_clears_a_stale_read_only_fixture_between_attempts() {
+        let relative = "evals/files/input.csv";
+        let (temp, skill_path) = skill_with_fixture(relative, "a,b\n1,2\n");
+        let case = make_case_with_files(serde_json::json!([{ "path": relative, "mode": "read_only" }]));
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            SKILL_MD,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("first attempt prepares");
+        assert!(workspace.join(relative).exists());
+
+        prepare_workspace(&request, Runner::ClaudeCode)
+            .expect("a stale read-only fixture must not block the next attempt's reset");
+        assert!(
+            workspace.join(relative).exists(),
+            "the fixture is staged fresh on the next attempt"
+        );
+    }
+
+    #[test]
+    fn verify_read_only_fixtures_flags_a_modified_fixture() {
+        let relative = "evals/files/input.csv";
+        let (temp, skill_path) = skill_with_fixture(relative, "a,b\n1,2\n");
+        let case = make_case_with_files(serde_json::json!([{ "path": relative, "mode": "read_only" }]));
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            SKILL_MD,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("workspace prepares");
+
+        let staged = workspace.join(relative);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        std::fs::write(&staged, "tampered").unwrap();
+
+        assert_eq!(verify_read_only_fixtures(&request), vec![relative.to_string()]);
+    }
+
+    #[test]
+    fn verify_read_only_fixtures_flags_a_deleted_fixture() {
+        let relative = "evals/files/input.csv";
+        let (temp, skill_path) = skill_with_fixture(relative, "a,b\n1,2\n");
+        let case = make_case_with_files(serde_json::json!([{ "path": relative, "mode": "read_only" }]));
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            SKILL_MD,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("workspace prepares");
+        std::fs::remove_file(workspace.join(relative)).unwrap();
+
+        assert_eq!(verify_read_only_fixtures(&request), vec![relative.to_string()]);
+    }
+
+    #[test]
+    fn verify_read_only_fixtures_is_silent_when_nothing_changed() {
+        let relative = "evals/files/input.csv";
+        let (temp, skill_path) = skill_with_fixture(relative, "a,b\n1,2\n");
+        let case = make_case_with_files(serde_json::json!([{ "path": relative, "mode": "read_only" }]));
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            SKILL_MD,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("workspace prepares");
+
+        assert!(verify_read_only_fixtures(&request).is_empty());
+    }
+
+    #[test]
+    fn verify_read_only_fixtures_ignores_writable_fixtures() {
+        let relative = "evals/files/input.csv";
+        let (temp, skill_path) = skill_with_fixture(relative, "a,b\n1,2\n");
+        let case = make_case_with_files(serde_json::json!([relative]));
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            SKILL_MD,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("workspace prepares");
+        std::fs::write(workspace.join(relative), "changed freely").unwrap();
+
+        assert!(verify_read_only_fixtures(&request).is_empty());
     }
 }
