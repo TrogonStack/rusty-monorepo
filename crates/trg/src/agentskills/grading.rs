@@ -797,6 +797,7 @@ fn read_only_fixture_violation_result(path: &str) -> AssertionGradeResult {
         rationale: None,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: None,
     }
 }
