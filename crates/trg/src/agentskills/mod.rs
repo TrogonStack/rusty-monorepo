@@ -18,6 +18,7 @@ pub mod iteration_summary;
 pub mod judge;
 pub mod judge_votes;
 pub mod layout;
+pub mod mocks;
 pub mod models;
 pub mod outputs;
 pub mod parser;

@@ -114,6 +114,11 @@ pub struct EvalRunRequest<'a> {
     pub environment: EnvironmentPolicy,
     pub permission: PermissionGrant,
     pub scaffold_permission: ScaffoldPermission,
+    /// Where the generated `--mcp-config` JSON lives, when the case declares mocks and the
+    /// runner drives `McpServers`. Runners that do not drive that control simply ignore it;
+    /// a case that declares mocks against one of those runners is refused earlier, before a
+    /// runner is ever invoked.
+    pub mcp_config_path: Option<PathBuf>,
 }
 
 impl EvalRunRequest<'_> {
@@ -141,6 +146,13 @@ impl RunStatus {
 }
 
 pub const FAILURE_KIND_RUNNER: &str = "runner";
+
+/// A case declared mocks against a runner whose harness offers no way to point it at them.
+///
+/// This is a run-level `unsupported`, not a failure: reusing `run.status = "skipped"` plus
+/// this kind mirrors how `FAILURE_KIND_BUDGET` reports a cost ceiling, since both stop a run
+/// before the runner is ever invoked rather than report the runner as having misbehaved.
+pub const FAILURE_KIND_MCP_UNSUPPORTED: &str = "mcp_unsupported";
 
 #[derive(Debug, Clone)]
 pub struct EvalRunOutcome {
@@ -807,6 +819,7 @@ mod workspace_tests {
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
             scaffold_permission: ScaffoldPermission::Withheld,
+            mcp_config_path: None,
         }
     }
 

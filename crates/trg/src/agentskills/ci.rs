@@ -965,6 +965,7 @@ mod tests {
                 cache: None,
                 skill_integrity: None,
                 warnings: Vec::new(),
+                mock_violations: Vec::new(),
             }],
             assertion_results: Vec::new(),
             summaries: SummariesSection {

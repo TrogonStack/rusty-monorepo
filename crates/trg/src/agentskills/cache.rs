@@ -57,6 +57,18 @@ pub struct CacheKeyInput {
     pub skill_hash: String,
     pub evals_hash: String,
     pub fixture_hash: String,
+    /// The resolved mock set's content hash, for a case that declares mcp mocks.
+    ///
+    /// `evals_hash` only covers mock content by accident, and only for a suite authored
+    /// as case directories: `canonical_directory_hash` walks every file under a case
+    /// directory, mocks included, but a manifest-authored suite's hash is the manifest
+    /// bytes alone, and suite-level mocks under `evals/mocks/` sit outside any case
+    /// directory either way. `None` for a case with no mocks rather than the empty
+    /// set's hash, mirroring `scaffold_hash`: a case that declares none must serialize
+    /// exactly as it did before this field existed, or every entry already on disk is
+    /// evicted for nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock_hash: Option<String>,
     pub model_config: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_model: Option<String>,
@@ -119,6 +131,8 @@ pub struct ReuseKeyInput {
     pub skill_hash: String,
     pub evals_hash: String,
     pub fixture_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock_hash: Option<String>,
     pub scenario: ScenarioKind,
     pub attempt: u32,
     #[serde(default)]
@@ -131,6 +145,7 @@ impl ReuseKeyInput {
             eval_case_id: key_input.eval_case_id.clone(),
             skill_hash: key_input.skill_hash.clone(),
             evals_hash: key_input.evals_hash.clone(),
+            mock_hash: key_input.mock_hash.clone(),
             fixture_hash: key_input.fixture_hash.clone(),
             scenario: key_input.scenario,
             attempt: key_input.attempt,
@@ -471,6 +486,7 @@ mod tests {
             skill_hash: skill_hash.to_string(),
             evals_hash: "sha256:evals".to_string(),
             fixture_hash: fixture_hash.to_string(),
+            mock_hash: None,
             model_config: "ci-default".to_string(),
             runner_model: None,
             runner_kind: "codex".to_string(),
@@ -525,6 +541,18 @@ mod tests {
         assert!(
             !serialized.contains("scaffold_hash"),
             "an absent scaffold must not reach the key: {serialized}"
+        );
+    }
+
+    /// A case that declares no mocks has to key exactly as it did before `mock_hash`
+    /// existed, or every entry already on disk is evicted for nothing.
+    #[test]
+    fn a_case_with_no_mocks_keys_as_it_did_before() {
+        let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture");
+        let serialized = serde_json::to_string(&input).unwrap();
+        assert!(
+            !serialized.contains("mock_hash"),
+            "an absent mock set must not reach the key: {serialized}"
         );
     }
 
@@ -618,6 +646,7 @@ mod tests {
             cache: None,
             skill_integrity: None,
             warnings: Vec::new(),
+            mock_violations: Vec::new(),
         };
 
         let document = serde_json::json!({
@@ -743,6 +772,7 @@ mod tests {
             cache: None,
             skill_integrity: None,
             warnings: Vec::new(),
+            mock_violations: Vec::new(),
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -786,6 +816,28 @@ mod tests {
         record_completion(&out_dir, &key, &stored, &report_a, "run-001").unwrap();
 
         let current = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixtures-new");
+        assert!(lookup_reuse(&out_dir, &ReuseKeyInput::of(&current)).is_none());
+    }
+
+    #[test]
+    fn stale_mock_hash_invalidates_reuse_entry() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run(&report_a, "run-001", "one", ScenarioKind::WithSkill);
+
+        let stored = CacheKeyInput {
+            mock_hash: Some("sha256:mocks-old".to_string()),
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str())
+        };
+        let key = CacheKey::from_input(&stored);
+        record_completion(&out_dir, &key, &stored, &report_a, "run-001").unwrap();
+
+        let current = CacheKeyInput {
+            mock_hash: Some("sha256:mocks-new".to_string()),
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str())
+        };
         assert!(lookup_reuse(&out_dir, &ReuseKeyInput::of(&current)).is_none());
     }
 

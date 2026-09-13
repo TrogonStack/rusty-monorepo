@@ -431,6 +431,31 @@ mod tests {
         assert_eq!(compiled.suite.evals[0].id.as_str(), "manifest-case");
     }
 
+    /// Suite-level mcp mocks live at `evals/mocks/<server>/<tool>.md`, a directory that
+    /// holds neither `prompt.md`, `case.json`, nor `graders/`. Pinning that it is not
+    /// picked up as a case named "mocks": if it ever were, it would both fail to run (no
+    /// prompt) and trip the manifest/case-directories "pick one layout" refusal for every
+    /// manifest-authored suite that also declares suite-level mocks.
+    #[test]
+    fn a_bare_mocks_directory_is_not_discovered_as_a_case_named_mocks() {
+        let fs = MemFS::new();
+        skill_md(&fs, "/skill", "demo-skill");
+        fs.insert(
+            Path::new("/skill/evals/evals.json"),
+            r#"{"skill_name": "demo-skill", "evals": [{"id": "manifest-case", "prompt": "p", "expected_output": "e"}]}"#,
+        );
+        fs.insert(
+            Path::new("/skill/evals/mocks/github/create_issue.md"),
+            "---\ntype: fixed\n---\n{}\n",
+        );
+
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+
+        assert!(matches!(compiled.source, EvalSource::Manifest { .. }));
+        assert_eq!(compiled.suite.evals.len(), 1);
+        assert_eq!(compiled.suite.evals[0].id.as_str(), "manifest-case");
+    }
+
     #[test]
     fn the_manifest_hash_stays_the_raw_file_bytes_digest() {
         let fs = MemFS::new();

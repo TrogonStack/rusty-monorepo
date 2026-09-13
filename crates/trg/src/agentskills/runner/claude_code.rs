@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 
 use super::capabilities::HarnessControl;
@@ -36,7 +37,12 @@ fn permission_mode(grant: PermissionGrant) -> &'static str {
 /// takes no path arguments today: a prompt or model string could still carry bytes that are
 /// not valid UTF-8, and building the list as `OsString` from the start means that stays true
 /// if a path argument is ever added here.
-pub(crate) fn build_args(prompt: &str, model: Option<&str>, permission: PermissionGrant) -> Vec<OsString> {
+pub(crate) fn build_args(
+    prompt: &str,
+    model: Option<&str>,
+    permission: PermissionGrant,
+    mcp_config: Option<&Path>,
+) -> Vec<OsString> {
     let sandbox_flag = Runner::ClaudeCode
         .support(HarnessControl::SandboxLevels)
         .flag()
@@ -54,13 +60,31 @@ pub(crate) fn build_args(prompt: &str, model: Option<&str>, permission: Permissi
         args.push(OsString::from("--model"));
         args.push(OsString::from(model));
     }
+    if let Some(mcp_config) = mcp_config {
+        let mcp_flag = Runner::ClaudeCode
+            .support(HarnessControl::McpServers)
+            .flag()
+            .expect("the capability matrix declares claude-code takes its mcp servers as a flag");
+        let guard_flag = Runner::ClaudeCode
+            .support(HarnessControl::McpServers)
+            .guard_flag()
+            .expect("the capability matrix guards claude-code's mcp servers flag");
+        args.push(OsString::from(mcp_flag));
+        args.push(mcp_config.as_os_str().to_os_string());
+        args.push(OsString::from(guard_flag));
+    }
     args
 }
 
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     let prepared = prepare_workspace(request, Runner::ClaudeCode)?;
 
-    let args = build_args(&prepared.prompt, request.runner_model, request.permission);
+    let args = build_args(
+        &prepared.prompt,
+        request.runner_model,
+        request.permission,
+        request.mcp_config_path.as_deref(),
+    );
 
     let mut command = Command::new(PROGRAM);
     command.current_dir(request.workspace_dir).args(&args);
@@ -234,7 +258,7 @@ mod tests {
     #[test]
     fn the_permission_mode_flag_actually_follows_the_requested_grant() {
         let mode_value_for = |grant: PermissionGrant| {
-            let args = build_args("do the thing", None, grant);
+            let args = build_args("do the thing", None, grant, None);
             let position = args
                 .windows(2)
                 .position(|pair| pair[0] == "--permission-mode")
@@ -252,7 +276,7 @@ mod tests {
             .support(HarnessControl::SandboxLevels)
             .flag()
             .expect("claude-code declares a sandbox flag in the capability matrix");
-        let args = build_args("do the thing", None, PermissionGrant::Unrestricted);
+        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None);
         let position = args
             .windows(2)
             .position(|pair| pair[0] == expected_flag)
@@ -260,9 +284,45 @@ mod tests {
         assert_eq!(args[position + 1], OsString::from("bypassPermissions"));
     }
 
+    /// Regression test for the defect a lone `--mcp-config` would be: without
+    /// `--strict-mcp-config` claude-code still falls back to whatever MCP servers happen to
+    /// be configured on the machine running the eval, defeating the whole point of a mock.
+    #[test]
+    fn a_declared_mcp_config_always_carries_the_guard_flag_alongside_it() {
+        let args = build_args(
+            "do the thing",
+            None,
+            PermissionGrant::Unrestricted,
+            Some(Path::new("/workspace/mcp-config.json")),
+        );
+        let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
+        let mcp_config_position = borrowed
+            .iter()
+            .position(|a| *a == "--mcp-config")
+            .expect("the invocation carries --mcp-config");
+        assert_eq!(borrowed[mcp_config_position + 1], "/workspace/mcp-config.json");
+        assert!(
+            borrowed.contains(&"--strict-mcp-config"),
+            "a declared mcp config must never be handed to claude-code without --strict-mcp-config"
+        );
+    }
+
+    #[test]
+    fn no_declared_mcp_config_carries_neither_flag() {
+        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None);
+        let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
+        assert!(!borrowed.contains(&"--mcp-config"));
+        assert!(!borrowed.contains(&"--strict-mcp-config"));
+    }
+
     #[test]
     fn the_permission_flag_sits_before_an_optional_model_flag() {
-        let args = build_args("do the thing", Some("claude-opus-5"), PermissionGrant::Unrestricted);
+        let args = build_args(
+            "do the thing",
+            Some("claude-opus-5"),
+            PermissionGrant::Unrestricted,
+            None,
+        );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
         assert_eq!(
             borrowed,

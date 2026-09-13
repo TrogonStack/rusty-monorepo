@@ -258,6 +258,10 @@
       ],
       "type": "object"
     },
+    "ExpectPath": {
+      "description": "A dotted path into a tool call's input, e.g. `repo.owner`.",
+      "type": "string"
+    },
     "FeedbackCategory": {
       "enum": [
         "correctness",
@@ -514,6 +518,31 @@
         "attempt",
         "value",
         "median"
+      ],
+      "type": "object"
+    },
+    "MockViolation": {
+      "properties": {
+        "constraint": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/$defs/ExpectPath"
+        },
+        "received": {},
+        "server": {
+          "$ref": "#/$defs/ServerName"
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolName"
+        }
+      },
+      "required": [
+        "server",
+        "tool",
+        "path",
+        "constraint",
+        "received"
       ],
       "type": "object"
     },
@@ -823,6 +852,13 @@
         "mirror_path": {
           "type": "string"
         },
+        "mock_violations": {
+          "description": "Every `expect` mismatch the mock server logged against a call this run made, read\nback from `mock-calls.jsonl` after the run finished.\n\nA violation never stops the mock from answering the call, so it cannot fail the run\non its own; grading turns each one into an ordinary failing assertion instead. A run\nthat declared no mocks, or violated nothing, serializes exactly as it did before\nthis field existed.",
+          "items": {
+            "$ref": "#/$defs/MockViolation"
+          },
+          "type": "array"
+        },
         "model_config_id": {
           "type": "string"
         },
@@ -936,6 +972,9 @@
       ],
       "type": "object"
     },
+    "ServerName": {
+      "type": "string"
+    },
     "SkillIntegrityReport": {
       "properties": {
         "tampered": {
@@ -1042,6 +1081,9 @@
         "by_scenario"
       ],
       "type": "object"
+    },
+    "ToolName": {
+      "type": "string"
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/report.json.schema.json",

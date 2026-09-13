@@ -44,6 +44,7 @@ fn bash_request<'a>(
         environment: crate::agentskills::report::EnvironmentPolicy::Scrubbed,
         permission: crate::agentskills::report::PermissionGrant::WorkspaceWrite,
         scaffold_permission: crate::agentskills::workspace_scaffold::ScaffoldPermission::Withheld,
+        mcp_config_path: None,
     }
 }
 

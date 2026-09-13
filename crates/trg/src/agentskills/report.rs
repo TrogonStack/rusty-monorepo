@@ -431,6 +431,15 @@ pub struct RunRecord {
     pub skill_integrity: Option<SkillIntegrityReport>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Every `expect` mismatch the mock server logged against a call this run made, read
+    /// back from `mock-calls.jsonl` after the run finished.
+    ///
+    /// A violation never stops the mock from answering the call, so it cannot fail the run
+    /// on its own; grading turns each one into an ordinary failing assertion instead. A run
+    /// that declared no mocks, or violated nothing, serializes exactly as it did before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mock_violations: Vec<crate::agentskills::mocks::MockViolation>,
 }
 
 fn default_runner_invocations() -> u32 {
@@ -877,6 +886,7 @@ fn build_runs(
                     cache: None,
                     skill_integrity: None,
                     warnings: Vec::new(),
+                    mock_violations: Vec::new(),
                 });
                 run_number += 1;
             }

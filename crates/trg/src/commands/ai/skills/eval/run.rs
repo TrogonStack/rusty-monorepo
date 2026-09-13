@@ -14,14 +14,18 @@ use crate::agentskills::evals::{
     effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalSuite,
 };
 use crate::agentskills::layout::detect_next_iteration;
+use crate::agentskills::mocks::{
+    materialize_mock_set, resolve_mock_set, MockCallLogEntry, MockSet, MOCK_CALLS_LOG_NAME,
+};
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::report::{
     build_report_bundle, write_report_bundle, BudgetReport, BuildReportOptions, EnvironmentPolicy, PermissionGrant,
     ReportBundle, RunRecord, ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
 };
+use crate::agentskills::runner::capabilities::HarnessControl;
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
-    SkillDigest,
+    SkillDigest, FAILURE_KIND_MCP_UNSUPPORTED,
 };
 use crate::agentskills::sampling::AttemptCount;
 use crate::agentskills::scenario_selection::ScenarioSelection;
@@ -829,6 +833,26 @@ impl RunExecution<'_> {
         let transcript_path = run_dir.join("transcript.jsonl");
         let stderr_path = run_dir.join("stderr.log");
 
+        let mock_set = match resolve_mock_set(self.skill_path, &run.eval_case_id) {
+            Ok(set) => set,
+            Err(e) => {
+                eprintln!("Run {}: failed to resolve mcp mocks: {}", run.id, e);
+                run.status = "failed".to_string();
+                return;
+            }
+        };
+
+        if !mock_set.is_empty() && !self.runner.support(HarnessControl::McpServers).is_offered() {
+            run.status = "skipped".to_string();
+            run.failure_kind = Some(FAILURE_KIND_MCP_UNSUPPORTED.to_string());
+            run.warnings.push(format!(
+                "{} declares mcp mocks but the {} harness offers no mcp servers control, so it was not started",
+                run.eval_case_id,
+                self.runner.display_name()
+            ));
+            return;
+        }
+
         let fixture_hash = match compute_fixture_hash(self.skill_path, &run.eval_case_id) {
             Ok(hash) => hash.as_str().to_string(),
             Err(e) => {
@@ -864,6 +888,11 @@ impl RunExecution<'_> {
             skill_hash,
             evals_hash: self.evals_hash.clone(),
             fixture_hash,
+            mock_hash: if mock_set.is_empty() {
+                None
+            } else {
+                Some(mock_set.content_hash())
+            },
             model_config: run.model_config_id.clone(),
             runner_model: self.runner_model.map(str::to_string),
             runner_kind: self.runner_kind.clone(),
@@ -897,6 +926,19 @@ impl RunExecution<'_> {
             return;
         }
 
+        let mcp_config_path = if mock_set.is_empty() {
+            None
+        } else {
+            match materialize_mock_set_for_run(&mock_set, &run_dir) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!("Run {}: failed to materialize mcp mocks: {}", run.id, e);
+                    run.status = "failed".to_string();
+                    return;
+                }
+            }
+        };
+
         let request = EvalRunRequest {
             eval: case,
             scenario,
@@ -913,6 +955,7 @@ impl RunExecution<'_> {
             environment: self.environment,
             permission: self.permission,
             scaffold_permission: self.scaffold_permission,
+            mcp_config_path,
         };
 
         let digest_before = match integrity {
@@ -1244,6 +1287,17 @@ mod fake_runner {
     }
 }
 
+/// Materialize a non-empty mock set into `run_dir`, pointing the generated `--mcp-config`
+/// at this same `trg` binary's own hidden `mock-server` subcommand.
+///
+/// `current_exe` is looked up per run rather than once for the whole pass because a pass
+/// can run for long enough that re-reading it costs nothing worth caching, and caching it
+/// would be one more piece of state a test has to seed.
+fn materialize_mock_set_for_run(mock_set: &MockSet, run_dir: &Path) -> Result<PathBuf, String> {
+    let trg_binary = std::env::current_exe().map_err(|e| format!("could not locate the running trg binary: {e}"))?;
+    materialize_mock_set(mock_set, run_dir, &trg_binary).map_err(|e| e.to_string())
+}
+
 fn invoke_runner(runner: Runner, request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     #[cfg(test)]
     if fake_runner::enabled() {
@@ -1275,9 +1329,14 @@ fn apply_outcome(
             .get("kind")
             .and_then(|value| value.as_str())
             .is_none_or(|kind| {
-                kind != "transcript" && kind != "stderr" && kind != "runner_command" && kind != "runner_env"
+                kind != "transcript"
+                    && kind != "stderr"
+                    && kind != "runner_command"
+                    && kind != "runner_env"
+                    && kind != "mock_calls"
             })
     });
+    run.mock_violations.clear();
 
     let transcript_relative = artifact_relative_path(transcript_path, report_dir);
     run.artifacts.push(serde_json::json!({
@@ -1307,6 +1366,15 @@ fn apply_outcome(
                 "kind": "runner_env",
                 "path": artifact_relative_path(&env_path, report_dir),
             }));
+        }
+
+        let mock_calls_path = run_dir.join(MOCK_CALLS_LOG_NAME);
+        if mock_calls_path.is_file() {
+            run.artifacts.push(serde_json::json!({
+                "kind": "mock_calls",
+                "path": artifact_relative_path(&mock_calls_path, report_dir),
+            }));
+            run.mock_violations = read_mock_violations(&mock_calls_path);
         }
     }
 
@@ -1339,6 +1407,23 @@ fn apply_outcome(
             run.warnings.push(warning);
         }
     }
+}
+
+/// Every violation the mock server logged against a call this run made.
+///
+/// A malformed or unreadable log line is skipped rather than failing the run: the log is
+/// a diagnostic aid, and losing one entry from it should never be the reason a run that
+/// otherwise completed gets reported as failed.
+fn read_mock_violations(mock_calls_path: &Path) -> Vec<crate::agentskills::mocks::MockViolation> {
+    let Ok(contents) = std::fs::read_to_string(mock_calls_path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<MockCallLogEntry>(line).ok())
+        .flat_map(|entry| entry.violations)
+        .collect()
 }
 
 /// trg runs each harness's own CLI, so it cannot stop one from reading outside the
@@ -3658,5 +3743,41 @@ mod tests {
             "two lanes each recording $3 must add to $6, not lose a write to the other"
         );
         assert_eq!(report["budget"]["runs_skipped"], 0);
+    }
+
+    fn write_mocked_skill(root: &Path) -> PathBuf {
+        let skill_dir = write_cacheable_skill(root);
+        std::fs::create_dir_all(skill_dir.join("evals/mocks/github")).unwrap();
+        std::fs::write(
+            skill_dir.join("evals/mocks/github/create_issue.md"),
+            "---\ntype: fixed\n---\n{\"issue_number\": 1}\n",
+        )
+        .unwrap();
+        skill_dir
+    }
+
+    /// A case that declares mcp mocks against a runner whose harness offers no `mcp
+    /// servers` control at all must never reach the runner: there is nothing honest a
+    /// mocked run against such a harness could report, so it is skipped as `unsupported`
+    /// rather than invoked and reported as though the skill had done something wrong.
+    #[test]
+    fn a_case_with_mocks_against_a_runner_with_no_mcp_servers_control_is_skipped_not_invoked() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_mocked_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            runner: Some(Runner::Codex),
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        assert_eq!(report["runs"][0]["status"], "skipped");
+        assert_eq!(report["runs"][0]["failure_kind"], "mcp_unsupported");
+        assert_eq!(
+            report["runs"][0]["metrics"]["duration_ms"],
+            serde_json::Value::Null,
+            "a skipped run was never handed to the runner, so it has no duration to report"
+        );
     }
 }
