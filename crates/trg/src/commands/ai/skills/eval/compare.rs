@@ -180,15 +180,17 @@ fn collect_eval_suite_drift_warnings(
     allow_eval_suite_drift: bool,
 ) -> Result<Vec<EvalSuiteDriftWarning>, crate::agentskills::evals::EvalError> {
     let current = load_report_drift_snapshot(report_dir)?;
-    let previous_dir = previous_override
-        .map(PathBuf::from)
-        .or_else(|| detect_previous_report_dir(report_dir, current.iteration));
+    let previous = match previous_override {
+        Some(dir) => Some(load_report_drift_snapshot(dir)?),
+        None => detect_previous_report_dir(report_dir, current.iteration)
+            .map(|previous| previous.drift_snapshot())
+            .transpose()?,
+    };
 
-    let Some(previous_dir) = previous_dir else {
+    let Some(previous) = previous else {
         return Ok(Vec::new());
     };
 
-    let previous = load_report_drift_snapshot(&previous_dir)?;
     let drift = detect_eval_suite_drift_snapshots(&current, &previous);
     maybe_emit_eval_suite_drift_warning(drift.as_ref(), allow_eval_suite_drift);
 
@@ -323,5 +325,33 @@ mod tests {
             .render_long_help()
             .to_string();
         assert!(help.contains("--allow-eval-suite-drift"));
+    }
+
+    #[test]
+    fn collect_eval_suite_drift_warnings_empty_without_a_previous_report() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let report_dir = skill_root.join("report-iter-2");
+        write_minimal_report(&report_dir, 2, "sha256:current", &["case-a"]);
+
+        let warnings = collect_eval_suite_drift_warnings(&report_dir, None, false).unwrap();
+
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn collect_eval_suite_drift_warnings_detected_from_sibling_previous_report() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous = skill_root.join("report-iter-1");
+        let current = skill_root.join("report-iter-2");
+        write_minimal_report(&previous, 1, "sha256:1111", &["case-a", "case-b"]);
+        write_minimal_report(&current, 2, "sha256:2222", &["case-a", "case-c"]);
+
+        let warnings = collect_eval_suite_drift_warnings(&current, None, false).unwrap();
+
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].added_eval_ids, vec!["case-c".to_string()]);
+        assert_eq!(warnings[0].removed_eval_ids, vec!["case-b".to_string()]);
     }
 }

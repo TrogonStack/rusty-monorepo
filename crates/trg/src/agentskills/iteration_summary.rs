@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::benchmark::{stddev, FailedRunsMode};
+use super::eval_suite_drift;
 use super::evals::{EvalError, Result};
 use super::layout;
 use super::report::ScenarioKind;
@@ -199,14 +200,14 @@ pub fn build_iteration_summary_document(
     let report = load_report(report_dir)?;
     let current = analyze_report(report_dir, &report, options.failed_runs);
 
-    let previous_report_dir = options
-        .previous_report_dir
-        .clone()
-        .or_else(|| detect_previous_report_dir(report_dir, report.report.iteration));
-
-    let cross_iteration = previous_report_dir
-        .as_ref()
-        .and_then(|previous_dir| build_cross_iteration_section(previous_dir, &current, options.failed_runs));
+    let cross_iteration = resolve_previous_report_for_summary(
+        report_dir,
+        report.report.iteration,
+        options.previous_report_dir.as_deref(),
+    )
+    .map(|(previous_dir, previous_report)| {
+        build_cross_iteration_section(&previous_dir, previous_report, &current, options.failed_runs)
+    });
 
     let (always_pass, always_fail) =
         apply_cross_iteration_deltas(&current.always_pass, &current.always_fail, cross_iteration.as_ref());
@@ -620,12 +621,31 @@ fn apply_cross_iteration_deltas(
     (always_pass, always_fail)
 }
 
+/// Resolve the previous report to compare against, either the caller's explicit override
+/// or a sibling detected next to `report_dir`. Either way this reads `report.json` exactly
+/// once: an override is read here for the first and only time, and a detected candidate
+/// arrives already parsed from the scan that found it.
+fn resolve_previous_report_for_summary(
+    report_dir: &Path,
+    current_iteration: u32,
+    previous_report_dir: Option<&Path>,
+) -> Option<(PathBuf, ReportForSummary)> {
+    if let Some(dir) = previous_report_dir {
+        let report = load_report(dir).ok()?;
+        return Some((dir.to_path_buf(), report));
+    }
+
+    let previous = detect_previous_report_dir(report_dir, current_iteration)?;
+    let report = previous.report_for_summary().ok()?;
+    Some((previous.dir().to_path_buf(), report))
+}
+
 fn build_cross_iteration_section(
     previous_dir: &Path,
+    previous_report: ReportForSummary,
     current: &AnalysisResult,
     mode: FailedRunsMode,
-) -> Option<CrossIterationSection> {
-    let previous_report = load_report(previous_dir).ok()?;
+) -> CrossIterationSection {
     let previous = analyze_report(previous_dir, &previous_report, mode);
 
     let current_pass = stability_key_set(&current.always_pass);
@@ -633,14 +653,14 @@ fn build_cross_iteration_section(
     let current_fail = stability_key_set(&current.always_fail);
     let previous_fail = stability_key_set(&previous.always_fail);
 
-    Some(CrossIterationSection {
+    CrossIterationSection {
         previous_report_id: previous_report.report.id,
         previous_iteration: previous_report.report.iteration,
         newly_always_pass: diff_records(&current.always_pass, &previous_pass),
         no_longer_always_pass: diff_records(&previous.always_pass, &current_pass),
         newly_always_fail: diff_records(&current.always_fail, &previous_fail),
         no_longer_always_fail: diff_records(&previous.always_fail, &current_fail),
-    })
+    }
 }
 
 fn stability_key_set(records: &[AssertionStabilityRecord]) -> HashSet<AssertionKey> {
@@ -673,7 +693,28 @@ fn diff_records(
         .collect()
 }
 
-pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> Option<PathBuf> {
+/// A previous report a scan has already located and parsed, so a caller reads its
+/// `report.json` exactly once no matter how many projections of it are needed.
+pub struct PreviousReport {
+    dir: PathBuf,
+    document: serde_json::Value,
+}
+
+impl PreviousReport {
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn drift_snapshot(&self) -> Result<eval_suite_drift::ReportDriftSnapshot> {
+        eval_suite_drift::report_drift_snapshot_from_value(&self.document)
+    }
+
+    fn report_for_summary(&self) -> Result<ReportForSummary> {
+        serde_json::from_value(self.document.clone()).map_err(EvalError::from)
+    }
+}
+
+pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> Option<PreviousReport> {
     if current_iteration <= 1 {
         return None;
     }
@@ -690,10 +731,17 @@ pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> 
     candidates.sort();
 
     for candidate in candidates {
-        if let Ok(report) = load_report(&candidate) {
-            if report.report.iteration == target_iteration {
-                return Some(candidate);
-            }
+        let Ok(document) = eval_suite_drift::read_report_value(&candidate) else {
+            continue;
+        };
+        let Ok(report) = serde_json::from_value::<ReportForSummary>(document.clone()) else {
+            continue;
+        };
+        if report.report.iteration == target_iteration {
+            return Some(PreviousReport {
+                dir: candidate,
+                document,
+            });
         }
     }
 
@@ -1139,6 +1187,94 @@ mod tests {
             summary.always_pass[0].cross_iteration_delta,
             Some(CrossIterationDelta::New)
         );
+    }
+
+    #[test]
+    fn detect_previous_report_dir_finds_matching_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        write_report(&previous_dir, serde_json::json!([]), 1, "report-iter-1");
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        let previous = detect_previous_report_dir(&current_dir, 2).expect("a matching sibling exists");
+
+        assert_eq!(previous.dir(), previous_dir.as_path());
+        let report = previous.report_for_summary().unwrap();
+        assert_eq!(report.report.id, "report-iter-1");
+        assert_eq!(report.report.iteration, 1);
+    }
+
+    #[test]
+    fn detect_previous_report_dir_skips_unparseable_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let broken_dir = skill_root.join("report-broken");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        std::fs::create_dir_all(&broken_dir).unwrap();
+        std::fs::write(broken_dir.join("report.json"), "not json").unwrap();
+
+        write_report(&previous_dir, serde_json::json!([]), 1, "report-iter-1");
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        let previous = detect_previous_report_dir(&current_dir, 2).expect("the valid sibling is still found");
+        assert_eq!(previous.dir(), previous_dir.as_path());
+    }
+
+    #[test]
+    fn detect_previous_report_dir_returns_none_when_no_sibling_matches() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let current_dir = skill_root.join("report-iter-2");
+
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        assert!(detect_previous_report_dir(&current_dir, 2).is_none());
+    }
+
+    #[test]
+    fn detect_previous_report_dir_returns_none_for_a_first_iteration() {
+        let root = tempfile::tempdir().unwrap();
+        let report_dir = root.path().join("report");
+        write_report(&report_dir, serde_json::json!([]), 1, "report-a");
+
+        assert!(detect_previous_report_dir(&report_dir, 1).is_none());
+    }
+
+    #[test]
+    fn previous_report_projection_survives_deletion_of_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        write_report(
+            &previous_dir,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            1,
+            "report-iter-1",
+        );
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        let previous = detect_previous_report_dir(&current_dir, 2).expect("a matching sibling exists");
+
+        std::fs::remove_dir_all(&previous_dir).unwrap();
+        assert!(!previous_dir.exists());
+
+        let report = previous
+            .report_for_summary()
+            .expect("the report was already read during detection");
+        assert_eq!(report.report.id, "report-iter-1");
+        assert_eq!(report.report.iteration, 1);
+
+        let snapshot = previous
+            .drift_snapshot()
+            .expect("the drift snapshot projects from the same in-memory document");
+        assert_eq!(snapshot.iteration, 1);
     }
 
     #[test]

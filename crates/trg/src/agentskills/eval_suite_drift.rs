@@ -59,6 +59,14 @@ pub fn load_report_document(report_dir: &Path) -> Result<ReportDocument> {
 }
 
 pub fn load_report_drift_snapshot(report_dir: &Path) -> Result<ReportDriftSnapshot> {
+    let value = read_report_value(report_dir)?;
+    report_drift_snapshot_from_value(&value)
+}
+
+/// Read and parse a report once, so a caller that already has this value (for example one
+/// that scanned it as a candidate previous report) never has to open the file again to get
+/// a projection of it.
+pub fn read_report_value(report_dir: &Path) -> Result<serde_json::Value> {
     let report_path = report_dir.join("report.json");
     let content = std::fs::read_to_string(&report_path).map_err(|source| {
         EvalError::Io(std::io::Error::new(
@@ -66,15 +74,17 @@ pub fn load_report_drift_snapshot(report_dir: &Path) -> Result<ReportDriftSnapsh
             format!("read {}: {source}", report_path.display()),
         ))
     })?;
-    let value: serde_json::Value = serde_json::from_str(&content)?;
+    serde_json::from_str(&content).map_err(EvalError::from)
+}
 
-    let iteration = parse_report_iteration(&value)?;
+pub fn report_drift_snapshot_from_value(value: &serde_json::Value) -> Result<ReportDriftSnapshot> {
+    let iteration = parse_report_iteration(value)?;
     let evals_hash = value
         .pointer("/suite/evals_hash")
         .and_then(|field| field.as_str())
         .unwrap_or_default()
         .to_string();
-    let declared_eval_case_ids = recorded_declared_case_ids(&value).unwrap_or_else(|| dimension_case_ids(&value));
+    let declared_eval_case_ids = recorded_declared_case_ids(value).unwrap_or_else(|| dimension_case_ids(value));
 
     Ok(ReportDriftSnapshot {
         iteration,
