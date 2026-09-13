@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::evals::EVAL_SUITE_DIR_NAME;
+use super::mocks::MOCK_CALLS_LOG_NAME;
 use super::report::{EnvironmentPolicy, PermissionGrant, RunRecord, ScenarioKind, SkillStaging};
 use super::runner::Runner;
 
@@ -347,14 +348,43 @@ pub fn apply_cache_hit(
     let source_run = load_source_run(&source_report, &pointer.run_id)?;
     copy_run_artifacts(&source_report, &pointer.run_id, report_dir, &run.id)?;
 
-    run.status = source_run.status;
-    run.metrics = source_run.metrics;
-    run.artifacts = source_run
-        .artifacts
+    // Named field by field, not `..source_run`, so a field added to `RunRecord` later
+    // fails this match rather than silently keeping `run`'s own (usually empty) value.
+    // Everything bound to `_` belongs to the run doing the reusing, not the run being
+    // reused: its own id, case, scenario, iteration, model, attempt, invocation count,
+    // paths, mirror path and cache slot must stay as `run` already has them.
+    let RunRecord {
+        id: _,
+        eval_case_id: _,
+        eval_slug: _,
+        scenario_id: _,
+        iteration: _,
+        model_config_id: _,
+        skill_revision_id: _,
+        attempt: _,
+        status,
+        runner_invocations: _,
+        failure_kind,
+        paths: _,
+        mirror_path: _,
+        artifacts,
+        metrics,
+        cache: _,
+        skill_integrity,
+        warnings,
+        mock_violations,
+    } = source_run;
+
+    run.status = status;
+    run.failure_kind = failure_kind;
+    run.artifacts = artifacts
         .into_iter()
         .map(|artifact| rewrite_artifact_run_id(artifact, &pointer.run_id, &run.id))
         .collect();
-    run.skill_integrity = source_run.skill_integrity;
+    run.metrics = metrics;
+    run.skill_integrity = skill_integrity;
+    run.warnings = warnings;
+    run.mock_violations = mock_violations;
     run.cache = Some(RunCacheInfo {
         hit: true,
         source_run_id: pointer.run_id.clone(),
@@ -403,7 +433,7 @@ fn copy_run_artifacts(
     let dest_run_dir = dest_report.join("runs").join(dest_run_id);
     fs::create_dir_all(&dest_run_dir)?;
 
-    for name in ["transcript.jsonl", "timing.json"] {
+    for name in ["transcript.jsonl", "timing.json", MOCK_CALLS_LOG_NAME] {
         let source = source_run_dir.join(name);
         if source.is_file() {
             fs::copy(&source, dest_run_dir.join(name))?;
@@ -665,6 +695,86 @@ mod tests {
         .unwrap();
     }
 
+    /// Same as `write_completed_run`, but the run recorded one `expect` violation while it
+    /// ran: `mock-calls.jsonl` carries it as the mock server would have logged it, and the
+    /// run's own `mock_violations` carries it as `apply_outcome` would have read it back.
+    fn write_completed_run_with_mock_violation(report_dir: &Path, run_id: &str, eval_case_id: &str) {
+        use crate::agentskills::mocks::{ExpectPath, MockCallLogEntry, MockViolation, ServerName, ToolName};
+
+        let run_dir = report_dir.join("runs").join(run_id);
+        let workspace = run_dir.join("workspace");
+        fs::create_dir_all(workspace.join("outputs")).unwrap();
+        fs::write(run_dir.join("transcript.jsonl"), "{}\n").unwrap();
+        fs::write(run_dir.join("timing.json"), r#"{"duration_ms":42}"#).unwrap();
+        fs::write(workspace.join("outputs/final.md"), "done").unwrap();
+
+        let violation = MockViolation {
+            server: ServerName::from("github"),
+            tool: ToolName::from("create_issue"),
+            path: ExpectPath::from("repo"),
+            constraint: "/^acme\\//".to_string(),
+            received: serde_json::json!("other/repo"),
+        };
+        let call_log = MockCallLogEntry {
+            server: violation.server.clone(),
+            tool: violation.tool.clone(),
+            input: serde_json::json!({"repo": "other/repo"}),
+            violations: vec![violation.clone()],
+        };
+        fs::write(
+            run_dir.join(MOCK_CALLS_LOG_NAME),
+            format!("{}\n", serde_json::to_string(&call_log).unwrap()),
+        )
+        .unwrap();
+
+        let run = RunRecord {
+            id: run_id.to_string(),
+            eval_case_id: eval_case_id.to_string(),
+            eval_slug: eval_case_id.to_string(),
+            scenario_id: ScenarioKind::WithSkill,
+            iteration: 1,
+            model_config_id: "ci-default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt: 1,
+            failure_kind: None,
+            runner_invocations: 1,
+            status: "completed".to_string(),
+            paths: RunPaths {
+                workspace: format!("runs/{run_id}/workspace"),
+                outputs: format!("runs/{run_id}/workspace/outputs"),
+            },
+            mirror_path: format!("iteration-1/eval-{eval_case_id}/with_skill/"),
+            artifacts: vec![serde_json::json!({"kind":"transcript","path":format!("runs/{run_id}/transcript.jsonl")})],
+            metrics: RunMetrics {
+                duration_ms: Some(42),
+                exit_code: Some(0),
+                total_tokens: Some(10),
+                input_tokens: Some(6),
+                output_tokens: Some(4),
+                cost_usd: None,
+            },
+            cache: None,
+            skill_integrity: None,
+            warnings: Vec::new(),
+            mock_violations: vec![violation],
+        };
+
+        let document = serde_json::json!({
+            "report": {"id":"r1","generated_at":"2026-01-01T00:00:00Z","iteration":1,"producer":{"name":"trg","version":"0.0.0"}},
+            "suite": {"skill_name":"demo","skill_path":"demo","skill_hash":"sha256:skill","evals_path":"demo/evals/evals.json","evals_hash":"sha256:evals"},
+            "dimensions": {"eval_cases":[],"assertions":[],"skill_revisions":[],"model_configs":[],"scenarios":[],"graders":[]},
+            "runs": [run],
+            "assertion_results": [],
+            "summaries": {"by_scenario":[]},
+            "comparisons": []
+        });
+        fs::write(
+            report_dir.join("report.json"),
+            serde_json::to_string_pretty(&document).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn cache_key_is_stable_for_identical_input() {
         let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixtures");
@@ -784,6 +894,72 @@ mod tests {
         assert_eq!(run.cache.as_ref().unwrap().source_run_id, "run-001");
         assert!(report_b.join("runs/run-001/transcript.jsonl").is_file());
         assert!(report_b.join("runs/run-001/workspace/outputs/final.md").is_file());
+    }
+
+    /// A cache hit must not launder a run that failed its mock's `expect` guard into one
+    /// that looks clean: grading only ever sees `mock_violations` and `mock-calls.jsonl`,
+    /// so if a cache hit drops either, the second run of a suite passes where the first
+    /// failed. Both must survive the hit exactly as the first run left them.
+    #[test]
+    fn a_cache_hit_still_carries_the_mock_violation_the_first_run_recorded() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run_with_mock_violation(&report_a, "run-001", "one");
+
+        let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        let key = CacheKey::from_input(&input);
+        record_completion(&out_dir, &key, &input, &report_a, "run-001").unwrap();
+
+        let report_b = out_dir.join("demo/report-b");
+        fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
+        let mut run = RunRecord {
+            id: "run-001".to_string(),
+            eval_case_id: "one".to_string(),
+            eval_slug: "one".to_string(),
+            scenario_id: ScenarioKind::WithSkill,
+            iteration: 2,
+            model_config_id: "ci-default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt: 1,
+            failure_kind: None,
+            runner_invocations: 0,
+            status: "skipped".to_string(),
+            paths: RunPaths {
+                workspace: "runs/run-001/workspace".to_string(),
+                outputs: "runs/run-001/workspace/outputs".to_string(),
+            },
+            mirror_path: "iteration-2/eval-one/with_skill/".to_string(),
+            artifacts: Vec::new(),
+            metrics: RunMetrics {
+                duration_ms: None,
+                exit_code: None,
+                total_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cost_usd: None,
+            },
+            cache: None,
+            skill_integrity: None,
+            warnings: Vec::new(),
+            mock_violations: Vec::new(),
+        };
+
+        let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
+        apply_cache_hit(&mut run, &key, &pointer, &report_b).unwrap();
+
+        assert_eq!(
+            run.mock_violations.len(),
+            1,
+            "a cache hit must reuse the violation the first run logged, not silently clear it"
+        );
+        assert_eq!(run.mock_violations[0].path.as_str(), "repo");
+        let copied_calls = fs::read_to_string(report_b.join("runs/run-001").join(MOCK_CALLS_LOG_NAME)).expect(
+            "mock-calls.jsonl is as much a record of what the first run did as transcript.jsonl, \
+             and must be copied alongside it",
+        );
+        assert!(copied_calls.contains("\"repo\""));
     }
 
     #[test]

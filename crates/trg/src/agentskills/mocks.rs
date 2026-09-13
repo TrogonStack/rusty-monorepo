@@ -173,13 +173,18 @@ impl From<&str> for ExpectPath {
     }
 }
 
+/// Every variant is a struct variant, even the ones with a single field, so that an
+/// internally tagged encoding always has a map to attach `kind` to. A newtype variant
+/// wrapping a bare string or array cannot be represented that way; serde only discovers
+/// that at serialization time, so the invalid shape does not fail to compile, it panics
+/// the first time a mock declaring `expect` reaches `content_hash`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExpectConstraint {
-    Regex(String),
-    Literal(String),
-    OneOf(Vec<String>),
-    TypeName(JsonTypeName),
+    Regex { pattern: String },
+    Literal { value: String },
+    OneOf { values: Vec<String> },
+    TypeName { type_name: JsonTypeName },
 }
 
 impl ExpectConstraint {
@@ -199,7 +204,7 @@ impl ExpectConstraint {
                         }
                     }
                 }
-                Ok(Self::OneOf(literals))
+                Ok(Self::OneOf { values: literals })
             }
             _ => Err(MocksError::UnsupportedConstraintShape {
                 path: path.to_path_buf(),
@@ -210,29 +215,31 @@ impl ExpectConstraint {
 
     fn from_string_value(raw: &str) -> Self {
         if raw.len() >= 2 && raw.starts_with('/') && raw.ends_with('/') {
-            return Self::Regex(raw[1..raw.len() - 1].to_string());
+            return Self::Regex {
+                pattern: raw[1..raw.len() - 1].to_string(),
+            };
         }
         if let Some(type_name) = JsonTypeName::parse(raw) {
-            return Self::TypeName(type_name);
+            return Self::TypeName { type_name };
         }
-        Self::Literal(raw.to_string())
+        Self::Literal { value: raw.to_string() }
     }
 
     fn describe(&self) -> String {
         match self {
-            Self::Regex(pattern) => format!("/{pattern}/"),
-            Self::Literal(value) => value.clone(),
-            Self::OneOf(values) => values.join(", "),
-            Self::TypeName(type_name) => type_name.label().to_string(),
+            Self::Regex { pattern } => format!("/{pattern}/"),
+            Self::Literal { value } => value.clone(),
+            Self::OneOf { values } => values.join(", "),
+            Self::TypeName { type_name } => type_name.label().to_string(),
         }
     }
 
     fn matches(&self, value: &serde_json::Value) -> bool {
         match self {
-            Self::Literal(expected) => value_as_text(value).is_some_and(|actual| actual == *expected),
-            Self::OneOf(options) => value_as_text(value).is_some_and(|actual| options.contains(&actual)),
-            Self::TypeName(type_name) => type_name.matches(value),
-            Self::Regex(pattern) => match Regex::new(pattern) {
+            Self::Literal { value: expected } => value_as_text(value).is_some_and(|actual| actual == *expected),
+            Self::OneOf { values: options } => value_as_text(value).is_some_and(|actual| options.contains(&actual)),
+            Self::TypeName { type_name } => type_name.matches(value),
+            Self::Regex { pattern } => match Regex::new(pattern) {
                 Ok(re) => value_as_text(value).is_some_and(|actual| re.is_match(&actual)),
                 Err(_) => false,
             },
@@ -690,11 +697,15 @@ mod tests {
         assert_eq!(declaration.body, "{\"id\": 1}");
         assert_eq!(
             declaration.expect.get(&ExpectPath("repo".to_string())),
-            Some(&ExpectConstraint::Regex("^acme\\/".to_string()))
+            Some(&ExpectConstraint::Regex {
+                pattern: "^acme\\/".to_string()
+            })
         );
         assert_eq!(
             declaration.expect.get(&ExpectPath("title".to_string())),
-            Some(&ExpectConstraint::TypeName(JsonTypeName::String))
+            Some(&ExpectConstraint::TypeName {
+                type_name: JsonTypeName::String
+            })
         );
     }
 
@@ -836,12 +847,38 @@ mod tests {
     }
 
     #[test]
+    fn a_mock_set_with_an_expect_constraint_round_trips_through_content_hash() {
+        let mut servers = BTreeMap::new();
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            ToolName::from("create_issue"),
+            MockDeclaration {
+                mock_type: MockType::Fixed,
+                expect: BTreeMap::from([(
+                    ExpectPath("repo".to_string()),
+                    ExpectConstraint::Regex {
+                        pattern: "^acme/".to_string(),
+                    },
+                )]),
+                error: None,
+                body: "{}".to_string(),
+            },
+        );
+        servers.insert(ServerName::from("github"), tools);
+        let set = MockSet { servers };
+
+        set.content_hash();
+    }
+
+    #[test]
     fn expect_violation_reports_path_constraint_and_received_value() {
         let declaration = MockDeclaration {
             mock_type: MockType::Fixed,
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
-                ExpectConstraint::Regex("^acme/".to_string()),
+                ExpectConstraint::Regex {
+                    pattern: "^acme/".to_string(),
+                },
             )]),
             error: None,
             body: "{}".to_string(),
@@ -862,7 +899,9 @@ mod tests {
             mock_type: MockType::Fixed,
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
-                ExpectConstraint::Regex("^acme/".to_string()),
+                ExpectConstraint::Regex {
+                    pattern: "^acme/".to_string(),
+                },
             )]),
             error: None,
             body: "{}".to_string(),
@@ -929,7 +968,9 @@ mod tests {
             mock_type: MockType::Fixed,
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
-                ExpectConstraint::Regex("^acme/".to_string()),
+                ExpectConstraint::Regex {
+                    pattern: "^acme/".to_string(),
+                },
             )]),
             error: None,
             body: "{{input.repo}} created".to_string(),
@@ -997,7 +1038,9 @@ mod tests {
             mock_type: MockType::Fixed,
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
-                ExpectConstraint::Regex("^acme/".to_string()),
+                ExpectConstraint::Regex {
+                    pattern: "^acme/".to_string(),
+                },
             )]),
             error: None,
             body: "{{input.missing}}".to_string(),
@@ -1060,6 +1103,44 @@ mod tests {
                 "--calls",
                 run_dir.join(MOCK_CALLS_LOG_NAME).to_string_lossy().as_ref(),
             ]
+        );
+    }
+
+    #[test]
+    fn a_materialized_expect_constraint_round_trips_through_the_json_file_the_mock_server_reads() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\nexpect:\n  repo: /^acme\\//\n  title: string\n  priority: [low, high]\n---\n{\"id\": 1}",
+        );
+        let mock_set = resolve_mock_set(&skill, "one").unwrap();
+        let run_dir = temp.path().join("run-dir");
+
+        materialize_mock_set(&mock_set, &run_dir, Path::new("/usr/local/bin/trg")).unwrap();
+
+        let tool_json_path = run_dir.join("mcp-mocks/github/create_issue.json");
+        let declaration: MockDeclaration = serde_json::from_str(&fs::read_to_string(&tool_json_path).unwrap())
+            .expect("a materialized expect constraint must deserialize back into a MockDeclaration");
+        assert_eq!(
+            declaration.expect.get(&ExpectPath("repo".to_string())),
+            Some(&ExpectConstraint::Regex {
+                pattern: "^acme\\/".to_string()
+            })
+        );
+        assert_eq!(
+            declaration.expect.get(&ExpectPath("title".to_string())),
+            Some(&ExpectConstraint::TypeName {
+                type_name: JsonTypeName::String
+            })
+        );
+        assert_eq!(
+            declaration.expect.get(&ExpectPath("priority".to_string())),
+            Some(&ExpectConstraint::OneOf {
+                values: vec!["low".to_string(), "high".to_string()]
+            })
         );
     }
 }

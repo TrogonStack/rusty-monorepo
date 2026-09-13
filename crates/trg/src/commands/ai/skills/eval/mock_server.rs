@@ -300,7 +300,9 @@ mod tests {
             declaration_with_expect(
                 "issue created",
                 "repo",
-                crate::agentskills::mocks::ExpectConstraint::Literal("acme/widgets".to_string()),
+                crate::agentskills::mocks::ExpectConstraint::Literal {
+                    value: "acme/widgets".to_string(),
+                },
             ),
         );
         let request = json!({
@@ -331,7 +333,9 @@ mod tests {
             declaration_with_expect(
                 "created {{input.issue_number}}",
                 "repo",
-                crate::agentskills::mocks::ExpectConstraint::Literal("acme/widgets".to_string()),
+                crate::agentskills::mocks::ExpectConstraint::Literal {
+                    value: "acme/widgets".to_string(),
+                },
             ),
         );
         let request = json!({
