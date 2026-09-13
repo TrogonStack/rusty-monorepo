@@ -366,6 +366,10 @@ pub struct DimensionsSection {
 pub struct EvalCaseDimension {
     pub id: String,
     pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub prompt: String,
     pub expected_output: String,
     pub files: Vec<String>,
@@ -758,6 +762,11 @@ fn build_dimensions(
                 .get(eval_case.id.as_str())
                 .cloned()
                 .unwrap_or_else(|| super::layout::eval_slug(eval_case.id.as_str())),
+            name: eval_case.name.as_ref().map(|name| name.as_str().to_string()),
+            description: eval_case
+                .description
+                .as_ref()
+                .map(|description| description.as_str().to_string()),
             prompt: eval_case.prompt.as_str().to_string(),
             expected_output: eval_case.expected_output.as_str().to_string(),
             files: eval_case.files.iter().map(|file| file.as_str().to_string()).collect(),
@@ -939,6 +948,8 @@ mod tests {
                 "evals": [
                     {
                         "id": "case-a",
+                        "name": "Case A",
+                        "description": "Covers case A.",
                         "prompt": "prompt a",
                         "expected_output": "output a",
                         "files": ["fixture.txt"],
@@ -972,11 +983,16 @@ mod tests {
 
         assert_eq!(dimensions.eval_cases.len(), 2);
         assert_eq!(dimensions.eval_cases[0].slug, "case-a");
+        assert_eq!(dimensions.eval_cases[0].name.as_deref(), Some("Case A"));
+        assert_eq!(dimensions.eval_cases[0].description.as_deref(), Some("Covers case A."));
         assert_eq!(dimensions.eval_cases[0].assertion_ids, vec!["case-a:a0"]);
+        assert_eq!(dimensions.eval_cases[1].name, None);
+        assert_eq!(dimensions.eval_cases[1].description, None);
         assert_eq!(dimensions.eval_cases[1].assertion_ids, vec!["case-b:a0", "case-b:a1"]);
         assert_eq!(dimensions.assertions.len(), 3);
         assert_eq!(dimensions.assertions[0].id, "case-a:a0");
         assert_eq!(dimensions.assertions[0].eval_case_id, "case-a");
+        assert_eq!(dimensions.assertions[0].name, None);
         assert_eq!(dimensions.scenarios.len(), 2);
         assert_eq!(dimensions.model_configs[0].capture_status, "partial");
         assert_eq!(dimensions.model_configs[0].label, "ci-default");
