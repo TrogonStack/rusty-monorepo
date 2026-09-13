@@ -7,8 +7,9 @@ use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 use super::call_bounds::CallBounds;
-use super::evals::{NonEmptyString, RelativeSkillPath};
+use super::evals::{EvalError, NonEmptyString, RelativeSkillPath, Result};
 use super::transcript::{NormalizedTranscript, ToolName};
+use super::validation::ValidationError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[schemars(schema_with = "regex_pattern_schema")]
@@ -154,6 +155,15 @@ pub enum Grader {
     Llm {
         criterion: NonEmptyString,
     },
+    ValidJson {
+        #[serde(default)]
+        target: GradeTarget,
+    },
+    SchemaValidation {
+        schema: RelativeSkillPath,
+        #[serde(default)]
+        target: GradeTarget,
+    },
 }
 
 impl Grader {
@@ -166,6 +176,8 @@ impl Grader {
             Self::ToolOrder { .. } => "tool_order",
             Self::SkillUsed { .. } => "skill_used",
             Self::Llm { .. } => "llm",
+            Self::ValidJson { .. } => "valid_json",
+            Self::SchemaValidation { .. } => "schema_validation",
         }
     }
 
@@ -218,6 +230,8 @@ impl Grader {
                 false => "the skill was engaged".to_string(),
             },
             Self::Llm { criterion } => criterion.to_string(),
+            Self::ValidJson { target } => format!("{target} is valid json"),
+            Self::SchemaValidation { schema, target } => format!("{target} validates against schema '{schema}'"),
         }
     }
 
@@ -357,6 +371,13 @@ pub enum GraderOutcome {
     Deferred {
         criterion: String,
     },
+    /// The case, not the run, is malformed: a named schema is missing, unreadable, or
+    /// not itself a valid JSON Schema document. Distinct from `Unsupported`, which
+    /// means the property is unobservable on this particular runner; this means the
+    /// assertion could never be checked on any runner until the case is fixed.
+    AuthoringError {
+        reason: String,
+    },
 }
 
 impl GraderOutcome {
@@ -377,12 +398,22 @@ pub struct GradeInput<'a> {
     pub outputs_dir: &'a Path,
     pub raw_transcript: &'a str,
     pub transcript: Option<&'a NormalizedTranscript>,
+    pub skill_dir: &'a Path,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetContent {
     Text(String),
     Missing(String),
+}
+
+impl TargetContent {
+    pub(crate) fn from_path(path: &Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::Text(text),
+            Err(e) => Self::Missing(format!("cannot read '{}': {e}", path.display())),
+        }
+    }
 }
 
 impl<'a> GradeInput<'a> {
@@ -408,13 +439,7 @@ impl<'a> GradeInput<'a> {
         match target {
             GradeTarget::FinalText => TargetContent::Text(self.final_text.to_string()),
             GradeTarget::Transcript => TargetContent::Text(self.raw_transcript.to_string()),
-            GradeTarget::File(path) => {
-                let resolved = self.resolve(path);
-                match std::fs::read_to_string(&resolved) {
-                    Ok(text) => TargetContent::Text(text),
-                    Err(e) => TargetContent::Missing(format!("cannot read '{}': {e}", resolved.display())),
-                }
-            }
+            GradeTarget::File(path) => TargetContent::from_path(&self.resolve(path)),
             GradeTarget::AnyOutput => {
                 let mut parts = vec![self.final_text.to_string()];
                 collect_text(self.outputs_dir, &mut parts);
@@ -517,6 +542,108 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                 },
             }
         }),
+        Grader::ValidJson { target } => {
+            let (passed, evidence) = check_json_validity(&input.target_content(target));
+            GraderOutcome::from_bool(passed, evidence)
+        }
+        Grader::SchemaValidation { schema, target } => {
+            let schema_path = input.skill_dir.join(schema.as_path());
+            match check_schema_validation(&schema_path, &input.target_content(target)) {
+                Ok((passed, evidence)) => GraderOutcome::from_bool(passed, evidence),
+                Err(e) => GraderOutcome::AuthoringError { reason: e.to_string() },
+            }
+        }
+    }
+}
+
+/// Whether a target parses as JSON, shared by the typed `valid_json` grader and the
+/// prose sniffer so the two rules can never drift apart.
+pub(crate) fn check_json_validity(content: &TargetContent) -> (bool, String) {
+    match content {
+        TargetContent::Missing(reason) => (false, reason.clone()),
+        TargetContent::Text(text) => match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(_) => (true, "parses as valid json".to_string()),
+            Err(e) => (
+                false,
+                format!("invalid json at line {} column {}: {e}", e.line(), e.column()),
+            ),
+        },
+    }
+}
+
+/// Whether a target validates against a named JSON Schema document, shared by the
+/// typed `schema_validation` grader and the prose sniffer. A schema that cannot be
+/// read or is not itself a valid schema is an authoring error, not a failed
+/// assertion, so it surfaces as `Err` rather than as `Ok((false, _))`.
+pub(crate) fn check_schema_validation(schema_path: &Path, content: &TargetContent) -> Result<(bool, String)> {
+    let text = match content {
+        TargetContent::Missing(reason) => return Ok((false, reason.clone())),
+        TargetContent::Text(text) => text,
+    };
+
+    #[cfg(any(feature = "schema-validation", test))]
+    {
+        let target: serde_json::Value = match serde_json::from_str(text) {
+            Ok(value) => value,
+            Err(e) => {
+                return Ok((
+                    false,
+                    format!("invalid json at line {} column {}: {e}", e.line(), e.column()),
+                ))
+            }
+        };
+        let schema_text = std::fs::read_to_string(schema_path).map_err(|e| {
+            EvalError::Validation(
+                ValidationError::for_field(
+                    format!("schema '{}'", schema_path.display()),
+                    format!("cannot read: {e}"),
+                )
+                .into(),
+            )
+        })?;
+        let schema_value: serde_json::Value = serde_json::from_str(&schema_text).map_err(|e| {
+            EvalError::Validation(
+                ValidationError::for_field(
+                    format!("schema '{}'", schema_path.display()),
+                    format!("is not valid json: {e}"),
+                )
+                .into(),
+            )
+        })?;
+        let validator = jsonschema::validator_for(&schema_value).map_err(|e| {
+            EvalError::Validation(
+                ValidationError::for_field(
+                    format!("schema '{}'", schema_path.display()),
+                    format!("is not a valid json schema document: {e}"),
+                )
+                .into(),
+            )
+        })?;
+        let errors: Vec<String> = validator.iter_errors(&target).map(|e| e.to_string()).collect();
+        if errors.is_empty() {
+            Ok((true, format!("validates against schema '{}'", schema_path.display())))
+        } else {
+            Ok((
+                false,
+                format!(
+                    "does not validate against schema '{}': {}",
+                    schema_path.display(),
+                    errors.join("; ")
+                ),
+            ))
+        }
+    }
+
+    #[cfg(not(any(feature = "schema-validation", test)))]
+    {
+        let _ = text;
+        Err(EvalError::Validation(
+            ValidationError::for_field(
+                format!("schema '{}'", schema_path.display()),
+                "schema validation requires this build's schema-validation feature",
+            )
+            .into(),
+        ))
     }
 }
 
@@ -596,6 +723,7 @@ mod tests {
         run_dir: PathBuf,
         workspace_dir: PathBuf,
         outputs_dir: PathBuf,
+        skill_dir: PathBuf,
         transcript: NormalizedTranscript,
     }
 
@@ -606,16 +734,19 @@ mod tests {
 
         fn of(stream: &[u8]) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let run_dir = dir.path().to_path_buf();
+            let run_dir = dir.path().join("run");
             let workspace_dir = run_dir.join("workspace");
             let outputs_dir = workspace_dir.join("outputs");
+            let skill_dir = dir.path().join("skill");
             std::fs::create_dir_all(&outputs_dir).unwrap();
+            std::fs::create_dir_all(&skill_dir).unwrap();
             std::fs::write(outputs_dir.join("report.md"), "# Title\nRevenue grew 12% in Q3.\n").unwrap();
             Self {
                 _dir: dir,
                 run_dir,
                 workspace_dir,
                 outputs_dir,
+                skill_dir,
                 transcript: normalize_stream_json(
                     "claude",
                     &redact_transcript_bytes(stream),
@@ -628,6 +759,10 @@ mod tests {
             std::fs::write(self.workspace_dir.join(name), contents).unwrap();
         }
 
+        fn write_to_skill(&self, name: &str, contents: &str) {
+            std::fs::write(self.skill_dir.join(name), contents).unwrap();
+        }
+
         fn input(&self) -> GradeInput<'_> {
             GradeInput {
                 final_text: "Wrote the report to outputs/report.md",
@@ -636,6 +771,7 @@ mod tests {
                 outputs_dir: &self.outputs_dir,
                 raw_transcript: "",
                 transcript: Some(&self.transcript),
+                skill_dir: &self.skill_dir,
             }
         }
     }
@@ -903,6 +1039,7 @@ mod tests {
             outputs_dir: dir.path(),
             raw_transcript: "",
             transcript: Some(&transcript),
+            skill_dir: dir.path(),
         };
 
         for grader in [
@@ -939,6 +1076,7 @@ mod tests {
             outputs_dir: dir.path(),
             raw_transcript: "",
             transcript: Some(&transcript),
+            skill_dir: dir.path(),
         };
 
         assert!(matches!(
@@ -969,6 +1107,7 @@ mod tests {
             outputs_dir: dir.path(),
             raw_transcript: "",
             transcript: Some(&transcript),
+            skill_dir: dir.path(),
         };
         let grader = Grader::Regex {
             pattern: RegexPattern::parse(r"\b42\b").unwrap(),
@@ -988,6 +1127,7 @@ mod tests {
             outputs_dir: dir.path(),
             raw_transcript: "",
             transcript: None,
+            skill_dir: dir.path(),
         };
         match evaluate(&Grader::SkillUsed { negate: false }, &input) {
             GraderOutcome::Unsupported { reason } => assert!(reason.contains("no normalized transcript"), "{reason}"),
@@ -1066,6 +1206,7 @@ mod tests {
             outputs_dir: dir.path(),
             raw_transcript: "",
             transcript: None,
+            skill_dir: dir.path(),
         };
         let grader = Grader::Llm {
             criterion: text("The summary avoids filler phrasing"),
@@ -1123,6 +1264,19 @@ mod tests {
             ),
             (Grader::SkillUsed { negate: false }, "the skill was engaged"),
             (Grader::SkillUsed { negate: true }, "the skill was not engaged"),
+            (
+                Grader::ValidJson {
+                    target: GradeTarget::FinalText,
+                },
+                "final text is valid json",
+            ),
+            (
+                Grader::SchemaValidation {
+                    schema: path("schema.json"),
+                    target: GradeTarget::File(path("out.json")),
+                },
+                "file 'out.json' validates against schema 'schema.json'",
+            ),
         ];
         for (grader, expected) in cases {
             assert_eq!(grader.describe(), expected, "{}", grader.kind());
@@ -1138,10 +1292,12 @@ mod tests {
             {"type": "tool_used", "tool": "Read", "min_calls": 2},
             {"type": "tool_order", "tools": ["Read", "Write"]},
             {"type": "skill_used"},
-            {"type": "llm", "criterion": "reads naturally"}
+            {"type": "llm", "criterion": "reads naturally"},
+            {"type": "valid_json"},
+            {"type": "schema_validation", "schema": "schema.json"}
         ]);
         let graders: Vec<Grader> = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(graders.len(), 7);
+        assert_eq!(graders.len(), 9);
         assert_eq!(
             graders.iter().map(Grader::kind).collect::<Vec<_>>(),
             vec![
@@ -1151,7 +1307,9 @@ mod tests {
                 "tool_used",
                 "tool_order",
                 "skill_used",
-                "llm"
+                "llm",
+                "valid_json",
+                "schema_validation"
             ]
         );
         let reparsed: Vec<Grader> = serde_json::from_value(serde_json::to_value(&graders).unwrap()).unwrap();
@@ -1202,6 +1360,136 @@ mod tests {
         assert!(matches!(
             evaluate(&Grader::SkillUsed { negate: true }, &fixture.input()),
             GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn valid_json_passes_when_the_target_parses() {
+        let fixture = Fixture::new();
+        fixture.write_to_workspace("data.json", r#"{"ok": true}"#);
+        let grader = Grader::ValidJson {
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn valid_json_fails_with_the_parse_location_when_the_target_does_not_parse() {
+        let fixture = Fixture::new();
+        fixture.write_to_workspace("data.json", "{not json");
+        let grader = Grader::ValidJson {
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        match evaluate(&grader, &fixture.input()) {
+            GraderOutcome::Failed { evidence } => assert!(evidence.contains("line"), "{evidence}"),
+            other => panic!("expected failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_validation_passes_when_the_target_conforms() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill(
+            "schema.json",
+            r#"{"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}"#,
+        );
+        fixture.write_to_workspace("data.json", r#"{"name": "trg"}"#);
+        let grader = Grader::SchemaValidation {
+            schema: path("schema.json"),
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn schema_validation_fails_when_the_target_does_not_conform() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill(
+            "schema.json",
+            r#"{"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}}"#,
+        );
+        fixture.write_to_workspace("data.json", r#"{"name": 42}"#);
+        let grader = Grader::SchemaValidation {
+            schema: path("schema.json"),
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        match evaluate(&grader, &fixture.input()) {
+            GraderOutcome::Failed { evidence } => assert!(evidence.contains("schema.json"), "{evidence}"),
+            other => panic!("expected failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_validation_is_an_authoring_error_when_the_schema_file_is_missing() {
+        let fixture = Fixture::new();
+        fixture.write_to_workspace("data.json", r#"{"name": "trg"}"#);
+        let grader = Grader::SchemaValidation {
+            schema: path("missing-schema.json"),
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        match evaluate(&grader, &fixture.input()) {
+            GraderOutcome::AuthoringError { reason } => assert!(reason.contains("missing-schema.json"), "{reason}"),
+            other => panic!("expected an authoring error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_validation_is_an_authoring_error_when_the_schema_is_not_valid_json() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill("schema.json", "{not json");
+        fixture.write_to_workspace("data.json", r#"{"name": "trg"}"#);
+        let grader = Grader::SchemaValidation {
+            schema: path("schema.json"),
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::AuthoringError { .. }
+        ));
+    }
+
+    #[test]
+    fn schema_validation_is_an_authoring_error_when_the_schema_document_is_not_a_valid_schema() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill("schema.json", r#"{"properties": "not an object"}"#);
+        fixture.write_to_workspace("data.json", r#"{"name": "trg"}"#);
+        let grader = Grader::SchemaValidation {
+            schema: path("schema.json"),
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::AuthoringError { .. }
+        ));
+    }
+
+    #[test]
+    fn schema_validation_is_resolved_relative_to_the_skill_directory_not_the_workspace() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill("schema.json", r#"{"type": "object"}"#);
+        fixture.write_to_workspace("schema.json", "{not json");
+        fixture.write_to_workspace("data.json", r#"{"name": "trg"}"#);
+        let grader = Grader::SchemaValidation {
+            schema: path("schema.json"),
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Passed { .. }
         ));
     }
 }
