@@ -150,6 +150,21 @@ impl StagedSkill {
         }
     }
 
+    /// Is this workspace-relative path inside the skill this run staged?
+    ///
+    /// A transcript from before a run recorded its staging cannot say which
+    /// directory it used, so it answers for all of them: crediting an agent
+    /// with a file the harness may have planted is the error worth avoiding.
+    pub fn planted(&self, relative: &str) -> bool {
+        match self {
+            Self::Unrecorded => STAGED_SKILL_DIRS
+                .iter()
+                .any(|directory| relative.starts_with(directory)),
+            Self::Nothing => false,
+            Self::At { directory } => relative.starts_with(directory.as_str()),
+        }
+    }
+
     fn is_unrecorded(&self) -> bool {
         matches!(self, Self::Unrecorded)
     }

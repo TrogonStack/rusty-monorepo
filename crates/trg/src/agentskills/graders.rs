@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::call_bounds::CallBounds;
 use super::evals::{EvalError, GlobPattern, NonEmptyString, RelativeSkillPath, Result};
-use super::transcript::{NormalizedTranscript, ToolName};
+use super::transcript::{NormalizedTranscript, StagedSkill, ToolName};
 use super::validation::ValidationError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -690,6 +690,15 @@ impl<'a> GradeInput<'a> {
         workspace_candidate
     }
 
+    /// What this run staged, as the run itself recorded it. A run whose transcript
+    /// could not be read is treated as one that staged somewhere unrecorded, since
+    /// that is the reading that cannot credit the agent with the harness's work.
+    fn staged_skill(&self) -> StagedSkill {
+        self.transcript
+            .map(|transcript| transcript.staged_skill.clone())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn target_content(&self, target: &GradeTarget) -> TargetContent {
         match target {
             GradeTarget::FinalText => TargetContent::Text(self.final_text.to_string()),
@@ -720,20 +729,23 @@ fn collect_text(dir: &Path, parts: &mut Vec<String>) {
 /// Walks each directory in priority order looking for a file whose path,
 /// relative to that directory and written with `/` separators, matches the
 /// glob's regex. Returns the first match.
-fn find_glob_match(dirs: &[&Path], regex: &Regex) -> Option<PathBuf> {
-    dirs.iter().find_map(|dir| walk_for_glob_match(dir, dir, regex))
+fn find_glob_match(dirs: &[&Path], regex: &Regex, staged: &StagedSkill) -> Option<PathBuf> {
+    dirs.iter().find_map(|dir| walk_for_glob_match(dir, dir, regex, staged))
 }
 
-fn walk_for_glob_match(base: &Path, dir: &Path, regex: &Regex) -> Option<PathBuf> {
+fn walk_for_glob_match(base: &Path, dir: &Path, regex: &Regex, staged: &StagedSkill) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if let Some(found) = walk_for_glob_match(base, &path, regex) {
+            if let Some(found) = walk_for_glob_match(base, &path, regex, staged) {
                 return Some(found);
             }
         } else if let Ok(relative) = path.strip_prefix(base) {
             let relative = relative.to_string_lossy().replace('\\', "/");
+            if staged.planted(&relative) {
+                continue;
+            }
             if regex.is_match(&relative) {
                 return Some(path);
             }
@@ -762,13 +774,15 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                     }
                 }
                 None => {
-                    // The run directory is deliberately not searched. A literal path names
-                    // one file and an author who names `transcript.jsonl` meant it, but a
-                    // glob is a description, and `timing.json` or `grading.json` sitting at
-                    // the run root would answer it with a file the agent never wrote.
+                    // The run directory is deliberately not searched, and neither is the
+                    // skill this run staged into its workspace. A literal path names one
+                    // file and an author who names `transcript.jsonl` meant it, but a glob
+                    // is a description, and `timing.json` at the run root or the staged
+                    // `SKILL.md` would answer it with a file the agent never wrote.
                     let regex = path.compile();
+                    let staged = input.staged_skill();
                     let dirs = [input.outputs_dir, input.workspace_dir];
-                    match find_glob_match(&dirs, &regex) {
+                    match find_glob_match(&dirs, &regex, &staged) {
                         Some(matched) => (true, format!("'{}' matches glob '{path}'", matched.display())),
                         None => (false, format!("no file matches glob '{path}'")),
                     }
@@ -1048,7 +1062,10 @@ fn is_subsequence(expected: &[ToolName], observed: &[&ToolName]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::SkillDisclosure;
+    use crate::agentskills::prompt::StagedSkillDir;
     use crate::agentskills::redact::redact_transcript_bytes;
+    use crate::agentskills::report::ScenarioKind;
     use crate::agentskills::transcript::{normalize_stream_json, TranscriptFormat, WorkspaceBoundary};
 
     const CLAUDE_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}
@@ -1104,6 +1121,15 @@ mod tests {
 
         fn write_to_run_dir(&self, name: &str, contents: &str) {
             std::fs::write(self.run_dir.join(name), contents).unwrap();
+        }
+
+        /// Plants a file where the harness stages a skill, and records the staging the
+        /// way a real run would, so a grader reads the same evidence it would in one.
+        fn stage_skill(&mut self, staged: StagedSkill, relative: &str, contents: &str) {
+            let path = self.workspace_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+            self.transcript.staged_skill = staged;
         }
 
         fn input(&self) -> GradeInput<'_> {
@@ -1364,6 +1390,94 @@ mod tests {
             &fixture.input(),
         );
         assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    fn staged_at(disclosure: SkillDisclosure) -> StagedSkill {
+        StagedSkill::At {
+            directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_glob_does_not_answer_with_the_skill_the_harness_staged() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(
+            staged_at(SkillDisclosure::Announced),
+            ".skill/SKILL.md",
+            "---\nname: demo-skill\n---\n",
+        );
+
+        match evaluate(
+            &Grader::FileExists {
+                path: glob("**/SKILL.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        ) {
+            GraderOutcome::Failed { .. } => {}
+            other => panic!("the agent wrote no SKILL.md; the harness staged one: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exists_false_over_a_glob_is_not_failed_by_the_skill_staged_under_a_plain_name() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(
+            staged_at(SkillDisclosure::Unannounced),
+            "skills/demo-skill/SKILL.md",
+            "---\nname: demo-skill\n---\n",
+        );
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("skills/**/*.md"),
+                exists: false,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "an unannounced skill is staged under a plain directory, and it is still not the agent's: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_transcript_that_never_recorded_its_staging_is_read_against_every_place_one_is_staged() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(
+            StagedSkill::Unrecorded,
+            ".skill/SKILL.md",
+            "---\nname: demo-skill\n---\n",
+        );
+
+        match evaluate(
+            &Grader::FileExists {
+                path: glob("**/SKILL.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        ) {
+            GraderOutcome::Failed { .. } => {}
+            other => panic!("an older transcript cannot say the agent wrote this: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_glob_still_answers_with_a_file_the_agent_wrote_where_a_skill_could_have_been_staged() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(StagedSkill::Nothing, ".skill/SKILL.md", "written by the agent\n");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("**/SKILL.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "this arm staged nothing, so every file under the workspace is the agent's: {outcome:?}"
+        );
     }
 
     #[test]
