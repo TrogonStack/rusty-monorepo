@@ -345,7 +345,9 @@ it means: `/pattern/` (opening and closing slashes) is a regex, one of
 value's JSON type, and anything else is matched literally. A YAML list of
 strings is a one-of: the value must equal one of them. A path the input never
 carries is a violation like any other, with the received value reported as
-`null`.
+`null`. A `/pattern/` is compiled when the declaration is loaded, so a regex
+that does not compile fails the suite by name rather than becoming an
+expectation no call can ever satisfy.
 
 A constraint violation never stops the mock from answering the call; the
 mock still returns `body` (or `error`), because otherwise it could not tell

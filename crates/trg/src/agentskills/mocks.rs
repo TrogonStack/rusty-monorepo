@@ -12,12 +12,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use gray_matter::{engine::YAML, Matter, Pod};
-use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::evals::EVAL_SUITE_DIR_NAME;
+use super::graders::RegexPattern;
 use super::hex_encode;
 
 const MOCKS_DIR_NAME: &str = "mocks";
@@ -34,6 +34,17 @@ pub enum MocksError {
     UnsupportedMockType { path: PathBuf, found: String },
     #[error("{path}: expect path `{expect_path}` has a constraint shape that is not supported")]
     UnsupportedConstraintShape { path: PathBuf, expect_path: String },
+    #[error("{path}: expect path `{expect_path}` declares `/{pattern}/`, which is not a valid regex: {detail}")]
+    InvalidExpectRegex {
+        path: PathBuf,
+        expect_path: String,
+        pattern: String,
+        detail: String,
+    },
+    #[error("the mock server must be spawned by an absolute path, but `{path}` is relative")]
+    RelativeMockServerBinary { path: PathBuf },
+    #[error("could not locate the running trg binary: {source}")]
+    UnlocatableBinary { source: std::io::Error },
     #[error("{path}: `{{{{file:{reference}}}}}` does not resolve to a file")]
     FileReferenceNotFound { path: PathBuf, reference: String },
     #[error(transparent)]
@@ -181,7 +192,7 @@ impl From<&str> for ExpectPath {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExpectConstraint {
-    Regex { pattern: String },
+    Regex { pattern: RegexPattern },
     Literal { value: String },
     OneOf { values: Vec<String> },
     TypeName { type_name: JsonTypeName },
@@ -190,7 +201,7 @@ pub enum ExpectConstraint {
 impl ExpectConstraint {
     fn from_pod(pod: &Pod, path: &Path, expect_path: &str) -> Result<Self, MocksError> {
         match pod {
-            Pod::String(raw) => Ok(Self::from_string_value(raw)),
+            Pod::String(raw) => Self::from_string_value(raw, path, expect_path),
             Pod::Array(items) => {
                 let mut literals = Vec::with_capacity(items.len());
                 for item in items {
@@ -213,16 +224,27 @@ impl ExpectConstraint {
         }
     }
 
-    fn from_string_value(raw: &str) -> Self {
+    /// A `/.../` constraint is compiled here, where the file that declares it is still in
+    /// hand, rather than where it is matched. A pattern that fails to compile at match time
+    /// is indistinguishable from one that simply did not match: the case reports a violation
+    /// naming the call, and the typo in the mock never surfaces at all.
+    fn from_string_value(raw: &str, path: &Path, expect_path: &str) -> Result<Self, MocksError> {
         if raw.len() >= 2 && raw.starts_with('/') && raw.ends_with('/') {
-            return Self::Regex {
-                pattern: raw[1..raw.len() - 1].to_string(),
+            let pattern = &raw[1..raw.len() - 1];
+            return match RegexPattern::parse(pattern) {
+                Ok(pattern) => Ok(Self::Regex { pattern }),
+                Err(source) => Err(MocksError::InvalidExpectRegex {
+                    path: path.to_path_buf(),
+                    expect_path: expect_path.to_string(),
+                    pattern: pattern.to_string(),
+                    detail: source.to_string(),
+                }),
             };
         }
         if let Some(type_name) = JsonTypeName::parse(raw) {
-            return Self::TypeName { type_name };
+            return Ok(Self::TypeName { type_name });
         }
-        Self::Literal { value: raw.to_string() }
+        Ok(Self::Literal { value: raw.to_string() })
     }
 
     fn describe(&self) -> String {
@@ -239,10 +261,10 @@ impl ExpectConstraint {
             Self::Literal { value: expected } => value_as_text(value).is_some_and(|actual| actual == *expected),
             Self::OneOf { values: options } => value_as_text(value).is_some_and(|actual| options.contains(&actual)),
             Self::TypeName { type_name } => type_name.matches(value),
-            Self::Regex { pattern } => match Regex::new(pattern) {
-                Ok(re) => value_as_text(value).is_some_and(|actual| re.is_match(&actual)),
-                Err(_) => false,
-            },
+            Self::Regex { pattern } => {
+                let compiled = pattern.compile();
+                value_as_text(value).is_some_and(|actual| compiled.is_match(&actual))
+            }
         }
     }
 }
@@ -372,7 +394,11 @@ const MCP_CONFIG_FILE_NAME: &str = "mcp-config.json";
 /// markdown or re-applies a per-case override itself. That keeps the mock server process
 /// unable to disagree with the very `MockSet` a run's cache key was computed from, since
 /// both are reading the same already-resolved declarations rather than deriving them twice.
-pub fn materialize_mock_set(mock_set: &MockSet, run_dir: &Path, trg_binary: &Path) -> Result<PathBuf, MocksError> {
+pub fn materialize_mock_set(
+    mock_set: &MockSet,
+    run_dir: &Path,
+    trg_binary: &MockServerBinary,
+) -> Result<PathBuf, MocksError> {
     // Every path written here is resolved by someone else: the harness reads the config
     // with its working directory set to the run's workspace, and it in turn spawns the
     // mock server. A relative `--out-dir` would have all of them resolve under the
@@ -395,7 +421,7 @@ pub fn materialize_mock_set(mock_set: &MockSet, run_dir: &Path, trg_binary: &Pat
         mcp_servers.insert(
             server.to_string(),
             serde_json::json!({
-                "command": trg_binary.to_string_lossy(),
+                "command": trg_binary.as_path().to_string_lossy(),
                 "args": [
                     "ai",
                     "skills",
@@ -424,6 +450,39 @@ pub fn materialize_mock_set(mock_set: &MockSet, run_dir: &Path, trg_binary: &Pat
     let config_json = serde_json::to_string_pretty(&config).expect("mcp config serializes");
     write_file(&config_path, &config_json)?;
     Ok(config_path)
+}
+
+/// The `trg` binary a mock server is spawned by, as a path that means the same thing from
+/// any working directory.
+///
+/// The harness reads the generated `--mcp-config` with its working directory set to the
+/// run's workspace and spawns the mock server from there, so a relative command would be
+/// looked up under the workspace and never found. `current_exe` is allowed to hand back a
+/// relative path, so the guarantee is taken here rather than hoped for at the one call site
+/// that happens to have it today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MockServerBinary(PathBuf);
+
+impl MockServerBinary {
+    /// The running `trg` binary, resolved through the filesystem so that neither a relative
+    /// invocation nor a symlinked one reaches the config document.
+    pub fn locate() -> Result<Self, MocksError> {
+        let invoked = std::env::current_exe().map_err(|source| MocksError::UnlocatableBinary { source })?;
+        let resolved = fs::canonicalize(invoked).map_err(|source| MocksError::UnlocatableBinary { source })?;
+        Self::at(resolved)
+    }
+
+    pub fn at(path: impl Into<PathBuf>) -> Result<Self, MocksError> {
+        let path = path.into();
+        match path.is_absolute() {
+            true => Ok(Self(path)),
+            false => Err(MocksError::RelativeMockServerBinary { path }),
+        }
+    }
+
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
 /// The run directory as a path that means the same thing from any working directory.
@@ -720,7 +779,7 @@ mod tests {
         assert_eq!(
             declaration.expect.get(&ExpectPath("repo".to_string())),
             Some(&ExpectConstraint::Regex {
-                pattern: "^acme\\/".to_string()
+                pattern: RegexPattern::parse("^acme\\/").unwrap()
             })
         );
         assert_eq!(
@@ -934,7 +993,7 @@ mod tests {
                 expect: BTreeMap::from([(
                     ExpectPath("repo".to_string()),
                     ExpectConstraint::Regex {
-                        pattern: "^acme/".to_string(),
+                        pattern: RegexPattern::parse("^acme/").unwrap(),
                     },
                 )]),
                 error: None,
@@ -954,7 +1013,7 @@ mod tests {
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
                 ExpectConstraint::Regex {
-                    pattern: "^acme/".to_string(),
+                    pattern: RegexPattern::parse("^acme/").unwrap(),
                 },
             )]),
             error: None,
@@ -977,7 +1036,7 @@ mod tests {
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
                 ExpectConstraint::Regex {
-                    pattern: "^acme/".to_string(),
+                    pattern: RegexPattern::parse("^acme/").unwrap(),
                 },
             )]),
             error: None,
@@ -1046,7 +1105,7 @@ mod tests {
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
                 ExpectConstraint::Regex {
-                    pattern: "^acme/".to_string(),
+                    pattern: RegexPattern::parse("^acme/").unwrap(),
                 },
             )]),
             error: None,
@@ -1116,7 +1175,7 @@ mod tests {
             expect: BTreeMap::from([(
                 ExpectPath("repo".to_string()),
                 ExpectConstraint::Regex {
-                    pattern: "^acme/".to_string(),
+                    pattern: RegexPattern::parse("^acme/").unwrap(),
                 },
             )]),
             error: None,
@@ -1158,7 +1217,12 @@ mod tests {
             "the point of this test is a run directory that means different things from different places"
         );
 
-        let config_path = materialize_mock_set(&mock_set, &run_dir, Path::new("/usr/local/bin/trg")).unwrap();
+        let config_path = materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+        )
+        .unwrap();
 
         assert!(
             config_path.is_absolute(),
@@ -1205,6 +1269,45 @@ mod tests {
         path
     }
 
+    /// A mock whose `expect` names a regex that cannot compile is an authoring mistake and
+    /// has to be reported as one. Compiling it at match time instead turns it into an
+    /// expectation nothing can satisfy, which blames the run for the author's typo.
+    #[test]
+    fn an_expect_regex_that_cannot_compile_fails_the_load() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\nexpect:\n  repo: \"/acme(/\"\n---\n{}",
+        );
+
+        let error = resolve_mock_set(&skill, "one").expect_err("an uncompilable expect regex must not load");
+
+        assert!(
+            matches!(
+                &error,
+                MocksError::InvalidExpectRegex { expect_path, pattern, .. }
+                    if expect_path == "repo" && pattern == "acme("
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The harness spawns the mock server with its working directory set to the run's
+    /// workspace rather than to wherever `trg` was invoked from, so a relative command is
+    /// looked up in the wrong place and the server simply never starts.
+    #[test]
+    fn a_relative_binary_cannot_be_handed_to_a_mock_server() {
+        let error = MockServerBinary::at("target/debug/trg").expect_err("a relative binary must be refused");
+
+        assert!(
+            matches!(&error, MocksError::RelativeMockServerBinary { path } if path == Path::new("target/debug/trg")),
+            "unexpected error: {error}"
+        );
+    }
+
     #[test]
     fn materialize_writes_one_json_file_per_tool_and_an_mcp_config_naming_the_mock_server_subcommand() {
         let temp = tempdir().unwrap();
@@ -1217,9 +1320,9 @@ mod tests {
         );
         let mock_set = resolve_mock_set(&skill, "one").unwrap();
         let run_dir = temp.path().join("run-dir");
-        let trg_binary = Path::new("/usr/local/bin/trg");
+        let trg_binary = MockServerBinary::at("/usr/local/bin/trg").unwrap();
 
-        let config_path = materialize_mock_set(&mock_set, &run_dir, trg_binary).unwrap();
+        let config_path = materialize_mock_set(&mock_set, &run_dir, &trg_binary).unwrap();
         let run_dir = run_dir.canonicalize().unwrap();
 
         let tool_json_path = run_dir.join("mcp-mocks/github/create_issue.json");
@@ -1266,7 +1369,12 @@ mod tests {
         let mock_set = resolve_mock_set(&skill, "one").unwrap();
         let run_dir = temp.path().join("run-dir");
 
-        materialize_mock_set(&mock_set, &run_dir, Path::new("/usr/local/bin/trg")).unwrap();
+        materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+        )
+        .unwrap();
 
         let tool_json_path = run_dir.join("mcp-mocks/github/create_issue.json");
         let declaration: MockDeclaration = serde_json::from_str(&fs::read_to_string(&tool_json_path).unwrap())
@@ -1274,7 +1382,7 @@ mod tests {
         assert_eq!(
             declaration.expect.get(&ExpectPath("repo".to_string())),
             Some(&ExpectConstraint::Regex {
-                pattern: "^acme\\/".to_string()
+                pattern: RegexPattern::parse("^acme\\/").unwrap()
             })
         );
         assert_eq!(

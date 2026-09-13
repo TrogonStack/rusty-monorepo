@@ -15,7 +15,7 @@ use crate::agentskills::evals::{
 };
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::mocks::{
-    materialize_mock_set, resolve_mock_set, MockCallLogEntry, MockSet, MOCK_CALLS_LOG_NAME,
+    materialize_mock_set, resolve_mock_set, MockCallLogEntry, MockServerBinary, MockSet, MOCK_CALLS_LOG_NAME,
 };
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::report::{
@@ -1325,7 +1325,7 @@ mod fake_runner {
 /// can run for long enough that re-reading it costs nothing worth caching, and caching it
 /// would be one more piece of state a test has to seed.
 fn materialize_mock_set_for_run(mock_set: &MockSet, run_dir: &Path) -> Result<PathBuf, String> {
-    let trg_binary = std::env::current_exe().map_err(|e| format!("could not locate the running trg binary: {e}"))?;
+    let trg_binary = MockServerBinary::locate().map_err(|e| e.to_string())?;
     materialize_mock_set(mock_set, run_dir, &trg_binary).map_err(|e| e.to_string())
 }
 
