@@ -228,7 +228,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `description` | string | no | Non-empty. For humans reading a report |
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
-| `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
+| `files` | (string \| object)[] | no | Relative paths inside the skill directory, staged into the run workspace. A bare string is writable; an object names `path` and `mode` (`writable`, the default, or `read_only`). See [Read-only fixtures](#read-only-fixtures) |
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
 | `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
@@ -547,6 +547,7 @@ subcommands run.
 | `artifacts` | array | Artifact descriptors (transcript when runner completes) |
 | `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner) |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
+| `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
 
 Run ordering: eval cases in manifest order, then scenarios in flag order.
 
@@ -878,6 +879,40 @@ separately into the workspace root, and they are the only part of `evals/` a
 run is meant to see. Only the top level is filtered, so a nested `evals/`
 deeper in the skill tree is treated as the skill's own content and staged
 normally.
+
+### Read-only fixtures
+
+A bare string in `files` names a fixture the agent is free to change, which is
+what a case about editing a file needs. A case about reading one needs the
+opposite: the fixture has to still be the thing the case's `expected_output`
+and graders describe after the run, not whatever the agent left behind.
+
+```json
+{ "files": ["evals/files/input.csv", { "path": "evals/files/reference.csv", "mode": "read_only" }] }
+```
+
+The object form names the same relative path as the bare string and adds
+`mode`, `writable` (the default, and what a bare string means) or
+`read_only`. Nothing about an existing suite's fixtures changes: every bare
+string still parses, still means writable, and a fixture authored as a bare
+string is written back as one, never rewritten into the object form.
+
+On Unix, a read-only fixture is staged with its write bits cleared, so an
+agent that tries to edit it in place is refused by the filesystem before it
+gets the chance. That is a courtesy, not the guarantee: an agent can still
+delete the file and write a fresh one in its place, which touches no
+permission bit. What actually holds a read-only fixture to its word is a
+content hash taken before the run and compared against the same fixture after
+it, the same comparison `skill_integrity` makes of the skill directory. A
+fixture's containing directory is left writable regardless of the fixture's
+own mode, because removing an entry needs write permission on the directory
+that holds it, not on the entry itself, and the workspace has to be
+removable between attempts.
+
+A run whose read-only fixture changed, however it changed, is reported as a
+failing assertion naming the fixture's path, so the operator sees which
+fixture and not just a count, and the case cannot be read as passing on the
+strength of assertions that never looked at the fixture at all.
 
 A top-level version control directory (`.git`, `.jj`, `.hg`, `.svn`) is
 withheld for the same reason. When the skill is its own checkout, its history
