@@ -210,12 +210,11 @@ $ trg ai skills eval verify ./report/runs/run-001/workspace --output-format json
 
 ## Eval suite manifest (`evals/evals.json`)
 
-Validated before `run` executes. Unknown fields are rejected, and a field is
-only accepted from the `schema_version` that introduced it.
+Validated before `run` executes. Unknown fields are rejected.
 
 | Field | Type | Required | Notes |
 | ----- | ---- | -------- | ----- |
-| `schema_version` | integer | no | Defaults to `1`. `3` is current and is what `init` scaffolds. `graders` requires `3` |
+| `schema_version` | integer | no | Accepted for backward compatibility; has no effect on parsing |
 | `skill_name` | string | yes | Must match the `name` in `SKILL.md` frontmatter |
 | `evals` | array | yes | At least one eval case; IDs must be unique |
 
@@ -228,7 +227,7 @@ only accepted from the `schema_version` that introduced it.
 | `expected_output` | string | yes | Non-empty reference output for graders |
 | `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
-| `graders` | object[] | no | Typed checks (see below). Requires `schema_version` 3 |
+| `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
 | `tags` | string[] | no | Free-form labels. `--tag` selects by them. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `priority` | enum | no | `low`, `normal`, `high`, or `critical` |

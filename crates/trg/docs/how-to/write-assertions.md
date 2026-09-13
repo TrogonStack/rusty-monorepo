@@ -116,9 +116,9 @@ instead, where the verdict is deterministic and needs no credential:
 }
 ```
 
-`graders` requires `schema_version: 3` on the suite. Mixing the two is the
-intended shape: typed graders for the facts, assertions for the judgments. See
-[Graders](../reference/ai-skills-eval.md#graders) for the full grader list.
+Mixing the two is the intended shape: typed graders for the facts, assertions
+for the judgments. See [Graders](../reference/ai-skills-eval.md#graders) for
+the full grader list.
 
 Only prose assertions appear in `dimensions.assertions` in `report.json`. A
 grader-only case contributes no assertion dimensions, but still produces
@@ -154,8 +154,6 @@ trg ai skills eval verify ./runs/run-001/workspace --mode strict
   `--require-assertions` (or verify with `--mode strict`) to require that each
   case declares at least one of the two.
 - Each assertion string must be non-empty.
-- `graders` requires `schema_version: 3`; declaring it on an older
-  `schema_version` is rejected.
 - Duplicate eval case IDs are rejected.
 - `skill_name` must match `SKILL.md` frontmatter `name`.
 

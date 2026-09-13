@@ -12,7 +12,7 @@ Examples:
 
   $ trg ai skills eval init --skill-dir ./skills/my-skill
 
-Optional eval-level metadata (schema_version >= 2 in evals/evals.json):
+Optional eval-level metadata in evals/evals.json:
   tags                  Categorize eval cases (e.g. smoke, regression)
   priority              low | normal | high | critical
   timeout_secs          Per-eval runner timeout override (overrides --timeout-secs)
@@ -130,10 +130,7 @@ mod tests {
         assert_eq!(suite.evals[0].id.as_str(), "produces-a-summary");
         assert!(!suite.evals[0].graders.is_empty());
         assert_eq!(suite.evals[1].id.as_str(), "triggers-the-skill");
-        assert_eq!(
-            suite.schema_version,
-            crate::agentskills::evals::SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION
-        );
+        assert_eq!(suite.schema_version, 1);
     }
 
     #[test]
