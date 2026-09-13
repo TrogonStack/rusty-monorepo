@@ -900,6 +900,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         };
 
         let html = render_assertion(&assertion);

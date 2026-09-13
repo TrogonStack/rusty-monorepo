@@ -308,6 +308,16 @@ comparison keys on; `name` gives it a stable one. Two graders in the same case
 declaring the same `name` are rejected. In the directory layout, a grader
 file's stem is its default name.
 
+Every grader also accepts `weight`, a number greater than zero. A case's score
+is the fraction of weight it passed rather than a plain count, so a grader
+worth three times as much as the rest of the case declares `"weight": 3`. A
+grader that leaves `weight` undeclared counts as one full vote, exactly what
+every grader counted as before weighting existed, so a case that never opts in
+scores exactly as it always has. Zero and negative weight are both rejected at
+parse time: a grader worth nothing to the score belongs out of the case
+entirely (`"arm": "with_only"`) rather than weighted to zero, and a negative
+weight has no share of a score to subtract from.
+
 `target` is `final_text` (default), `transcript`, `any_output`,
 `{"file": "<relative path>"}`, or `created_files`. `created_files` is the set
 of paths the run wrote under `outputs/`, read from the same index the report
@@ -806,7 +816,9 @@ out of the score in both arms. `ungraded` marks an assertion no mechanical
 pattern recognized and no LLM judge was consulted for; it is neither a pass nor
 a fail, because nothing ever attempted it, and it stays out of `pass_rate` for
 the same reason `unsupported` does. `votes` is present only when a panel of
-judges decided the result.
+judges decided the result. `weight` is present only when the declaring grader
+gave one; a case whose graders left every weight undeclared reports the same
+`pass_rate` it always has.
 
 ```json
 {
@@ -863,6 +875,7 @@ judges decided the result.
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |
 | `assertion_results[].ungraded` | string | Present when no mechanical pattern recognized the assertion and no LLM judge was consulted. Why nothing attempted it |
 | `assertion_results[].votes` | object | Present only under `--grader-votes N` with `N` above 1. `{passed, failed}` opinions behind this result. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
+| `assertion_results[].weight` | number | Present when the grader declared one. Must be greater than zero |
 | `summary.passed` | integer | Must equal the count of scored, passing results |
 | `summary.failed` | integer | Must equal the count of scored, failing results |
 | `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` and not `excluded` |

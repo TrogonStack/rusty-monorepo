@@ -16,8 +16,8 @@ pub(crate) use output::print_report_dir;
 use std::path::Path;
 
 use crate::agentskills::ci::{
-    collect_failed_assertions, collect_missing_grading_workspaces, collect_report_metrics, emit_github_annotations,
-    print_human_summary, run_ci_checks, EvalCommandJsonOutput,
+    collect_case_scores, collect_failed_assertions, collect_missing_grading_workspaces, collect_report_metrics,
+    emit_github_annotations, print_human_summary, run_ci_checks, EvalCommandJsonOutput,
 };
 use crate::agentskills::evals::WorkspaceCheckReport;
 use crate::fs::FileSystem;
@@ -103,7 +103,15 @@ pub(crate) fn eval_output(
 
     let failed_assertions = collect_failed_assertions(report_dir).unwrap_or_default();
     let missing_grading = collect_missing_grading_workspaces(report_dir).unwrap_or_default();
-    let check = run_ci_checks(&metrics, policy, thresholds, &failed_assertions, &missing_grading);
+    let case_scores = collect_case_scores(report_dir).unwrap_or_default();
+    let check = run_ci_checks(
+        &metrics,
+        policy,
+        thresholds,
+        &failed_assertions,
+        &missing_grading,
+        &case_scores,
+    );
 
     Ok(EvalCommandJsonOutput {
         report_dir: report_dir.display().to_string(),
