@@ -38,7 +38,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--skill-dir` | path | *(required)* | Skill directory containing `SKILL.md` and `evals/evals.json` |
 | `--out-dir` | path | *(required)* | Root directory for generated artifact bundles |
 | `--model-config` | string | `ci-default` | Opaque model-configuration label recorded in `report.json` |
-| `--scenario` | enum | `with_skill` | Scenario kind to include. Repeatable; values: `with_skill`, `without_skill`, `old_skill` |
+| `--scenario` | enum | `with_skill` + `without_skill` | Scenario kind to include. Repeatable; values: `with_skill`, `without_skill`, `old_skill`. See [Choosing which scenarios run](#choosing-which-scenarios-run) |
 | `--runner` | enum | *(unset)* | Agent CLI to execute each (eval × scenario). When unset, runs are scaffolded with `status: skipped` |
 | `--runner-model` | string | *(unset)* | Model identifier forwarded to the runner CLI (`--model` / `-m`). When unset, the runner picks its own default |
 | `--force` | bool | `false` | Overwrite an existing report directory if it already exists |
@@ -750,6 +750,30 @@ the file format, the flag, and whether resumption is possible at all differ acro
 `claude-code`, `codex` and `cursor-agent`. A field that worked on one and silently
 did nothing on the others would make a suite's results incomparable, which is the
 one thing trg exists to avoid.
+
+---
+
+## Choosing which scenarios run
+
+Naming `--scenario` one or more times runs exactly those scenarios and nothing
+else. Naming it zero times runs `with_skill` and `without_skill` together: a
+`with_skill` pass alone can only say whether a case was covered, not whether the
+skill changed anything, because the report has no baseline in it to compare
+against. An eval suite exists to answer that question, so a pass that named no
+preference gets both arms.
+
+The one exception is `--reuse-completed`. Reuse serves a prior completed run
+for the same case and scenario (see [Reusing a completed run](#reusing-a-completed-run)),
+which is inherently single-arm, so defaulting to both arms under it would turn
+a command that used to run one arm into one that always fails. Naming no
+`--scenario` under `--reuse-completed` runs `with_skill` alone. Naming more
+than one `--scenario` together with `--reuse-completed` is still rejected: see
+[Reusing a completed run](#reusing-a-completed-run).
+
+Running both arms by default doubles the runs of a pass that also leaves
+`--attempts` at its default of `3`, from three runs per case to six. Pair
+`--max-cost-usd` with a default pass to keep that bounded; see
+[Bounding what a pass may spend](#bounding-what-a-pass-may-spend).
 
 ---
 
