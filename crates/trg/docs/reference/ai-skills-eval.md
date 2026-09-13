@@ -511,9 +511,10 @@ snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
 | `budget` | object | Present whenever the pass was given a runner, including one whose every run was served from cache and so spent nothing. Absent only when the pass had no runner at all. What the pass spent, and against what ceiling. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 
 `assertion_results` is populated by `eval grade`, which flattens every run's
-`grading.json` into it, carrying `unsupported` forward where present.
-`comparisons` is populated by `eval compare`. Both are empty until those
-subcommands run.
+`grading.json` into it, adding `run_id` and `eval_case_id` and carrying every
+other field forward as declared there, including `name`, `excluded`,
+`rationale` and `votes` where present. `comparisons` is populated by
+`eval compare`. Both are empty until those subcommands run.
 
 ### `budget` section
 

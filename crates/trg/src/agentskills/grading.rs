@@ -1766,6 +1766,18 @@ fn store_grader_artifacts(
     Ok(())
 }
 
+/// A graded assertion as it appears in `report.json`: the result exactly as its own run wrote
+/// it, plus the two keys that only the run knows. Flattening rather than listing the fields by
+/// hand is what keeps a field added to `AssertionGradeResult` later from silently missing the
+/// published report the way `name`, `excluded`, `rationale` and `votes` once did.
+#[derive(Serialize)]
+struct PublishedAssertionResult<'a> {
+    run_id: &'a str,
+    eval_case_id: &'a str,
+    #[serde(flatten)]
+    result: &'a AssertionGradeResult,
+}
+
 fn update_report_after_grading(
     document: &mut ReportDocument,
     runs: &[RunRecord],
@@ -1789,21 +1801,13 @@ fn update_report_after_grading(
         }
         let grading: GradingFile = serde_json::from_str(&std::fs::read_to_string(&grading_path)?)?;
         for result in &grading.assertion_results {
-            let mut flattened = serde_json::json!({
-                "run_id": run.id,
-                "eval_case_id": run.eval_case_id,
-                "assertion": result.assertion,
-                "passed": result.passed,
-                "evidence": result.evidence,
-                "grader": result.grader,
-            });
-            if let Some(reason) = &result.unsupported {
-                flattened["unsupported"] = serde_json::Value::String(reason.clone());
-            }
-            if let Some(reason) = &result.ungraded {
-                flattened["ungraded"] = serde_json::Value::String(reason.clone());
-            }
-            document.assertion_results.push(flattened);
+            document
+                .assertion_results
+                .push(serde_json::to_value(PublishedAssertionResult {
+                    run_id: &run.id,
+                    eval_case_id: &run.eval_case_id,
+                    result,
+                })?);
         }
     }
 
@@ -2147,6 +2151,79 @@ mod tests {
         }
     }
 
+    const NAMED_AND_UNNAMED_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "contains", "text": "all done", "name": "wraps-up"}
+                ],
+                "assertions": ["the tone stays professional throughout"]
+            }
+        ]
+    }"#;
+
+    /// A grader the author never named must not pick one up along the way,
+    /// whether from a sibling grader in the same case or from its own
+    /// rendered description: an unnamed grader indistinguishable from a
+    /// named one defeats the point of naming one at all.
+    #[test]
+    fn an_unnamed_prose_assertion_stays_unnamed_next_to_a_named_grader() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, NAMED_AND_UNNAMED_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        for (scenario, grading) in grading_files_by_scenario(&report_dir) {
+            let prose_result = grading
+                .assertion_results
+                .iter()
+                .find(|result| result.assertion.contains("professional"))
+                .unwrap_or_else(|| panic!("{scenario:?} must still report the prose assertion"));
+            assert_eq!(
+                prose_result.name, None,
+                "{scenario:?} prose assertion must stay unnamed"
+            );
+        }
+
+        let published: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let flattened_prose = published["assertion_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| {
+                result["assertion"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("professional")
+            })
+            .expect("the prose result must survive the flatten");
+        assert!(
+            flattened_prose.get("name").is_none(),
+            "an unnamed grader must not gain a name key in the published report.json"
+        );
+
+        let flattened_named = published["assertion_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| result["assertion"].as_str().unwrap_or_default().contains("all done"))
+            .expect("the named result must survive the flatten");
+        assert_eq!(flattened_named["name"], "wraps-up");
+    }
+
     #[test]
     fn a_named_grader_result_is_absent_from_the_serialized_json_when_unnamed() {
         let result = AssertionGradeResult {
@@ -2168,6 +2245,79 @@ mod tests {
 
         let json = serde_json::to_string(&result).unwrap();
         assert!(!json.contains("\"name\""));
+    }
+
+    /// The flatten in `update_report_after_grading` used to rebuild the object
+    /// field by field, which is exactly how `name`, `excluded`, `rationale`
+    /// and `votes` were previously lost between `grading.json` and the
+    /// published `report.json`. This pins every one of those fields against
+    /// the artifact a reader actually opens, not just the per-run file.
+    #[test]
+    fn a_named_excluded_multi_voted_result_survives_the_flatten_into_report_json() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, ARM_SCOPED_SUITE);
+
+        let mut document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let runs = document.runs.clone();
+        let run = runs.first().expect("both_arms_report_dir produced at least one run");
+        let run_dir = report_dir.join(&run.paths.workspace).parent().unwrap().to_path_buf();
+
+        let crafted = GradingFile {
+            assertion_results: vec![AssertionGradeResult {
+                name: Some("wraps-up".to_string()),
+                assertion: "the summary reads well".to_string(),
+                passed: true,
+                evidence: "the summary names every column".to_string(),
+                grader: GraderInfo {
+                    kind: GraderKind::Llm,
+                    model: Some("judge-model".to_string()),
+                    command: None,
+                },
+                rationale: Some("both judges agreed".to_string()),
+                unsupported: None,
+                excluded: Some("scoped to the with_skill arm".to_string()),
+                ungraded: None,
+                votes: Some(JudgeVoteTally { passed: 2, failed: 1 }),
+            }],
+            summary: GradingSummary {
+                passed: 1,
+                failed: 0,
+                total: 1,
+                unsupported: 0,
+                excluded: 1,
+                ungraded: 0,
+                pass_rate: Some(1.0),
+            },
+        };
+        fs::write(
+            run_dir.join("grading.json"),
+            serde_json::to_string_pretty(&crafted).unwrap(),
+        )
+        .unwrap();
+
+        let grader_config = build_grader_config(&GradeOptions::default());
+        update_report_after_grading(&mut document, &runs, &report_dir, &grader_config).unwrap();
+        std::fs::write(
+            report_dir.join("report.json"),
+            serde_json::to_string_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        let published: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let flattened = published["assertion_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| result["assertion"] == "the summary reads well")
+            .expect("the crafted result must survive the flatten into the published report.json");
+
+        assert_eq!(flattened["name"], "wraps-up");
+        assert_eq!(flattened["excluded"], "scoped to the with_skill arm");
+        assert_eq!(flattened["rationale"], "both judges agreed");
+        assert_eq!(flattened["votes"]["passed"], 2);
+        assert_eq!(flattened["votes"]["failed"], 1);
     }
 
     fn suite_from(json: &str) -> EvalSuite {
