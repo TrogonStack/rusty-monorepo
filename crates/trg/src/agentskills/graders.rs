@@ -575,23 +575,14 @@ pub(crate) fn check_json_validity(content: &TargetContent) -> (bool, String) {
 /// typed `schema_validation` grader and the prose sniffer. A schema that cannot be
 /// read or is not itself a valid schema is an authoring error, not a failed
 /// assertion, so it surfaces as `Err` rather than as `Ok((false, _))`.
+///
+/// The schema is opened before the target is looked at, and the order is the whole
+/// guarantee. Judging the target first means a suite naming a schema that does not
+/// exist reports the skill failing for as long as the run happens to produce nothing
+/// parseable, and only admits to the typo once the skill starts passing.
 pub(crate) fn check_schema_validation(schema_path: &Path, content: &TargetContent) -> Result<(bool, String)> {
-    let text = match content {
-        TargetContent::Missing(reason) => return Ok((false, reason.clone())),
-        TargetContent::Text(text) => text,
-    };
-
     #[cfg(any(feature = "schema-validation", test))]
     {
-        let target: serde_json::Value = match serde_json::from_str(text) {
-            Ok(value) => value,
-            Err(e) => {
-                return Ok((
-                    false,
-                    format!("invalid json at line {} column {}: {e}", e.line(), e.column()),
-                ))
-            }
-        };
         let schema_text = std::fs::read_to_string(schema_path).map_err(|e| {
             EvalError::Validation(
                 ValidationError::for_field(
@@ -619,6 +610,21 @@ pub(crate) fn check_schema_validation(schema_path: &Path, content: &TargetConten
                 .into(),
             )
         })?;
+
+        let text = match content {
+            TargetContent::Missing(reason) => return Ok((false, reason.clone())),
+            TargetContent::Text(text) => text,
+        };
+        let target: serde_json::Value = match serde_json::from_str(text) {
+            Ok(value) => value,
+            Err(e) => {
+                return Ok((
+                    false,
+                    format!("invalid json at line {} column {}: {e}", e.line(), e.column()),
+                ))
+            }
+        };
+
         let errors: Vec<String> = validator.iter_errors(&target).map(|e| e.to_string()).collect();
         if errors.is_empty() {
             Ok((true, format!("validates against schema '{}'", schema_path.display())))
@@ -636,7 +642,7 @@ pub(crate) fn check_schema_validation(schema_path: &Path, content: &TargetConten
 
     #[cfg(not(any(feature = "schema-validation", test)))]
     {
-        let _ = text;
+        let _ = content;
         Err(EvalError::Validation(
             ValidationError::for_field(
                 format!("schema '{}'", schema_path.display()),
@@ -1474,6 +1480,40 @@ mod tests {
             evaluate(&grader, &fixture.input()),
             GraderOutcome::AuthoringError { .. }
         ));
+    }
+
+    #[test]
+    fn a_broken_schema_is_an_authoring_error_even_when_the_run_produced_no_target() {
+        let fixture = Fixture::new();
+        let grader = Grader::SchemaValidation {
+            schema: path("missing-schema.json"),
+            target: GradeTarget::File(path("never-written.json")),
+        };
+
+        match evaluate(&grader, &fixture.input()) {
+            GraderOutcome::AuthoringError { reason } => assert!(reason.contains("missing-schema.json"), "{reason}"),
+            other => {
+                panic!("a suite naming a schema that does not exist is broken however the run went, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_broken_schema_is_an_authoring_error_even_when_the_target_is_not_json() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill("schema.json", "{not json");
+        fixture.write_to_workspace("data.json", "this is prose, not json");
+        let grader = Grader::SchemaValidation {
+            schema: path("schema.json"),
+            target: GradeTarget::File(path("data.json")),
+        };
+
+        match evaluate(&grader, &fixture.input()) {
+            GraderOutcome::AuthoringError { .. } => {}
+            other => {
+                panic!("the schema is unreadable, which is the author's problem and not the skill's, got {other:?}")
+            }
+        }
     }
 
     #[test]
