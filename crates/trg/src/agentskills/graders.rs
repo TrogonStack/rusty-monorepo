@@ -762,8 +762,12 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                     }
                 }
                 None => {
+                    // The run directory is deliberately not searched. A literal path names
+                    // one file and an author who names `transcript.jsonl` meant it, but a
+                    // glob is a description, and `timing.json` or `grading.json` sitting at
+                    // the run root would answer it with a file the agent never wrote.
                     let regex = path.compile();
-                    let dirs = [input.outputs_dir, input.workspace_dir, input.run_dir];
+                    let dirs = [input.outputs_dir, input.workspace_dir];
                     match find_glob_match(&dirs, &regex) {
                         Some(matched) => (true, format!("'{}' matches glob '{path}'", matched.display())),
                         None => (false, format!("no file matches glob '{path}'")),
@@ -1098,6 +1102,10 @@ mod tests {
             std::fs::write(self.skill_dir.join(name), contents).unwrap();
         }
 
+        fn write_to_run_dir(&self, name: &str, contents: &str) {
+            std::fs::write(self.run_dir.join(name), contents).unwrap();
+        }
+
         fn input(&self) -> GradeInput<'_> {
             GradeInput {
                 final_text: "Wrote the report to outputs/report.md",
@@ -1356,6 +1364,59 @@ mod tests {
             &fixture.input(),
         );
         assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_glob_does_not_answer_with_the_harnesss_own_run_artifacts() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir("timing.json", r#"{"duration_ms":42}"#);
+
+        match evaluate(
+            &Grader::FileExists {
+                path: glob("**/*.json"),
+                exists: true,
+            },
+            &fixture.input(),
+        ) {
+            GraderOutcome::Failed { .. } => {}
+            other => panic!("the agent wrote no json; only trg did: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exists_false_over_a_glob_is_not_failed_by_a_file_trg_wrote_itself() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir("grading.json", "{}");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("*.json"),
+                exists: false,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "a case cannot be failed by an artifact it has no way to avoid: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_glob_written_from_the_current_directory_matches_the_same_files() {
+        let fixture = Fixture::new();
+        fixture.write_to_workspace("summary.md", "May revenue was up.\n");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("./*.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "a leading ./ is how half the world writes a relative path: {outcome:?}"
+        );
     }
 
     #[test]
