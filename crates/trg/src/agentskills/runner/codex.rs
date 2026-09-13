@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
+use super::capabilities::HarnessControl;
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
     runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
@@ -41,11 +42,15 @@ fn build_args(
     permission: PermissionGrant,
     prompt: &str,
 ) -> Vec<OsString> {
+    let sandbox_flag = Runner::Codex
+        .support(HarnessControl::SandboxLevels)
+        .flag()
+        .expect("the capability matrix declares codex takes its sandbox level as a flag");
     let mut args = vec![
         OsString::from("exec"),
         OsString::from("--json"),
         OsString::from("--skip-git-repo-check"),
-        OsString::from("-s"),
+        OsString::from(sandbox_flag),
         OsString::from(permission_sandbox(permission)),
         OsString::from("-C"),
         workspace_dir.as_os_str().to_os_string(),
@@ -257,6 +262,10 @@ mod tests {
     /// go on meaning whatever it was hardcoded to.
     #[test]
     fn the_sandbox_flag_actually_follows_the_requested_grant() {
+        let expected_flag = Runner::Codex
+            .support(HarnessControl::SandboxLevels)
+            .flag()
+            .expect("codex declares a sandbox flag in the capability matrix");
         let sandbox_value_for = |grant: PermissionGrant| {
             let args = build_args(
                 Path::new("/ws"),
@@ -267,8 +276,8 @@ mod tests {
             );
             let position = args
                 .windows(2)
-                .position(|pair| pair[0] == "-s")
-                .expect("the invocation carries a -s flag");
+                .position(|pair| pair[0] == expected_flag)
+                .expect("the invocation carries the flag the matrix declares");
             args[position + 1].to_str().expect("test args are utf8").to_string()
         };
 

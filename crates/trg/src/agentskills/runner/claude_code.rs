@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::process::Command;
 
+use super::capabilities::HarnessControl;
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
     runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
@@ -36,13 +37,17 @@ fn permission_mode(grant: PermissionGrant) -> &'static str {
 /// not valid UTF-8, and building the list as `OsString` from the start means that stays true
 /// if a path argument is ever added here.
 fn build_args(prompt: &str, model: Option<&str>, permission: PermissionGrant) -> Vec<OsString> {
+    let sandbox_flag = Runner::ClaudeCode
+        .support(HarnessControl::SandboxLevels)
+        .flag()
+        .expect("the capability matrix declares claude-code takes its sandbox level as a flag");
     let mut args = vec![
         OsString::from("-p"),
         OsString::from(prompt),
         OsString::from("--output-format"),
         OsString::from("stream-json"),
         OsString::from("--verbose"),
-        OsString::from("--permission-mode"),
+        OsString::from(sandbox_flag),
         OsString::from(permission_mode(permission)),
     ];
     if let Some(model) = model {
@@ -239,6 +244,20 @@ mod tests {
 
         assert_eq!(mode_value_for(PermissionGrant::WorkspaceWrite), "acceptEdits");
         assert_eq!(mode_value_for(PermissionGrant::Unrestricted), "bypassPermissions");
+    }
+
+    #[test]
+    fn the_built_invocation_carries_the_matrixs_sandbox_flag() {
+        let expected_flag = Runner::ClaudeCode
+            .support(HarnessControl::SandboxLevels)
+            .flag()
+            .expect("claude-code declares a sandbox flag in the capability matrix");
+        let args = build_args("do the thing", None, PermissionGrant::Unrestricted);
+        let position = args
+            .windows(2)
+            .position(|pair| pair[0] == expected_flag)
+            .expect("the invocation carries the flag the matrix declares");
+        assert_eq!(args[position + 1], OsString::from("bypassPermissions"));
     }
 
     #[test]

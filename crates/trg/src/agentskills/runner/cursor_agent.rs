@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
+use super::capabilities::HarnessControl;
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
     runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
@@ -25,8 +26,12 @@ pub fn check_available() -> Result<(), EvalError> {
 /// documented non-interactive grant, so both levels collapse into it: cursor-agent draws no
 /// boundary between them for us to translate. It also has `--sandbox enabled|disabled`, but
 /// that flag's boundary is undocumented, so trg does not reach for it here.
-fn permission_args(_grant: PermissionGrant) -> &'static [&'static str] {
-    &["--force"]
+fn permission_args(_grant: PermissionGrant) -> [&'static str; 1] {
+    let flag = Runner::CursorAgent
+        .support(HarnessControl::SandboxLevels)
+        .flag()
+        .expect("the capability matrix declares cursor-agent takes its sandbox level as a flag");
+    [flag]
 }
 
 /// The arguments are `OsString` because one of them is a path, and a path is not always
@@ -218,12 +223,16 @@ mod tests {
 
     #[test]
     fn both_grants_collapse_to_the_same_force_flag() {
-        assert_eq!(permission_args(PermissionGrant::WorkspaceWrite), &["--force"]);
-        assert_eq!(permission_args(PermissionGrant::Unrestricted), &["--force"]);
+        assert_eq!(permission_args(PermissionGrant::WorkspaceWrite), ["--force"]);
+        assert_eq!(permission_args(PermissionGrant::Unrestricted), ["--force"]);
     }
 
     #[test]
-    fn the_built_invocation_carries_the_force_flag() {
+    fn the_built_invocation_carries_the_matrixs_sandbox_flag() {
+        let expected_flag = Runner::CursorAgent
+            .support(HarnessControl::SandboxLevels)
+            .flag()
+            .expect("cursor-agent declares a sandbox flag in the capability matrix");
         let args = build_args(Path::new("/ws"), None, PermissionGrant::WorkspaceWrite, "do it");
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
         assert_eq!(
@@ -232,7 +241,7 @@ mod tests {
                 "-p",
                 "--output-format",
                 "stream-json",
-                "--force",
+                expected_flag,
                 "--workspace",
                 "/ws",
                 "do it"

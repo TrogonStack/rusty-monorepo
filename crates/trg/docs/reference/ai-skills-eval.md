@@ -986,6 +986,31 @@ could then score differently on two machines.
 
 ---
 
+## Harness support
+
+Every runner drives a different CLI, and no two of those CLIs expose the same
+controls. `no` in the table below is not a placeholder: it means the control is
+absent from that harness's own `--help`, so trg has nothing to drive it with.
+The table below is checked against the same declaration trg builds its
+invocations from, so a test fails if the two ever disagree.
+
+| Control | `claude-code` | `codex` | `cursor-agent` |
+| ------- | ------------- | ------- | -------------- |
+| tool allowlist | `--allowedTools` | no | no |
+| turn cap | no | no | no |
+| system prompt append | `--append-system-prompt` | no | no |
+| mcp servers | `--mcp-config` | no | no |
+| sandbox levels | `--permission-mode` | `-s` | `--force` |
+| conversation resume | `--resume` | `resume` subcommand | `--resume` |
+| run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no |
+| cost reporting | reported | no | no |
+
+`cursor-agent` accepts a sandbox level, but `--force` is its only documented
+non-interactive grant: both of trg's permission grants collapse onto that one
+flag, the same as in the "Run permission" table above.
+
+---
+
 ## Reusing a completed run
 
 A run is cached under everything that decides what it would do: the case, the
