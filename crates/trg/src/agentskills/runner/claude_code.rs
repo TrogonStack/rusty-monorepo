@@ -36,7 +36,7 @@ fn permission_mode(grant: PermissionGrant) -> &'static str {
 /// takes no path arguments today: a prompt or model string could still carry bytes that are
 /// not valid UTF-8, and building the list as `OsString` from the start means that stays true
 /// if a path argument is ever added here.
-fn build_args(prompt: &str, model: Option<&str>, permission: PermissionGrant) -> Vec<OsString> {
+pub(crate) fn build_args(prompt: &str, model: Option<&str>, permission: PermissionGrant) -> Vec<OsString> {
     let sandbox_flag = Runner::ClaudeCode
         .support(HarnessControl::SandboxLevels)
         .flag()

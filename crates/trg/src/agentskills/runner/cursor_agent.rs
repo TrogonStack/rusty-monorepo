@@ -37,7 +37,12 @@ fn permission_args(_grant: PermissionGrant) -> [&'static str; 1] {
 /// The arguments are `OsString` because one of them is a path, and a path is not always
 /// valid UTF-8. Rendering it into a `String` to build the list would hand the harness a
 /// lossily rewritten workspace to work in.
-fn build_args(workspace_dir: &Path, model: Option<&str>, permission: PermissionGrant, prompt: &str) -> Vec<OsString> {
+pub(crate) fn build_args(
+    workspace_dir: &Path,
+    model: Option<&str>,
+    permission: PermissionGrant,
+    prompt: &str,
+) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("-p"),
         OsString::from("--output-format"),
