@@ -20,6 +20,7 @@ trg ai skills eval <SUBCOMMAND>
 | `feedback` | Manage human review feedback artifacts |
 | `compare` | Blindly compare scenario outputs within a report directory |
 | `next-iteration` | Build an improvement bundle from a prior iteration |
+| `html-report` | Render a local-only, self-contained HTML report over a report bundle |
 
 ---
 
@@ -675,6 +676,41 @@ answered, because the same model name can be served by more than one endpoint:
 
 Outputs are presented to the judge blindly, as A and B, with the mapping back to
 scenarios recorded separately in the same record.
+
+---
+
+## Artifact: `report.html`
+
+**Status: available.** Written by `eval html-report` into the report directory,
+alongside `report.json`.
+
+```text
+trg ai skills eval html-report <REPORT_DIR>
+```
+
+`REPORT_DIR` is the directory containing `report.json`, the same directory
+every other `eval` subcommand reads and writes against.
+
+The page is a single self-contained HTML file: every style is inlined, there is
+no JavaScript, and nothing on the page references the network. No CDN script,
+remote stylesheet or font, analytics beacon, or external image is ever emitted,
+so the report opens correctly from a `file://` URL with no connectivity and
+carries nothing out of the machine it was generated on. Links to output
+artifacts stay inside the bundle and are never absolute URLs; they are
+percent-encoded, so an artifact an agent named with a `#`, a `?`, or a space
+still resolves to the file it names.
+
+Because every value it renders (final text, transcript excerpts, output
+artifacts, assertion evidence, judge rationales, skill names, file paths)
+originates from an LLM agent under evaluation and must be treated as untrusted,
+every interpolated string is HTML-escaped through a single chokepoint before it
+reaches the page. Nothing is written into the output outside that path.
+
+The page covers bundle identity and provenance (skill, harness, scenario,
+timestamps, attempt counts, and the skill integrity report), per-scenario
+summaries, and a case-by-case, arm-by-arm breakdown of every run: pass or fail,
+each assertion's evidence, and non-scoring outcomes (`unsupported`, `excluded`)
+shown distinctly from a scored result rather than folded into a pass or fail.
 
 ---
 
