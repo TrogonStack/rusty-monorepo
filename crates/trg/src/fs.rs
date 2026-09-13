@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub trait FileSystem {
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
@@ -7,6 +7,8 @@ pub trait FileSystem {
     fn write(&self, path: &Path, contents: &str) -> io::Result<()>;
     fn exists(&self, path: &Path) -> bool;
     fn is_file(&self, path: &Path) -> bool;
+    fn is_dir(&self, path: &Path) -> bool;
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
 }
 
 pub struct RealFS;
@@ -30,6 +32,14 @@ impl FileSystem for RealFS {
 
     fn is_file(&self, path: &Path) -> bool {
         path.is_file()
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        path.is_dir()
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        std::fs::read_dir(path)?.map(|entry| entry.map(|e| e.path())).collect()
     }
 }
 
@@ -91,6 +101,30 @@ pub mod testutil {
 
         fn is_file(&self, path: &Path) -> bool {
             self.files.borrow().contains_key(path)
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            self.files
+                .borrow()
+                .keys()
+                .any(|candidate| candidate != path && candidate.starts_with(path))
+        }
+
+        fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            let mut children: Vec<PathBuf> = self
+                .files
+                .borrow()
+                .keys()
+                .filter_map(|candidate| {
+                    let rest = candidate.strip_prefix(path).ok()?;
+                    let mut components = rest.components();
+                    let first = components.next()?;
+                    Some(path.join(first))
+                })
+                .collect();
+            children.sort();
+            children.dedup();
+            Ok(children)
         }
     }
 }

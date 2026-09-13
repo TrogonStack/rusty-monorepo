@@ -10,8 +10,9 @@ use crate::fs::FileSystem;
 
 use super::budget::PassSpend;
 use super::cache::RunCacheInfo;
+use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
-use super::evals::{parse_eval_suite, EvalError, EvalSuite, Result};
+use super::evals::{EvalError, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
@@ -534,10 +535,9 @@ pub fn build_report_bundle(
         None => (None, None),
     };
 
-    let evals_path = skill_path.join("evals").join("evals.json");
-    let evals_content = fs.read_to_string(&evals_path)?;
-    let evals_hash = sha256_digest(&evals_content);
-    let mut suite: EvalSuite = parse_eval_suite(&evals_content)?;
+    let compiled_suite = resolve_eval_suite(fs, skill_path)?;
+    let evals_hash = compiled_suite.hash;
+    let mut suite: EvalSuite = compiled_suite.suite;
     let declared_case_ids: Vec<String> = suite.evals.iter().map(|case| case.id.to_string()).collect();
     suite.evals = options.cases.apply(suite.evals)?;
     let case_selection = options.cases.record(suite.evals.len(), declared_case_ids);
@@ -546,7 +546,10 @@ pub fn build_report_bundle(
     let attempts = options.attempts;
 
     let user_skill_path_str = path_to_string(user_skill_path);
-    let evals_path_str = format!("{user_skill_path_str}/evals/evals.json");
+    let evals_path_str = match compiled_suite.source {
+        EvalSource::Manifest { .. } => format!("{user_skill_path_str}/evals/evals.json"),
+        EvalSource::CaseDirectories { .. } => format!("{user_skill_path_str}/evals"),
+    };
 
     let dimensions = build_dimensions(
         &suite,

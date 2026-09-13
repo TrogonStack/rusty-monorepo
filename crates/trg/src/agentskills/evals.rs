@@ -418,9 +418,7 @@ pub struct WorkspaceCheckReport {
 }
 
 pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSuite> {
-    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
-    let content = fs.read_to_string(&suite_path)?;
-    parse_eval_suite(&content)
+    super::case_directories::resolve_eval_suite(fs, skill_path).map(|compiled| compiled.suite)
 }
 
 pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
@@ -653,9 +651,7 @@ pub fn check_eval_suite(
     expected_skill_name: &str,
     options: EvalCheckOptions,
 ) -> Result<EvalCheckReport> {
-    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
-    let content = fs.read_to_string(&suite_path)?;
-    let suite = parse_eval_suite(&content)?;
+    let suite = super::case_directories::resolve_eval_suite(fs, skill_path)?.suite;
 
     let mut errors = ValidationErrors::new();
     let mut file_count = 0;

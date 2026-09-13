@@ -26,7 +26,7 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::evals::{parse_eval_suite, EvalCase, EvalError, EvalSuite, Result};
+use super::evals::{EvalCase, EvalError, EvalSuite, Result};
 use super::graders::{self, CaseGrader, GradeInput, Grader, GraderOutcome};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
@@ -376,17 +376,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     let mut document: ReportDocument = serde_json::from_str(&report_content)?;
 
     let skill_path = PathBuf::from(&document.suite.skill_path);
-    let evals_path = skill_path.join("evals").join("evals.json");
-    let evals_content = std::fs::read_to_string(&evals_path).map_err(|e| {
-        EvalError::Validation(
-            ValidationError::for_field(
-                format!("evals '{}'", evals_path.display()),
-                format!("failed to read: {e}"),
-            )
-            .into(),
-        )
-    })?;
-    let suite: EvalSuite = parse_eval_suite(&evals_content)?;
+    let suite: EvalSuite = super::case_directories::resolve_eval_suite(&crate::fs::RealFS, &skill_path)?.suite;
 
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
 

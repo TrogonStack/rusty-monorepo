@@ -11,7 +11,7 @@ use crate::agentskills::cache::{
 use crate::agentskills::case_selection::CaseSelection;
 use crate::agentskills::concurrency::RunConcurrency;
 use crate::agentskills::evals::{
-    effective_timeout_secs, missing_expected_output_warnings, parse_eval_suite, EvalCase, EvalCheckOptions, EvalSuite,
+    effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalSuite,
 };
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::outputs::index_output_artifacts;
@@ -564,17 +564,14 @@ fn execute_runs(
         None
     };
 
-    let evals_path = skill_path.join("evals").join("evals.json");
-    let suite: EvalSuite = match std::fs::read_to_string(&evals_path)
-        .map_err(|e| format!("read {}: {e}", evals_path.display()))
-        .and_then(|s| parse_eval_suite(&s).map_err(|e| format!("parse {}: {e}", evals_path.display())))
-    {
-        Ok(suite) => suite,
-        Err(msg) => {
-            eprintln!("Failed to load eval suite: {}", msg);
-            return Err(1);
-        }
-    };
+    let suite: EvalSuite =
+        match crate::agentskills::case_directories::resolve_eval_suite(&crate::fs::RealFS, skill_path) {
+            Ok(compiled) => compiled.suite,
+            Err(err) => {
+                eprintln!("Failed to load eval suite: {}", err);
+                return Err(1);
+            }
+        };
 
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
     let runner_version = bundle.document.report.runner_version.clone();

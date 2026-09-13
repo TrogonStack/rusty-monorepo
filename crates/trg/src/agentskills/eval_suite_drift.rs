@@ -3,12 +3,10 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use super::evals::{EvalError, Result};
+use super::report::ReportDocument;
 use schemars::JsonSchema;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-
-use super::evals::{parse_eval_suite, EvalError, Result};
-use super::report::ReportDocument;
 
 pub const WARNING_KIND: &str = "eval_suite_drift";
 
@@ -188,21 +186,20 @@ pub fn detect_eval_suite_drift_vs_skill(
     report: &ReportDocument,
     skill_dir: &Path,
 ) -> Result<Option<EvalSuiteDriftReport>> {
-    let evals_path = skill_dir.join("evals").join("evals.json");
-    if !evals_path.is_file() {
-        return Ok(None);
-    }
+    let compiled = match super::case_directories::resolve_eval_suite(&crate::fs::RealFS, skill_dir) {
+        Ok(compiled) => compiled,
+        Err(EvalError::Io(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
 
-    let current_content = std::fs::read_to_string(&evals_path)?;
-    let current_hash = sha256_digest(&current_content);
+    let current_hash = compiled.hash;
     let previous_hash = report.suite.evals_hash.clone();
 
     if current_hash == previous_hash {
         return Ok(None);
     }
 
-    let suite = parse_eval_suite(&current_content)?;
-    let current_ids: BTreeSet<String> = suite.evals.iter().map(|eval| eval.id.to_string()).collect();
+    let current_ids: BTreeSet<String> = compiled.suite.evals.iter().map(|eval| eval.id.to_string()).collect();
     let previous_ids = declared_eval_case_ids(report);
     let (added_eval_ids, removed_eval_ids) = diff_eval_case_ids(&current_ids, &previous_ids);
 
@@ -239,12 +236,6 @@ fn diff_eval_case_ids(current_ids: &BTreeSet<String>, previous_ids: &BTreeSet<St
     let added_eval_ids: Vec<String> = current_ids.difference(previous_ids).cloned().collect();
     let removed_eval_ids: Vec<String> = previous_ids.difference(current_ids).cloned().collect();
     (added_eval_ids, removed_eval_ids)
-}
-
-fn sha256_digest(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("sha256:{}", super::hex_encode(hasher.finalize()))
 }
 
 #[cfg(test)]
