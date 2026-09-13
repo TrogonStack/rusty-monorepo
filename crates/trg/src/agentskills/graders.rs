@@ -71,6 +71,10 @@ pub enum GradeTarget {
     Transcript,
     AnyOutput,
     File(RelativeSkillPath),
+    /// The set of files the run created under `outputs/`, one per line. Backed by
+    /// the same index the report itself is built from, so "the agent created a
+    /// file called X" is checkable without walking the directory a second time.
+    CreatedFiles,
 }
 
 impl fmt::Display for GradeTarget {
@@ -80,8 +84,60 @@ impl fmt::Display for GradeTarget {
             Self::Transcript => f.write_str("transcript"),
             Self::AnyOutput => f.write_str("any output file"),
             Self::File(path) => write!(f, "file '{path}'"),
+            Self::CreatedFiles => f.write_str("created files"),
         }
     }
+}
+
+/// Whether an `llm` grader's `target` came from the author or from the field's
+/// default.
+///
+/// A bare `GradeTarget` cannot answer that question: `#[serde(default)]` fills
+/// the field in either case, so by the time the grader is deserialized, an
+/// omitted `target` and one written out as `final_text` look identical. That
+/// distinction is exactly what decides whether the mechanical shortcut may
+/// still fire ahead of the judge, so it has to survive deserialization as part
+/// of the value.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum TargetDeclaration {
+    #[default]
+    Default,
+    Named(GradeTarget),
+}
+
+impl TargetDeclaration {
+    pub fn resolve(&self) -> GradeTarget {
+        match self {
+            Self::Default => GradeTarget::default(),
+            Self::Named(target) => target.clone(),
+        }
+    }
+
+    pub fn is_explicit(&self) -> bool {
+        matches!(self, Self::Named(_))
+    }
+}
+
+impl<'de> Deserialize<'de> for TargetDeclaration {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        GradeTarget::deserialize(deserializer).map(Self::Named)
+    }
+}
+
+impl Serialize for TargetDeclaration {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.resolve().serialize(serializer)
+    }
+}
+
+fn is_default_target(target: &TargetDeclaration) -> bool {
+    !target.is_explicit()
 }
 
 /// Which arm of a with-skill versus without-skill comparison a grader is
@@ -154,6 +210,9 @@ pub enum Grader {
     },
     Llm {
         criterion: NonEmptyString,
+        #[serde(default, skip_serializing_if = "is_default_target")]
+        #[schemars(with = "GradeTarget", extend("default" = "final_text"))]
+        target: TargetDeclaration,
     },
     ValidJson {
         #[serde(default)]
@@ -229,7 +288,10 @@ impl Grader {
                 true => "the skill was not engaged".to_string(),
                 false => "the skill was engaged".to_string(),
             },
-            Self::Llm { criterion } => criterion.to_string(),
+            Self::Llm { criterion, target } => match target.resolve() {
+                GradeTarget::FinalText => criterion.to_string(),
+                other => format!("{other}: {criterion}"),
+            },
             Self::ValidJson { target } => format!("{target} is valid json"),
             Self::SchemaValidation { schema, target } => format!("{target} validates against schema '{schema}'"),
         }
@@ -370,6 +432,7 @@ pub enum GraderOutcome {
     /// The grader is a judgement call and must be handed to the LLM grader.
     Deferred {
         criterion: String,
+        target: TargetDeclaration,
     },
     /// The case, not the run, is malformed: a named schema is missing, unreadable, or
     /// not itself a valid JSON Schema document. Distinct from `Unsupported`, which
@@ -399,16 +462,65 @@ pub struct GradeInput<'a> {
     pub raw_transcript: &'a str,
     pub transcript: Option<&'a NormalizedTranscript>,
     pub skill_dir: &'a Path,
+    /// The paths this run created under `outputs/`, as already indexed for the
+    /// report. Backs `GradeTarget::CreatedFiles` without a second directory walk.
+    pub created_files: &'a [String],
+}
+
+/// The image formats a `file` target can hand the judge as a picture rather
+/// than as text.
+///
+/// Detected from the extension, the same signal `MechanicalKind::ImageExists`
+/// already trusts to decide whether a file is a picture at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageMediaType {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+
+impl ImageMediaType {
+    fn from_extension(path: &Path) -> Option<Self> {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .as_deref()
+        {
+            Some("png") => Some(Self::Png),
+            Some("jpg") | Some("jpeg") => Some(Self::Jpeg),
+            Some("gif") => Some(Self::Gif),
+            Some("webp") => Some(Self::Webp),
+            _ => None,
+        }
+    }
+
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetContent {
     Text(String),
+    Image { media_type: ImageMediaType, bytes: Vec<u8> },
     Missing(String),
 }
 
 impl TargetContent {
     pub(crate) fn from_path(path: &Path) -> Self {
+        if let Some(media_type) = ImageMediaType::from_extension(path) {
+            return match std::fs::read(path) {
+                Ok(bytes) => Self::Image { media_type, bytes },
+                Err(e) => Self::Missing(format!("cannot read '{}': {e}", path.display())),
+            };
+        }
         match std::fs::read_to_string(path) {
             Ok(text) => Self::Text(text),
             Err(e) => Self::Missing(format!("cannot read '{}': {e}", path.display())),
@@ -435,7 +547,7 @@ impl<'a> GradeInput<'a> {
         workspace_candidate
     }
 
-    fn target_content(&self, target: &GradeTarget) -> TargetContent {
+    pub(crate) fn target_content(&self, target: &GradeTarget) -> TargetContent {
         match target {
             GradeTarget::FinalText => TargetContent::Text(self.final_text.to_string()),
             GradeTarget::Transcript => TargetContent::Text(self.raw_transcript.to_string()),
@@ -445,6 +557,7 @@ impl<'a> GradeInput<'a> {
                 collect_text(self.outputs_dir, &mut parts);
                 TargetContent::Text(parts.join("\n"))
             }
+            GradeTarget::CreatedFiles => TargetContent::Text(self.created_files.join("\n")),
         }
     }
 }
@@ -463,8 +576,9 @@ fn collect_text(dir: &Path, parts: &mut Vec<String>) {
 
 pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
     match grader {
-        Grader::Llm { criterion } => GraderOutcome::Deferred {
+        Grader::Llm { criterion, target } => GraderOutcome::Deferred {
             criterion: criterion.to_string(),
+            target: target.clone(),
         },
         Grader::FileExists { path } => {
             let resolved = input.resolve(path);
@@ -483,6 +597,9 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
             negate,
         } => match input.target_content(target) {
             TargetContent::Missing(reason) => GraderOutcome::Failed { evidence: reason },
+            TargetContent::Image { .. } => GraderOutcome::Failed {
+                evidence: format!("{target} is an image; a pattern can only match text"),
+            },
             TargetContent::Text(text) => {
                 let found = pattern.compile().find(&text);
                 let evidence = match &found {
@@ -499,6 +616,9 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
             negate,
         } => match input.target_content(target) {
             TargetContent::Missing(reason) => GraderOutcome::Failed { evidence: reason },
+            TargetContent::Image { .. } => GraderOutcome::Failed {
+                evidence: format!("{target} is an image; it cannot be searched for text"),
+            },
             TargetContent::Text(haystack) => {
                 let found = match case {
                     MatchCase::Sensitive => haystack.find(text.as_str()),
@@ -561,6 +681,10 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
 pub(crate) fn check_json_validity(content: &TargetContent) -> (bool, String) {
     match content {
         TargetContent::Missing(reason) => (false, reason.clone()),
+        TargetContent::Image { .. } => (
+            false,
+            "target is an image; json validity is checked against text".to_string(),
+        ),
         TargetContent::Text(text) => match serde_json::from_str::<serde_json::Value>(text) {
             Ok(_) => (true, "parses as valid json".to_string()),
             Err(e) => (
@@ -613,6 +737,12 @@ pub(crate) fn check_schema_validation(schema_path: &Path, content: &TargetConten
 
         let text = match content {
             TargetContent::Missing(reason) => return Ok((false, reason.clone())),
+            TargetContent::Image { .. } => {
+                return Ok((
+                    false,
+                    "target is an image; schema validation is checked against text".to_string(),
+                ))
+            }
             TargetContent::Text(text) => text,
         };
         let target: serde_json::Value = match serde_json::from_str(text) {
@@ -778,6 +908,7 @@ mod tests {
                 raw_transcript: "",
                 transcript: Some(&self.transcript),
                 skill_dir: &self.skill_dir,
+                created_files: &[],
             }
         }
     }
@@ -1046,6 +1177,7 @@ mod tests {
             raw_transcript: "",
             transcript: Some(&transcript),
             skill_dir: dir.path(),
+            created_files: &[],
         };
 
         for grader in [
@@ -1083,6 +1215,7 @@ mod tests {
             raw_transcript: "",
             transcript: Some(&transcript),
             skill_dir: dir.path(),
+            created_files: &[],
         };
 
         assert!(matches!(
@@ -1114,6 +1247,7 @@ mod tests {
             raw_transcript: "",
             transcript: Some(&transcript),
             skill_dir: dir.path(),
+            created_files: &[],
         };
         let grader = Grader::Regex {
             pattern: RegexPattern::parse(r"\b42\b").unwrap(),
@@ -1134,6 +1268,7 @@ mod tests {
             raw_transcript: "",
             transcript: None,
             skill_dir: dir.path(),
+            created_files: &[],
         };
         match evaluate(&Grader::SkillUsed { negate: false }, &input) {
             GraderOutcome::Unsupported { reason } => assert!(reason.contains("no normalized transcript"), "{reason}"),
@@ -1213,15 +1348,89 @@ mod tests {
             raw_transcript: "",
             transcript: None,
             skill_dir: dir.path(),
+            created_files: &[],
         };
         let grader = Grader::Llm {
             criterion: text("The summary avoids filler phrasing"),
+            target: TargetDeclaration::default(),
         };
         assert_eq!(
             evaluate(&grader, &input),
             GraderOutcome::Deferred {
-                criterion: "The summary avoids filler phrasing".to_string()
+                criterion: "The summary avoids filler phrasing".to_string(),
+                target: TargetDeclaration::Default,
             }
+        );
+    }
+
+    /// A declared target on an `llm` grader must survive to the deferred
+    /// outcome, since that is what tells the judge what to look at.
+    #[test]
+    fn llm_grader_carries_its_declared_target_into_the_deferred_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = GradeInput {
+            final_text: "done",
+            run_dir: dir.path(),
+            workspace_dir: dir.path(),
+            outputs_dir: dir.path(),
+            raw_transcript: "the agent checked the config twice",
+            transcript: None,
+            skill_dir: dir.path(),
+            created_files: &[],
+        };
+        let grader = Grader::Llm {
+            criterion: text("the agent checked the existing config before overwriting it"),
+            target: TargetDeclaration::Named(GradeTarget::Transcript),
+        };
+        assert_eq!(
+            evaluate(&grader, &input),
+            GraderOutcome::Deferred {
+                criterion: "the agent checked the existing config before overwriting it".to_string(),
+                target: TargetDeclaration::Named(GradeTarget::Transcript),
+            }
+        );
+    }
+
+    #[test]
+    fn created_files_target_lists_what_the_run_produced() {
+        let fixture = Fixture::new();
+        let created = vec!["report.md".to_string(), "sub/data.json".to_string()];
+        let input = GradeInput {
+            created_files: &created,
+            ..fixture.input()
+        };
+        let grader = Grader::Contains {
+            text: text("sub/data.json"),
+            target: GradeTarget::CreatedFiles,
+            case: MatchCase::Sensitive,
+            negate: false,
+        };
+        assert!(matches!(evaluate(&grader, &input), GraderOutcome::Passed { .. }));
+
+        let missing = Grader::Contains {
+            text: text("never-written.txt"),
+            target: GradeTarget::CreatedFiles,
+            case: MatchCase::Sensitive,
+            negate: false,
+        };
+        assert!(matches!(evaluate(&missing, &input), GraderOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn llm_grader_description_is_unchanged_by_the_default_target_but_names_a_declared_one() {
+        let default_target = Grader::Llm {
+            criterion: text("the summary avoids filler phrasing"),
+            target: TargetDeclaration::default(),
+        };
+        assert_eq!(default_target.describe(), "the summary avoids filler phrasing");
+
+        let declared_target = Grader::Llm {
+            criterion: text("the summary avoids filler phrasing"),
+            target: TargetDeclaration::Named(GradeTarget::Transcript),
+        };
+        assert_eq!(
+            declared_target.describe(),
+            "transcript: the summary avoids filler phrasing"
         );
     }
 

@@ -292,7 +292,7 @@ every reader and to every runner.
 | `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
 | `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
-| `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
+| `llm` | `criterion`, `target` | Handed to the LLM judge, which is the only grader that costs a request |
 | `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
 | `schema_validation` | `schema`, `target` | The target parses as JSON and validates against the named JSON Schema document. `schema` is a relative path inside the skill directory, resolved the same way `files` and `scaffold` are |
 
@@ -306,14 +306,26 @@ comparison keys on; `name` gives it a stable one. Two graders in the same case
 declaring the same `name` are rejected. In the directory layout, a grader
 file's stem is its default name.
 
-`target` is `final_text` (default), `transcript`, `any_output`, or
-`{"file": "<relative path>"}`.
+`target` is `final_text` (default), `transcript`, `any_output`,
+`{"file": "<relative path>"}`, or `created_files`. `created_files` is the set
+of paths the run wrote under `outputs/`, read from the same index the report
+itself is built from, so checking that the agent created a file named `X`
+never re-walks the output directory.
 
 A relative path resolves against the workspace `outputs/` directory first, then
 the workspace itself, then the run directory. Declared outputs therefore win
 over an incidental file of the same name, and a plain `summary.md` still
 resolves when the agent wrote it straight into its working directory. A path
 that matches nowhere reports against the workspace candidate.
+
+An `llm` grader whose criterion text also happens to parse as a known
+mechanical pattern (see the `assertions` row above) is graded mechanically
+under `--grader auto` and `--grader llm` alike, as a shortcut that skips the
+judge request. Declaring `target` on that grader turns the shortcut off, even
+when the declared value is `final_text`, the same value the field would have
+defaulted to: writing `target` at all is the author saying what to look at,
+which the shortcut cannot promise to honor since it grades from the criterion
+text rather than the declared target.
 
 ### Asserting which command ran, not just that a tool was used
 
@@ -451,6 +463,71 @@ Anthropic judge, or a `claude-code` run with a local OpenAI-compatible endpoint,
 are both ordinary. Under `--grader auto` a suite of typed graders needs no
 credential at all, and the endpoint is resolved once up front so a missing
 credential is reported before any run is graded.
+
+#### What the judge is shown
+
+A prose assertion, and an `llm` grader that does not declare `target`, get the
+default `final_text` payload, unchanged from before `target` existed:
+
+```json
+{ "assertion": "...", "final_text": "...", "outputs": { "<name>": "..." } }
+```
+
+`any_output` gets the same shape, and now the same scope: `outputs` walks
+every file under `outputs/`, nested directories included, matching what a
+mechanical grader aimed at `any_output` already looks at. `final_text` (declared
+or defaulted) keeps looking only at what sits directly in `outputs/`, so a
+suite written before `any_output` walked subdirectories still grades the same
+way. `transcript`, `{"file": ...}`, and `created_files` instead get a payload
+that names its own target, since the judge is no longer implicitly looking at
+the run's output:
+
+```json
+{ "assertion": "...", "target": "transcript", "content": "..." }
+```
+
+A target that resolves to nothing (a named file the run never wrote) reports
+why instead of sending an empty string:
+
+```json
+{ "assertion": "...", "target": "file 'out.md'", "missing_reason": "..." }
+```
+
+A `{"file": ...}` target that resolves to a `.png`, `.jpg`, `.jpeg`, `.gif`, or
+`.webp` file is attached to the judge as a picture instead of being read as
+text, since reading it as text would only ever fail:
+
+```json
+{ "assertion": "...", "target": "file 'chart.png'", "content": "image attached separately" }
+```
+
+`regex`, `contains`, `valid_json`, and `schema_validation` aimed at an image
+target cannot fall back to a judge request, so each reports why it failed
+rather than misreading the bytes as text:
+
+```json
+{ "passed": false, "evidence": "file 'chart.png' is an image; a pattern can only match text" }
+```
+
+One judge request carries at most 8,000 bytes of content in total, shared
+across every artifact placed into it rather than granted per artifact. Each
+artifact still to be placed claims an equal share of what remains, so an
+artifact that needs less than its share leaves the difference for the ones
+after it. An artifact too large for its share is truncated with a trailing
+`[truncated after N bytes]` marker; an artifact that arrives after the budget
+is already spent is left out of the payload entirely, and its omission is
+reported via an `artifacts_omitted` field rather than passing silently. A
+transcript keeps its tail and drops its head, since the run's outcome and its
+most recent tool calls sit at the end; every other target keeps its head and
+drops its tail.
+
+A transcript's cut falls between messages, not through one: it is line-delimited,
+one message per line, so an oversized transcript keeps whole messages from the
+end backward until the budget runs out, keeps the first message too when room
+remains, and names what it dropped (`N message(s) omitted from the middle of
+the transcript`) instead of silently shaving whatever byte the cap happened to
+land on. Only a single message too large to fit the budget on its own falls
+back to a plain byte cut of that message.
 
 ### Asking the judge more than once
 

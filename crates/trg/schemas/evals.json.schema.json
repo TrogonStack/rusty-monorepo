@@ -164,6 +164,14 @@
             "criterion": {
               "$ref": "#/$defs/NonEmptyString"
             },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
             "type": {
               "const": "llm",
               "type": "string"
@@ -426,6 +434,11 @@
             "file"
           ],
           "type": "object"
+        },
+        {
+          "const": "created_files",
+          "description": "The set of files the run created under `outputs/`, one per line. Backed by\nthe same index the report itself is built from, so \"the agent created a\nfile called X\" is checkable without walking the directory a second time.",
+          "type": "string"
         }
       ]
     },
