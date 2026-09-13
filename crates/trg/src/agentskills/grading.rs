@@ -751,6 +751,36 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
     }
 }
 
+/// A grader script that did not exit cleanly graded nothing, whatever it printed.
+///
+/// Recording the crash as a failed assertion reads as evidence the skill did the wrong
+/// thing, which is the one thing it is not evidence of. Ungraded is the honest record, and
+/// the gate already refuses to pass a suite carrying anything ungraded, so a broken script
+/// still stops the build without discarding every other case in the run.
+fn script_crashed_result(assertion: &str, command: &str, output: &std::process::Output) -> AssertionGradeResult {
+    let evidence = format!(
+        "script grader exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    AssertionGradeResult {
+        name: None,
+        assertion: assertion.to_string(),
+        passed: false,
+        evidence: evidence.clone(),
+        grader: GraderInfo {
+            kind: GraderKind::Script,
+            model: None,
+            command: Some(command.to_string()),
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: Some(evidence),
+        votes: None,
+    }
+}
+
 fn grade_with_script(
     assertion: &str,
     eval_case: &EvalCase,
@@ -802,26 +832,7 @@ fn grade_with_script(
     )?;
 
     if !output.status.success() {
-        return Ok(AssertionGradeResult {
-            name: None,
-            assertion: assertion.to_string(),
-            passed: false,
-            evidence: format!(
-                "script grader exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            grader: GraderInfo {
-                kind: GraderKind::Script,
-                model: None,
-                command: Some(command.to_string()),
-            },
-            rationale: None,
-            unsupported: None,
-            excluded: None,
-            ungraded: None,
-            votes: None,
-        });
+        return Ok(script_crashed_result(assertion, command, &output));
     }
 
     let parsed: ScriptGraderResponse = serde_json::from_str(&raw).map_err(|e| {
@@ -1019,6 +1030,40 @@ impl AssertionText {
         let end = self.lower[start..].find(suffix)? + start;
         Some(self.original[start..end].trim())
     }
+
+    fn unquoted_after(&self, prefix: &str) -> Option<&str> {
+        non_empty(unquote(self.after(prefix)?))
+    }
+
+    fn unquoted_before(&self, suffix: &str) -> Option<&str> {
+        non_empty(unquote(self.before(suffix)?))
+    }
+
+    fn unquoted_between(&self, prefix: &str, suffix: &str) -> Option<&str> {
+        non_empty(unquote(self.between(prefix, suffix)?))
+    }
+}
+
+/// One matched pair of surrounding quotes, removed, and only a matched pair.
+///
+/// Authors quote a path that carries spaces, and each capture site used to decide for
+/// itself whether to strip them, so a site that forgot opened a file whose name included
+/// the quote characters. Trimming every quote at both ends is what the sites that
+/// remembered did, and that also eats an apostrophe the author meant to keep.
+fn unquote(value: &str) -> &str {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next_back()) {
+        (Some(open), Some(close)) if open == close && (open == '"' || open == '\'') => chars.as_str(),
+        _ => value,
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
@@ -1098,9 +1143,9 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
         return Some(MechanicalKind::ContainsString { needle, path });
     }
     if text.starts_with("output includes ") {
-        if let Some(rest) = text.after("output includes ") {
+        if let Some(rest) = text.unquoted_after("output includes ") {
             return Some(MechanicalKind::ContainsString {
-                needle: rest.trim_matches('"').to_string(),
+                needle: rest.to_string(),
                 path: None,
             });
         }
@@ -1122,12 +1167,11 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
 
     if text.contains("schema validation") || text.contains("validates against schema ") {
         let schema = text
-            .between("validates against schema ", " for ")
-            .or_else(|| text.after("validates against schema "))
-            .filter(|name| !name.is_empty())
+            .unquoted_between("validates against schema ", " for ")
+            .or_else(|| text.unquoted_after("validates against schema "))
             .map(str::to_string);
         let path = text
-            .after(" for ")
+            .unquoted_after(" for ")
             .map(str::to_string)
             .or_else(|| extract_path_before(&text, " validates against schema"));
         return Some(MechanicalKind::SchemaValidation { schema, path });
@@ -1681,22 +1725,11 @@ fn extract_quoted(text: &AssertionText, prefix: &str) -> Option<String> {
 }
 
 fn extract_quoted_or_token_after(text: &AssertionText, prefix: &str, suffix: &str) -> Option<String> {
-    let token = text.between(prefix, suffix)?;
-    let token = token.trim_matches('"').trim_matches('\'');
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
-    }
+    text.unquoted_between(prefix, suffix).map(str::to_string)
 }
 
 fn extract_path_before(text: &AssertionText, suffix: &str) -> Option<String> {
-    let path = text.before(suffix)?.trim_matches('"').trim_matches('\'');
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
-    }
+    text.unquoted_before(suffix).map(str::to_string)
 }
 
 fn extract_usize_after(text: &AssertionText, prefix: &str) -> Option<usize> {
@@ -2533,6 +2566,41 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_prose_schema_name_is_read_without_its_quotes() {
+        let kind = parse_mechanical_kind("outputs/report.json validates against schema \"schemas/Report.schema.json\"");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/Report.schema.json" && path == "outputs/report.json"
+        ));
+    }
+
+    #[test]
+    fn a_quoted_prose_schema_target_is_read_without_its_quotes() {
+        let kind = parse_mechanical_kind("validates against schema report.schema.json for \"outputs/a report.json\"");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "report.schema.json" && path == "outputs/a report.json"
+        ));
+    }
+
+    /// An apostrophe inside a name is not a quote to strip, and a lone leading quote is not
+    /// a pair. Trimming every quote character at both ends got both of these wrong.
+    #[test]
+    fn unquoting_a_captured_name_leaves_an_unpaired_quote_alone() {
+        assert_eq!(unquote("\"schema.json\""), "schema.json");
+        assert_eq!(unquote("'schema.json'"), "schema.json");
+        assert_eq!(unquote("\"schema.json"), "\"schema.json");
+        assert_eq!(unquote("yordis's report.json"), "yordis's report.json");
+        assert_eq!(unquote("\""), "\"");
+    }
+
+    #[test]
     fn a_prose_schema_name_and_target_keep_the_case_the_author_wrote() {
         let kind = parse_mechanical_kind("outputs/Report.json validates against schema schemas/Report.schema.json");
         assert!(matches!(
@@ -2780,6 +2848,55 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         assert!(result.passed);
         assert_eq!(result.grader.kind, GraderKind::Script);
         assert!(result.evidence.contains("script verified"));
+    }
+
+    /// A crash is not a verdict. Counting a broken grader as a failed assertion reports that
+    /// the skill did the wrong thing on the strength of evidence that says nothing about the
+    /// skill at all.
+    #[test]
+    fn a_crashed_grader_script_grades_nothing_rather_than_failing_the_assertion() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("broken-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+echo 'grader could not reach the model' >&2
+exit 3
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
+            grader_model: None,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
+            strict: false,
+        };
+        let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+        }))
+        .unwrap();
+
+        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+
+        assert!(
+            result.is_ungraded(),
+            "a grader that never exited cleanly attempted nothing"
+        );
+        assert!(!result.is_scored());
+        assert!(result.evidence.contains("grader could not reach the model"));
+
+        let counts = GradingCounts::tally(std::slice::from_ref(&result));
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(counts.failed, 0, "a broken grader must not read as the skill failing");
     }
 
     fn result_with_votes(votes: Option<JudgeVoteTally>) -> AssertionGradeResult {
