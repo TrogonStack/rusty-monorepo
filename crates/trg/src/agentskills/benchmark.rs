@@ -13,8 +13,6 @@ use super::evals::{EvalError, Result};
 use super::iteration_summary::detect_previous_report_dir;
 use super::report::ScenarioKind;
 
-pub const SCHEMA_VERSION: &str = "trg.skills-eval.benchmark.v1";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FailedRunsMode {
@@ -34,7 +32,6 @@ pub struct BenchmarkOptions {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(title = "trg skills eval benchmark")]
 pub struct BenchmarkDocument {
-    pub schema_version: String,
     pub report_id: String,
     pub generated_at: String,
     pub failed_runs_mode: FailedRunsMode,
@@ -359,7 +356,6 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
     )?;
 
     Ok(BenchmarkDocument {
-        schema_version: SCHEMA_VERSION.to_string(),
         report_id: report.report.id,
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         failed_runs_mode: failed_runs,
@@ -1153,7 +1149,6 @@ mod tests {
     fn write_report(report_dir: &Path, runs: serde_json::Value, iteration: Option<serde_json::Value>) {
         fs::create_dir_all(report_dir).unwrap();
         let mut report = serde_json::json!({
-            "schema_version": "trg.skills-eval.report.v1",
             "report": {
                 "id": "report-test",
                 "generated_at": "2026-05-26T00:00:00Z",
@@ -1723,14 +1718,5 @@ mod tests {
         let expected: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/benchmark_expected.json")).unwrap();
         assert_eq!(actual, expected);
-
-        let schema: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/benchmark.schema.json")).unwrap();
-        assert_eq!(
-            actual.get("schema_version").and_then(|value| value.as_str()),
-            schema
-                .pointer("/properties/schema_version/const")
-                .and_then(|value| value.as_str())
-        );
     }
 }

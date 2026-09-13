@@ -102,7 +102,7 @@ fn validate_benchmark_artifacts(report_dir: &Path) -> Result<()> {
 
     for path in paths {
         let value = read_json_file(&path)?;
-        if value.get("schema_version").is_none() {
+        if value.get("report_id").is_none() {
             continue;
         }
         validate_artifact(BENCHMARK_SCHEMA, &value).map_err(|error| schema_error_for_path(&path, error))?;
@@ -117,7 +117,7 @@ fn validate_iteration_summary_artifacts(report_dir: &Path) -> Result<()> {
 
     for path in paths {
         let value = read_json_file(&path)?;
-        if value.get("schema_version").is_none() {
+        if value.get("report_id").is_none() {
             continue;
         }
         validate_artifact(ITERATION_SUMMARY_SCHEMA, &value).map_err(|error| schema_error_for_path(&path, error))?;
@@ -306,7 +306,6 @@ mod tests {
     fn write_benchmark_fixture_report(report_dir: &Path) {
         std::fs::create_dir_all(report_dir).unwrap();
         let report = serde_json::json!({
-            "schema_version": "trg.skills-eval.report.v1",
             "report": {
                 "id": "report-test",
                 "generated_at": "2026-05-26T00:00:00Z",
@@ -361,7 +360,6 @@ mod tests {
         std::fs::write(
             run_dir.join("grading.json"),
             r#"{
-  "schema_version": "trg.skills-eval.grading.v1",
   "assertion_results": [
     { "assertion": "a", "passed": true, "evidence": "ok", "grader": { "kind": "mechanical" } }
   ],

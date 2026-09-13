@@ -187,7 +187,6 @@ After `trg ai skills eval grade`, each run directory contains:
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v5",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",

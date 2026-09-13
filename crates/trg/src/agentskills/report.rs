@@ -21,8 +21,6 @@ use super::outputs::OUTPUTS_DIR;
 use super::sampling::AttemptCount;
 use super::validation::ValidationError;
 
-pub const SCHEMA_VERSION: &str = "trg.skills-eval.report.v1";
-
 #[derive(
     Debug,
     Clone,
@@ -201,7 +199,6 @@ pub struct ReportBundle {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReportDocument {
-    pub schema_version: String,
     pub report: ReportSection,
     pub suite: SuiteSection,
     pub dimensions: DimensionsSection,
@@ -521,7 +518,6 @@ pub fn build_report_bundle(
         .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
 
     let document = ReportDocument {
-        schema_version: SCHEMA_VERSION.to_string(),
         report: ReportSection {
             id: report_id.clone(),
             generated_at,
@@ -1208,7 +1204,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(bundle.report_id, "test-report-id");
-        assert_eq!(bundle.document.schema_version, SCHEMA_VERSION);
         assert_eq!(bundle.document.report.iteration, 1);
         assert!(bundle.document.suite.skill_hash.starts_with("sha256:"));
         assert!(bundle.document.suite.evals_hash.starts_with("sha256:"));
@@ -1306,7 +1301,6 @@ mod tests {
             report_id: "report-123".to_string(),
             skill_name: "demo-skill".to_string(),
             document: ReportDocument {
-                schema_version: SCHEMA_VERSION.to_string(),
                 report: ReportSection {
                     id: "report-123".to_string(),
                     generated_at: "2026-05-25T22:00:00Z".to_string(),
@@ -1371,10 +1365,6 @@ mod tests {
 
         let parsed: std::collections::HashMap<String, serde_json::Value> =
             serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
-        assert_eq!(
-            parsed.get("schema_version").and_then(|v| v.as_str()),
-            Some(SCHEMA_VERSION)
-        );
         assert!(
             !parsed.contains_key("budget"),
             "a report nothing ever priced must not claim a budget section"
@@ -1409,6 +1399,9 @@ mod tests {
             match (original, roundtrip) {
                 (serde_json::Value::Object(orig), serde_json::Value::Object(rt)) => {
                     for (key, orig_val) in orig {
+                        if path.is_empty() && key == "schema_version" {
+                            continue;
+                        }
                         if is_omitted_on_reserialize(orig_val) {
                             continue;
                         }
@@ -1418,9 +1411,7 @@ mod tests {
                             format!("{path}.{key}")
                         };
                         let rt_val = rt.get(key).unwrap_or_else(|| {
-                            panic!(
-                                "field {child_path} missing after round-trip (possible breaking change without schema_version bump)"
-                            )
+                            panic!("field {child_path} missing after round-trip (possible breaking change)")
                         });
                         assert_round_trip_preserves_fields(orig_val, rt_val, &child_path);
                     }
@@ -1442,7 +1433,6 @@ mod tests {
             let original = load_fixture_json("v1.json", FIXTURE_V1);
             let document: ReportDocument =
                 serde_json::from_value(original.clone()).expect("v1 fixture deserializes into ReportDocument");
-            assert_eq!(document.schema_version, SCHEMA_VERSION);
 
             let roundtrip = serde_json::to_value(&document).expect("ReportDocument serializes");
             assert_round_trip_preserves_fields(&original, &roundtrip, "");

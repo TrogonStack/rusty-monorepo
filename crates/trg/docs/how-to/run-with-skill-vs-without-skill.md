@@ -49,7 +49,6 @@ $ trg ai skills eval benchmark ./artifacts/csv-analyzer/20260526T150000Z-aabbccd
 
 ```json
 {
-  "schema_version": "trg.skills-eval.report.v1",
   "report": {
     "id": "20260526T150000Z-aabbccdd",
     "iteration": 1
@@ -91,7 +90,6 @@ Written under `runs/run-001/grading.json` after `eval grade`:
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v5",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",
@@ -122,7 +120,6 @@ Written at `iteration-1/benchmark.json` (and report root) after `eval benchmark`
 
 ```json
 {
-  "schema_version": "trg.skills-eval.benchmark.v1",
   "report_id": "20260526T150000Z-aabbccdd",
   "failed_runs_mode": "bucket",
   "scenarios": {

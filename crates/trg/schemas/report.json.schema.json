@@ -1052,9 +1052,6 @@
       },
       "type": "array"
     },
-    "schema_version": {
-      "type": "string"
-    },
     "suite": {
       "$ref": "#/$defs/SuiteSection"
     },
@@ -1063,7 +1060,6 @@
     }
   },
   "required": [
-    "schema_version",
     "report",
     "suite",
     "dimensions",

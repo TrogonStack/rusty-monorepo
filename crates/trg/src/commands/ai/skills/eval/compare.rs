@@ -220,7 +220,6 @@ mod tests {
             })
             .collect();
         let report = serde_json::json!({
-            "schema_version": "trg.skills-eval.report.v1",
             "report": {
                 "id": format!("report-iter-{iteration}"),
                 "generated_at": "2026-05-26T12:00:00Z",

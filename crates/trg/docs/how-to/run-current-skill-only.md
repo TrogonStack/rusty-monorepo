@@ -122,7 +122,6 @@ After `eval run`, the report directory contains:
 
 ```json
 {
-  "schema_version": "trg.skills-eval.report.v1",
   "report": {
     "id": "20260526T143022Z-7f3a2b1c",
     "iteration": 1

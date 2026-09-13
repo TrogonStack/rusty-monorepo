@@ -14,7 +14,6 @@ use super::feedback::{load_run_feedback_entries, FeedbackNote};
 use super::grading::{GradingCounts, GradingFile};
 use super::report::{ReportDocument, RunRecord, ScenarioKind};
 
-pub const SCHEMA_VERSION: &str = "trg.skills-eval.improvement-bundle.v1";
 pub const BUNDLE_MD_NAME: &str = "improvement-bundle.md";
 pub const BUNDLE_JSON_NAME: &str = "improvement-bundle.json";
 pub const NEXT_ITERATION_DIR: &str = "next-iteration";
@@ -124,7 +123,6 @@ pub struct TranscriptExcerpt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ImprovementBundleDocument {
-    pub schema_version: String,
     pub generated_at: String,
     pub source_report_dir: String,
     pub output_dir: String,
@@ -191,7 +189,6 @@ pub fn build_improvement_bundle(
     let summary = build_summary(&report, from_report_dir)?;
 
     Ok(ImprovementBundleDocument {
-        schema_version: SCHEMA_VERSION.to_string(),
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         source_report_dir: from_report_dir.display().to_string(),
         output_dir: output_dir.display().to_string(),
@@ -761,9 +758,7 @@ pub(crate) mod testutil {
     use crate::agentskills::feedback::{
         FeedbackCategory, FeedbackDocument, FeedbackNote, FeedbackSeverity, FEEDBACK_FILE_NAME,
     };
-    use crate::agentskills::grading::{
-        AssertionGradeResult, GraderInfo, GraderKind, GradingSummary, GRADING_SCHEMA_VERSION,
-    };
+    use crate::agentskills::grading::{AssertionGradeResult, GraderInfo, GraderKind, GradingSummary};
     use crate::agentskills::report::{
         build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
     };
@@ -774,7 +769,6 @@ pub(crate) mod testutil {
     fn write_grading(run_dir: &Path, assertion: &str, passed: bool, evidence: &str) {
         std::fs::create_dir_all(run_dir).unwrap();
         let grading = GradingFile {
-            schema_version: GRADING_SCHEMA_VERSION.to_string(),
             assertion_results: vec![AssertionGradeResult {
                 assertion: assertion.to_string(),
                 passed,

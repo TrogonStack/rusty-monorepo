@@ -166,16 +166,11 @@
       },
       "type": "array"
     },
-    "schema_version": {
-      "minLength": 1,
-      "type": "string"
-    },
     "summary": {
       "$ref": "#/$defs/GradingSummary"
     }
   },
   "required": [
-    "schema_version",
     "assertion_results",
     "summary"
   ],
