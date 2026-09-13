@@ -529,7 +529,7 @@ subcommands run.
 | `skill_path` | string | User-supplied `--skill-dir` path |
 | `skill_hash` | string | `sha256:` digest of `SKILL.md` |
 | `evals_path` | string | `<skill_path>/evals/evals.json` for a manifest suite, `<skill_path>/evals` for a suite authored as case directories |
-| `evals_hash` | string | `sha256:` digest of `evals.json` |
+| `evals_hash` | string | `sha256:` digest of `evals.json` for a manifest suite, or of a canonical walk of every case's files for a suite authored as case directories, under a distinct regime tag so the two can never collide |
 | `case_selection` | object | Present only when the run covered part of the suite. See [Covering part of a suite](#covering-part-of-a-suite) |
 
 ### `runs[]` record
