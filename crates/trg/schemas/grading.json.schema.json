@@ -19,6 +19,12 @@
         "grader": {
           "$ref": "#/$defs/GraderInfo"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "passed": {
           "type": "boolean"
         },

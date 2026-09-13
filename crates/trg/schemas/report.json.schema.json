@@ -8,6 +8,12 @@
         "id": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "text": {
           "type": "string"
         }

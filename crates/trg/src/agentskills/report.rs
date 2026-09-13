@@ -376,6 +376,8 @@ pub struct AssertionDimension {
     pub id: String,
     pub eval_case_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -743,6 +745,7 @@ fn build_dimensions(
                 id: assertion_id,
                 eval_case_id: eval_case.id.to_string(),
                 text: assertion.as_str().to_string(),
+                name: None,
             });
         }
 

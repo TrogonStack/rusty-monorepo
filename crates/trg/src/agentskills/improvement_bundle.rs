@@ -770,6 +770,7 @@ pub(crate) mod testutil {
         std::fs::create_dir_all(run_dir).unwrap();
         let grading = GradingFile {
             assertion_results: vec![AssertionGradeResult {
+                name: None,
                 assertion: assertion.to_string(),
                 passed,
                 evidence: evidence.to_string(),

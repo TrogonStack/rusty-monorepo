@@ -260,6 +260,12 @@ every reader and to every runner.
 Every grader also accepts `arm`, which decides whether its result counts toward
 the score. See [Arm-scoped graders](#arm-scoped-graders).
 
+Every grader also accepts `name`, a non-empty label unique within its case. A
+grader's only other identity in results is its rendered description, so editing
+a pattern or a threshold would otherwise silently change the key a downstream
+comparison keys on; `name` gives it a stable one. Two graders in the same case
+declaring the same `name` are rejected.
+
 `target` is `final_text` (default), `transcript`, `any_output`, or
 `{"file": "<relative path>"}`.
 
@@ -562,6 +568,7 @@ decided the result.
 | `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` is present. An indicator rather than a score when `excluded` is present |
 | `assertion_results[].evidence` | string | Non-empty. A passing result must not merely restate its assertion |
 | `assertion_results[].grader.kind` | enum | `mechanical`, `declarative`, `llm`, `script`, `needs_llm`, or `none` |
+| `assertion_results[].name` | string | Present when the grader declared a `name` |
 | `assertion_results[].rationale` | string | Optional judge reasoning |
 | `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |

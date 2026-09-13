@@ -244,6 +244,7 @@ mod tests {
     #[test]
     fn grading_json_round_trip_validates() {
         let grading = build_grading_file(vec![AssertionGradeResult {
+            name: None,
             assertion: "file exists".to_string(),
             passed: true,
             evidence: "outputs/report.md exists".to_string(),

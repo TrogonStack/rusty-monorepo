@@ -281,7 +281,11 @@ pub struct EvalCase {
     pub expected_output_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grader_hints: Option<HashMap<String, serde_json::Value>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_case_graders",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub graders: Vec<CaseGrader>,
     #[serde(default, skip_serializing_if = "is_announced")]
     pub skill_disclosure: SkillDisclosure,
@@ -338,6 +342,22 @@ where
         }
     }
     Ok(evals)
+}
+
+fn deserialize_case_graders<'de, D>(deserializer: D) -> std::result::Result<Vec<CaseGrader>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let graders = Vec::<CaseGrader>::deserialize(deserializer)?;
+    let mut seen = HashSet::new();
+    for declared in &graders {
+        if let Some(name) = &declared.name {
+            if !seen.insert(name.as_str()) {
+                return Err(de::Error::custom(format!("graders contains duplicate name '{name}'")));
+            }
+        }
+    }
+    Ok(graders)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1801,5 +1821,26 @@ mod tests {
         let warnings = missing_expected_output_warnings(&eval, &outputs);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("missing.md"));
+    }
+
+    #[test]
+    fn a_case_that_declares_two_graders_with_the_same_name_is_refused() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "graders": [
+        { "type": "skill_used", "name": "primary" },
+        { "type": "contains", "text": "total", "name": "primary" }
+      ]
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err().to_string();
+        assert!(err.contains("duplicate name 'primary'"));
     }
 }
