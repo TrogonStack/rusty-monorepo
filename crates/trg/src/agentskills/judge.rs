@@ -10,6 +10,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use super::evals::EvalError;
+use super::graders::ImageMediaType;
 use super::validation::ValidationError;
 
 /// The request protocol a judge endpoint speaks.
@@ -198,11 +199,58 @@ impl JudgeEndpoint {
     }
 }
 
-/// One judging turn: a system instruction and the payload to judge.
+/// A picture attached to a judge request, already carrying the encoding both
+/// providers' vision content parts require.
+///
+/// Built from `graders::ImageMediaType` plus the file's bytes rather than a
+/// path, so a request can be assembled (and, in tests, inspected) without a
+/// filesystem in the loop.
+#[derive(Debug, Clone)]
+pub struct ImageAttachment {
+    media_type: ImageMediaType,
+    base64_data: String,
+}
+
+impl ImageAttachment {
+    pub fn new(media_type: ImageMediaType, bytes: &[u8]) -> Self {
+        Self {
+            media_type,
+            base64_data: base64_encode(bytes),
+        }
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// One judging turn: a system instruction, the payload to judge, and
+/// optionally a picture the payload refers to.
 #[derive(Debug, Clone)]
 pub struct JudgeRequest {
     pub system: String,
     pub user: String,
+    pub image: Option<ImageAttachment>,
     pub max_tokens: u32,
 }
 
@@ -211,18 +259,51 @@ impl JudgeRequest {
         Self {
             system: system.into(),
             user: user.into(),
+            image: None,
             max_tokens: 1024,
         }
+    }
+
+    pub fn with_image(mut self, image: ImageAttachment) -> Self {
+        self.image = Some(image);
+        self
+    }
+}
+
+/// The `content` value of the user turn: a bare string when there is nothing
+/// to look at beyond the text, or a provider-shaped array of content parts
+/// once a picture is attached, since neither provider accepts an image
+/// alongside a bare string.
+fn user_content(api: JudgeApi, request: &JudgeRequest) -> serde_json::Value {
+    let Some(image) = &request.image else {
+        return serde_json::Value::String(request.user.clone());
+    };
+    match api {
+        JudgeApi::OpenAiChatCompletions => serde_json::json!([
+            {"type": "text", "text": request.user},
+            {"type": "image_url", "image_url": {
+                "url": format!("data:{};base64,{}", image.media_type.mime(), image.base64_data)
+            }}
+        ]),
+        JudgeApi::AnthropicMessages => serde_json::json!([
+            {"type": "text", "text": request.user},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": image.media_type.mime(),
+                "data": image.base64_data
+            }}
+        ]),
     }
 }
 
 pub fn build_body(api: JudgeApi, model: &JudgeModel, request: &JudgeRequest) -> serde_json::Value {
+    let user_content = user_content(api, request);
     match api {
         JudgeApi::OpenAiChatCompletions => serde_json::json!({
             "model": model.as_str(),
             "messages": [
                 {"role": "system", "content": request.system},
-                {"role": "user", "content": request.user}
+                {"role": "user", "content": user_content}
             ],
             "response_format": {"type": "json_object"}
         }),
@@ -230,7 +311,7 @@ pub fn build_body(api: JudgeApi, model: &JudgeModel, request: &JudgeRequest) -> 
             "model": model.as_str(),
             "max_tokens": request.max_tokens,
             "system": request.system,
-            "messages": [{"role": "user", "content": request.user}]
+            "messages": [{"role": "user", "content": user_content}]
         }),
     }
 }
@@ -342,6 +423,35 @@ mod tests {
         assert_eq!(anthropic["messages"][0]["role"], "user");
         assert_eq!(anthropic["max_tokens"], 1024);
         assert!(anthropic.get("response_format").is_none());
+    }
+
+    #[test]
+    fn base64_matches_the_standard_test_vectors() {
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn an_attached_image_becomes_a_provider_shaped_content_part() {
+        let request = JudgeRequest::new("be a judge", "look at this")
+            .with_image(ImageAttachment::new(ImageMediaType::Png, &[0, 1, 2]));
+
+        let openai = build_body(JudgeApi::OpenAiChatCompletions, &model(), &request);
+        let openai_content = &openai["messages"][1]["content"];
+        assert_eq!(openai_content[0]["type"], "text");
+        assert_eq!(openai_content[0]["text"], "look at this");
+        assert_eq!(openai_content[1]["type"], "image_url");
+        assert_eq!(openai_content[1]["image_url"]["url"], "data:image/png;base64,AAEC");
+
+        let anthropic = build_body(JudgeApi::AnthropicMessages, &model(), &request);
+        let anthropic_content = &anthropic["messages"][0]["content"];
+        assert_eq!(anthropic_content[0]["type"], "text");
+        assert_eq!(anthropic_content[1]["type"], "image");
+        assert_eq!(anthropic_content[1]["source"]["type"], "base64");
+        assert_eq!(anthropic_content[1]["source"]["media_type"], "image/png");
+        assert_eq!(anthropic_content[1]["source"]["data"], "AAEC");
     }
 
     #[test]

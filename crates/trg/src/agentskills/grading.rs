@@ -27,7 +27,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::evals::{EvalCase, EvalError, EvalSuite, Result};
-use super::graders::{self, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, TargetContent};
+use super::graders::{
+    self, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, TargetContent, TargetDeclaration,
+};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
@@ -600,12 +602,12 @@ fn run_context(report_dir: &Path, run: &RunRecord, skill_path: &Path) -> RunCont
 /// Recovers outputs-relative filenames from the artifact index the run already
 /// recorded, so `GradeTarget::CreatedFiles` does not re-walk the output directory.
 fn created_files_from_artifacts(run: &RunRecord) -> Vec<String> {
-    let prefix = format!("{}/", run.paths.outputs);
+    let outputs_root = Path::new(&run.paths.outputs);
     run.artifacts
         .iter()
         .filter(|artifact| artifact.get("kind").and_then(serde_json::Value::as_str) == Some("output"))
         .filter_map(|artifact| artifact.get("path").and_then(serde_json::Value::as_str))
-        .map(|path| path.strip_prefix(prefix.as_str()).unwrap_or(path).to_string())
+        .map(|path| relative_slash_path(outputs_root, Path::new(path)))
         .collect()
 }
 
@@ -630,7 +632,7 @@ fn grade_assertion(
     let options = session.options;
     match options.grader {
         GraderMode::Script => grade_with_script(assertion, eval_case, ctx, options),
-        GraderMode::Llm => grade_with_llm(assertion, &GradeTarget::default(), declarative, ctx, session),
+        GraderMode::Llm => grade_with_llm(assertion, &TargetDeclaration::Default, declarative, ctx, session),
         GraderMode::None | GraderMode::Auto => {
             if let Some(kind) = parse_mechanical_kind(assertion) {
                 let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
@@ -991,36 +993,39 @@ struct ScriptGraderResponse {
 
 fn grade_with_llm(
     assertion: &str,
-    target: &GradeTarget,
+    target: &TargetDeclaration,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
     session: &GradeSession,
 ) -> Result<AssertionGradeResult> {
-    if let Some(kind) = parse_mechanical_kind(assertion) {
-        let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
-        return Ok(AssertionGradeResult {
-            name: None,
-            assertion: assertion.to_string(),
-            passed,
-            evidence,
-            grader: GraderInfo {
-                kind: GraderKind::Mechanical,
-                model: None,
-                command: None,
-            },
-            rationale: None,
-            unsupported: None,
-            excluded: None,
-            ungraded: None,
-            votes: None,
-        });
+    if !target.is_explicit() {
+        if let Some(kind) = parse_mechanical_kind(assertion) {
+            let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
+            return Ok(AssertionGradeResult {
+                name: None,
+                assertion: assertion.to_string(),
+                passed,
+                evidence,
+                grader: GraderInfo {
+                    kind: GraderKind::Mechanical,
+                    model: None,
+                    command: None,
+                },
+                rationale: None,
+                unsupported: None,
+                excluded: None,
+                ungraded: None,
+                votes: None,
+            });
+        }
     }
 
     let endpoint = session.endpoint()?;
-    let request = JudgeRequest::new(
-        LLM_GRADER_SYSTEM_PROMPT,
-        llm_grader_payload(assertion, target, declarative, ctx)?,
-    );
+    let payload = llm_grader_payload(assertion, &target.resolve(), declarative, ctx)?;
+    let mut request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, payload.text);
+    if let Some(image) = payload.image {
+        request = request.with_image(image);
+    }
 
     let votes = session.options.grader_votes;
     let mut opinions = Vec::with_capacity(votes.count() as usize);
@@ -1125,17 +1130,84 @@ fn truncate(text: &str, cap: usize, direction: TruncateDirection) -> String {
         // A transcript's interesting part is usually its end (the final tool
         // calls and the answer the run converged on), not its start, so the
         // judge keeps the tail rather than the head.
-        TruncateDirection::Tail => {
-            let mut start = text.len() - cap;
-            while start < text.len() && !text.is_char_boundary(start) {
-                start += 1;
-            }
-            let shown = text.len() - start;
-            format!(
-                "[showing the last {shown} bytes; earlier content truncated]\n{}",
-                &text[start..]
-            )
+        TruncateDirection::Tail => truncate_transcript_tail(text, cap),
+    }
+}
+
+fn truncate_bytes_from_tail(text: &str, cap: usize) -> String {
+    let mut start = text.len().saturating_sub(cap);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let shown = text.len() - start;
+    format!(
+        "[showing the last {shown} bytes; earlier content truncated]\n{}",
+        &text[start..]
+    )
+}
+
+/// A flat byte cut lands wherever the budget runs out, which can fall inside
+/// the one message a criterion is about and gives no sign that anything was
+/// removed. A transcript is line-delimited NDJSON, one message per line, so
+/// the cut can instead fall between messages: this keeps whole messages from
+/// the end backward until the budget is spent, keeps the first message too
+/// when room remains, and names what sat between them rather than
+/// discarding it silently.
+fn truncate_transcript_tail(text: &str, cap: usize) -> String {
+    let messages: Vec<&str> = text.split('\n').filter(|line| !line.is_empty()).collect();
+    if messages.len() < 2 {
+        return truncate_bytes_from_tail(text, cap);
+    }
+
+    let mut used = 0usize;
+    let mut first_kept = messages.len();
+    for (index, message) in messages.iter().enumerate().rev() {
+        let added = message.len() + 1;
+        if used + added > cap {
+            break;
         }
+        used += added;
+        first_kept = index;
+    }
+
+    if first_kept == messages.len() {
+        return truncate_bytes_from_tail(messages[messages.len() - 1], cap);
+    }
+    if first_kept == 0 {
+        return messages.join("\n");
+    }
+
+    let tail = messages[first_kept..].join("\n");
+    let first = messages[0];
+    let remaining = cap.saturating_sub(used);
+
+    if first.len() < remaining {
+        let hidden = first_kept - 1;
+        if hidden == 0 {
+            format!("{first}\n{tail}")
+        } else {
+            format!("{first}\n[{hidden} message(s) omitted from the middle of the transcript]\n{tail}")
+        }
+    } else {
+        format!("[{first_kept} message(s) omitted from the start of the transcript]\n{tail}")
+    }
+}
+
+/// What a judge request needs beyond a system prompt: the text payload, and,
+/// when a target resolves to a picture, the attachment that carries it.
+///
+/// A bare `String` cannot also carry an optional image without either
+/// smuggling it into the text (which is exactly the shape mismatch a vision
+/// content part exists to avoid) or falling back to a tuple that leaves the
+/// pairing anonymous at every call site.
+struct JudgePayload {
+    text: String,
+    image: Option<judge::ImageAttachment>,
+}
+
+impl JudgePayload {
+    fn text_only(text: String) -> Self {
+        Self { text, image: None }
     }
 }
 
@@ -1144,36 +1216,103 @@ fn llm_grader_payload(
     target: &GradeTarget,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
-) -> Result<String> {
+) -> Result<JudgePayload> {
     match target {
-        GradeTarget::FinalText | GradeTarget::AnyOutput => legacy_structured_payload(assertion, declarative, ctx),
+        GradeTarget::FinalText => {
+            legacy_structured_payload(assertion, declarative, ctx, OutputScope::TopLevel).map(JudgePayload::text_only)
+        }
+        GradeTarget::AnyOutput => {
+            legacy_structured_payload(assertion, declarative, ctx, OutputScope::Nested).map(JudgePayload::text_only)
+        }
         GradeTarget::Transcript | GradeTarget::File(_) | GradeTarget::CreatedFiles => {
             single_target_payload(assertion, target, declarative, ctx)
         }
     }
 }
 
-/// The payload shape used before the judge could be aimed at anything but the
-/// final text plus the run's output files. Kept byte-for-byte for a suite that
-/// does not declare a `target`, and reused for `any_output` since that target
-/// already means the same "final text plus everything written" scope.
-fn legacy_structured_payload(assertion: &str, declarative: &DeclarativeContext, ctx: &RunContext) -> Result<String> {
+/// How far under `outputs/` a structured payload looks for files to hand the
+/// judge alongside the final text.
+///
+/// `final_text` (declared or defaulted) keeps the pre-target behavior of
+/// looking only at what sits directly in `outputs/`, unchanged so a suite
+/// written before targets existed still grades the same way. `any_output`
+/// means the same thing here that it means to the mechanical grader, which
+/// walks every file the run produced, nested directories included.
+enum OutputScope {
+    TopLevel,
+    Nested,
+}
+
+fn collect_output_files(outputs_dir: &Path, scope: OutputScope) -> Vec<(String, String)> {
     let mut output_files = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&ctx.outputs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == FINAL_MD {
-                continue;
-            }
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                output_files.push((name, text));
+    match scope {
+        OutputScope::TopLevel => {
+            if let Ok(entries) = std::fs::read_dir(outputs_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name == FINAL_MD {
+                        continue;
+                    }
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        output_files.push((name, text));
+                    }
+                }
             }
         }
+        OutputScope::Nested => collect_output_files_nested(outputs_dir, outputs_dir, &mut output_files),
     }
+    output_files
+}
+
+fn collect_output_files_nested(root: &Path, dir: &Path, output_files: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_output_files_nested(root, &path, output_files);
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let name = relative_slash_path(root, &path);
+        if name == FINAL_MD {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            output_files.push((name, text));
+        }
+    }
+}
+
+/// A path relative to `root`, rendered with `/` separators regardless of
+/// platform, so a nested output's key in the judge payload matches what an
+/// author would write in an assertion.
+fn relative_slash_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The payload shape used before the judge could be aimed at anything but the
+/// final text plus the run's output files. Kept byte-for-byte for a suite that
+/// does not declare a `target`.
+fn legacy_structured_payload(
+    assertion: &str,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    scope: OutputScope,
+) -> Result<String> {
+    let mut output_files = collect_output_files(&ctx.outputs_dir, scope);
     output_files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut budget = PayloadBudget::new(1 + output_files.len());
@@ -1218,7 +1357,7 @@ fn single_target_payload(
     target: &GradeTarget,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
-) -> Result<String> {
+) -> Result<JudgePayload> {
     let content = declarative.input(ctx).target_content(target);
     let direction = match target {
         GradeTarget::Transcript => TruncateDirection::Tail,
@@ -1229,6 +1368,7 @@ fn single_target_payload(
         "assertion": assertion,
         "target": target.to_string(),
     });
+    let mut image = None;
 
     match content {
         TargetContent::Text(text) => match PayloadBudget::new(1).place(&text, direction) {
@@ -1240,12 +1380,19 @@ fn single_target_payload(
                     serde_json::Value::String("1 artifact(s) omitted: judge payload budget exhausted".to_string());
             }
         },
+        TargetContent::Image { media_type, bytes } => {
+            payload["content"] = serde_json::Value::String("image attached separately".to_string());
+            image = Some(judge::ImageAttachment::new(media_type, &bytes));
+        }
         TargetContent::Missing(reason) => {
             payload["missing_reason"] = serde_json::Value::String(reason);
         }
     }
 
-    Ok(serde_json::to_string(&payload)?)
+    Ok(JudgePayload {
+        text: serde_json::to_string(&payload)?,
+        image,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -2584,6 +2731,25 @@ mod tests {
     }
 
     #[test]
+    fn created_files_from_artifacts_strips_a_mismatched_outputs_prefix() {
+        let mut run = run_record_with_artifacts(vec![serde_json::json!({
+            "kind": "output",
+            "path": "runs/run-001/workspace/outputs/report.md",
+            "size_bytes": 4,
+            "sha256": "abc",
+        })]);
+        run.paths.outputs = "runs/run-001/workspace/outputs/".to_string();
+
+        let created = created_files_from_artifacts(&run);
+
+        assert_eq!(
+            created,
+            vec!["report.md".to_string()],
+            "a path-aware strip must not be defeated by a trailing separator on the outputs root"
+        );
+    }
+
+    #[test]
     fn created_files_from_artifacts_strips_the_outputs_prefix_and_ignores_other_kinds() {
         let run = run_record_with_artifacts(vec![
             serde_json::json!({
@@ -2624,7 +2790,9 @@ mod tests {
         fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
         let declarative = declarative_context("the final answer", "irrelevant to this target");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         assert_eq!(
@@ -2644,7 +2812,9 @@ mod tests {
         fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
         let declarative = declarative_context("the final answer", "irrelevant to this target");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         assert_eq!(
@@ -2658,12 +2828,44 @@ mod tests {
     }
 
     #[test]
+    fn any_output_walks_nested_output_files_but_the_default_final_text_target_does_not() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("out.txt"), "top level").unwrap();
+        fs::create_dir_all(ctx.outputs_dir.join("sub")).unwrap();
+        fs::write(ctx.outputs_dir.join("sub").join("nested.txt"), "buried").unwrap();
+        let declarative = declarative_context("the final answer", "irrelevant to this target");
+
+        let any_output = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let any_output: serde_json::Value = serde_json::from_str(&any_output).unwrap();
+        assert_eq!(
+            any_output["outputs"],
+            serde_json::json!({"out.txt": "top level", "sub/nested.txt": "buried"}),
+            "any_output must see everything the mechanical grader's collect_text would see"
+        );
+
+        let final_text = llm_grader_payload("the assertion", &GradeTarget::FinalText, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let final_text: serde_json::Value = serde_json::from_str(&final_text).unwrap();
+        assert_eq!(
+            final_text["outputs"],
+            serde_json::json!({"out.txt": "top level"}),
+            "final_text keeps the pre-target, top-level-only scope"
+        );
+    }
+
+    #[test]
     fn transcript_target_names_itself_and_carries_the_transcript() {
         let tmp = tempdir().unwrap();
         let ctx = ctx_with_outputs(tmp.path());
         let declarative = declarative_context("the final answer", "the agent read the config then wrote it back");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         assert_eq!(
@@ -2684,7 +2886,9 @@ mod tests {
 
         let path: RelativeSkillPath = serde_json::from_value(serde_json::json!("missing.json")).unwrap();
         let target = GradeTarget::File(path);
-        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         assert_eq!(value["assertion"], "the assertion");
@@ -2694,13 +2898,41 @@ mod tests {
     }
 
     #[test]
+    fn a_file_target_pointing_at_a_picture_attaches_it_instead_of_failing_to_read_it_as_text() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(
+            ctx.outputs_dir.join("screenshot.png"),
+            [0x89, 0x50, 0x4E, 0x47, 1, 2, 3],
+        )
+        .unwrap();
+        let declarative = declarative_context("the final answer", "");
+
+        let path: RelativeSkillPath = serde_json::from_value(serde_json::json!("screenshot.png")).unwrap();
+        let target = GradeTarget::File(path);
+        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx).unwrap();
+
+        assert!(
+            payload.image.is_some(),
+            "a picture target must carry an image attachment for the judge to see"
+        );
+        let value: serde_json::Value = serde_json::from_str(&payload.text).unwrap();
+        assert!(
+            value.get("missing_reason").is_none(),
+            "an image target must not be reported as unreadable: {value}"
+        );
+    }
+
+    #[test]
     fn created_files_target_lists_what_the_run_produced() {
         let tmp = tempdir().unwrap();
         let mut ctx = ctx_with_outputs(tmp.path());
         ctx.created_files = vec!["report.md".to_string(), "sub/data.json".to_string()];
         let declarative = declarative_context("the final answer", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::CreatedFiles, &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::CreatedFiles, &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         assert_eq!(
@@ -2724,7 +2956,9 @@ mod tests {
         fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
         let declarative = declarative_context("c", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         let a = value["outputs"]["a.txt"].as_str().unwrap();
@@ -2756,7 +2990,9 @@ mod tests {
         fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
         let declarative = declarative_context("c", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         let a = value["outputs"]["a.txt"].as_str().unwrap();
@@ -2791,7 +3027,9 @@ mod tests {
         }
         let declarative = declarative_context("final", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
 
         let note = value["artifacts_omitted"]
@@ -2823,6 +3061,33 @@ mod tests {
     }
 
     #[test]
+    fn transcript_truncation_keeps_the_first_and_last_message_and_names_what_it_drops() {
+        let first = "FIRST_MESSAGE".to_string();
+        let middle = "MIDDLE_MESSAGE_".repeat(400);
+        let last = "LAST_MESSAGE".to_string();
+        let long_transcript = format!("{first}\n{middle}\n{last}");
+
+        let truncated = truncate(&long_transcript, 100, TruncateDirection::Tail);
+
+        assert!(
+            truncated.contains(&first),
+            "the first message must survive so the judge sees how the run began: {truncated}"
+        );
+        assert!(
+            truncated.contains(&last),
+            "the last message must survive so the judge sees how the run ended: {truncated}"
+        );
+        assert!(
+            !truncated.contains(&middle),
+            "the dropped middle message must not appear: {truncated}"
+        );
+        assert!(
+            truncated.contains("omitted"),
+            "the elision must be visible rather than silent: {truncated}"
+        );
+    }
+
+    #[test]
     fn an_oversized_transcript_reaches_the_judge_tail_truncated_via_the_full_payload() {
         let tmp = tempdir().unwrap();
         let ctx = ctx_with_outputs(tmp.path());
@@ -2830,7 +3095,9 @@ mod tests {
         let tail = "B".repeat(PayloadBudget::TOTAL_BYTES + 100);
         let declarative = declarative_context("final", &format!("{head}{tail}"));
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx)
+            .unwrap()
+            .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
         let content = value["content"].as_str().unwrap();
 
@@ -2899,6 +3166,46 @@ mod tests {
         };
 
         assert!(!suite_needs_a_judge(&options, &suite));
+    }
+
+    #[test]
+    fn an_explicit_target_suppresses_the_mechanical_shortcut_even_when_the_criterion_parses_as_mechanical() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let declarative = declarative_context("done", "the agent reported that report.md exists");
+        let options = GradeOptions::default();
+        let session = GradeSession {
+            options: &options,
+            judge: None,
+        };
+
+        let mechanical_sounding = "report.md exists";
+
+        let defaulted = grade_with_llm(
+            mechanical_sounding,
+            &TargetDeclaration::Default,
+            &declarative,
+            &ctx,
+            &session,
+        );
+        assert!(
+            defaulted.is_ok(),
+            "a defaulted target should still take the mechanical shortcut without a judge: {defaulted:?}"
+        );
+        assert_eq!(defaulted.unwrap().grader.kind, GraderKind::Mechanical);
+
+        let declared = grade_with_llm(
+            mechanical_sounding,
+            &TargetDeclaration::Named(GradeTarget::Transcript),
+            &declarative,
+            &ctx,
+            &session,
+        );
+        let err = declared.expect_err("an explicit target must reach the judge instead of the mechanical shortcut");
+        assert!(
+            err.to_string().contains("no LLM judge was resolved"),
+            "expected the judge lookup to fail, got: {err}"
+        );
     }
 
     #[test]
