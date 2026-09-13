@@ -936,8 +936,9 @@ mod tests {
     #[test]
     fn detects_always_pass_assertions() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 1, "completed"),
@@ -946,19 +947,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"stable pass","passed":true}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"stable pass","passed":true}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.always_pass.len(), 1);
         assert_eq!(summary.always_pass[0].eval_id, "case-a");
@@ -969,8 +970,9 @@ mod tests {
     #[test]
     fn detects_always_fail_assertions() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 2, "completed"),
@@ -979,19 +981,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"always broken","passed":false}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"always broken","passed":false}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.always_fail.len(), 1);
         assert_eq!(summary.always_fail[0].attempts_observed, 2);
@@ -1000,8 +1002,9 @@ mod tests {
     #[test]
     fn detects_helped_by_skill_assertions() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 1, "completed"),
@@ -1010,19 +1013,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"skill helps","passed":true}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"skill helps","passed":false}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.helped_by_skill.len(), 1);
         assert_eq!(summary.helped_by_skill[0].with_skill_pass_rate, 1.0);
@@ -1033,8 +1036,9 @@ mod tests {
     #[test]
     fn detects_flaky_assertions_across_attempts() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "with_skill", 2, "completed"),
@@ -1043,19 +1047,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"flaky check","passed":true}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"flaky check","passed":false}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.flaky_assertions.len(), 1);
         assert_eq!(summary.flaky_assertions[0].attempts, 2);
@@ -1066,8 +1070,9 @@ mod tests {
     #[test]
     fn outlier_detection_requires_at_least_four_samples() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "with_skill", 2, "completed"),
@@ -1078,7 +1083,7 @@ mod tests {
         );
         for (run_id, duration_ms, tokens) in [("run-001", 1000, 100), ("run-002", 1100, 110), ("run-003", 9000, 900)] {
             write_run_artifacts(
-                temp.path(),
+                &report_dir,
                 run_id,
                 None,
                 Some(&format!(
@@ -1087,12 +1092,12 @@ mod tests {
             );
         }
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
         assert!(summary.timing_outliers.is_empty());
         assert!(summary.token_outliers.is_empty());
 
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "with_skill", 2, "completed"),
@@ -1117,7 +1122,7 @@ mod tests {
             ("run-008", 50000, 50000),
         ] {
             write_run_artifacts(
-                temp.path(),
+                &report_dir,
                 run_id,
                 None,
                 Some(&format!(
@@ -1126,7 +1131,7 @@ mod tests {
             );
         }
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
         assert_eq!(summary.timing_outliers.len(), 1);
         assert_eq!(summary.timing_outliers[0].attempt, 8);
         assert_eq!(summary.timing_outliers[0].duration_ms, 50000);
@@ -1280,8 +1285,9 @@ mod tests {
     #[test]
     fn iteration_summary_json_matches_schema() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 1, "completed"),
@@ -1290,19 +1296,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"a","passed":true}]}"#),
             Some(r#"{ "duration_ms": 1000, "total_tokens": 100 }"#),
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"a","passed":false}]}"#),
             Some(r#"{ "duration_ms": 2000, "total_tokens": 200 }"#),
         );
 
-        let mut summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let mut summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
         summary.generated_at = "2026-05-26T12:00:00Z".to_string();
 
         let json = serde_json::to_value(&summary).unwrap();
