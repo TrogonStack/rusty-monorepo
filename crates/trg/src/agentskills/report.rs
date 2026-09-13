@@ -212,6 +212,30 @@ pub struct ReportDocument {
     pub comparisons: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iteration_summary: Option<super::benchmark::IterationSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget: Option<BudgetReport>,
+}
+
+/// What a pass spent against its ceiling.
+///
+/// Absent when the pass was given no runner at all, since nothing could have been spent
+/// and no ceiling could have bound it. Present whenever the pass was given one, including
+/// a pass every run of which was served from cache: that pass really did cost nothing, and
+/// a reader tracking spend wants to read the zero rather than watch the section come and
+/// go with the state of a cache. Present, with `ceiling_usd` absent, when a runner ran
+/// without `--max-cost-usd`: there was nothing to be admitted against, but a reader still
+/// wants to know what the pass cost.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BudgetReport {
+    /// Only ever a finite amount greater than zero, since a ceiling of zero or less could
+    /// admit nothing and would make the pass unrunnable rather than bounded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("exclusiveMinimum" = 0.0))]
+    pub ceiling_usd: Option<f64>,
+    #[schemars(range(min = 0.0))]
+    pub spent_usd: f64,
+    pub exhausted: bool,
+    pub runs_skipped: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -529,6 +553,7 @@ pub fn build_report_bundle(
         improvement_feedback: Vec::new(),
         comparisons: Vec::new(),
         iteration_summary: None,
+        budget: None,
     };
 
     Ok(ReportBundle {
@@ -1320,6 +1345,7 @@ mod tests {
                 improvement_feedback: Vec::new(),
                 comparisons: Vec::new(),
                 iteration_summary: None,
+                budget: None,
             },
             workspace_dirs: vec!["runs/run-001/workspace".to_string()],
         };
@@ -1345,6 +1371,10 @@ mod tests {
         assert_eq!(
             parsed.get("schema_version").and_then(|v| v.as_str()),
             Some(SCHEMA_VERSION)
+        );
+        assert!(
+            !parsed.contains_key("budget"),
+            "a report nothing ever priced must not claim a budget section"
         );
     }
 

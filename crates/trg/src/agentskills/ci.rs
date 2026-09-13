@@ -975,6 +975,7 @@ mod tests {
             comparisons: Vec::new(),
             improvement_feedback: Default::default(),
             iteration_summary: None,
+            budget: None,
         };
         let report_json = serde_json::to_string_pretty(&document).unwrap();
         fs::write(dir.join("report.json"), report_json).unwrap();

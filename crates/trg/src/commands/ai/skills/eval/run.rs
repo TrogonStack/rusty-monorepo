@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
 
+use crate::agentskills::budget::{Admission, CostCeiling, CostLedger, FAILURE_KIND_BUDGET};
 use crate::agentskills::cache::{
     apply_cache_hit, compute_fixture_hash, record_completion, runner_kind_label, try_resolve_cache, CacheKey,
     CacheKeyInput, CacheOptions, ReuseKeyInput, PROMPT_CONTRACT_VERSION,
@@ -15,8 +16,8 @@ use crate::agentskills::evals::{
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::report::{
-    build_report_bundle, write_report_bundle, BuildReportOptions, EnvironmentPolicy, ReportBundle, RunRecord,
-    ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
+    build_report_bundle, write_report_bundle, BudgetReport, BuildReportOptions, EnvironmentPolicy, ReportBundle,
+    RunRecord, ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
 };
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
@@ -144,6 +145,13 @@ pub struct RunArgs {
         help = "Execute this many runs at once, 1 to 8. Cuts wall clock, not cost: every run still pays for its own model calls, and the lanes share one account's rate limit"
     )]
     pub concurrency: RunConcurrency,
+
+    #[arg(
+        long,
+        value_name = "USD",
+        help = "Refuse to start further runs once the pass has spent this many US dollars. The ledger is checked before each run starts, so a pass can still overshoot by whatever the runs already in flight cost. Only the claude-code runner reports cost today, so this ceiling never binds a codex or cursor-agent pass"
+    )]
+    pub max_cost_usd: Option<CostCeiling>,
 
     #[arg(
         long,
@@ -379,12 +387,14 @@ impl RunArgs {
             }
         };
 
+        let mut budget_exhausted = false;
         if let Some(runner) = self.runner {
             let cache_options = CacheOptions {
                 enabled: !self.no_cache,
                 reuse_completed: self.reuse_completed,
             };
-            if let Err(code) = execute_runs(
+            let cost_ledger = CostLedger::new(self.max_cost_usd);
+            match execute_runs(
                 runner,
                 self.runner_model.as_deref(),
                 self.timeout_secs,
@@ -399,8 +409,10 @@ impl RunArgs {
                 self.environment,
                 ScaffoldPermission::granted(self.allow_scaffold),
                 self.concurrency,
+                &cost_ledger,
             ) {
-                return code;
+                Ok(runs_skipped) => budget_exhausted = runs_skipped > 0 || cost_ledger.overspent(),
+                Err(code) => return code,
             }
         }
 
@@ -416,21 +428,26 @@ impl RunArgs {
             let (code, grade_report) = grade_report_dir_with_report(&report_dir, grade_options, self.output_format);
             let last_stage = code != 0 || !self.benchmark;
             if last_stage {
+                let exit_code = exit_code_with_budget(code, budget_exhausted);
                 if self.output_format.is_json() {
-                    return print_json(&GradeJsonOutput::new(&report_dir, code, grade_report.as_ref()), code);
+                    return print_json(
+                        &GradeJsonOutput::new(&report_dir, exit_code, grade_report.as_ref()),
+                        exit_code,
+                    );
                 }
-                return code;
+                return exit_code;
             }
         }
 
         if self.benchmark {
             let (code, benchmark_doc) = benchmark_report_dir_with_document(&report_dir, BenchmarkOptions::default());
+            let exit_code = exit_code_with_budget(code, budget_exhausted);
             if self.output_format.is_json() {
                 if let Some(document) = benchmark_doc {
-                    return print_json(&BenchmarkJsonOutput::new(&report_dir, code, &document), code);
+                    return print_json(&BenchmarkJsonOutput::new(&report_dir, exit_code, &document), exit_code);
                 }
             }
-            return code;
+            return exit_code;
         }
 
         finish_eval_output(
@@ -439,7 +456,31 @@ impl RunArgs {
             self.ci.policy(),
             &self.ci.thresholds(),
             None,
+            budget_exhausted,
         )
+    }
+}
+
+/// Where a budget stop lands among the codes a stage already reports.
+///
+/// A stage that failed said so on its own terms, and the budget finding must not swallow
+/// that, so 1 still wins over 2. A stage that passed said nothing about spend, so a pass
+/// the ceiling cut short cannot report 0 either.
+///
+/// Reported when the pass got less than it asked for, or paid more than it allowed:
+/// either a run was refused, or spend went strictly past the ceiling, which a single
+/// run can do on its own because admission is checked rather than reserved. A pass that
+/// lands exactly on its ceiling having refused nothing is neither, and exits 0: it did
+/// all the work and paid what it said it would.
+const EXIT_BUDGET_EXHAUSTED: i32 = 2;
+
+pub(super) fn exit_code_with_budget(code: i32, budget_exhausted: bool) -> i32 {
+    if code != 0 {
+        code
+    } else if budget_exhausted {
+        EXIT_BUDGET_EXHAUSTED
+    } else {
+        0
     }
 }
 
@@ -478,7 +519,8 @@ fn execute_runs(
     environment: EnvironmentPolicy,
     scaffold_permission: ScaffoldPermission,
     concurrency: RunConcurrency,
-) -> std::result::Result<(), i32> {
+    cost_ledger: &CostLedger,
+) -> std::result::Result<usize, i32> {
     let skill_md = match std::fs::read_to_string(skill_path.join("SKILL.md")) {
         Ok(s) => s,
         Err(e) => {
@@ -536,10 +578,24 @@ fn execute_runs(
         skill_hash: bundle.document.suite.skill_hash.clone(),
         old_skill_hash: bundle.document.suite.old_skill_hash.clone(),
         evals_hash: bundle.document.suite.evals_hash.clone(),
+        cost_ledger,
     };
     execution.execute_all(&mut bundle.document.runs, concurrency);
 
     rebuild_summaries(&mut bundle);
+
+    let runs_skipped = bundle
+        .document
+        .runs
+        .iter()
+        .filter(|run| run.failure_kind.as_deref() == Some(FAILURE_KIND_BUDGET))
+        .count();
+    bundle.document.budget = Some(BudgetReport {
+        ceiling_usd: cost_ledger.ceiling().map(CostCeiling::usd),
+        spent_usd: cost_ledger.spent_usd(),
+        exhausted: cost_ledger.exhausted(),
+        runs_skipped,
+    });
 
     let report_json = match serde_json::to_string_pretty(&bundle.document) {
         Ok(s) => s,
@@ -553,7 +609,7 @@ fn execute_runs(
         return Err(1);
     }
 
-    Ok(())
+    Ok(runs_skipped)
 }
 
 /// When the skill directory is hashed to see whether a run rewrote it.
@@ -593,6 +649,7 @@ struct RunExecution<'a> {
     skill_hash: String,
     old_skill_hash: Option<String>,
     evals_hash: String,
+    cost_ledger: &'a CostLedger,
 }
 
 impl RunExecution<'_> {
@@ -808,6 +865,15 @@ impl RunExecution<'_> {
             }
         }
 
+        if let Admission::Exhausted { spent_usd, ceiling_usd } = self.cost_ledger.admit() {
+            run.status = "skipped".to_string();
+            run.failure_kind = Some(FAILURE_KIND_BUDGET.to_string());
+            run.warnings.push(format!(
+                "the pass has spent ${spent_usd:.2} against a ${ceiling_usd:.2} cost ceiling, so this run was not started"
+            ));
+            return;
+        }
+
         let request = EvalRunRequest {
             eval: case,
             scenario,
@@ -844,6 +910,7 @@ impl RunExecution<'_> {
             invocations += 1;
             match invoke_runner(self.runner, &request) {
                 Ok(outcome) => {
+                    self.cost_ledger.record(outcome.cost_usd);
                     if !outcome.is_transient_failure() || invocations >= max_attempts {
                         apply_outcome(
                             run,
@@ -964,6 +1031,8 @@ mod fake_runner {
         joined: Condvar,
         tamper_case: Mutex<Option<String>>,
         remove_case: Mutex<Option<String>>,
+        cost_usd: Mutex<Option<f64>>,
+        transient_failures: AtomicUsize,
     }
 
     #[derive(Default)]
@@ -999,6 +1068,8 @@ mod fake_runner {
         *state.lanes.lock().expect("fake lanes") = LaneCensus::default();
         *state.tamper_case.lock().expect("fake tamper") = None;
         *state.remove_case.lock().expect("fake remove") = None;
+        *state.cost_usd.lock().expect("fake cost") = None;
+        state.transient_failures.store(0, Ordering::SeqCst);
     }
 
     /// Have this case's run rewrite the skill directory it was handed, standing in for an
@@ -1011,6 +1082,18 @@ mod fake_runner {
     /// agent that removed the directory the pass is meant to answer for.
     pub fn remove_skill_on_case(case_id: &str) {
         *state().remove_case.lock().expect("fake remove") = Some(case_id.to_string());
+    }
+
+    /// Have every run from here on report this dollar cost, standing in for a runner that
+    /// prices what it did.
+    pub fn set_cost_usd(cost_usd: f64) {
+        *state().cost_usd.lock().expect("fake cost") = Some(cost_usd);
+    }
+
+    /// Have the next runs fail the way a flaky harness does, so a test can tell what a
+    /// retried run cost in total from what the attempt that finally stuck cost.
+    pub fn fail_transiently_times(times: usize) {
+        state().transient_failures.store(times, Ordering::SeqCst);
     }
 
     /// Hold every run until this many are in flight, so a test can tell lanes that
@@ -1083,6 +1166,26 @@ mod fake_runner {
 
         leave_lane(&state);
 
+        let cost_usd = *state.cost_usd.lock().expect("fake cost");
+
+        let transient = state
+            .transient_failures
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+            .is_ok();
+        if transient {
+            return EvalRunOutcome {
+                status: RunStatus::Failed,
+                failure_kind: Some(crate::agentskills::runner::FAILURE_KIND_RUNNER),
+                duration_ms: count as u64 * 100,
+                exit_code: Some(1),
+                total_tokens: Some(count as u64),
+                input_tokens: Some(count as u64),
+                output_tokens: Some(0),
+                cost_usd,
+                final_text: format!("transient-{count}"),
+            };
+        }
+
         EvalRunOutcome {
             status: RunStatus::Completed,
             failure_kind: None,
@@ -1091,7 +1194,7 @@ mod fake_runner {
             total_tokens: Some(count as u64),
             input_tokens: Some(count as u64),
             output_tokens: Some(0),
-            cost_usd: None,
+            cost_usd,
             final_text: format!("run-{count}"),
         }
     }
@@ -1377,6 +1480,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs {
                 strict_ci: false,
                 fail_on_runner_failure: false,
@@ -1515,6 +1619,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1558,6 +1663,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1617,6 +1723,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -1652,6 +1759,14 @@ mod tests {
     }
 
     fn run_with_fake_runner(args: RunArgs) -> PathBuf {
+        let (status, report_dir) = run_with_fake_runner_reporting_status(args);
+        assert_eq!(status, 0, "eval run failed");
+        report_dir
+    }
+
+    /// Same as `run_with_fake_runner`, without insisting the pass exited clean, so a test
+    /// can look at a report a budget or a CI gate stopped from being one.
+    fn run_with_fake_runner_reporting_status(args: RunArgs) -> (i32, PathBuf) {
         super::fake_runner::enable();
         let out_dir = args.out_dir.clone();
         let skill_name = std::fs::read_to_string(args.skill_dir.join("SKILL.md"))
@@ -1663,20 +1778,20 @@ mod tests {
             .to_string();
         let status = args.handle(&crate::fs::RealFS);
         super::fake_runner::disable();
-        assert_eq!(status, 0, "eval run failed");
 
         let report_dirs: Vec<_> = std::fs::read_dir(out_dir.join(skill_name))
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .collect();
-        report_dirs
+        let report_dir = report_dirs
             .into_iter()
             .max_by_key(|path| {
                 std::fs::metadata(path)
                     .and_then(|meta| meta.modified())
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
             })
-            .expect("report dir")
+            .expect("report dir");
+        (status, report_dir)
     }
 
     fn read_report(report_dir: &Path) -> serde_json::Value {
@@ -1725,6 +1840,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -1776,6 +1892,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -1827,6 +1944,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -1870,6 +1988,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -1915,6 +2034,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -1977,6 +2097,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }));
 
@@ -2138,6 +2259,7 @@ mod tests {
             environment: EnvironmentPolicy::Scrubbed,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
     }
@@ -2272,6 +2394,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2302,6 +2425,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2349,6 +2473,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2379,6 +2504,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2423,6 +2549,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -2497,6 +2624,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2565,6 +2693,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2605,6 +2734,49 @@ mod tests {
         )
         .unwrap();
         skill_dir
+    }
+
+    fn write_two_case_gradable_skill(root: &Path) -> PathBuf {
+        let skill_dir = root.join("gradable-pair");
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: gradable-pair\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "gradable-pair",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "create output",
+                        "expected_output": "done",
+                        "assertions": ["file \"out.json\" exists"]
+                    },
+                    {
+                        "id": "two",
+                        "prompt": "create output again",
+                        "expected_output": "done",
+                        "assertions": ["file \"out.json\" exists"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
+    fn count_grading_json(report_dir: &Path) -> usize {
+        let runs_dir = report_dir.join("runs");
+        let Ok(entries) = std::fs::read_dir(&runs_dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().join("grading.json").is_file())
+            .count()
     }
 
     fn find_grading_json(report_dir: &Path) -> Option<PathBuf> {
@@ -2656,6 +2828,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2698,6 +2871,7 @@ mod tests {
                 allow_scaffold: false,
                 cases: Vec::new(),
                 tags: Vec::new(),
+                max_cost_usd: None,
                 ci: EvalCiArgs::default(),
             }
             .handle(&crate::fs::RealFS);
@@ -2765,6 +2939,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -2812,6 +2987,7 @@ mod tests {
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
+            max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -2823,5 +2999,383 @@ mod tests {
                 .and_then(|v| v.as_u64()),
             Some(1)
         );
+    }
+
+    /// A pass told to spend nothing, or a ceiling that cannot be compared against spend,
+    /// is refused where every other malformed run argument is refused: at the command
+    /// line, before a report exists to explain it later.
+    #[test]
+    fn a_max_cost_that_cannot_bound_a_run_is_refused_at_the_command_line() {
+        use clap::Parser;
+
+        for value in ["0", "-5", "nan"] {
+            assert!(
+                crate::cli::Cli::try_parse_from([
+                    "trg",
+                    "ai",
+                    "skills",
+                    "eval",
+                    "run",
+                    "--skill-dir",
+                    "skill",
+                    "--out-dir",
+                    "out",
+                    "--max-cost-usd",
+                    value,
+                ])
+                .is_err(),
+                "'{value}' must not parse as a cost ceiling"
+            );
+        }
+    }
+
+    /// A pass that cannot afford everything it was asked to run must say so rather than
+    /// pretend it ran everything: the runs the ledger refuses are marked skipped for the
+    /// reason the ledger refused them, not dropped or reported as failed runs.
+    #[test]
+    fn a_pass_under_an_unaffordable_ceiling_skips_the_runs_it_cannot_afford() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(5.0);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            max_cost_usd: Some(CostCeiling::parse(5.0).unwrap()),
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        assert_eq!(status, 2, "a budget-exhausted pass has to say so in its exit code");
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(report["runs"][1]["status"], "skipped");
+        assert_eq!(report["runs"][1]["failure_kind"], "budget");
+        assert!(
+            report["runs"][1]["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning.as_str().unwrap_or_default().contains("cost ceiling")),
+            "the report has to say why the run did not start"
+        );
+
+        assert_eq!(report["budget"]["ceiling_usd"], 5.0);
+        assert_eq!(report["budget"]["spent_usd"], 5.0);
+        assert_eq!(report["budget"]["exhausted"], true);
+        assert_eq!(report["budget"]["runs_skipped"], 1);
+    }
+
+    /// Grading a run that never started reads the empty workspace as a wrong answer, and
+    /// every assertion fails. That turns a spending decision into a reported regression,
+    /// and the resulting exit 1 hides the exit 2 that would have told an operator to raise
+    /// the ceiling rather than go looking for a bug in the skill.
+    #[test]
+    fn a_run_the_ceiling_refused_is_not_graded_as_a_failure() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(5.0);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_gradable_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            grade: true,
+            max_cost_usd: Some(CostCeiling::parse(5.0).unwrap()),
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][1]["status"], "skipped");
+        assert_eq!(report["runs"][1]["failure_kind"], "budget");
+        assert_eq!(
+            count_grading_json(&report_dir),
+            1,
+            "only the run that produced a workspace has anything to grade"
+        );
+        assert_eq!(
+            status, 2,
+            "the pass reports that it ran out of money, not that the skill got something wrong"
+        );
+    }
+
+    /// Spend reaching the ceiling is not the same as spend passing it. A pass whose last
+    /// run lands exactly on the ceiling refused nothing and paid no more than it said it
+    /// would, so it has nothing to report that an operator did not already agree to. A
+    /// gate that cries wolf on the boundary is a gate a team learns to ignore.
+    #[test]
+    fn a_pass_that_lands_exactly_on_its_ceiling_without_losing_a_run_still_exits_clean() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(5.0);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            max_cost_usd: Some(CostCeiling::parse(10.0).unwrap()),
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        assert_eq!(status, 0, "a pass that did every run inside its ceiling has not failed");
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(report["runs"][1]["status"], "completed");
+        assert_eq!(report["budget"]["spent_usd"], 10.0);
+        assert_eq!(report["budget"]["ceiling_usd"], 10.0);
+        assert_eq!(
+            report["budget"]["runs_skipped"], 0,
+            "nothing was refused, so nothing may be reported as skipped"
+        );
+        assert_eq!(
+            report["budget"]["exhausted"], true,
+            "the ledger would admit nothing further, and the report still says so"
+        );
+    }
+
+    /// A pass that prints its result reports the same code it exits with. A reader
+    /// parsing the JSON and a shell reading `$?` are asking the same question, and a
+    /// budget stop the JSON does not mention is a green result in every dashboard
+    /// built on it.
+    #[test]
+    fn the_exit_code_in_the_json_carries_the_budget_stop_the_process_exits_with() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (status, report_dir) = run_with_fake_runner_reporting_status(base_run_args(&skill_dir, &out_dir));
+        assert_eq!(
+            status, 0,
+            "the pass itself is clean, so only the budget can move the code"
+        );
+
+        let ci = EvalCiArgs::default();
+        let stopped = super::super::eval_output(&report_dir, ci.policy(), &ci.thresholds(), None, true)
+            .expect("the report is readable");
+        assert_eq!(
+            stopped.exit_code, 2,
+            "a pass the ceiling cut short reports the budget code in the document it prints"
+        );
+
+        let ran_fully = super::super::eval_output(&report_dir, ci.policy(), &ci.thresholds(), None, false)
+            .expect("the report is readable");
+        assert_eq!(
+            ran_fully.exit_code, 0,
+            "and reports nothing when the ceiling took nothing"
+        );
+    }
+
+    /// A run the ceiling refused cost money it never spent, once. Retries are invisible in
+    /// the report, which keeps only the attempt that stuck, so a ledger fed from the report
+    /// prices a flaky pass at a fraction of what it actually billed and lets a ceiling
+    /// be walked straight through.
+    #[test]
+    fn the_ledger_counts_the_attempts_that_were_thrown_away() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(1.0);
+        super::fake_runner::fail_transiently_times(2);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (_status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            retries: 2,
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(
+            report["runs"][0]["runner_invocations"], 3,
+            "the first case was invoked three times before one stuck"
+        );
+        assert_eq!(report["runs"][1]["runner_invocations"], 1);
+        assert_eq!(
+            report["budget"]["spent_usd"], 4.0,
+            "every invocation was billed, not only the two the report kept"
+        );
+    }
+
+    /// A ceiling is checked before a run starts, not before one is served. A cache hit
+    /// costs nothing, so a case the pass already paid for in an earlier report has to be
+    /// readable from a later report even after that later report has spent its way past
+    /// the ceiling on the cases the cache could not answer for.
+    #[test]
+    fn a_cached_run_is_still_served_after_the_ceiling_is_reached() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = temp.path().join("mixed-skill");
+        std::fs::create_dir_all(skill_dir.join("evals/one/fixtures")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("evals/two")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: mixed-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "mixed-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "first prompt",
+                        "expected_output": "first output",
+                        "assertions": ["checks first"]
+                    },
+                    {
+                        "id": "two",
+                        "prompt": "second prompt",
+                        "expected_output": "second output",
+                        "assertions": ["checks second"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("evals/one/fixtures/input.txt"), "fixture-v1").unwrap();
+        let out_dir = temp.path().join("artifacts");
+
+        let base = || RunArgs {
+            skill_dir: skill_dir.clone(),
+            out_dir: out_dir.clone(),
+            model_config: "ci-default".to_string(),
+            scenario: vec![ScenarioKind::WithSkill],
+            runner: Some(Runner::Codex),
+            runner_model: None,
+            timeout_secs: None,
+            retries: 0,
+            attempts: AttemptCount::single(),
+            concurrency: RunConcurrency::serial(),
+            force: true,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: false,
+            reuse_completed: false,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            allow_scaffold: false,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            max_cost_usd: None,
+            ci: EvalCiArgs::default(),
+        };
+
+        // The first pass prices nothing and populates the cache for both cases.
+        run_with_fake_runner(base());
+
+        // The second pass changes the fixture case "one" reads, so only "one" has to
+        // execute again. It executes at a price the ceiling cannot cover a second run
+        // of, while "two" is unchanged and must still come from the cache pass one paid
+        // for.
+        std::fs::write(skill_dir.join("evals/one/fixtures/input.txt"), "fixture-v2").unwrap();
+        super::fake_runner::set_cost_usd(5.0);
+        let (status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            max_cost_usd: Some(CostCeiling::parse(1.0).unwrap()),
+            ..base()
+        });
+        assert_eq!(status, 2, "the second pass has to report the ceiling it hit");
+
+        let report = read_report(&report_dir);
+        assert!(
+            report["runs"][0]["cache"].is_null(),
+            "the fixture change has to force case one to execute again"
+        );
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(
+            report["runs"][1]["cache"]["source_run_id"], "run-002",
+            "case two is unchanged, so it is still served from the pass that already paid for it"
+        );
+        assert_eq!(report["runs"][1]["status"], "completed");
+        assert_eq!(
+            report["budget"]["runs_skipped"], 0,
+            "a cache hit is not a run the ledger had to refuse"
+        );
+    }
+
+    /// A pass told no ceiling has nothing to check a run against, so every case runs
+    /// whatever it costs. The ledger still counts what ran, since a number worth reporting
+    /// is not the same thing as a number worth enforcing.
+    #[test]
+    fn a_pass_with_no_ceiling_runs_every_case_even_when_each_one_costs_money() {
+        super::fake_runner::reset();
+        super::fake_runner::set_cost_usd(50.0);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            max_cost_usd: None,
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(report["runs"][1]["status"], "completed");
+        assert_eq!(report["budget"]["ceiling_usd"], serde_json::Value::Null);
+        assert_eq!(report["budget"]["spent_usd"], 100.0);
+        assert_eq!(report["budget"]["exhausted"], false);
+        assert_eq!(report["budget"]["runs_skipped"], 0);
+    }
+
+    /// A runner that never says what a run cost has not run it for free: the ledger must
+    /// not treat a missing price as a zero one, or a runner that forgot to price itself
+    /// would silently exempt every run it made from the ceiling meant to bound it.
+    #[test]
+    fn a_runner_that_reports_no_cost_does_not_silently_count_as_free() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            max_cost_usd: Some(CostCeiling::parse(1.0).unwrap()),
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(
+            report["runs"][1]["status"], "completed",
+            "an uncosted run must not be mistaken for one the ledger had to refuse"
+        );
+        assert_eq!(report["budget"]["spent_usd"], 0.0);
+        assert_eq!(report["budget"]["exhausted"], false);
+        assert_eq!(report["budget"]["runs_skipped"], 0);
+    }
+
+    /// The ledger is shared across every lane a pass spawns, so what it reports after a
+    /// concurrent pass must equal the sum of what each lane actually spent, whether the
+    /// lanes' writes land at the same instant or not.
+    #[test]
+    fn a_ledger_shared_across_lanes_records_the_sum_of_every_run_it_admitted() {
+        super::fake_runner::reset();
+        super::fake_runner::expect_lanes(2);
+        super::fake_runner::set_cost_usd(3.0);
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            concurrency: RunConcurrency::parse(2).unwrap(),
+            max_cost_usd: Some(CostCeiling::parse(100.0).unwrap()),
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        assert_eq!(
+            super::fake_runner::peak_lanes(),
+            2,
+            "both runs have to be in flight at once for this to test the shared ledger"
+        );
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(report["runs"][1]["status"], "completed");
+        assert_eq!(
+            report["budget"]["spent_usd"], 6.0,
+            "two lanes each recording $3 must add to $6, not lose a write to the other"
+        );
+        assert_eq!(report["budget"]["runs_skipped"], 0);
     }
 }

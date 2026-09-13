@@ -42,7 +42,7 @@ pub struct EvalArgs {
 #[derive(Subcommand)]
 pub enum EvalCommands {
     /// Run skill evals and write an artifact bundle
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Grade a completed eval report bundle
     Grade(GradeArgs),
     /// Verify a generated eval bundle
@@ -77,34 +77,52 @@ impl EvalArgs {
     }
 }
 
-pub(crate) fn finish_eval_output(
+/// What the pass decided, before anything is said about it.
+///
+/// Kept apart from the printing so the code the process exits with and the code the
+/// JSON reports are one value rather than two that agree by habit.
+pub(crate) fn eval_output(
     report_dir: &Path,
-    format: OutputFormat,
     policy: crate::agentskills::ci::CiPolicy,
     thresholds: &crate::agentskills::ci::ThresholdConfig,
     workspace: Option<WorkspaceCheckReport>,
-) -> i32 {
+    budget_exhausted: bool,
+) -> Result<EvalCommandJsonOutput, i32> {
     let metrics = match collect_report_metrics(report_dir) {
         Ok(metrics) => metrics,
         Err(error) => {
             eprintln!("Failed to collect report metrics: {error}");
-            return 1;
+            return Err(1);
         }
     };
 
     let failed_assertions = collect_failed_assertions(report_dir).unwrap_or_default();
     let missing_grading = collect_missing_grading_workspaces(report_dir).unwrap_or_default();
     let check = run_ci_checks(&metrics, policy, thresholds, &failed_assertions, &missing_grading);
-    emit_github_annotations(&check.violations);
 
-    let exit_code = if check.passed { 0 } else { 1 };
+    Ok(EvalCommandJsonOutput {
+        report_dir: report_dir.display().to_string(),
+        exit_code: run::exit_code_with_budget(if check.passed { 0 } else { 1 }, budget_exhausted),
+        check,
+        workspace,
+    })
+}
+
+pub(crate) fn finish_eval_output(
+    report_dir: &Path,
+    format: OutputFormat,
+    policy: crate::agentskills::ci::CiPolicy,
+    thresholds: &crate::agentskills::ci::ThresholdConfig,
+    workspace: Option<WorkspaceCheckReport>,
+    budget_exhausted: bool,
+) -> i32 {
+    let output = match eval_output(report_dir, policy, thresholds, workspace, budget_exhausted) {
+        Ok(output) => output,
+        Err(code) => return code,
+    };
+    emit_github_annotations(&output.check.violations);
+
     if format.is_json() {
-        let output = EvalCommandJsonOutput {
-            report_dir: report_dir.display().to_string(),
-            exit_code,
-            check,
-            workspace,
-        };
         match serde_json::to_string_pretty(&output) {
             Ok(json) => println!("{json}"),
             Err(error) => {
@@ -114,10 +132,10 @@ pub(crate) fn finish_eval_output(
         }
     } else {
         print_report_dir(report_dir);
-        print_human_summary(&check);
+        print_human_summary(&output.check);
     }
 
-    exit_code
+    output.exit_code
 }
 
 #[cfg(test)]
