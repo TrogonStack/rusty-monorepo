@@ -975,6 +975,7 @@ impl RunExecution<'_> {
 
         for _ in 0..max_attempts {
             invocations += 1;
+            discard_mock_calls_from_earlier_attempts(&run_dir, &run.id);
             match invoke_runner(self.runner, &request) {
                 Ok(outcome) => {
                     self.cost_ledger.record(outcome.cost_usd);
@@ -1100,6 +1101,7 @@ mod fake_runner {
         remove_case: Mutex<Option<String>>,
         cost_usd: Mutex<Option<f64>>,
         transient_failures: AtomicUsize,
+        log_mock_calls: AtomicBool,
     }
 
     #[derive(Default)]
@@ -1137,6 +1139,7 @@ mod fake_runner {
         *state.remove_case.lock().expect("fake remove") = None;
         *state.cost_usd.lock().expect("fake cost") = None;
         state.transient_failures.store(0, Ordering::SeqCst);
+        state.log_mock_calls.store(false, Ordering::SeqCst);
     }
 
     /// Have this case's run rewrite the skill directory it was handed, standing in for an
@@ -1161,6 +1164,12 @@ mod fake_runner {
     /// retried run cost in total from what the attempt that finally stuck cost.
     pub fn fail_transiently_times(times: usize) {
         state().transient_failures.store(times, Ordering::SeqCst);
+    }
+
+    /// Record one mock call per invocation, in breach of what the case expected on the
+    /// attempts that are about to be discarded and within it on the one that sticks.
+    pub fn log_mock_calls() {
+        state().log_mock_calls.store(true, Ordering::SeqCst);
     }
 
     /// Hold every run until this many are in flight, so a test can tell lanes that
@@ -1239,6 +1248,28 @@ mod fake_runner {
             .transient_failures
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
             .is_ok();
+        if state.log_mock_calls.load(Ordering::SeqCst) {
+            use std::io::Write;
+            let run_dir = request.transcript_path.parent().expect("run dir");
+            let violations = match transient {
+                true => {
+                    r#"[{"server":"issues","tool":"create_issue","path":"repo","constraint":"equals acme/repo","received":"acme/other"}]"#
+                }
+                false => "[]",
+            };
+            let path = run_dir.join(crate::agentskills::mocks::MOCK_CALLS_LOG_NAME);
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .expect("mock call log");
+            writeln!(
+                file,
+                r#"{{"server":"issues","tool":"create_issue","input":{{"repo":"acme/repo"}},"violations":{violations}}}"#
+            )
+            .expect("mock call log");
+        }
+
         if transient {
             return EvalRunOutcome {
                 status: RunStatus::Failed,
@@ -1414,6 +1445,22 @@ fn apply_outcome(
 /// A malformed or unreadable log line is skipped rather than failing the run: the log is
 /// a diagnostic aid, and losing one entry from it should never be the reason a run that
 /// otherwise completed gets reported as failed.
+/// A retried attempt is thrown away whole, so what it asked of the mocks must not be
+/// answered for by the attempt that stuck.
+///
+/// The log is appended to for the life of a run, so left in place the calls of an
+/// attempt nobody kept are read back as violations of the run that was kept, and a
+/// clean invocation fails for a call it never made.
+fn discard_mock_calls_from_earlier_attempts(run_dir: &Path, run_id: &str) {
+    let path = run_dir.join(MOCK_CALLS_LOG_NAME);
+    if !path.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(&path) {
+        eprintln!("Run {run_id}: failed to clear the mock call log between attempts: {e}");
+    }
+}
+
 fn read_mock_violations(mock_calls_path: &Path) -> Vec<crate::agentskills::mocks::MockViolation> {
     let Ok(contents) = std::fs::read_to_string(mock_calls_path) else {
         return Vec::new();
@@ -3486,6 +3533,40 @@ mod tests {
     /// the report, which keeps only the attempt that stuck, so a ledger fed from the report
     /// prices a flaky pass at a fraction of what it actually billed and lets a ceiling
     /// be walked straight through.
+    /// A transient attempt is discarded whole, and what it asked of the mocks has to go
+    /// with it. The call log is appended to for the life of a run, so an attempt nobody
+    /// kept otherwise leaves its breaches behind for the attempt that stuck to answer
+    /// for, and a run that did everything asked of it fails for a call it never made.
+    #[test]
+    fn a_run_is_not_graded_on_the_mock_calls_of_the_attempts_that_were_discarded() {
+        super::fake_runner::reset();
+        super::fake_runner::fail_transiently_times(2);
+        super::fake_runner::log_mock_calls();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let (_status, report_dir) = run_with_fake_runner_reporting_status(RunArgs {
+            retries: 2,
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(
+            report["runs"][0]["runner_invocations"], 3,
+            "two attempts were discarded before one stuck"
+        );
+
+        let breaches = report["runs"][0]["mock_violations"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0);
+        assert_eq!(
+            breaches, 0,
+            "the surviving attempt called the mocks exactly as the case expected, so the run is clean"
+        );
+    }
+
     #[test]
     fn the_ledger_counts_the_attempts_that_were_thrown_away() {
         super::fake_runner::reset();
