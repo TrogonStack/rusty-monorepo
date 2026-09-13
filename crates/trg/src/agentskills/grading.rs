@@ -87,6 +87,12 @@ pub struct AssertionGradeResult {
     /// work and not the premise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded: Option<String>,
+    /// No grader could answer this assertion at all: the text matched no mechanical
+    /// pattern and no judge was consulted. Distinct from `unsupported`, which means a
+    /// grader existed and the harness could not answer it, and from `excluded`, which
+    /// means the author scoped it to the other arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ungraded: Option<String>,
     /// How a panel of judges split, present only when more than one opinion was taken.
     /// A single opinion has no split to report, and `passed` already carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -102,8 +108,12 @@ impl AssertionGradeResult {
         self.excluded.is_some()
     }
 
+    pub fn is_ungraded(&self) -> bool {
+        self.ungraded.is_some()
+    }
+
     pub fn is_scored(&self) -> bool {
-        !self.is_unsupported() && !self.is_excluded()
+        !self.is_unsupported() && !self.is_excluded() && !self.is_ungraded()
     }
 }
 
@@ -116,6 +126,9 @@ pub struct GradingSummary {
     pub unsupported: usize,
     #[serde(default)]
     pub excluded: usize,
+    /// No grader could even attempt these, so they carry no signal either way.
+    #[serde(default)]
+    pub ungraded: usize,
     /// Over the scored assertions only, so an ungradable property cannot drag a
     /// skill's score down on a runner that simply cannot be observed. `null` when
     /// nothing was scored at all, because no assertion answered is not the same
@@ -132,6 +145,7 @@ pub struct GradingCounts {
     pub failed: usize,
     pub unsupported: usize,
     pub excluded: usize,
+    pub ungraded: usize,
     pub total: usize,
 }
 
@@ -142,19 +156,24 @@ impl GradingCounts {
             .iter()
             .filter(|r| !r.is_excluded() && r.is_unsupported())
             .count();
+        let ungraded = results
+            .iter()
+            .filter(|r| !r.is_excluded() && !r.is_unsupported() && r.is_ungraded())
+            .count();
         let passed = results.iter().filter(|r| r.is_scored() && r.passed).count();
         let total = results.len();
         Self {
             passed,
-            failed: total - passed - unsupported - excluded,
+            failed: total - passed - unsupported - excluded - ungraded,
             unsupported,
             excluded,
+            ungraded,
             total,
         }
     }
 
     pub fn scored(self) -> usize {
-        self.total - self.unsupported - self.excluded
+        self.total - self.unsupported - self.excluded - self.ungraded
     }
 
     pub fn pass_rate(self) -> Option<f64> {
@@ -172,6 +191,7 @@ impl GradingCounts {
             total: self.total,
             unsupported: self.unsupported,
             excluded: self.excluded,
+            ungraded: self.ungraded,
             pass_rate: self.pass_rate(),
         }
     }
@@ -214,11 +234,16 @@ pub struct GradeReport {
     pub assertions_graded: usize,
     pub passed: usize,
     pub failed: usize,
-    pub needs_llm: usize,
+    /// Every assertion no grader could even attempt, mechanical or judge. Sourced
+    /// from the same tally as `unsupported` and `excluded` rather than a separate
+    /// count, so this can never disagree with what the grading files themselves say.
+    pub ungraded: usize,
     #[serde(default)]
     pub unsupported: usize,
     #[serde(default)]
     pub excluded: usize,
+    #[serde(default)]
+    pub ungraded_assertions: Vec<String>,
     #[serde(default)]
     pub run_statuses: GradedRunStatuses,
 }
@@ -278,6 +303,7 @@ struct RunContext {
     workspace_dir: PathBuf,
     outputs_dir: PathBuf,
     transcript_path: PathBuf,
+    skill_dir: PathBuf,
 }
 
 /// The grading options plus the judge they resolve to, resolved once per
@@ -349,17 +375,46 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
 
 #[derive(Debug, Clone)]
 pub(crate) enum MechanicalKind {
-    FileExists { path: String },
-    FileCount { count: usize, dir: Option<String> },
-    ValidJson { path: Option<String> },
-    ValidCsv { path: Option<String> },
-    ValidMarkdownHeadings { path: Option<String> },
-    ImageExists { path: String },
-    ImageDimensions { path: String, width: u32, height: u32 },
-    ContainsString { needle: String, path: Option<String> },
-    MatchesRegex { pattern: String, path: Option<String> },
-    RowCount { count: usize, path: Option<String> },
-    SchemaValidation { schema: String, path: Option<String> },
+    FileExists {
+        path: String,
+    },
+    FileCount {
+        count: usize,
+        dir: Option<String>,
+    },
+    ValidJson {
+        path: Option<String>,
+    },
+    ValidCsv {
+        path: Option<String>,
+    },
+    ValidMarkdownHeadings {
+        path: Option<String>,
+    },
+    ImageExists {
+        path: String,
+    },
+    ImageDimensions {
+        path: String,
+        width: u32,
+        height: u32,
+    },
+    ContainsString {
+        needle: String,
+        path: Option<String>,
+    },
+    MatchesRegex {
+        pattern: String,
+        path: Option<String>,
+    },
+    RowCount {
+        count: usize,
+        path: Option<String>,
+    },
+    SchemaValidation {
+        schema: Option<String>,
+        path: Option<String>,
+    },
 }
 
 pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport> {
@@ -391,9 +446,10 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         assertions_graded: 0,
         passed: 0,
         failed: 0,
-        needs_llm: 0,
+        ungraded: 0,
         unsupported: 0,
         excluded: 0,
+        ungraded_assertions: Vec::new(),
         run_statuses: GradedRunStatuses::default(),
     };
 
@@ -417,7 +473,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             continue;
         }
 
-        let ctx = run_context(report_dir, run);
+        let ctx = run_context(report_dir, run, &skill_path);
         let mut assertion_results = Vec::with_capacity(case.assertions.len() + case.graders.len());
 
         let declarative = DeclarativeContext::load(&ctx);
@@ -431,17 +487,19 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
 
         restore_when_nothing_would_be_scored(&mut assertion_results);
 
-        for result in &assertion_results {
-            if result.grader.kind == GraderKind::NeedsLlm {
-                report.needs_llm += 1;
-            }
-            report.assertions_graded += 1;
-        }
+        report.assertions_graded += assertion_results.len();
+        report.ungraded_assertions.extend(
+            assertion_results
+                .iter()
+                .filter(|r| r.is_ungraded())
+                .map(|r| r.assertion.clone()),
+        );
         let counts = GradingCounts::tally(&assertion_results);
         report.passed += counts.passed;
         report.failed += counts.failed;
         report.unsupported += counts.unsupported;
         report.excluded += counts.excluded;
+        report.ungraded += counts.ungraded;
 
         let grading = build_grading_file(assertion_results)?;
         validate_grading_document(&grading, options.strict)?;
@@ -461,7 +519,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     Ok(report)
 }
 
-fn run_context(report_dir: &Path, run: &RunRecord) -> RunContext {
+fn run_context(report_dir: &Path, run: &RunRecord, skill_path: &Path) -> RunContext {
     let workspace_dir = report_dir.join(&run.paths.workspace);
     let run_dir = workspace_dir
         .parent()
@@ -479,6 +537,7 @@ fn run_context(report_dir: &Path, run: &RunRecord) -> RunContext {
         workspace_dir,
         outputs_dir,
         transcript_path,
+        skill_dir: skill_path.to_path_buf(),
     }
 }
 
@@ -519,6 +578,7 @@ fn grade_assertion(
                     rationale: None,
                     unsupported: None,
                     excluded: None,
+                    ungraded: None,
                     votes: None,
                 })
             } else if options.grader == GraderMode::None {
@@ -560,6 +620,7 @@ impl DeclarativeContext {
             outputs_dir: &ctx.outputs_dir,
             raw_transcript: &self.raw_transcript,
             transcript: self.transcript.as_ref(),
+            skill_dir: &ctx.skill_dir,
         }
     }
 }
@@ -594,6 +655,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            ungraded: None,
             votes: None,
         },
         GraderOutcome::Failed { evidence } => AssertionGradeResult {
@@ -605,6 +667,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            ungraded: None,
             votes: None,
         },
         GraderOutcome::Unsupported { reason } => AssertionGradeResult {
@@ -616,6 +679,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: Some(reason),
             excluded,
+            ungraded: None,
             votes: None,
         },
         GraderOutcome::Deferred { criterion } => {
@@ -628,12 +692,14 @@ fn grade_declaratively(
             result.name = name;
             result
         }
+        GraderOutcome::AuthoringError { reason } => {
+            return Err(EvalError::Validation(
+                ValidationError::for_field(assertion, reason).into(),
+            ));
+        }
     })
 }
 
-/// A case whose every check is arm-scoped would otherwise measure nothing at
-/// all, which is never what the author meant by writing it, so the exclusions
-/// are lifted and the case is scored as declared.
 /// Whether the cost ceiling stopped this run before it started.
 ///
 /// Such a run has no workspace and no transcript, so there is nothing for a grader
@@ -644,9 +710,21 @@ fn stopped_by_cost_ceiling(run: &RunRecord) -> bool {
     run.failure_kind.as_deref() == Some(crate::agentskills::budget::FAILURE_KIND_BUDGET)
 }
 
+/// A case whose every check is arm-scoped would otherwise measure nothing at
+/// all, which is never what the author meant by writing it, so the exclusions
+/// are lifted and the case is scored as declared. But lifting them only helps
+/// when doing so would actually produce something scorable; a case that is
+/// entirely ungraded, or whose only observable checks are also unsupported,
+/// gains nothing from the lift and must not have it applied.
 fn restore_when_nothing_would_be_scored(results: &mut [AssertionGradeResult]) {
     let scored = results.iter().filter(|result| result.is_scored()).count();
-    if scored > 0 || !results.iter().any(AssertionGradeResult::is_excluded) {
+    if scored > 0 {
+        return;
+    }
+    let lifting_would_score = results
+        .iter()
+        .any(|result| result.is_excluded() && !result.is_unsupported() && !result.is_ungraded());
+    if !lifting_would_score {
         return;
     }
     for result in results.iter_mut() {
@@ -668,6 +746,7 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
         rationale: None,
         unsupported: None,
         excluded: None,
+        ungraded: Some(evidence.to_string()),
         votes: None,
     }
 }
@@ -740,6 +819,7 @@ fn grade_with_script(
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes: None,
         });
     }
@@ -767,6 +847,7 @@ fn grade_with_script(
         rationale: parsed.rationale,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: None,
     })
 }
@@ -795,6 +876,7 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes: None,
         });
     }
@@ -829,6 +911,7 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
         rationale: verdict.opinion.rationale,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
     })
 }
@@ -990,10 +1073,9 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
 
     if lower.contains("schema validation") || lower.contains("validates against schema ") {
         let schema = extract_after(&lower, "validates against schema ")
-            .or_else(|| extract_after(&lower, "schema validation for "))
-            .unwrap_or("default")
-            .trim()
-            .to_string();
+            .map(|rest| rest.split(" for ").next().unwrap_or(rest).trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let path = extract_after(&lower, " for ").map(str::to_string);
         return Some(MechanicalKind::SchemaValidation { schema, path });
     }
@@ -1031,7 +1113,9 @@ fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool,
                 .as_ref()
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| ctx.outputs_dir.clone());
-            validate_json_file(&target)
+            Ok(graders::check_json_validity(&graders::TargetContent::from_path(
+                &target,
+            )))
         }
         MechanicalKind::ValidCsv { path } => {
             let target = path
@@ -1120,25 +1204,18 @@ fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool,
             Ok((rows == *count, format!("{} has {rows} data row(s)", target.display())))
         }
         MechanicalKind::SchemaValidation { schema, path } => {
+            let schema_name = schema.as_ref().ok_or_else(|| {
+                EvalError::Validation(
+                    ValidationError::for_field("schema validation", "does not name a schema to validate against")
+                        .into(),
+                )
+            })?;
             let target = path
                 .as_ref()
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| ctx.outputs_dir.join("output.json"));
-            let valid = target.is_file()
-                && serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&target).unwrap_or_default())
-                    .is_ok();
-            Ok((
-                valid,
-                format!(
-                    "schema '{schema}' validation on {}: {}",
-                    target.display(),
-                    if valid {
-                        "valid JSON document"
-                    } else {
-                        "invalid or missing"
-                    }
-                ),
-            ))
+            let content = graders::TargetContent::from_path(&target);
+            graders::check_schema_validation(&ctx.skill_dir.join(schema_name), &content)
         }
     }
 }
@@ -1174,17 +1251,6 @@ fn count_files(dir: &Path) -> Result<usize> {
         }
     }
     Ok(count)
-}
-
-fn validate_json_file(path: &Path) -> Result<(bool, String)> {
-    if !path.is_file() {
-        return Ok((false, format!("JSON file not found at {}", path.display())));
-    }
-    let content = std::fs::read_to_string(path)?;
-    match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(_) => Ok((true, format!("{} is valid JSON", path.display()))),
-        Err(e) => Ok((false, format!("{} is invalid JSON: {e}", path.display()))),
-    }
 }
 
 fn validate_csv_file(path: &Path) -> Result<(bool, String)> {
@@ -1422,6 +1488,15 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
             ),
         ));
     }
+    if grading.summary.ungraded != counts.ungraded {
+        errors.push(ValidationError::for_field(
+            "summary.ungraded",
+            format!(
+                "{} does not match {} ungraded results",
+                grading.summary.ungraded, counts.ungraded
+            ),
+        ));
+    }
     if grading.summary.total != grading.assertion_results.len() {
         errors.push(ValidationError::for_field(
             "summary.total",
@@ -1528,6 +1603,9 @@ fn update_report_after_grading(
             });
             if let Some(reason) = &result.unsupported {
                 flattened["unsupported"] = serde_json::Value::String(reason.clone());
+            }
+            if let Some(reason) = &result.ungraded {
+                flattened["ungraded"] = serde_json::Value::String(reason.clone());
             }
             document.assertion_results.push(flattened);
         }
@@ -1906,6 +1984,7 @@ mod tests {
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes: None,
         };
 
@@ -2032,6 +2111,7 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                ungraded: None,
                 votes: None,
             },
             AssertionGradeResult {
@@ -2047,6 +2127,7 @@ mod tests {
                 rationale: None,
                 unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
                 excluded: None,
+                ungraded: None,
                 votes: None,
             },
         ]);
@@ -2074,6 +2155,7 @@ mod tests {
             rationale: None,
             unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
             excluded: None,
+            ungraded: None,
             votes: None,
         }]);
 
@@ -2130,7 +2212,7 @@ mod tests {
         assert_eq!(report.excluded, 0);
         assert_eq!(report.passed, 1);
         assert_eq!(report.failed, 0);
-        assert_eq!(report.needs_llm, 0);
+        assert_eq!(report.ungraded, 0);
         assert_eq!(report.run_statuses.skipped, 1);
         assert_eq!(report.run_statuses.completed, 0);
         assert_eq!(
@@ -2176,6 +2258,7 @@ mod tests {
             workspace_dir: workspace,
             outputs_dir: outputs,
             transcript_path: run_dir.join("transcript.jsonl"),
+            skill_dir: dir.join("skill"),
         }
     }
 
@@ -2309,6 +2392,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_schema_validation_separates_the_schema_name_from_the_target_clause() {
+        let kind = parse_mechanical_kind("output.json validates against schema report for outputs/output.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "report" && path == "outputs/output.json"
+        ));
+    }
+
+    #[test]
+    fn parse_schema_validation_for_a_path_alone_names_no_schema() {
+        let kind = parse_mechanical_kind("schema validation for outputs/output.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation { schema: None, .. })
+        ));
+    }
+
+    #[test]
+    fn mechanical_schema_validation_is_an_authoring_error_when_no_schema_is_named() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
+
+        let kind = MechanicalKind::SchemaValidation {
+            schema: None,
+            path: Some("output.json".to_string()),
+        };
+        let err = evaluate_mechanical(&kind, &ctx).unwrap_err();
+        assert!(err.to_string().contains("does not name a schema"), "{err}");
+    }
+
+    #[test]
+    fn mechanical_schema_validation_resolves_the_schema_against_the_skill_directory() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::create_dir_all(&ctx.skill_dir).unwrap();
+        fs::write(
+            ctx.skill_dir.join("report.schema.json"),
+            r#"{"type": "object", "required": ["ok"]}"#,
+        )
+        .unwrap();
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
+
+        let kind = MechanicalKind::SchemaValidation {
+            schema: Some("report.schema.json".to_string()),
+            path: Some("output.json".to_string()),
+        };
+        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
+        assert!(passed);
+
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"nope": true}"#).unwrap();
+        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
+        assert!(!passed);
+    }
+
+    #[test]
     fn mechanical_valid_csv() {
         let tmp = tempdir().unwrap();
         let ctx = ctx_with_outputs(tmp.path());
@@ -2426,6 +2568,7 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                ungraded: None,
                 votes: None,
             }],
             summary: GradingSummary {
@@ -2434,6 +2577,7 @@ mod tests {
                 total: 1,
                 unsupported: 0,
                 excluded: 0,
+                ungraded: 0,
                 pass_rate: Some(1.0),
             },
         };
@@ -2496,6 +2640,7 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes,
         }
     }
