@@ -1,4 +1,5 @@
 pub mod availability;
+pub mod capabilities;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor_agent;
