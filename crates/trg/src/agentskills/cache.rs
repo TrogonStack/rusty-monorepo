@@ -617,6 +617,7 @@ mod tests {
             },
             cache: None,
             skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
         };
 
@@ -742,6 +743,7 @@ mod tests {
             },
             cache: None,
             skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
         };
 

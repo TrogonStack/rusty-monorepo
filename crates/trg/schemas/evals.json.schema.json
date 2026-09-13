@@ -228,7 +228,7 @@
         "files": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/RelativeSkillPath"
+            "$ref": "#/$defs/EvalFixture"
           },
           "type": "array"
         },
@@ -320,6 +320,35 @@
         {
           "minimum": 0,
           "type": "integer"
+        }
+      ]
+    },
+    "EvalFixture": {
+      "description": "A `files` entry on an `EvalCase`.\n\nThe wire form stays a bare string for the common, writable case: a suite authored\nbefore read-only fixtures existed must keep parsing, and must keep round-tripping\nas a string rather than being rewritten into the object form the first time the\nsuite is saved back out. Only a fixture that opts into `read_only` pays for the\nobject form.",
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "writable",
+                "read_only"
+              ],
+              "type": "string"
+            },
+            "path": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
         }
       ]
     },

@@ -280,6 +280,7 @@ mod tests {
                 final_text: String::new(),
                 exit_code: None,
                 failure_kind: None,
+                read_only_fixture_violations: Vec::new(),
             },
         )
         .unwrap();

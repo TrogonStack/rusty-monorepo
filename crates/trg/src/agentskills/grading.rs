@@ -429,6 +429,13 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             assertion_results.push(grade_assertion(assertion.as_str(), case, &ctx, &session)?);
         }
 
+        // A read-only fixture that was modified during the run is a failure of the run
+        // itself, not a property left for an assertion or grader to notice, so it is added
+        // here rather than left to whichever declared checks the case happens to have.
+        for path in &run.read_only_fixture_violations {
+            assertion_results.push(read_only_fixture_violation_result(path));
+        }
+
         restore_when_nothing_would_be_scored(&mut assertion_results);
 
         for result in &assertion_results {
@@ -651,6 +658,24 @@ fn restore_when_nothing_would_be_scored(results: &mut [AssertionGradeResult]) {
     }
     for result in results.iter_mut() {
         result.excluded = None;
+    }
+}
+
+fn read_only_fixture_violation_result(path: &str) -> AssertionGradeResult {
+    AssertionGradeResult {
+        name: None,
+        assertion: format!("read-only fixture '{path}' is unchanged"),
+        passed: false,
+        evidence: format!("fixture '{path}' did not match its source after the run"),
+        grader: GraderInfo {
+            kind: GraderKind::Mechanical,
+            model: None,
+            command: None,
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        votes: None,
     }
 }
 
@@ -2532,5 +2557,96 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         }))
         .unwrap();
         assert!(parsed.votes.is_none());
+    }
+
+    const READ_ONLY_FIXTURE_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "contains", "text": "all done"}
+                ]
+            }
+        ]
+    }"#;
+
+    fn single_run_report_dir(temp: &tempfile::TempDir) -> PathBuf {
+        let skill_dir = temp.path().join("demo-skill");
+        fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        let skill_md = "---\nname: demo-skill\ndescription: d\n---\n";
+        fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), READ_ONLY_FIXTURE_SUITE).unwrap();
+
+        let mem = MemFS::new();
+        let mem_skill = Path::new("demo-skill");
+        mem.insert(mem_skill.join("SKILL.md"), skill_md);
+        mem.insert(mem_skill.join("evals/evals.json"), READ_ONLY_FIXTURE_SUITE);
+
+        let bundle = build_report_bundle(
+            &mem,
+            mem_skill,
+            &skill_dir,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                report_id: Some("report-read-only".to_string()),
+                generated_at: Some("2026-05-26T12:00:00Z".to_string()),
+                runner: Some("codex".to_string()),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        let report_dir = write_report_bundle(&temp.path().join("out"), &bundle, WriteReportOptions::default()).unwrap();
+        let workspace = report_dir.join(&bundle.document.runs[0].paths.workspace);
+        let run_dir = workspace.parent().unwrap().to_path_buf();
+        fs::write(workspace.join("outputs").join(FINAL_MD), "all done\n").unwrap();
+        let transcript_path = run_dir.join("transcript.jsonl");
+        fs::write(&transcript_path, "{\"type\":\"turn.completed\"}\n").unwrap();
+        write_normalized_transcript(&transcript_path, &NormalizedTranscript::unavailable("codex")).unwrap();
+
+        report_dir
+    }
+
+    /// The run-level outcome field is what the grading layer turns into a failed case: this
+    /// proves that path end to end, including that the case cannot pass on the strength of
+    /// its own grader once a read-only fixture it was handed came back changed.
+    #[test]
+    fn a_read_only_fixture_violation_fails_the_case_even_when_its_own_grader_passes() {
+        let temp = tempdir().unwrap();
+        let report_dir = single_run_report_dir(&temp);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: ReportDocument = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document.runs[0].read_only_fixture_violations = vec!["evals/files/input.csv".to_string()];
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.passed, 1, "the case's own grader still passes");
+        assert_eq!(
+            report.failed, 1,
+            "a mutated read-only fixture fails the case regardless of what its own checks found"
+        );
+
+        let (_, grading) = &grading_files_by_scenario(&report_dir)[0];
+        let violation = grading
+            .assertion_results
+            .iter()
+            .find(|result| result.evidence.contains("evals/files/input.csv"))
+            .expect("the operator sees the fixture path, not just a count");
+        assert!(!violation.passed);
     }
 }
