@@ -19,9 +19,10 @@ use crate::agentskills::report::{
     build_report_bundle, write_report_bundle, BudgetReport, BuildReportOptions, EnvironmentPolicy, PermissionGrant,
     ReportBundle, RunRecord, ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
 };
+use crate::agentskills::runner::capabilities::{ControlSupport, HarnessControl};
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
-    SkillDigest,
+    SkillDigest, FAILURE_KIND_UNSUPPORTED,
 };
 use crate::agentskills::sampling::AttemptCount;
 use crate::agentskills::scenario_selection::ScenarioSelection;
@@ -897,6 +898,21 @@ impl RunExecution<'_> {
             return;
         }
 
+        if case.conversation_history.is_some()
+            && !matches!(
+                self.runner.support(HarnessControl::ConversationSeeding),
+                ControlSupport::Driven(_)
+            )
+        {
+            run.status = "skipped".to_string();
+            run.failure_kind = Some(FAILURE_KIND_UNSUPPORTED.to_string());
+            run.warnings.push(format!(
+                "this case asks to seed a conversation history, but {}, so this run was not started",
+                self.runner.unsupported_reason(HarnessControl::ConversationSeeding)
+            ));
+            return;
+        }
+
         let request = EvalRunRequest {
             eval: case,
             scenario,
@@ -1133,6 +1149,10 @@ mod fake_runner {
 
     pub fn last_timeout_secs() -> Option<u64> {
         *state().last_timeout_secs.lock().expect("fake timeout")
+    }
+
+    pub fn invocations() -> usize {
+        state().invocations.load(Ordering::SeqCst)
     }
 
     pub fn enabled() -> bool {
@@ -2497,6 +2517,40 @@ mod tests {
         skill_dir
     }
 
+    fn write_conversation_seeding_skill(root: &Path) -> PathBuf {
+        let skill_dir = root.join("resuming-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: resuming-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "resuming-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "first prompt",
+                        "expected_output": "first output",
+                        "assertions": ["checks first"]
+                    },
+                    {
+                        "id": "resumes",
+                        "prompt": "second prompt",
+                        "expected_output": "second output",
+                        "assertions": ["checks second"],
+                        "conversation_history": "history/prior-turn.json"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
     #[test]
     fn reuse_completed_serves_the_same_arm_produced_under_another_model_config() {
         super::fake_runner::reset();
@@ -3213,6 +3267,44 @@ mod tests {
         assert_eq!(report["budget"]["spent"]["usd"], 5.0);
         assert_eq!(report["budget"]["exhausted"], true);
         assert_eq!(report["budget"]["runs_skipped"], 1);
+    }
+
+    /// A case that names a conversation history is asking a harness to resume a
+    /// transcript it did not itself produce. No installed harness offers that, so the
+    /// run must be skipped before the runner is ever started, not silently answered as
+    /// a fresh conversation that never saw the history the case authored.
+    #[test]
+    fn a_case_seeding_a_conversation_history_is_skipped_before_the_runner_starts() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_conversation_seeding_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report_dir = run_with_fake_runner(RunArgs {
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][0]["status"], "completed");
+
+        assert_eq!(report["runs"][1]["status"], "skipped");
+        assert_eq!(report["runs"][1]["failure_kind"], "unsupported");
+        assert_eq!(
+            super::fake_runner::invocations(),
+            1,
+            "the only invocation must be the case with no conversation history to seed"
+        );
+        assert!(
+            report["runs"][1]["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("seed a conversation history")),
+            "the report has to say why the run did not start"
+        );
     }
 
     /// `--permission` defaults to the narrowest grant, matching every other harness flag

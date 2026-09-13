@@ -16,18 +16,20 @@ pub enum HarnessControl {
     McpServers,
     SandboxLevels,
     ConversationResume,
+    ConversationSeeding,
     RunScopedConfigHome,
     CostReporting,
 }
 
 impl HarnessControl {
-    pub const ALL: [HarnessControl; 8] = [
+    pub const ALL: [HarnessControl; 9] = [
         Self::ToolAllowlist,
         Self::TurnCap,
         Self::SystemPromptAppend,
         Self::McpServers,
         Self::SandboxLevels,
         Self::ConversationResume,
+        Self::ConversationSeeding,
         Self::RunScopedConfigHome,
         Self::CostReporting,
     ];
@@ -40,6 +42,7 @@ impl HarnessControl {
             Self::McpServers => "mcp servers",
             Self::SandboxLevels => "sandbox levels",
             Self::ConversationResume => "conversation resume",
+            Self::ConversationSeeding => "conversation seeding",
             Self::RunScopedConfigHome => "run-scoped config home",
             Self::CostReporting => "cost reporting",
         }
@@ -118,6 +121,11 @@ impl Runner {
             (Self::ClaudeCode, HarnessControl::McpServers) => ControlSupport::Offered(Flag("--mcp-config")),
             (Self::ClaudeCode, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("--permission-mode")),
             (Self::ClaudeCode, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--resume")),
+            // `--input-format stream-json` looked like a candidate, but every "user" event
+            // it is given re-runs as a live model turn and any scripted "assistant" event
+            // is discarded, so it cannot adopt a case-authored transcript as history that
+            // already happened. Nothing in claude's `--help` output does that.
+            (Self::ClaudeCode, HarnessControl::ConversationSeeding) => ControlSupport::Absent,
             (Self::ClaudeCode, HarnessControl::RunScopedConfigHome) => {
                 ControlSupport::Driven(EnvVar("CLAUDE_CONFIG_DIR"))
             }
@@ -129,6 +137,9 @@ impl Runner {
             (Self::Codex, HarnessControl::McpServers) => ControlSupport::Absent,
             (Self::Codex, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("-s")),
             (Self::Codex, HarnessControl::ConversationResume) => ControlSupport::Offered(Subcommand("resume")),
+            // `codex exec resume` only replays a session codex itself recorded; there is no
+            // flag or subcommand that ingests an arbitrary transcript.
+            (Self::Codex, HarnessControl::ConversationSeeding) => ControlSupport::Absent,
             (Self::Codex, HarnessControl::RunScopedConfigHome) => ControlSupport::Driven(EnvVar("CODEX_HOME")),
             (Self::Codex, HarnessControl::CostReporting) => ControlSupport::Absent,
 
@@ -141,6 +152,9 @@ impl Runner {
             // this one flag rather than onto two distinct levels.
             (Self::CursorAgent, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("--force")),
             (Self::CursorAgent, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--resume")),
+            // `--resume`/`--continue` only reopen a chat cursor-agent itself recorded; there
+            // is no flag that ingests an arbitrary transcript.
+            (Self::CursorAgent, HarnessControl::ConversationSeeding) => ControlSupport::Absent,
             (Self::CursorAgent, HarnessControl::RunScopedConfigHome) => ControlSupport::Absent,
             (Self::CursorAgent, HarnessControl::CostReporting) => ControlSupport::Absent,
         }
@@ -165,7 +179,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 24);
+        assert_eq!(count, 27);
 
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::ToolAllowlist),
@@ -190,6 +204,10 @@ mod tests {
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::ConversationResume),
             ControlSupport::Offered(ControlMechanism::Flag("--resume"))
+        );
+        assert_eq!(
+            Runner::ClaudeCode.support(HarnessControl::ConversationSeeding),
+            ControlSupport::Absent
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::RunScopedConfigHome),
@@ -220,6 +238,10 @@ mod tests {
         assert_eq!(
             Runner::Codex.support(HarnessControl::ConversationResume),
             ControlSupport::Offered(ControlMechanism::Subcommand("resume"))
+        );
+        assert_eq!(
+            Runner::Codex.support(HarnessControl::ConversationSeeding),
+            ControlSupport::Absent
         );
         assert_eq!(
             Runner::Codex.support(HarnessControl::RunScopedConfigHome),
@@ -253,6 +275,10 @@ mod tests {
         assert_eq!(
             Runner::CursorAgent.support(HarnessControl::ConversationResume),
             ControlSupport::Offered(ControlMechanism::Flag("--resume"))
+        );
+        assert_eq!(
+            Runner::CursorAgent.support(HarnessControl::ConversationSeeding),
+            ControlSupport::Absent
         );
         assert_eq!(
             Runner::CursorAgent.support(HarnessControl::RunScopedConfigHome),

@@ -147,6 +147,10 @@ impl RunStatus {
 
 pub const FAILURE_KIND_RUNNER: &str = "runner";
 
+/// The failure kind recorded on a run skipped because the case asked for a control the
+/// chosen runner does not offer.
+pub const FAILURE_KIND_UNSUPPORTED: &str = "unsupported";
+
 #[derive(Debug, Clone)]
 pub struct EvalRunOutcome {
     pub status: RunStatus,
