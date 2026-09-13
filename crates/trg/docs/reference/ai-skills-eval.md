@@ -786,6 +786,7 @@ other field forward as declared there, including `name`, `excluded`,
 | `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner) |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
 | `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
+| `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
 
 Run ordering: eval cases in manifest order, then scenarios in flag order.
 

@@ -558,6 +558,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         report.unsupported += counts.unsupported;
         report.excluded += counts.excluded;
         report.ungraded += counts.ungraded;
+        run_mut.case_score = counts.pass_rate();
 
         let grading = build_grading_file(assertion_results)?;
         validate_grading_document(&grading, options.strict)?;
@@ -2450,7 +2451,26 @@ mod tests {
         ]
     }"#;
 
+    const ALL_UNSUPPORTED_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "skill_used", "arm": "both"}
+                ]
+            }
+        ]
+    }"#;
+
     fn unobservable_report_dir(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        unobservable_report_dir_with_suite(temp, UNOBSERVABLE_SUITE)
+    }
+
+    fn unobservable_report_dir_with_suite(temp: &tempfile::TempDir, suite_json: &str) -> (PathBuf, PathBuf) {
         let skill_dir = temp.path().join("demo-skill");
         fs::create_dir_all(skill_dir.join("evals")).unwrap();
         fs::write(
@@ -2458,7 +2478,7 @@ mod tests {
             "---\nname: demo-skill\ndescription: d\n---\n",
         )
         .unwrap();
-        fs::write(skill_dir.join("evals/evals.json"), UNOBSERVABLE_SUITE).unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), suite_json).unwrap();
 
         let mem = MemFS::new();
         let mem_skill = Path::new("demo-skill");
@@ -2669,6 +2689,72 @@ mod tests {
             assert_eq!(grading.summary.excluded, 0);
             assert!(grading.summary.pass_rate.is_some());
         }
+    }
+
+    #[test]
+    fn a_case_scored_only_by_unsupported_checks_has_no_case_score() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _run_dir) = unobservable_report_dir_with_suite(&temp, ALL_UNSUPPORTED_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let run = &document.runs[0];
+        assert_eq!(
+            run.case_score, None,
+            "a case scored on nothing must not read as a score of zero"
+        );
+    }
+
+    #[test]
+    fn a_case_scored_and_failing_every_check_reports_a_score_of_zero_not_no_score() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, TRIGGERING_ONLY_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        for run in &document.runs {
+            let workspace = report_dir.join(&run.paths.workspace);
+            let run_dir = workspace.parent().unwrap();
+            let grading: GradingFile =
+                serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+            let expected = GradingCounts::tally(&grading.assertion_results).pass_rate();
+            assert_eq!(run.case_score, expected, "{:?}", run.scenario_id);
+        }
+
+        let with_skill = document
+            .runs
+            .iter()
+            .find(|r| r.scenario_id == ScenarioKind::WithSkill)
+            .unwrap();
+        let without_skill = document
+            .runs
+            .iter()
+            .find(|r| r.scenario_id == ScenarioKind::WithoutSkill)
+            .unwrap();
+        assert_eq!(with_skill.case_score, Some(1.0));
+        assert_eq!(
+            without_skill.case_score,
+            Some(0.0),
+            "a case that scored and failed everything is a zero, not a missing score"
+        );
     }
 
     const NAMED_GRADER_SUITE: &str = r#"{
@@ -3086,6 +3172,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
+            case_score: None,
         }
     }
 
