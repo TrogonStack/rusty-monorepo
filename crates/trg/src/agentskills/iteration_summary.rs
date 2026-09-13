@@ -205,7 +205,7 @@ pub fn build_iteration_summary_document(
         report.report.iteration,
         options.previous_report_dir.as_deref(),
     )
-    .map(|(previous_dir, previous_report)| {
+    .and_then(|(previous_dir, previous_report)| {
         build_cross_iteration_section(&previous_dir, previous_report, &current, options.failed_runs)
     });
 
@@ -385,6 +385,11 @@ struct AnalysisResult {
     flaky_assertions: Vec<FlakyAssertionRecord>,
     timing_outliers: Vec<TimingOutlierRecord>,
     token_outliers: Vec<TokenOutlierRecord>,
+    /// Set when a completed run's grading artifact could not be loaded, whether because it
+    /// was never written or because it vanished before this read. Distinguishes "we could
+    /// not see this iteration's scoring" from "this iteration scored nothing", since only
+    /// the former should keep a caller from comparing against it.
+    grading_unavailable: bool,
 }
 
 fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRunsMode) -> AnalysisResult {
@@ -393,6 +398,7 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
     let mut flaky_groups: BTreeMap<(String, ScenarioKind, String), BTreeMap<u32, bool>> = BTreeMap::new();
     let mut duration_by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>> = HashMap::new();
     let mut tokens_by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>> = HashMap::new();
+    let mut grading_unavailable = false;
 
     for run in &report.runs {
         if !matches!(classify_run(run, mode), RunDisposition::Completed) {
@@ -401,35 +407,38 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
 
         let sample = load_run_sample(report_dir, &run.paths.workspace);
 
-        if let Some(grading) = &sample.grading {
-            for result in &grading.assertion_results {
-                let assertion_text = normalize_assertion_key(&result.assertion);
-                if assertion_text.is_empty() || !result.is_scored() {
-                    continue;
-                }
+        match &sample.grading {
+            Some(grading) => {
+                for result in &grading.assertion_results {
+                    let assertion_text = normalize_assertion_key(&result.assertion);
+                    if assertion_text.is_empty() || !result.is_scored() {
+                        continue;
+                    }
 
-                let key = AssertionObservationKey::new(&run.eval_case_id, &assertion_text);
-                let entry = assertion_outcomes.entry(key.clone()).or_insert((0, 0));
-                if result.passed {
-                    entry.0 += 1;
-                } else {
-                    entry.1 += 1;
-                }
+                    let key = AssertionObservationKey::new(&run.eval_case_id, &assertion_text);
+                    let entry = assertion_outcomes.entry(key.clone()).or_insert((0, 0));
+                    if result.passed {
+                        entry.0 += 1;
+                    } else {
+                        entry.1 += 1;
+                    }
 
-                let scenario_entry = scenario_assertion_rates
-                    .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text.clone()))
-                    .or_insert((0, 0));
-                if result.passed {
-                    scenario_entry.0 += 1;
-                } else {
-                    scenario_entry.1 += 1;
-                }
+                    let scenario_entry = scenario_assertion_rates
+                        .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text.clone()))
+                        .or_insert((0, 0));
+                    if result.passed {
+                        scenario_entry.0 += 1;
+                    } else {
+                        scenario_entry.1 += 1;
+                    }
 
-                flaky_groups
-                    .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text))
-                    .or_default()
-                    .insert(run.attempt, result.passed);
+                    flaky_groups
+                        .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text))
+                        .or_default()
+                        .insert(run.attempt, result.passed);
+                }
             }
+            None => grading_unavailable = true,
         }
 
         if let Some(timing) = &sample.timing {
@@ -531,6 +540,7 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
         flaky_assertions,
         timing_outliers: detect_timing_outliers(duration_by_scenario),
         token_outliers: detect_token_outliers(tokens_by_scenario),
+        grading_unavailable,
     }
 }
 
@@ -645,22 +655,28 @@ fn build_cross_iteration_section(
     previous_report: ReportForSummary,
     current: &AnalysisResult,
     mode: FailedRunsMode,
-) -> CrossIterationSection {
+) -> Option<CrossIterationSection> {
     let previous = analyze_report(previous_dir, &previous_report, mode);
+
+    // A previous iteration whose grading artifacts could not be read is not the same
+    // thing as one that scored nothing: only the former must not be compared against.
+    if previous.grading_unavailable {
+        return None;
+    }
 
     let current_pass = stability_key_set(&current.always_pass);
     let previous_pass = stability_key_set(&previous.always_pass);
     let current_fail = stability_key_set(&current.always_fail);
     let previous_fail = stability_key_set(&previous.always_fail);
 
-    CrossIterationSection {
+    Some(CrossIterationSection {
         previous_report_id: previous_report.report.id,
         previous_iteration: previous_report.report.iteration,
         newly_always_pass: diff_records(&current.always_pass, &previous_pass),
         no_longer_always_pass: diff_records(&previous.always_pass, &current_pass),
         newly_always_fail: diff_records(&current.always_fail, &previous_fail),
         no_longer_always_fail: diff_records(&previous.always_fail, &current_fail),
-    }
+    })
 }
 
 fn stability_key_set(records: &[AssertionStabilityRecord]) -> HashSet<AssertionKey> {
@@ -1192,6 +1208,104 @@ mod tests {
             summary.always_pass[0].cross_iteration_delta,
             Some(CrossIterationDelta::New)
         );
+    }
+
+    #[test]
+    fn cross_iteration_omitted_when_previous_grading_vanishes_after_detection() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous = skill_root.join("report-iter-1");
+        let current = skill_root.join("report-iter-2");
+
+        write_report(
+            &previous,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            1,
+            "report-iter-1",
+        );
+        write_run_artifacts(
+            &previous,
+            "run-001",
+            Some(r#"{"assertion_results":[{"assertion":"now stable","passed":false}]}"#),
+            None,
+        );
+
+        write_report(
+            &current,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            2,
+            "report-iter-2",
+        );
+        write_run_artifacts(
+            &current,
+            "run-001",
+            Some(r#"{"assertion_results":[{"assertion":"now stable","passed":true}]}"#),
+            None,
+        );
+
+        // Detection reads report.json while the previous iteration's directory still
+        // exists, exactly as `resolve_previous_report_for_summary` does.
+        let previous_report = load_report(&previous).unwrap();
+
+        // The previous iteration's directory is removed after detection but before the
+        // grading artifacts underneath it are read for analysis.
+        fs::remove_dir_all(&previous).unwrap();
+
+        let current_report = load_report(&current).unwrap();
+        let current_analysis = analyze_report(&current, &current_report, FailedRunsMode::default());
+
+        let cross_iteration =
+            build_cross_iteration_section(&previous, previous_report, &current_analysis, FailedRunsMode::default());
+
+        assert!(
+            cross_iteration.is_none(),
+            "a previous iteration whose grading could not be read must not be compared against"
+        );
+    }
+
+    #[test]
+    fn cross_iteration_present_when_previous_iteration_scored_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous = skill_root.join("report-iter-1");
+        let current = skill_root.join("report-iter-2");
+
+        write_report(
+            &previous,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            1,
+            "report-iter-1",
+        );
+        // The grading artifact is present and reads fine; it simply scored nothing.
+        write_run_artifacts(&previous, "run-001", Some(r#"{"assertion_results":[]}"#), None);
+
+        write_report(
+            &current,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            2,
+            "report-iter-2",
+        );
+        write_run_artifacts(
+            &current,
+            "run-001",
+            Some(r#"{"assertion_results":[{"assertion":"now stable","passed":true}]}"#),
+            None,
+        );
+
+        let summary = build_iteration_summary_document(
+            &current,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous),
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+
+        let cross = summary
+            .cross_iteration
+            .as_ref()
+            .expect("a readable but empty previous iteration must still be compared against");
+        assert_eq!(cross.newly_always_pass.len(), 1);
     }
 
     #[test]
