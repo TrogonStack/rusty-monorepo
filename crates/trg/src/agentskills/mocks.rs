@@ -464,7 +464,7 @@ fn merge_mock_dir(dir: &Path, set: &mut MockSet) -> Result<(), MocksError> {
             }
             let tool_name = tool_entry.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
             let tool = ToolName::from(tool_name);
-            let declaration = parse_mock_file(&tool_entry, dir)?;
+            let declaration = parse_mock_file(&tool_entry)?;
             set.servers.entry(server.clone()).or_default().insert(tool, declaration);
         }
     }
@@ -492,14 +492,18 @@ fn file_name_str(path: &Path) -> String {
 }
 
 /// Parse a single mock declaration file and eagerly resolve any `{{file:<relative path>}}`
-/// references against `mocks_root` (the `mocks/` directory the file was found under).
+/// references against the directory the file itself is in.
+///
+/// Resolved from there rather than from the `mocks/` root so that a payload can sit beside
+/// the tool that answers with it and two servers can each ship their own `payload.json`. A
+/// file genuinely shared between servers is still reachable, by naming it `../shared.json`.
 ///
 /// `{{file:...}}` never depends on a call's arguments, so resolving it here, at case
 /// resolution time, means a missing referenced file is a loud failure before any subprocess
 /// is spawned, rather than something a running mock server would have to explain. `{{input.
 /// ...}}` placeholders are left untouched: they can only be resolved once an actual call
 /// arrives, so that substitution happens inside the mock server process instead.
-fn parse_mock_file(path: &Path, mocks_root: &Path) -> Result<MockDeclaration, MocksError> {
+fn parse_mock_file(path: &Path) -> Result<MockDeclaration, MocksError> {
     let content = fs::read_to_string(path).map_err(|source| MocksError::Io {
         path: path.to_path_buf(),
         source,
@@ -540,7 +544,7 @@ fn parse_mock_file(path: &Path, mocks_root: &Path) -> Result<MockDeclaration, Mo
 
     let error = fields.get("error").and_then(|pod| pod.as_string().ok());
 
-    let body = resolve_file_references(&parsed.content, path, mocks_root)?;
+    let body = resolve_file_references(&parsed.content, path)?;
 
     Ok(MockDeclaration {
         mock_type,
@@ -550,7 +554,10 @@ fn parse_mock_file(path: &Path, mocks_root: &Path) -> Result<MockDeclaration, Mo
     })
 }
 
-fn resolve_file_references(body: &str, mock_file: &Path, mocks_root: &Path) -> Result<String, MocksError> {
+fn resolve_file_references(body: &str, mock_file: &Path) -> Result<String, MocksError> {
+    let base = mock_file
+        .parent()
+        .expect("a mock file found by reading a directory sits in one");
     let mut out = String::with_capacity(body.len());
     let mut rest = body;
     while let Some(start) = rest.find("{{file:") {
@@ -562,7 +569,7 @@ fn resolve_file_references(body: &str, mock_file: &Path, mocks_root: &Path) -> R
             break;
         };
         let reference = after[..end].trim();
-        let resolved_path = mocks_root.join(reference);
+        let resolved_path = base.join(reference);
         let contents = fs::read_to_string(&resolved_path).map_err(|_| MocksError::FileReferenceNotFound {
             path: mock_file.to_path_buf(),
             reference: reference.to_string(),
@@ -772,18 +779,17 @@ mod tests {
     }
 
     #[test]
-    fn file_reference_is_resolved_eagerly_relative_to_mocks_root() {
+    fn file_reference_is_resolved_eagerly_relative_to_the_mock_file_it_is_written_in() {
         let temp = tempdir().unwrap();
         let skill = temp.path().join("skill");
         let suite_mocks = skill.join("evals/mocks");
-        fs::create_dir_all(&suite_mocks).unwrap();
-        fs::write(suite_mocks.join("payload.json"), "{\"ok\":true}").unwrap();
         write_mock(
             &suite_mocks,
             "github",
             "create_issue",
             "---\ntype: fixed\n---\n{{file:payload.json}}",
         );
+        fs::write(suite_mocks.join("github/payload.json"), "{\"ok\":true}").unwrap();
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
         let set = resolve_mock_set(&skill, "one").unwrap();
@@ -793,6 +799,62 @@ mod tests {
             .get(&ToolName::from("create_issue"))
             .unwrap();
         assert_eq!(declaration.body, "{\"ok\":true}");
+    }
+
+    /// Resolving from the `mocks/` root instead would make the name `payload.json` mean one
+    /// file for the whole suite, so the second server to claim it would silently answer with
+    /// the first server's body.
+    #[test]
+    fn two_servers_can_each_ship_a_payload_of_the_same_name() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        let suite_mocks = skill.join("evals/mocks");
+        for (server, body) in [("github", "from github"), ("issues", "from issues")] {
+            write_mock(
+                &suite_mocks,
+                server,
+                "create_issue",
+                "---\ntype: fixed\n---\n{{file:payload.json}}",
+            );
+            fs::write(suite_mocks.join(server).join("payload.json"), body).unwrap();
+        }
+        fs::create_dir_all(skill.join("evals/one")).unwrap();
+
+        let set = resolve_mock_set(&skill, "one").unwrap();
+
+        for (server, body) in [("github", "from github"), ("issues", "from issues")] {
+            let declaration = set
+                .tools_for(&ServerName::from(server))
+                .unwrap()
+                .get(&ToolName::from("create_issue"))
+                .unwrap();
+            assert_eq!(declaration.body, body, "{server} must answer with its own payload");
+        }
+    }
+
+    /// Per-server resolution must not cost an author the ability to share one fixture between
+    /// servers, which is the thing resolving from the root bought.
+    #[test]
+    fn a_file_reference_reaches_a_fixture_shared_above_the_server_directory() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        let suite_mocks = skill.join("evals/mocks");
+        write_mock(
+            &suite_mocks,
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\n{{file:../shared.json}}",
+        );
+        fs::write(suite_mocks.join("shared.json"), "shared body").unwrap();
+        fs::create_dir_all(skill.join("evals/one")).unwrap();
+
+        let set = resolve_mock_set(&skill, "one").unwrap();
+        let declaration = set
+            .tools_for(&ServerName::from("github"))
+            .unwrap()
+            .get(&ToolName::from("create_issue"))
+            .unwrap();
+        assert_eq!(declaration.body, "shared body");
     }
 
     #[test]
@@ -841,18 +903,18 @@ mod tests {
         let temp = tempdir().unwrap();
         let skill = temp.path().join("skill");
         let suite_mocks = skill.join("evals/mocks");
-        fs::create_dir_all(&suite_mocks).unwrap();
-        fs::write(suite_mocks.join("payload.json"), "one").unwrap();
         write_mock(
             &suite_mocks,
             "github",
             "create_issue",
             "---\ntype: fixed\n---\n{{file:payload.json}}",
         );
+        let payload = suite_mocks.join("github/payload.json");
+        fs::write(&payload, "one").unwrap();
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
         let first = resolve_mock_set(&skill, "one").unwrap().content_hash();
-        fs::write(suite_mocks.join("payload.json"), "two").unwrap();
+        fs::write(&payload, "two").unwrap();
         let second = resolve_mock_set(&skill, "one").unwrap().content_hash();
 
         assert_ne!(
