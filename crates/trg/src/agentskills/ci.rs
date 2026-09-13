@@ -560,7 +560,7 @@ mod tests {
     use super::*;
     use crate::agentskills::report::{
         ProducerSection, ReportDocument, ReportSection, RunMetrics, RunPaths, RunRecord, ScenarioKind, SuiteSection,
-        SummariesSection, SCHEMA_VERSION,
+        SummariesSection,
     };
     use std::fs;
     use std::path::Path;
@@ -783,7 +783,6 @@ mod tests {
         fs::write(
             workspace.join("grading.json"),
             r#"{
-                "schema_version": "trg.skills-eval.grading.v2",
                 "assertion_results": [
                     {
                         "assertion": "the skill was engaged",
@@ -888,7 +887,7 @@ mod tests {
         fs::write(
             dir.join("runs/run-001/workspace/grading.json"),
             format!(
-                "{{\n  \"schema_version\": \"1.0\",\n  \"assertion_results\": [\n{}\n  ],\n  \"summary\": {{ \"passed\": {passed}, \"failed\": {failed}, \"total\": {}, \"pass_rate\": {pass_rate} }}\n}}",
+                "{{\n  \"assertion_results\": [\n{}\n  ],\n  \"summary\": {{ \"passed\": {passed}, \"failed\": {failed}, \"total\": {}, \"pass_rate\": {pass_rate} }}\n}}",
                 assertion_rows.join(",\n"),
                 metrics.assertion_results
             ),
@@ -904,7 +903,6 @@ mod tests {
         .unwrap();
 
         let document = ReportDocument {
-            schema_version: SCHEMA_VERSION.to_string(),
             report: ReportSection {
                 id: "report-test".to_string(),
                 generated_at: "2026-05-26T00:00:00Z".to_string(),

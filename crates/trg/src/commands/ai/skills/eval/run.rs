@@ -1524,10 +1524,6 @@ mod tests {
 
         let report: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&report_json_path).unwrap()).unwrap();
-        assert_eq!(
-            report.get("schema_version").and_then(|value| value.as_str()),
-            Some(crate::agentskills::report::SCHEMA_VERSION)
-        );
         assert!(report
             .pointer("/suite/skill_hash")
             .and_then(|value| value.as_str())

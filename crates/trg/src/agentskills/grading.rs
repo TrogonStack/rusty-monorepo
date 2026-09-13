@@ -35,23 +35,6 @@ use super::report::{ReportDocument, RunRecord};
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
-pub const GRADING_SCHEMA_VERSION: &str = "trg.skills-eval.grading.v5";
-const GRADING_SCHEMA_VERSION_V4: &str = "trg.skills-eval.grading.v4";
-const GRADING_SCHEMA_VERSION_V3: &str = "trg.skills-eval.grading.v3";
-const GRADING_SCHEMA_VERSION_V2: &str = "trg.skills-eval.grading.v2";
-const GRADING_SCHEMA_VERSION_V1: &str = "trg.skills-eval.grading.v1";
-
-pub fn grading_schema_version_is_supported(version: &str) -> bool {
-    matches!(
-        version,
-        GRADING_SCHEMA_VERSION
-            | GRADING_SCHEMA_VERSION_V4
-            | GRADING_SCHEMA_VERSION_V3
-            | GRADING_SCHEMA_VERSION_V2
-            | GRADING_SCHEMA_VERSION_V1
-    )
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GraderKind {
@@ -209,8 +192,6 @@ pub fn describe_pass_rate(rate: Option<f64>) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GradingFile {
-    #[schemars(length(min = 1))]
-    pub schema_version: String,
     pub assertion_results: Vec<AssertionGradeResult>,
     pub summary: GradingSummary,
 }
@@ -1345,7 +1326,6 @@ pub fn build_grading_file(assertion_results: Vec<AssertionGradeResult>) -> Resul
     let summary = GradingCounts::tally(&assertion_results).summary();
 
     Ok(GradingFile {
-        schema_version: GRADING_SCHEMA_VERSION.to_string(),
         assertion_results,
         summary,
     })
@@ -1370,21 +1350,6 @@ fn normalize_for_compare(value: &str) -> String {
 
 pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<()> {
     let mut errors = ValidationErrors::new();
-
-    if !grading_schema_version_is_supported(&grading.schema_version) {
-        errors.push(ValidationError::for_field(
-            "schema_version",
-            format!(
-                "expected '{}', '{}', '{}', '{}' or '{}', got '{}'",
-                GRADING_SCHEMA_VERSION,
-                GRADING_SCHEMA_VERSION_V4,
-                GRADING_SCHEMA_VERSION_V3,
-                GRADING_SCHEMA_VERSION_V2,
-                GRADING_SCHEMA_VERSION_V1,
-                grading.schema_version
-            ),
-        ));
-    }
 
     if grading.assertion_results.is_empty() {
         errors.push(ValidationError::for_field(
@@ -2381,7 +2346,6 @@ mod tests {
     #[test]
     fn validate_grading_rejects_trivial_pass_evidence() {
         let grading = GradingFile {
-            schema_version: GRADING_SCHEMA_VERSION.to_string(),
             assertion_results: vec![AssertionGradeResult {
                 assertion: "file out.json exists".to_string(),
                 passed: true,

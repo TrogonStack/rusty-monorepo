@@ -361,9 +361,6 @@
     "output_dir": {
       "type": "string"
     },
-    "schema_version": {
-      "type": "string"
-    },
     "source_report_dir": {
       "type": "string"
     },
@@ -384,7 +381,6 @@
     }
   },
   "required": [
-    "schema_version",
     "generated_at",
     "source_report_dir",
     "output_dir",

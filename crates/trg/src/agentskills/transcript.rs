@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use super::prompt::{StagedSkillDir, SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::RedactedTranscript;
 
-pub const NORMALIZED_TRANSCRIPT_SCHEMA_VERSION: &str = "trg.skills-eval.transcript.v1";
 pub const NORMALIZED_TRANSCRIPT_FILE: &str = "events.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema)]
@@ -207,7 +206,6 @@ impl ToolVisibility {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedTranscript {
-    pub schema_version: String,
     pub runner: String,
     pub tool_visibility: ToolVisibility,
     pub events: Vec<TranscriptEvent>,
@@ -220,7 +218,6 @@ pub struct NormalizedTranscript {
 impl NormalizedTranscript {
     pub fn new(runner: impl Into<String>, tool_visibility: ToolVisibility, events: Vec<TranscriptEvent>) -> Self {
         Self {
-            schema_version: NORMALIZED_TRANSCRIPT_SCHEMA_VERSION.to_string(),
             runner: runner.into(),
             tool_visibility,
             events,
@@ -1351,7 +1348,6 @@ mod tests {
         let json = serde_json::to_string(&transcript).unwrap();
         let parsed: NormalizedTranscript = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, transcript);
-        assert_eq!(parsed.schema_version, NORMALIZED_TRANSCRIPT_SCHEMA_VERSION);
     }
 
     fn staged(disclosure: SkillDisclosure) -> StagedSkill {

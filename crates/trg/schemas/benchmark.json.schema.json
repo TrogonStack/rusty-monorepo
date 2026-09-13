@@ -531,9 +531,6 @@
       },
       "type": "object"
     },
-    "schema_version": {
-      "type": "string"
-    },
     "warnings": {
       "items": {
         "$ref": "#/$defs/EvalSuiteDriftWarning"
@@ -542,7 +539,6 @@
     }
   },
   "required": [
-    "schema_version",
     "report_id",
     "generated_at",
     "failed_runs_mode",

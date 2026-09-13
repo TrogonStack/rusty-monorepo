@@ -10,7 +10,6 @@ use super::evals::{EvalError, Result};
 use super::layout;
 use super::report::ScenarioKind;
 
-pub const SCHEMA_VERSION: &str = "trg.skills-eval.iteration-summary.v1";
 pub const OUTPUT_FILE_NAME: &str = "iteration-summary.json";
 
 #[derive(Debug, Clone, Default)]
@@ -21,7 +20,6 @@ pub struct IterationSummaryOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IterationSummaryDocument {
-    pub schema_version: String,
     pub report_id: String,
     pub iteration: u32,
     pub generated_at: String,
@@ -214,7 +212,6 @@ pub fn build_iteration_summary_document(
         apply_cross_iteration_deltas(&current.always_pass, &current.always_fail, cross_iteration.as_ref());
 
     Ok(IterationSummaryDocument {
-        schema_version: SCHEMA_VERSION.to_string(),
         report_id: report.report.id,
         iteration: report.report.iteration,
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -828,7 +825,6 @@ mod tests {
     fn write_report(report_dir: &Path, runs: serde_json::Value, iteration: u32, report_id: &str) {
         fs::create_dir_all(report_dir).unwrap();
         let report = serde_json::json!({
-            "schema_version": "trg.skills-eval.report.v1",
             "report": {
                 "id": report_id,
                 "generated_at": "2026-05-26T00:00:00Z",

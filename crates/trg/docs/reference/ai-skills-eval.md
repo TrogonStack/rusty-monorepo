@@ -432,7 +432,7 @@ nothing for a second opinion to settle.
 
 **Status: available.** Always written by `eval run`.
 
-Schema version: `trg.skills-eval.report.v1`. This file is a **superset** of the
+This file is a **superset** of the
 agentskills.io report model; companion artifacts (`benchmark.json`,
 `grading.json`, etc.) follow the docs shape. See
 [Divergences from agentskills.io](../explanation/divergences-from-agentskills-io.md)
@@ -443,7 +443,6 @@ snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `schema_version` | string | Always `trg.skills-eval.report.v1` |
 | `report` | object | Report metadata (id, timestamp, producer, optional CI context) |
 | `suite` | object | Skill and eval-suite hashes |
 | `dimensions` | object | Eval cases, assertions, scenarios, model configs, skill revisions |
@@ -515,17 +514,14 @@ Run ordering: eval cases in manifest order, then scenarios in flag order.
 `runs/<run-id>/grading.json`. `verify` discovers these recursively under a
 workspace tree.
 
-Schema version: `trg.skills-eval.grading.v5`. `v4`, `v3`, `v2` and `v1` are
-still accepted on read. `v2` added `unsupported` and narrowed `pass_rate` to
-scored results only; `v3` makes `pass_rate` nullable, because a run where nothing
-could be scored has no pass rate and reporting `0.0` reads as a total failure;
-`v4` adds `excluded`, which takes an arm-scoped grader out of the score in both
-arms; `v5` adds `votes`, which is present only when a panel of judges decided the
-result.
+`unsupported` narrows `pass_rate` to scored results only. `pass_rate` is
+nullable, because a run where nothing could be scored has no pass rate and
+reporting `0.0` reads as a total failure. `excluded` takes an arm-scoped grader
+out of the score in both arms. `votes` is present only when a panel of judges
+decided the result.
 
 ```json
 {
-  "schema_version": "trg.skills-eval.grading.v5",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",
@@ -1162,11 +1158,8 @@ Alongside the redacted transcript, each run gets
 `runs/<run-id>/events.json`: the same turn reduced to one event vocabulary, so a
 grader is written once rather than once per harness.
 
-Schema version: `trg.skills-eval.transcript.v1`.
-
 ```json
 {
-  "schema_version": "trg.skills-eval.transcript.v1",
   "runner": "claude",
   "tool_visibility": "observed",
   "events": [

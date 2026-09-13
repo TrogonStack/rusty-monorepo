@@ -134,7 +134,6 @@ Bundle verified
 | Rule | Detail |
 | ---- | ------ |
 | Location | `grading.json` inside the workspace (or a nested subdirectory) |
-| `schema_version` | `trg.skills-eval.grading.v5`; `v4`, `v3`, `v2` and `v1` still read |
 | `assertion_results` | At least one entry; each needs a non-empty `assertion` (`text` is accepted as an alias) and `evidence` |
 | `summary` | `passed`, `failed`, `total`, and `unsupported` must match the results array |
 | `pass_rate` | `passed / (total - unsupported)`, or `null` when nothing was scored |

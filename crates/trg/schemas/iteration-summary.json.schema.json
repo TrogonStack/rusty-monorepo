@@ -284,9 +284,6 @@
     "report_id": {
       "type": "string"
     },
-    "schema_version": {
-      "type": "string"
-    },
     "timing_outliers": {
       "items": {
         "$ref": "#/$defs/TimingOutlierRecord"
@@ -301,7 +298,6 @@
     }
   },
   "required": [
-    "schema_version",
     "report_id",
     "iteration",
     "generated_at",
