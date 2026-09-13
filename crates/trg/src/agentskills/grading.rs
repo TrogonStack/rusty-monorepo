@@ -757,6 +757,22 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
 /// thing, which is the one thing it is not evidence of. Ungraded is the honest record, and
 /// the gate already refuses to pass a suite carrying anything ungraded, so a broken script
 /// still stops the build without discarding every other case in the run.
+/// A grader that stopped reading is answered by its exit status, not by the write that failed.
+///
+/// A script which exits before draining the payload closes the pipe under us, and reporting that
+/// as harness I/O aborts the entire run over one broken grader, discarding every case already
+/// paid for. Whatever it exited with is the honest account of what it did.
+fn hand_payload_to(child: &mut std::process::Child, payload: &[u8]) -> Result<()> {
+    let Some(mut stdin) = child.stdin.take() else {
+        return Ok(());
+    };
+    use std::io::Write;
+    match stdin.write_all(payload) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other.map_err(EvalError::Io),
+    }
+}
+
 fn script_crashed_result(assertion: &str, command: &str, output: &std::process::Output) -> AssertionGradeResult {
     let evidence = format!(
         "script grader exited with {}: {}",
@@ -810,12 +826,7 @@ fn grade_with_script(
         .spawn()
         .map_err(|e| EvalError::Validation(ValidationError::for_field("--grader-command", e.to_string()).into()))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin
-            .write_all(serde_json::to_string(&input)?.as_bytes())
-            .map_err(EvalError::Io)?;
-    }
+    hand_payload_to(&mut child, serde_json::to_string(&input)?.as_bytes())?;
 
     let output = child.wait_with_output().map_err(EvalError::Io)?;
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -2897,6 +2908,51 @@ exit 3
         let counts = GradingCounts::tally(std::slice::from_ref(&result));
         assert_eq!(counts.ungraded, 1);
         assert_eq!(counts.failed, 0, "a broken grader must not read as the skill failing");
+    }
+
+    /// A payload too large for the pipe buffer cannot be handed over without the script reading
+    /// it, so the script exiting first closes the pipe every time rather than only when it wins
+    /// a race. That is the shape a real grader crash takes, and it must still reach a verdict.
+    #[test]
+    fn a_grader_that_exits_without_reading_its_payload_is_answered_by_its_exit_status() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("deaf-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+echo 'grader refused the payload' >&2
+exit 4
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
+            grader_model: None,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
+            strict: false,
+        };
+        let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+            "grader_hints": { "blob": "x".repeat(512 * 1024) },
+        }))
+        .unwrap();
+
+        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+
+        assert!(
+            result.is_ungraded(),
+            "a grader that never exited cleanly attempted nothing"
+        );
+        assert!(result.evidence.contains("grader refused the payload"));
     }
 
     fn result_with_votes(votes: Option<JudgeVoteTally>) -> AssertionGradeResult {
