@@ -317,6 +317,15 @@ over an incidental file of the same name, and a plain `summary.md` still
 resolves when the agent wrote it straight into its working directory. A path
 that matches nowhere reports against the workspace candidate.
 
+An `llm` grader whose criterion text also happens to parse as a known
+mechanical pattern (see the `assertions` row above) is graded mechanically
+under `--grader auto` and `--grader llm` alike, as a shortcut that skips the
+judge request. Declaring `target` on that grader turns the shortcut off, even
+when the declared value is `final_text`, the same value the field would have
+defaulted to: writing `target` at all is the author saying what to look at,
+which the shortcut cannot promise to honor since it grades from the criterion
+text rather than the declared target.
+
 ### Asserting which command ran, not just that a tool was used
 
 A tool name on its own says "a shell ran", which is rarely what a case means.
@@ -463,10 +472,14 @@ default `final_text` payload, unchanged from before `target` existed:
 { "assertion": "...", "final_text": "...", "outputs": { "<name>": "..." } }
 ```
 
-`any_output` gets the same shape, since it already means the same "final text
-plus everything the run wrote" scope. `transcript`, `{"file": ...}`, and
-`created_files` instead get a payload that names its own target, since the
-judge is no longer implicitly looking at the run's output:
+`any_output` gets the same shape, and now the same scope: `outputs` walks
+every file under `outputs/`, nested directories included, matching what a
+mechanical grader aimed at `any_output` already looks at. `final_text` (declared
+or defaulted) keeps looking only at what sits directly in `outputs/`, so a
+suite written before `any_output` walked subdirectories still grades the same
+way. `transcript`, `{"file": ...}`, and `created_files` instead get a payload
+that names its own target, since the judge is no longer implicitly looking at
+the run's output:
 
 ```json
 { "assertion": "...", "target": "transcript", "content": "..." }
@@ -477,6 +490,22 @@ why instead of sending an empty string:
 
 ```json
 { "assertion": "...", "target": "file 'out.md'", "missing_reason": "..." }
+```
+
+A `{"file": ...}` target that resolves to a `.png`, `.jpg`, `.jpeg`, `.gif`, or
+`.webp` file is attached to the judge as a picture instead of being read as
+text, since reading it as text would only ever fail:
+
+```json
+{ "assertion": "...", "target": "file 'chart.png'", "content": "image attached separately" }
+```
+
+`regex`, `contains`, `valid_json`, and `schema_validation` aimed at an image
+target cannot fall back to a judge request, so each reports why it failed
+rather than misreading the bytes as text:
+
+```json
+{ "passed": false, "evidence": "file 'chart.png' is an image; a pattern can only match text" }
 ```
 
 One judge request carries at most 8,000 bytes of content in total, shared
@@ -490,6 +519,14 @@ reported via an `artifacts_omitted` field rather than passing silently. A
 transcript keeps its tail and drops its head, since the run's outcome and its
 most recent tool calls sit at the end; every other target keeps its head and
 drops its tail.
+
+A transcript's cut falls between messages, not through one: it is line-delimited,
+one message per line, so an oversized transcript keeps whole messages from the
+end backward until the budget runs out, keeps the first message too when room
+remains, and names what it dropped (`N message(s) omitted from the middle of
+the transcript`) instead of silently shaving whatever byte the cap happened to
+land on. Only a single message too large to fit the budget on its own falls
+back to a plain byte cut of that message.
 
 ### Asking the judge more than once
 
