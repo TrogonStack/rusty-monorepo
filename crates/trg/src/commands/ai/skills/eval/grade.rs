@@ -261,6 +261,72 @@ mod tests {
     }
 
     #[test]
+    fn grade_refuses_to_exit_zero_when_an_assertion_went_ungraded_even_without_strict() {
+        let temp = tempdir().unwrap();
+        let skill_dir = temp.path().join("fixture-skill");
+        fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        let skill_md = "---\nname: fixture-skill\ndescription: fixture\n---\n";
+        fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+        let suite = r#"{
+                "skill_name": "fixture-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "create output",
+                        "expected_output": "done",
+                        "assertions": ["the summary reads as appropriately cautious"]
+                    }
+                ]
+            }"#;
+        fs::write(skill_dir.join("evals/evals.json"), suite).unwrap();
+
+        let mem = MemFS::new();
+        mem.insert(skill_dir.join("SKILL.md"), skill_md);
+        mem.insert(skill_dir.join("evals/evals.json"), suite);
+
+        let bundle = build_report_bundle(
+            &mem,
+            &skill_dir,
+            &skill_dir,
+            "fixture-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                report_id: Some("ungraded-report".to_string()),
+                generated_at: Some("2026-05-26T00:00:00Z".to_string()),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
+        let run_dir = report_dir.join("runs/run-001");
+        fs::create_dir_all(run_dir.join("outputs")).unwrap();
+
+        let status = GradeArgs {
+            report_dir: report_dir.clone(),
+            grader: GraderMode::None,
+            grader_provider: JudgeProvider::default(),
+            grader_model: None,
+            grader_command: None,
+            grader_votes: JudgeVotes::single(),
+            strict: false,
+            output_format: OutputFormat::Text,
+        }
+        .handle(&crate::fs::RealFS);
+
+        assert_eq!(
+            status, 1,
+            "a suite that measured less than it declared must not report success just because strict is off"
+        );
+
+        let grading: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+        assert_eq!(grading.pointer("/summary/ungraded").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(grading.pointer("/summary/failed").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
     fn grade_command_integration_with_script_grader() {
         let temp = tempdir().unwrap();
         let skill_dir = write_fixture_skill(temp.path());

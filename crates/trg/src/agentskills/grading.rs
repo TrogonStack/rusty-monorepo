@@ -2192,6 +2192,68 @@ mod tests {
         assert_eq!(clean.describe_not_completed(), None);
     }
 
+    fn result_for_test(assertion: &str, passed: bool) -> AssertionGradeResult {
+        AssertionGradeResult {
+            name: None,
+            assertion: assertion.to_string(),
+            passed,
+            evidence: "e".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Mechanical,
+                model: None,
+                command: None,
+            },
+            rationale: None,
+            unsupported: None,
+            excluded: None,
+            ungraded: None,
+            votes: None,
+        }
+    }
+
+    #[test]
+    fn an_assertion_nothing_could_grade_is_not_counted_as_a_failure() {
+        let results = vec![
+            result_for_test("a", true),
+            needs_llm_result("b", "grader mode is none, so no judge was consulted"),
+        ];
+
+        let counts = GradingCounts::tally(&results);
+
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(
+            counts.failed, 0,
+            "an assertion no grader could attempt is not evidence the skill failed it"
+        );
+        assert_eq!(counts.passed, 1);
+        assert_eq!(counts.scored(), 1);
+
+        let summary = counts.summary();
+        assert_eq!(summary.ungraded, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(
+            summary.pass_rate,
+            Some(1.0),
+            "pass_rate is over the scored assertions, so an ungraded one cannot dilute it"
+        );
+    }
+
+    #[test]
+    fn every_assertion_going_ungraded_leaves_no_pass_rate_at_all() {
+        let results = vec![needs_llm_result("a", "no judge was consulted")];
+
+        let counts = GradingCounts::tally(&results);
+
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.scored(), 0);
+        assert_eq!(
+            counts.pass_rate(),
+            None,
+            "nothing answered is not the same result as everything failed"
+        );
+    }
+
     #[test]
     fn grading_a_run_from_an_unobservable_runner_reports_unsupported_instead_of_failed() {
         let temp = tempdir().unwrap();
