@@ -972,68 +972,115 @@ struct LlmGraderResponse {
     rationale: Option<String>,
 }
 
-pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
-    let lower = assertion.trim().to_lowercase();
+/// The assertion as the author wrote it, beside an ASCII-lowercased copy used only to
+/// locate keywords.
+///
+/// Keyword matching has to ignore case; capture must not. Mapping each byte to itself or
+/// to exactly one other byte keeps the two copies index-aligned, so an offset found in
+/// `lower` names the same position in `original`, and every path, needle and pattern
+/// handed back is a slice of what was written. Nothing here can hand out lowercased text,
+/// which is the property that was missing when captures came off the lowercase copy.
+struct AssertionText {
+    original: String,
+    lower: String,
+}
 
-    if let Some(path) = extract_quoted_or_token_after(&lower, "file ", " exists") {
+impl AssertionText {
+    fn new(assertion: &str) -> Self {
+        let original = assertion.trim().to_string();
+        let lower = original.to_ascii_lowercase();
+        Self { original, lower }
+    }
+
+    fn contains(&self, needle: &str) -> bool {
+        self.lower.contains(needle)
+    }
+
+    fn starts_with(&self, prefix: &str) -> bool {
+        self.lower.starts_with(prefix)
+    }
+
+    fn ends_with(&self, suffix: &str) -> bool {
+        self.lower.ends_with(suffix)
+    }
+
+    fn after(&self, prefix: &str) -> Option<&str> {
+        let idx = self.lower.find(prefix)? + prefix.len();
+        Some(self.original[idx..].trim())
+    }
+
+    fn before(&self, suffix: &str) -> Option<&str> {
+        let idx = self.lower.find(suffix)?;
+        Some(self.original[..idx].trim())
+    }
+
+    fn between(&self, prefix: &str, suffix: &str) -> Option<&str> {
+        let start = self.lower.find(prefix)? + prefix.len();
+        let end = self.lower[start..].find(suffix)? + start;
+        Some(self.original[start..end].trim())
+    }
+}
+
+pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
+    let text = AssertionText::new(assertion);
+
+    if let Some(path) = extract_quoted_or_token_after(&text, "file ", " exists") {
         return Some(MechanicalKind::FileExists { path });
     }
-    if lower.ends_with(" exists") && !lower.contains("file count") && !lower.contains("image ") {
-        let path = lower.trim_end_matches(" exists").trim().to_string();
-        if !path.is_empty() && !path.contains(' ') {
-            return Some(MechanicalKind::FileExists { path });
+    if text.ends_with(" exists") && !text.contains("file count") && !text.contains("image ") {
+        if let Some(path) = extract_path_before(&text, " exists") {
+            if !path.contains(' ') {
+                return Some(MechanicalKind::FileExists { path });
+            }
         }
     }
 
-    if let Some(count) = extract_usize_after(&lower, "file count is ") {
+    if let Some(count) = extract_usize_after(&text, "file count is ") {
         return Some(MechanicalKind::FileCount { count, dir: None });
     }
-    if let Some(count) = extract_usize_before(&lower, " files") {
-        let dir = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(count) = extract_usize_before(&text, " files") {
+        let dir = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::FileCount { count, dir });
     }
-    if let Some(count) = extract_usize_after(&lower, "contains ") {
-        if lower.contains(" files") {
+    if let Some(count) = extract_usize_after(&text, "contains ") {
+        if text.contains(" files") {
             return Some(MechanicalKind::FileCount { count, dir: None });
         }
     }
 
-    if lower.contains("valid json") || lower.contains("is valid json") {
-        let path = extract_path_before(&lower, " is valid json").or_else(|| extract_path_before(&lower, "valid json"));
+    if text.contains("valid json") {
+        let path = extract_path_before(&text, " is valid json").or_else(|| extract_path_before(&text, "valid json"));
         return Some(MechanicalKind::ValidJson { path });
     }
 
-    if lower.contains("valid csv") || lower.contains("is valid csv") {
-        let path = extract_path_before(&lower, " is valid csv").or_else(|| extract_path_before(&lower, "valid csv"));
+    if text.contains("valid csv") {
+        let path = extract_path_before(&text, " is valid csv").or_else(|| extract_path_before(&text, "valid csv"));
         return Some(MechanicalKind::ValidCsv { path });
     }
 
-    if lower.contains("markdown headings") || lower.contains("valid markdown") {
-        let path = extract_path_before(&lower, " has valid markdown headings");
+    if text.contains("markdown headings") || text.contains("valid markdown") {
+        let path = extract_path_before(&text, " has valid markdown headings");
         return Some(MechanicalKind::ValidMarkdownHeadings { path });
     }
 
-    if let Some(path) = extract_after(&lower, "image exists at ") {
+    if let Some(path) = text.after("image exists at ") {
         return Some(MechanicalKind::ImageExists { path: path.to_string() });
     }
-    if lower.starts_with("image ") && lower.ends_with(" exists") {
-        let path = lower
-            .trim_start_matches("image ")
-            .trim_end_matches(" exists")
-            .trim()
-            .to_string();
-        return Some(MechanicalKind::ImageExists { path });
+    if text.starts_with("image ") && text.ends_with(" exists") {
+        if let Some(path) = text.between("image ", " exists") {
+            return Some(MechanicalKind::ImageExists { path: path.to_string() });
+        }
     }
 
-    if let Some(dims) = extract_dimensions(&lower) {
-        if let Some(path) = extract_path_before(&lower, " is ") {
+    if let Some(dims) = extract_dimensions(&text) {
+        if let Some(path) = extract_path_before(&text, " is ") {
             return Some(MechanicalKind::ImageDimensions {
-                path: path.to_string(),
+                path,
                 width: dims.0,
                 height: dims.1,
             });
         }
-        if lower.contains("image dimensions are ") {
+        if text.contains("image dimensions are ") {
             return Some(MechanicalKind::ImageDimensions {
                 path: "outputs".to_string(),
                 width: dims.0,
@@ -1042,41 +1089,47 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
         }
     }
 
-    if let Some(needle) = extract_quoted(assertion, "contains ") {
-        let path = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(needle) = extract_quoted(&text, "contains ") {
+        let path = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::ContainsString { needle, path });
     }
-    if let Some(needle) = extract_quoted(assertion, "includes ") {
-        let path = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(needle) = extract_quoted(&text, "includes ") {
+        let path = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::ContainsString { needle, path });
     }
-    if lower.starts_with("output includes ") {
-        let needle = assertion.trim()[16..].trim().trim_matches('"').to_string();
-        return Some(MechanicalKind::ContainsString { needle, path: None });
+    if text.starts_with("output includes ") {
+        if let Some(rest) = text.after("output includes ") {
+            return Some(MechanicalKind::ContainsString {
+                needle: rest.trim_matches('"').to_string(),
+                path: None,
+            });
+        }
     }
 
-    if let Some(pattern) = extract_regex_pattern(&lower) {
-        let path = extract_path_before(&lower, " matches");
+    if let Some(pattern) = extract_regex_pattern(&text) {
+        let path = extract_path_before(&text, " matches");
         return Some(MechanicalKind::MatchesRegex { pattern, path });
     }
 
-    if let Some(count) = extract_usize_after(&lower, "row count is ") {
-        let path = extract_before(&lower, " row count").map(str::to_string);
+    if let Some(count) = extract_usize_after(&text, "row count is ") {
+        let path = text.before(" row count").map(str::to_string);
         return Some(MechanicalKind::RowCount { count, path });
     }
-    if let Some(count) = extract_usize_before(&lower, " rows") {
-        let path = extract_before(&lower, " has ")
-            .or_else(|| extract_before(&lower, " in "))
-            .map(str::to_string);
+    if let Some(count) = extract_usize_before(&text, " rows") {
+        let path = text.before(" has ").or_else(|| text.before(" in ")).map(str::to_string);
         return Some(MechanicalKind::RowCount { count, path });
     }
 
-    if lower.contains("schema validation") || lower.contains("validates against schema ") {
-        let schema = extract_after(&lower, "validates against schema ")
-            .map(|rest| rest.split(" for ").next().unwrap_or(rest).trim())
-            .filter(|s| !s.is_empty())
+    if text.contains("schema validation") || text.contains("validates against schema ") {
+        let schema = text
+            .between("validates against schema ", " for ")
+            .or_else(|| text.after("validates against schema "))
+            .filter(|name| !name.is_empty())
             .map(str::to_string);
-        let path = extract_after(&lower, " for ").map(str::to_string);
+        let path = text
+            .after(" for ")
+            .map(str::to_string)
+            .or_else(|| extract_path_before(&text, " validates against schema"));
         return Some(MechanicalKind::SchemaValidation { schema, path });
     }
 
@@ -1614,11 +1667,8 @@ fn update_report_after_grading(
     Ok(())
 }
 
-fn extract_quoted(source: &str, prefix: &str) -> Option<String> {
-    let lower = source.to_lowercase();
-    let idx = lower.find(&prefix.to_lowercase())?;
-    let rest = &source[idx + prefix.len()..];
-    let rest = rest.trim_start();
+fn extract_quoted(text: &AssertionText, prefix: &str) -> Option<String> {
+    let rest = text.after(prefix)?;
     if let Some(stripped) = rest.strip_prefix('"') {
         let end = stripped.find('"')?;
         return Some(stripped[..end].to_string());
@@ -1630,10 +1680,18 @@ fn extract_quoted(source: &str, prefix: &str) -> Option<String> {
     None
 }
 
-fn extract_quoted_or_token_after(lower: &str, prefix: &str, suffix: &str) -> Option<String> {
-    let start = lower.find(prefix)? + prefix.len();
-    let end = lower[start..].find(suffix)? + start;
-    let path = lower[start..end].trim().trim_matches('"').trim_matches('\'');
+fn extract_quoted_or_token_after(text: &AssertionText, prefix: &str, suffix: &str) -> Option<String> {
+    let token = text.between(prefix, suffix)?;
+    let token = token.trim_matches('"').trim_matches('\'');
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+fn extract_path_before(text: &AssertionText, suffix: &str) -> Option<String> {
+    let path = text.before(suffix)?.trim_matches('"').trim_matches('\'');
     if path.is_empty() {
         None
     } else {
@@ -1641,45 +1699,33 @@ fn extract_quoted_or_token_after(lower: &str, prefix: &str, suffix: &str) -> Opt
     }
 }
 
-fn extract_after<'a>(lower: &'a str, prefix: &str) -> Option<&'a str> {
-    let idx = lower.find(prefix)? + prefix.len();
-    Some(lower[idx..].trim())
+fn extract_usize_after(text: &AssertionText, prefix: &str) -> Option<usize> {
+    text.after(prefix)?.split_whitespace().next()?.parse().ok()
 }
 
-fn extract_before<'a>(lower: &'a str, suffix: &str) -> Option<&'a str> {
-    let idx = lower.find(suffix)?;
-    Some(lower[..idx].trim())
+fn extract_usize_before(text: &AssertionText, suffix: &str) -> Option<usize> {
+    text.before(suffix)?.split_whitespace().last()?.parse().ok()
 }
 
-fn extract_path_before(lower: &str, suffix: &str) -> Option<String> {
-    extract_before(lower, suffix)
-        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn extract_usize_after(lower: &str, prefix: &str) -> Option<usize> {
-    let rest = extract_after(lower, prefix)?;
-    rest.split_whitespace().next()?.parse().ok()
-}
-
-fn extract_usize_before(lower: &str, suffix: &str) -> Option<usize> {
-    let before = extract_before(lower, suffix)?;
-    before.split_whitespace().last()?.parse().ok()
-}
-
-fn extract_dimensions(lower: &str) -> Option<(u32, u32)> {
+fn extract_dimensions(text: &AssertionText) -> Option<(u32, u32)> {
     let re = Regex::new(r"(\d+)\s*[x×]\s*(\d+)").ok()?;
-    let caps = re.captures(lower)?;
+    let caps = re.captures(&text.lower)?;
     Some((caps[1].parse().ok()?, caps[2].parse().ok()?))
 }
 
-fn extract_regex_pattern(lower: &str) -> Option<String> {
-    if let Some(start) = lower.find('/') {
-        if let Some(end) = lower[start + 1..].find('/') {
-            return Some(lower[start + 1..start + 1 + end].to_string());
-        }
-    }
-    None
+/// The pattern between the `/` delimiters of a `matches` assertion.
+///
+/// The delimiters are looked for after the keyword rather than from the start of the
+/// assertion, because a target path carries slashes of its own. Taking the first pair in
+/// the whole string swallowed the path and the keyword into the pattern, and made every
+/// later prose form unreachable for any assertion that named a path at all.
+fn extract_regex_pattern(text: &AssertionText) -> Option<String> {
+    const KEYWORD: &str = "matches";
+    let idx = text.lower.find(KEYWORD)? + KEYWORD.len();
+    let rest = &text.original[idx..];
+    let start = rest.find('/')?;
+    let end = rest[start + 1..].find('/')? + start + 1;
+    Some(rest[start + 1..end].to_string())
 }
 
 #[cfg(test)]
@@ -2471,6 +2517,54 @@ mod tests {
         assert!(matches!(
             kind,
             Some(MechanicalKind::SchemaValidation { schema: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_prose_schema_form_grades_the_target_it_names() {
+        let kind = parse_mechanical_kind("outputs/report.json validates against schema schemas/report.schema.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/report.schema.json" && path == "outputs/report.json"
+        ));
+    }
+
+    #[test]
+    fn a_prose_schema_name_and_target_keep_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind("outputs/Report.json validates against schema schemas/Report.schema.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/Report.schema.json" && path == "outputs/Report.json"
+        ));
+    }
+
+    #[test]
+    fn a_prose_target_keeps_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind(r#"contains "Hello World" in outputs/Report.md"#);
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::ContainsString {
+                ref needle,
+                path: Some(ref path),
+            }) if needle == "Hello World" && path == "outputs/Report.md"
+        ));
+    }
+
+    #[test]
+    fn a_prose_regex_keeps_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind("outputs/Report.md matches /Error [0-9]+/");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::MatchesRegex {
+                ref pattern,
+                path: Some(ref path),
+            }) if pattern == "Error [0-9]+" && path == "outputs/Report.md"
         ));
     }
 
