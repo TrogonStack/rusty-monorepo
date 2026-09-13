@@ -113,7 +113,6 @@ pub(crate) fn grade_report_dir_with_report(
     options: GradeOptions,
     format: OutputFormat,
 ) -> (i32, Option<GradeReport>) {
-    let strict = options.strict;
     match grade_report_bundle(report_dir, options) {
         Ok(report) => {
             if !format.is_json() {
@@ -122,7 +121,7 @@ pub(crate) fn grade_report_dir_with_report(
                 println!(
                     "  assertions: {}/{} passed",
                     report.passed,
-                    report.assertions_graded - report.unsupported - report.excluded
+                    report.assertions_graded - report.unsupported - report.excluded - report.ungraded
                 );
                 if report.unsupported > 0 {
                     println!(
@@ -143,15 +142,21 @@ pub(crate) fn grade_report_dir_with_report(
                         detail
                     );
                 }
-                if report.needs_llm > 0 {
-                    println!("  needs LLM: {}", report.needs_llm);
+                if report.ungraded > 0 {
+                    println!(
+                        "  ungraded: {} (no grader could attempt these, so the suite measured less than it declared)",
+                        report.ungraded
+                    );
+                    const CAP: usize = 5;
+                    for text in report.ungraded_assertions.iter().take(CAP) {
+                        println!("    - {text}");
+                    }
+                    if report.ungraded_assertions.len() > CAP {
+                        println!("    ... and {} more", report.ungraded_assertions.len() - CAP);
+                    }
                 }
             }
-            let exit_code = if report.failed > 0 || (strict && report.needs_llm > 0) {
-                1
-            } else {
-                0
-            };
+            let exit_code = if report.failed > 0 || report.ungraded > 0 { 1 } else { 0 };
             (exit_code, Some(report))
         }
         Err(e) => {
