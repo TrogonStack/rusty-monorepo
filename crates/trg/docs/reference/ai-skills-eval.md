@@ -349,9 +349,8 @@ grader runs.
 
 ### Matching a file by name, or asserting one is absent
 
-`file_exists`'s `path` accepts the same wildcards a shell glob does, resolved
-against the same `outputs/`, workspace, run-directory order every other
-relative path uses:
+`file_exists`'s `path` accepts the same wildcards a shell glob does, searched
+under `outputs/` first and then the workspace:
 
 | Wildcard | Matches |
 | -------- | ------- |
@@ -363,6 +362,14 @@ relative path uses:
 ```json
 { "type": "file_exists", "path": "outputs/**/*.md" }
 ```
+
+A literal `path` is resolved against the usual `outputs/`, workspace,
+run-directory order, but a glob searches neither the run directory nor the
+directory the skill was staged in. A literal path names one file, and an author
+who writes `transcript.jsonl` means it; a glob is a description of what the run
+should have produced, and `timing.json` at the run root or the staged `SKILL.md`
+would answer it with a file the agent never wrote. A leading `./` is dropped
+before matching, so `./*.md` and `*.md` are the same pattern.
 
 Character classes (`[...]`), brace expansion (`{...}`), and escaping (`\`) are
 not part of this dialect; a pattern containing `[`, `]`, `{`, `}`, or `\` is
