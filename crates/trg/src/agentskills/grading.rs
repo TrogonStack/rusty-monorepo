@@ -1174,6 +1174,17 @@ fn grade_against_baseline(
         }
     };
 
+    // A blank reference is refused where it is read, and a blank run has to fall at the
+    // same line. `final_text` reads a missing `final.md` as an empty string rather than
+    // as a missing target, so without this a run that produced nothing reaches the judge
+    // and passes on a tie against a reference it never answered.
+    if run_output.trim().is_empty() {
+        return Ok(baseline_shortfall(
+            assertion,
+            format!("{target} is empty, and nothing is not at least as good as a baseline"),
+        ));
+    }
+
     let direction = match target {
         GradeTarget::Transcript => TruncateDirection::Tail,
         _ => TruncateDirection::Head,
@@ -4359,6 +4370,36 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         assert!(!result.passed);
         assert_eq!(result.grader.kind, GraderKind::Declarative);
         assert!(result.grader.model.is_none(), "no judge answered this one");
+    }
+
+    #[test]
+    fn a_run_whose_output_is_empty_falls_short_of_its_baseline_without_a_judge_being_asked() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let reference = reference_in(&ctx.skill_dir, "The reference answer.\n");
+        let options = GradeOptions {
+            grader: GraderMode::Llm,
+            ..GradeOptions::default()
+        };
+        let session = GradeSession {
+            options: &options,
+            judge: None,
+        };
+
+        let result = grade_against_baseline(
+            "final text is at least as good as baseline 'golden.md' on: is as complete",
+            "is as complete",
+            &GradeTarget::FinalText,
+            &reference,
+            &baseline_case(),
+            &DeclarativeContext::load(&ctx),
+            &ctx,
+            &session,
+        )
+        .unwrap();
+
+        assert!(!result.passed, "nothing is not at least as good as a baseline");
+        assert!(result.grader.model.is_none(), "no judge was billed for an empty run");
     }
 
     #[test]
