@@ -265,6 +265,10 @@ pub struct EvalSuite {
 #[serde(deny_unknown_fields)]
 pub struct EvalCase {
     pub id: EvalCaseId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<NonEmptyString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<NonEmptyString>,
     pub prompt: NonEmptyString,
     pub expected_output: NonEmptyString,
     #[serde(default)]
@@ -1342,6 +1346,8 @@ mod tests {
     fn sample_eval_case(id: &str, prompt: &str, expected_output: &str) -> EvalCase {
         EvalCase {
             id: EvalCaseId(id.to_string()),
+            name: None,
+            description: None,
             prompt: NonEmptyString(prompt.to_string()),
             expected_output: NonEmptyString(expected_output.to_string()),
             files: vec![],
@@ -1842,5 +1848,67 @@ mod tests {
 
         let err = parse_eval_suite(json).unwrap_err().to_string();
         assert!(err.contains("duplicate name 'primary'"));
+    }
+
+    #[test]
+    fn a_case_with_a_name_and_description_round_trips_through_serde_json() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "name": "Readable case title",
+      "description": "What this case is checking for.",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    }
+  ]
+}"#;
+
+        let suite = parse_eval_suite(json).unwrap();
+        let round_tripped: EvalSuite = parse_eval_suite(&serde_json::to_string(&suite).unwrap()).unwrap();
+
+        assert_eq!(
+            round_tripped.evals[0].name.as_ref().map(NonEmptyString::to_string),
+            Some("Readable case title".to_string())
+        );
+        assert_eq!(
+            round_tripped.evals[0]
+                .description
+                .as_ref()
+                .map(NonEmptyString::to_string),
+            Some("What this case is checking for.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_case_with_an_empty_name_is_refused() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "name": "",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err();
+        assert!(err.to_string().contains("must be a non-empty string"));
+    }
+
+    #[test]
+    fn a_case_without_a_name_or_description_omits_them_from_serialized_json() {
+        let suite = sample_suite_with_eval(sample_eval_case(
+            "one",
+            "A sufficiently long prompt here",
+            "A detailed analysis output",
+        ));
+
+        let json = serde_json::to_string(&suite.evals[0]).unwrap();
+        assert!(!json.contains("\"name\""));
+        assert!(!json.contains("\"description\""));
     }
 }

@@ -224,6 +224,8 @@ Validated before `run` executes. Unknown fields are rejected.
 | Field | Type | Required | Notes |
 | ----- | ---- | -------- | ----- |
 | `id` | string or integer | yes | Non-empty string or non-negative integer |
+| `name` | string | no | Non-empty. For humans reading a report; `id` remains the key |
+| `description` | string | no | Non-empty. For humans reading a report |
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
 | `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |

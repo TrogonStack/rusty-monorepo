@@ -203,6 +203,16 @@
           },
           "type": "array"
         },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "expected_output": {
           "$ref": "#/$defs/NonEmptyString"
         },
@@ -237,6 +247,16 @@
         },
         "id": {
           "$ref": "#/$defs/EvalCaseId"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "priority": {
           "anyOf": [
