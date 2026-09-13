@@ -757,19 +757,36 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
 /// thing, which is the one thing it is not evidence of. Ungraded is the honest record, and
 /// the gate already refuses to pass a suite carrying anything ungraded, so a broken script
 /// still stops the build without discarding every other case in the run.
+/// The payload goes over on its own thread so that neither side can wedge the other.
+///
+/// A grader is free to print more than a pipe holds before it reads its input, and a parent that
+/// insists on finishing the write first would then wait on a buffer only the grader can drain
+/// while the grader waits on one only the parent can drain. Neither ever gives way.
+fn feed_payload(child: &mut std::process::Child, payload: Vec<u8>) -> Option<PayloadHandover> {
+    let mut stdin = child.stdin.take()?;
+    Some(std::thread::spawn(move || {
+        use std::io::Write;
+        stdin.write_all(&payload)
+    }))
+}
+
+type PayloadHandover = std::thread::JoinHandle<std::io::Result<()>>;
+
 /// A grader that stopped reading is answered by its exit status, not by the write that failed.
 ///
 /// A script which exits before draining the payload closes the pipe under us, and reporting that
 /// as harness I/O aborts the entire run over one broken grader, discarding every case already
 /// paid for. Whatever it exited with is the honest account of what it did.
-fn hand_payload_to(child: &mut std::process::Child, payload: &[u8]) -> Result<()> {
-    let Some(mut stdin) = child.stdin.take() else {
+fn payload_handed_over(handover: Option<PayloadHandover>) -> Result<()> {
+    let Some(handover) = handover else {
         return Ok(());
     };
-    use std::io::Write;
-    match stdin.write_all(payload) {
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        other => other.map_err(EvalError::Io),
+    match handover.join() {
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Ok(other) => other.map_err(EvalError::Io),
+        Err(_) => Err(EvalError::Io(std::io::Error::other(
+            "the thread handing the payload to the grader script panicked",
+        ))),
     }
 }
 
@@ -826,9 +843,10 @@ fn grade_with_script(
         .spawn()
         .map_err(|e| EvalError::Validation(ValidationError::for_field("--grader-command", e.to_string()).into()))?;
 
-    hand_payload_to(&mut child, serde_json::to_string(&input)?.as_bytes())?;
-
+    let handover = feed_payload(&mut child, serde_json::to_string(&input)?.into_bytes());
     let output = child.wait_with_output().map_err(EvalError::Io)?;
+    payload_handed_over(handover)?;
+
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     let artifact_path = ctx.run_dir.join("grader-script-result.json");
@@ -2953,6 +2971,55 @@ exit 4
             "a grader that never exited cleanly attempted nothing"
         );
         assert!(result.evidence.contains("grader refused the payload"));
+    }
+
+    /// Both pipes are filled past what they hold, in the one order that wedges a parent which
+    /// insists on finishing the write before it starts reading. The deadline is the assertion:
+    /// a regression here hangs rather than fails, and a hung test reports nothing at all.
+    #[test]
+    fn a_grader_printing_more_than_a_pipe_holds_does_not_wedge_the_harness() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("loud-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+awk 'BEGIN { while (i++ < 40000) print "padding for the stderr pipe" }' >&2
+echo '{"passed": true, "evidence": "script verified"}'
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outputs = tmp.path().to_path_buf();
+        let command = script.to_string_lossy().into_owned();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = ctx_with_outputs(&outputs);
+            let options = GradeOptions {
+                grader: GraderMode::Script,
+                grader_provider: JudgeProvider::default(),
+                grader_model: None,
+                grader_command: Some(command),
+                grader_votes: JudgeVotes::single(),
+                strict: false,
+            };
+            let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+                "id": "case",
+                "prompt": "prompt long enough",
+                "expected_output": "expected output",
+                "assertions": ["custom assertion"],
+                "grader_hints": { "blob": "x".repeat(512 * 1024) },
+            }))
+            .unwrap();
+            let _ = done.send(grade_with_script("custom assertion", &eval_case, &ctx, &options).map(|r| r.passed));
+        });
+
+        match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(Ok(passed)) => assert!(passed, "the grader reported a pass once both pipes drained"),
+            Ok(Err(e)) => panic!("grading the loud script failed: {e}"),
+            Err(_) => panic!("the harness and the grader each waited on a pipe only the other could drain"),
+        }
     }
 
     fn result_with_votes(votes: Option<JudgeVoteTally>) -> AssertionGradeResult {
