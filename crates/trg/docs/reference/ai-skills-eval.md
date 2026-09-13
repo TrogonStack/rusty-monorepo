@@ -372,6 +372,15 @@ should have produced, and `timing.json` at the run root or the staged `SKILL.md`
 would answer it with a file the agent never wrote. A leading `./` is dropped
 before matching, so `./*.md` and `*.md` are the same pattern.
 
+A leading `outputs/` is dropped before the output tree is searched, and kept for
+the workspace. `outputs/` names that tree rather than a directory that is always
+there to walk into: a run may leave it beside the workspace or inside it, and in
+the first layout no workspace-relative path begins with `outputs/` at all. A
+pattern naming it therefore answers the same way under either layout, which is
+how a literal `outputs/...` path already behaves. The prefix is dropped only for
+the output tree, so `outputs/*.md` is still not answered by a stray `notes.md`
+the agent left in its working directory.
+
 Character classes (`[...]`), brace expansion (`{...}`), and escaping (`\`) are
 not part of this dialect; a pattern containing `[`, `]`, `{`, `}`, or `\` is
 rejected when the manifest is parsed; use `*` and `?` for wildcards. A `path`

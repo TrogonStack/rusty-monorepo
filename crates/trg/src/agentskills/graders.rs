@@ -729,8 +729,10 @@ fn collect_text(dir: &Path, parts: &mut Vec<String>) {
 /// Walks each directory in priority order looking for a file whose path,
 /// relative to that directory and written with `/` separators, matches the
 /// glob's regex. Returns the first match.
-fn find_glob_match(dirs: &[&Path], regex: &Regex, staged: &StagedSkill) -> Option<PathBuf> {
-    dirs.iter().find_map(|dir| walk_for_glob_match(dir, dir, regex, staged))
+fn find_glob_match(searches: &[(&Path, &Regex)], staged: &StagedSkill) -> Option<PathBuf> {
+    searches
+        .iter()
+        .find_map(|(dir, regex)| walk_for_glob_match(dir, dir, regex, staged))
 }
 
 fn walk_for_glob_match(base: &Path, dir: &Path, regex: &Regex, staged: &StagedSkill) -> Option<PathBuf> {
@@ -779,10 +781,17 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                     // file and an author who names `transcript.jsonl` meant it, but a glob
                     // is a description, and `timing.json` at the run root or the staged
                     // `SKILL.md` would answer it with a file the agent never wrote.
-                    let regex = path.compile();
+                    //
+                    // The output tree is searched under a pattern that has had any
+                    // `outputs/` prefix dropped, since paths taken relative to that tree
+                    // do not carry one; the workspace keeps the pattern as written,
+                    // because in the layout where the tree sits inside the workspace that
+                    // is exactly how the same files read from there.
                     let staged = input.staged_skill();
-                    let dirs = [input.outputs_dir, input.workspace_dir];
-                    match find_glob_match(&dirs, &regex, &staged) {
+                    let in_outputs = path.within_outputs().compile();
+                    let as_written = path.compile();
+                    let searches = [(input.outputs_dir, &in_outputs), (input.workspace_dir, &as_written)];
+                    match find_glob_match(&searches, &staged) {
                         Some(matched) => (true, format!("'{}' matches glob '{path}'", matched.display())),
                         None => (false, format!("no file matches glob '{path}'")),
                     }
@@ -1121,6 +1130,15 @@ mod tests {
 
         fn write_to_run_dir(&self, name: &str, contents: &str) {
             std::fs::write(self.run_dir.join(name), contents).unwrap();
+        }
+
+        /// Moves the output tree beside the workspace instead of inside it, which is
+        /// the layout `run_context` picks whenever `<run>/outputs` is a directory.
+        /// No workspace-relative path carries an `outputs/` prefix in that layout.
+        fn outputs_beside_the_workspace(&mut self) {
+            let relocated = self.run_dir.join("outputs");
+            std::fs::rename(&self.outputs_dir, &relocated).unwrap();
+            self.outputs_dir = relocated;
         }
 
         /// Plants a file where the harness stages a skill, and records the staging the
@@ -2308,5 +2326,63 @@ mod tests {
             evaluate(&grader, &fixture.input()),
             GraderOutcome::Passed { .. }
         ));
+    }
+
+    #[test]
+    fn an_outputs_prefixed_glob_answers_the_same_wherever_the_run_put_the_output_tree() {
+        for beside in [false, true] {
+            let mut fixture = Fixture::new();
+            if beside {
+                fixture.outputs_beside_the_workspace();
+            }
+            let outcome = evaluate(
+                &Grader::FileExists {
+                    path: glob("outputs/**/*.md"),
+                    exists: true,
+                },
+                &fixture.input(),
+            );
+            assert!(
+                matches!(outcome, GraderOutcome::Passed { .. }),
+                "outputs beside the workspace: {beside}, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_outputs_prefixed_glob_is_not_answered_by_a_file_outside_the_output_tree() {
+        let mut fixture = Fixture::new();
+        fixture.outputs_beside_the_workspace();
+        fixture.write_to_workspace("notes.md", "scratch the agent left in its working directory");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("outputs/note?.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+
+        assert!(
+            matches!(outcome, GraderOutcome::Failed { .. }),
+            "dropping the prefix must not let the pattern reach the workspace: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_glob_that_names_no_output_directory_is_unchanged_by_the_prefix_rule() {
+        let mut fixture = Fixture::new();
+        fixture.outputs_beside_the_workspace();
+        fixture.write_to_workspace("notes.md", "scratch the agent left in its working directory");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("note?.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+
+        assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
     }
 }

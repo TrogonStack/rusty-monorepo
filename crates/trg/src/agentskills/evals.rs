@@ -251,6 +251,21 @@ impl GlobPattern {
         self.is_literal().then(|| Path::new(self.0.as_str()))
     }
 
+    /// The same pattern as it reads from inside the output directory.
+    ///
+    /// `outputs/` is a spelling of that directory, not a path segment that is
+    /// always there to walk into: grading resolves the output tree beside the
+    /// workspace in one run layout and inside it in another, so a pattern naming
+    /// `outputs/` matches nothing at all in the first. Dropping the prefix before
+    /// matching against the output tree makes the pattern answer the same way in
+    /// both, which is how a literal `outputs/...` path is already resolved.
+    pub fn within_outputs(&self) -> Self {
+        match self.0.strip_prefix("outputs/") {
+            Some(rest) if !rest.is_empty() => Self(rest.to_string()),
+            _ => self.clone(),
+        }
+    }
+
     /// Compiles the glob into a regex anchored to a full match against a
     /// `/`-separated relative path.
     pub fn compile(&self) -> Regex {
