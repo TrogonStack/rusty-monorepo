@@ -292,7 +292,7 @@ every reader and to every runner.
 | `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
 | `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
-| `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
+| `llm` | `criterion`, `target` | Handed to the LLM judge, which is the only grader that costs a request |
 | `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
 | `schema_validation` | `schema`, `target` | The target parses as JSON and validates against the named JSON Schema document. `schema` is a relative path inside the skill directory, resolved the same way `files` and `scaffold` are |
 
@@ -306,8 +306,11 @@ comparison keys on; `name` gives it a stable one. Two graders in the same case
 declaring the same `name` are rejected. In the directory layout, a grader
 file's stem is its default name.
 
-`target` is `final_text` (default), `transcript`, `any_output`, or
-`{"file": "<relative path>"}`.
+`target` is `final_text` (default), `transcript`, `any_output`,
+`{"file": "<relative path>"}`, or `created_files`. `created_files` is the set
+of paths the run wrote under `outputs/`, read from the same index the report
+itself is built from, so checking that the agent created a file named `X`
+never re-walks the output directory.
 
 A relative path resolves against the workspace `outputs/` directory first, then
 the workspace itself, then the run directory. Declared outputs therefore win
@@ -451,6 +454,43 @@ Anthropic judge, or a `claude-code` run with a local OpenAI-compatible endpoint,
 are both ordinary. Under `--grader auto` a suite of typed graders needs no
 credential at all, and the endpoint is resolved once up front so a missing
 credential is reported before any run is graded.
+
+#### What the judge is shown
+
+A prose assertion, and an `llm` grader that does not declare `target`, get the
+default `final_text` payload, unchanged from before `target` existed:
+
+```json
+{ "assertion": "...", "final_text": "...", "outputs": { "<name>": "..." } }
+```
+
+`any_output` gets the same shape, since it already means the same "final text
+plus everything the run wrote" scope. `transcript`, `{"file": ...}`, and
+`created_files` instead get a payload that names its own target, since the
+judge is no longer implicitly looking at the run's output:
+
+```json
+{ "assertion": "...", "target": "transcript", "content": "..." }
+```
+
+A target that resolves to nothing (a named file the run never wrote) reports
+why instead of sending an empty string:
+
+```json
+{ "assertion": "...", "target": "file 'out.md'", "missing_reason": "..." }
+```
+
+One judge request carries at most 8,000 bytes of content in total, shared
+across every artifact placed into it rather than granted per artifact. Each
+artifact still to be placed claims an equal share of what remains, so an
+artifact that needs less than its share leaves the difference for the ones
+after it. An artifact too large for its share is truncated with a trailing
+`[truncated after N bytes]` marker; an artifact that arrives after the budget
+is already spent is left out of the payload entirely, and its omission is
+reported via an `artifacts_omitted` field rather than passing silently. A
+transcript keeps its tail and drops its head, since the run's outcome and its
+most recent tool calls sit at the end; every other target keeps its head and
+drops its tail.
 
 ### Asking the judge more than once
 
