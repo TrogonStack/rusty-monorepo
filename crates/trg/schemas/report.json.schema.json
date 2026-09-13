@@ -8,6 +8,12 @@
         "id": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "text": {
           "type": "string"
         }
@@ -211,6 +217,12 @@
           },
           "type": "array"
         },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "expected_output": {
           "type": "string"
         },
@@ -222,6 +234,12 @@
         },
         "id": {
           "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "prompt": {
           "type": "string"

@@ -8,8 +8,9 @@ use chrono::{SecondsFormat, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::eval_suite_drift::{detect_eval_suite_drift_vs_skill, maybe_emit_eval_suite_drift_warning};
-use super::evals::{EvalError, Result};
+use super::evals::{EvalError, Result, EVAL_SUITE_DIR_NAME, EVAL_SUITE_MANIFEST_NAME};
 use super::feedback::{load_run_feedback_entries, FeedbackNote};
 use super::grading::{GradingCounts, GradingFile};
 use super::report::{ReportDocument, RunRecord, ScenarioKind};
@@ -229,7 +230,13 @@ fn eval_suite_drift_from_report(
     skill_path: &Path,
     drift_report: Option<super::eval_suite_drift::EvalSuiteDriftReport>,
 ) -> Result<EvalSuiteDrift> {
-    let evals_path = skill_path.join("evals").join("evals.json");
+    let evals_path = match resolve_eval_suite(&crate::fs::RealFS, skill_path) {
+        Ok(compiled) => match compiled.source {
+            EvalSource::Manifest { path } => path,
+            EvalSource::CaseDirectories { root } => root,
+        },
+        Err(_) => skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME),
+    };
     let previous_hash = report.suite.evals_hash.clone();
     let detected = drift_report.is_some();
     let (current_hash, added_eval_ids, removed_eval_ids) = if let Some(drift) = drift_report {
@@ -770,6 +777,7 @@ pub(crate) mod testutil {
         std::fs::create_dir_all(run_dir).unwrap();
         let grading = GradingFile {
             assertion_results: vec![AssertionGradeResult {
+                name: None,
                 assertion: assertion.to_string(),
                 passed,
                 evidence: evidence.to_string(),

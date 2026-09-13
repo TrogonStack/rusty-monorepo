@@ -224,6 +224,8 @@ Validated before `run` executes. Unknown fields are rejected.
 | Field | Type | Required | Notes |
 | ----- | ---- | -------- | ----- |
 | `id` | string or integer | yes | Non-empty string or non-negative integer |
+| `name` | string | no | Non-empty. For humans reading a report; `id` remains the key |
+| `description` | string | no | Non-empty. For humans reading a report |
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
 | `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
@@ -238,6 +240,40 @@ Validated before `run` executes. Unknown fields are rejected.
 | `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 
 A case must declare at least one `assertion` or one `grader`.
+
+### Eval case directories (`evals/<case-id>/`)
+
+An alternative to `evals/evals.json`: one directory per case instead of one JSON
+array. A skill's `evals/` directory may use either layout, but not both; mixing
+a manifest with case directories in the same suite is rejected, naming both
+conflicting sources.
+
+```
+<skill>/evals/
+  <case-id>/
+    prompt.md             # required, becomes the case's `prompt`
+    case.json             # optional, the case's non-prose fields
+    graders/
+      <name>.json          # optional, one CaseGrader per file
+```
+
+| File | Required | Notes |
+| ---- | -------- | ----- |
+| `prompt.md` | yes | Its contents become `prompt`. A directory without it is rejected by name |
+| `case.json` | no | Any `EvalCase` field other than `id`, `prompt`, and `graders`. Redeclaring one of those three is rejected |
+| `graders/*.json` | no | One `CaseGrader` per file. A file's stem becomes the grader's `name` when the file does not declare one itself |
+
+The directory name becomes the case `id`. A directory that holds none of
+`prompt.md`, `case.json`, or `graders/` is not treated as a case, which keeps a
+directory of unrelated fixtures (such as `evals/files/`) out of the suite.
+
+Both layouts compile to the same `EvalSuite` and `EvalCase` shapes, so nothing
+downstream (grading, reports, drift detection) can tell which one a suite used.
+What differs is `evals_hash`: a manifest keeps hashing the raw file bytes of
+`evals.json`, while case directories hash a canonical walk of every case's
+files in sorted order, under a distinct regime tag. The two can never produce
+the same hash for the same logical content, so moving a suite from one layout
+to the other always reads as a change, which is honest: its source did change.
 
 ---
 
@@ -259,6 +295,13 @@ every reader and to every runner.
 
 Every grader also accepts `arm`, which decides whether its result counts toward
 the score. See [Arm-scoped graders](#arm-scoped-graders).
+
+Every grader also accepts `name`, a non-empty label unique within its case. A
+grader's only other identity in results is its rendered description, so editing
+a pattern or a threshold would otherwise silently change the key a downstream
+comparison keys on; `name` gives it a stable one. Two graders in the same case
+declaring the same `name` are rejected. In the directory layout, a grader
+file's stem is its default name.
 
 `target` is `final_text` (default), `transcript`, `any_output`, or
 `{"file": "<relative path>"}`.
@@ -485,8 +528,8 @@ subcommands run.
 | `skill_name` | string | From skill frontmatter |
 | `skill_path` | string | User-supplied `--skill-dir` path |
 | `skill_hash` | string | `sha256:` digest of `SKILL.md` |
-| `evals_path` | string | `<skill_path>/evals/evals.json` |
-| `evals_hash` | string | `sha256:` digest of `evals.json` |
+| `evals_path` | string | `<skill_path>/evals/evals.json` for a manifest suite, `<skill_path>/evals` for a suite authored as case directories |
+| `evals_hash` | string | `sha256:` digest of `evals.json` for a manifest suite, or of a canonical walk of every case's files for a suite authored as case directories, under a distinct regime tag so the two can never collide |
 | `case_selection` | object | Present only when the run covered part of the suite. See [Covering part of a suite](#covering-part-of-a-suite) |
 
 ### `runs[]` record
@@ -562,6 +605,7 @@ decided the result.
 | `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` is present. An indicator rather than a score when `excluded` is present |
 | `assertion_results[].evidence` | string | Non-empty. A passing result must not merely restate its assertion |
 | `assertion_results[].grader.kind` | enum | `mechanical`, `declarative`, `llm`, `script`, `needs_llm`, or `none` |
+| `assertion_results[].name` | string | Present when the grader declared a `name` |
 | `assertion_results[].rationale` | string | Optional judge reasoning |
 | `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |

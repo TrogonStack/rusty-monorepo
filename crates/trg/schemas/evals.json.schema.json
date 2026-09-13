@@ -179,6 +179,16 @@
       "properties": {
         "arm": {
           "$ref": "#/$defs/GraderArm"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraderName"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "type": "object"
@@ -192,6 +202,16 @@
             "$ref": "#/$defs/NonEmptyString"
           },
           "type": "array"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "expected_output": {
           "$ref": "#/$defs/NonEmptyString"
@@ -227,6 +247,16 @@
         },
         "id": {
           "$ref": "#/$defs/EvalCaseId"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "priority": {
           "anyOf": [
@@ -345,6 +375,10 @@
           "type": "string"
         }
       ]
+    },
+    "GraderName": {
+      "minLength": 1,
+      "type": "string"
     },
     "MatchCase": {
       "enum": [

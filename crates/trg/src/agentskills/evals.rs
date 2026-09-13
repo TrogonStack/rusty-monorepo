@@ -265,6 +265,10 @@ pub struct EvalSuite {
 #[serde(deny_unknown_fields)]
 pub struct EvalCase {
     pub id: EvalCaseId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<NonEmptyString>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<NonEmptyString>,
     pub prompt: NonEmptyString,
     pub expected_output: NonEmptyString,
     #[serde(default)]
@@ -281,7 +285,11 @@ pub struct EvalCase {
     pub expected_output_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grader_hints: Option<HashMap<String, serde_json::Value>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_case_graders",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub graders: Vec<CaseGrader>,
     #[serde(default, skip_serializing_if = "is_announced")]
     pub skill_disclosure: SkillDisclosure,
@@ -340,6 +348,22 @@ where
     Ok(evals)
 }
 
+fn deserialize_case_graders<'de, D>(deserializer: D) -> std::result::Result<Vec<CaseGrader>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let graders = Vec::<CaseGrader>::deserialize(deserializer)?;
+    let mut seen = HashSet::new();
+    for declared in &graders {
+        if let Some(name) = &declared.name {
+            if !seen.insert(name.as_str()) {
+                return Err(de::Error::custom(format!("graders contains duplicate name '{name}'")));
+            }
+        }
+    }
+    Ok(graders)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EvalCheckOptions {
     pub require_assertions: bool,
@@ -394,9 +418,7 @@ pub struct WorkspaceCheckReport {
 }
 
 pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSuite> {
-    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
-    let content = fs.read_to_string(&suite_path)?;
-    parse_eval_suite(&content)
+    super::case_directories::resolve_eval_suite(fs, skill_path).map(|compiled| compiled.suite)
 }
 
 pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
@@ -629,9 +651,7 @@ pub fn check_eval_suite(
     expected_skill_name: &str,
     options: EvalCheckOptions,
 ) -> Result<EvalCheckReport> {
-    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
-    let content = fs.read_to_string(&suite_path)?;
-    let suite = parse_eval_suite(&content)?;
+    let suite = super::case_directories::resolve_eval_suite(fs, skill_path)?.suite;
 
     let mut errors = ValidationErrors::new();
     let mut file_count = 0;
@@ -1322,6 +1342,8 @@ mod tests {
     fn sample_eval_case(id: &str, prompt: &str, expected_output: &str) -> EvalCase {
         EvalCase {
             id: EvalCaseId(id.to_string()),
+            name: None,
+            description: None,
             prompt: NonEmptyString(prompt.to_string()),
             expected_output: NonEmptyString(expected_output.to_string()),
             files: vec![],
@@ -1801,5 +1823,88 @@ mod tests {
         let warnings = missing_expected_output_warnings(&eval, &outputs);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("missing.md"));
+    }
+
+    #[test]
+    fn a_case_that_declares_two_graders_with_the_same_name_is_refused() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "graders": [
+        { "type": "skill_used", "name": "primary" },
+        { "type": "contains", "text": "total", "name": "primary" }
+      ]
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err().to_string();
+        assert!(err.contains("duplicate name 'primary'"));
+    }
+
+    #[test]
+    fn a_case_with_a_name_and_description_round_trips_through_serde_json() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "name": "Readable case title",
+      "description": "What this case is checking for.",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    }
+  ]
+}"#;
+
+        let suite = parse_eval_suite(json).unwrap();
+        let round_tripped: EvalSuite = parse_eval_suite(&serde_json::to_string(&suite).unwrap()).unwrap();
+
+        assert_eq!(
+            round_tripped.evals[0].name.as_ref().map(NonEmptyString::to_string),
+            Some("Readable case title".to_string())
+        );
+        assert_eq!(
+            round_tripped.evals[0]
+                .description
+                .as_ref()
+                .map(NonEmptyString::to_string),
+            Some("What this case is checking for.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_case_with_an_empty_name_is_refused() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "name": "",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output"
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err();
+        assert!(err.to_string().contains("must be a non-empty string"));
+    }
+
+    #[test]
+    fn a_case_without_a_name_or_description_omits_them_from_serialized_json() {
+        let suite = sample_suite_with_eval(sample_eval_case(
+            "one",
+            "A sufficiently long prompt here",
+            "A detailed analysis output",
+        ));
+
+        let json = serde_json::to_string(&suite.evals[0]).unwrap();
+        assert!(!json.contains("\"name\""));
+        assert!(!json.contains("\"description\""));
     }
 }

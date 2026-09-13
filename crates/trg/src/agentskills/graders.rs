@@ -242,6 +242,47 @@ impl Grader {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(schema_with = "grader_name_schema")]
+pub struct GraderName(String);
+
+fn grader_name_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "minLength": 1
+    })
+}
+
+impl GraderName {
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, String> {
+        let value = value.into();
+        if value.trim().is_empty() {
+            return Err("grader name must not be empty".to_string());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GraderName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for GraderName {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
 /// A grader as a case declares it, together with the arm scope that decides
 /// whether its result counts toward the score.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -250,6 +291,8 @@ pub struct CaseGrader {
     pub grader: Grader,
     #[serde(default, skip_serializing_if = "is_default_arm")]
     pub arm: GraderArm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<GraderName>,
 }
 
 fn is_not_negated(negate: &bool) -> bool {
@@ -265,6 +308,7 @@ impl CaseGrader {
         Self {
             grader,
             arm: GraderArm::default(),
+            name: None,
         }
     }
 

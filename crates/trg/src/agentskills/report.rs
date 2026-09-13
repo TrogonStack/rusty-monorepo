@@ -10,8 +10,9 @@ use crate::fs::FileSystem;
 
 use super::budget::PassSpend;
 use super::cache::RunCacheInfo;
+use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
-use super::evals::{parse_eval_suite, EvalError, EvalSuite, Result};
+use super::evals::{EvalError, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
@@ -365,6 +366,10 @@ pub struct DimensionsSection {
 pub struct EvalCaseDimension {
     pub id: String,
     pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub prompt: String,
     pub expected_output: String,
     pub files: Vec<String>,
@@ -376,6 +381,8 @@ pub struct AssertionDimension {
     pub id: String,
     pub eval_case_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -532,10 +539,9 @@ pub fn build_report_bundle(
         None => (None, None),
     };
 
-    let evals_path = skill_path.join("evals").join("evals.json");
-    let evals_content = fs.read_to_string(&evals_path)?;
-    let evals_hash = sha256_digest(&evals_content);
-    let mut suite: EvalSuite = parse_eval_suite(&evals_content)?;
+    let compiled_suite = resolve_eval_suite(fs, skill_path)?;
+    let evals_hash = compiled_suite.hash;
+    let mut suite: EvalSuite = compiled_suite.suite;
     let declared_case_ids: Vec<String> = suite.evals.iter().map(|case| case.id.to_string()).collect();
     suite.evals = options.cases.apply(suite.evals)?;
     let case_selection = options.cases.record(suite.evals.len(), declared_case_ids);
@@ -544,7 +550,10 @@ pub fn build_report_bundle(
     let attempts = options.attempts;
 
     let user_skill_path_str = path_to_string(user_skill_path);
-    let evals_path_str = format!("{user_skill_path_str}/evals/evals.json");
+    let evals_path_str = match compiled_suite.source {
+        EvalSource::Manifest { .. } => format!("{user_skill_path_str}/evals/evals.json"),
+        EvalSource::CaseDirectories { .. } => format!("{user_skill_path_str}/evals"),
+    };
 
     let dimensions = build_dimensions(
         &suite,
@@ -735,7 +744,9 @@ fn build_dimensions(
     let mut eval_cases = Vec::with_capacity(suite.evals.len());
 
     for eval_case in &suite.evals {
-        let mut assertion_ids = Vec::with_capacity(eval_case.assertions.len());
+        // Assertion ids come first so a suite with no graders keeps producing the
+        // ids it always has; grader ids are appended after.
+        let mut assertion_ids = Vec::with_capacity(eval_case.assertions.len() + eval_case.graders.len());
         for (index, assertion) in eval_case.assertions.iter().enumerate() {
             let assertion_id = format!("{}:a{index}", eval_case.id);
             assertion_ids.push(assertion_id.clone());
@@ -743,6 +754,17 @@ fn build_dimensions(
                 id: assertion_id,
                 eval_case_id: eval_case.id.to_string(),
                 text: assertion.as_str().to_string(),
+                name: None,
+            });
+        }
+        for (index, grader) in eval_case.graders.iter().enumerate() {
+            let assertion_id = format!("{}:g{index}", eval_case.id);
+            assertion_ids.push(assertion_id.clone());
+            assertions.push(AssertionDimension {
+                id: assertion_id,
+                eval_case_id: eval_case.id.to_string(),
+                text: grader.grader.describe(),
+                name: grader.name.as_ref().map(ToString::to_string),
             });
         }
 
@@ -752,6 +774,11 @@ fn build_dimensions(
                 .get(eval_case.id.as_str())
                 .cloned()
                 .unwrap_or_else(|| super::layout::eval_slug(eval_case.id.as_str())),
+            name: eval_case.name.as_ref().map(|name| name.as_str().to_string()),
+            description: eval_case
+                .description
+                .as_ref()
+                .map(|description| description.as_str().to_string()),
             prompt: eval_case.prompt.as_str().to_string(),
             expected_output: eval_case.expected_output.as_str().to_string(),
             files: eval_case.files.iter().map(|file| file.as_str().to_string()).collect(),
@@ -933,10 +960,15 @@ mod tests {
                 "evals": [
                     {
                         "id": "case-a",
+                        "name": "Case A",
+                        "description": "Covers case A.",
                         "prompt": "prompt a",
                         "expected_output": "output a",
                         "files": ["fixture.txt"],
-                        "assertions": ["assert a"]
+                        "assertions": ["assert a"],
+                        "graders": [
+                            { "type": "contains", "text": "total", "name": "mentions-total" }
+                        ]
                     },
                     {
                         "id": "case-b",
@@ -966,11 +998,20 @@ mod tests {
 
         assert_eq!(dimensions.eval_cases.len(), 2);
         assert_eq!(dimensions.eval_cases[0].slug, "case-a");
-        assert_eq!(dimensions.eval_cases[0].assertion_ids, vec!["case-a:a0"]);
+        assert_eq!(dimensions.eval_cases[0].name.as_deref(), Some("Case A"));
+        assert_eq!(dimensions.eval_cases[0].description.as_deref(), Some("Covers case A."));
+        assert_eq!(dimensions.eval_cases[0].assertion_ids, vec!["case-a:a0", "case-a:g0"]);
+        assert_eq!(dimensions.eval_cases[1].name, None);
+        assert_eq!(dimensions.eval_cases[1].description, None);
         assert_eq!(dimensions.eval_cases[1].assertion_ids, vec!["case-b:a0", "case-b:a1"]);
-        assert_eq!(dimensions.assertions.len(), 3);
+        assert_eq!(dimensions.assertions.len(), 4);
         assert_eq!(dimensions.assertions[0].id, "case-a:a0");
         assert_eq!(dimensions.assertions[0].eval_case_id, "case-a");
+        assert_eq!(dimensions.assertions[0].name, None);
+        assert_eq!(dimensions.assertions[1].id, "case-a:g0");
+        assert_eq!(dimensions.assertions[1].eval_case_id, "case-a");
+        assert_eq!(dimensions.assertions[1].text, "final text contains 'total'");
+        assert_eq!(dimensions.assertions[1].name.as_deref(), Some("mentions-total"));
         assert_eq!(dimensions.scenarios.len(), 2);
         assert_eq!(dimensions.model_configs[0].capture_status, "partial");
         assert_eq!(dimensions.model_configs[0].label, "ci-default");
