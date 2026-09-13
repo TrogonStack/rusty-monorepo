@@ -7,8 +7,8 @@ use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 use super::call_bounds::CallBounds;
-use super::evals::{EvalError, NonEmptyString, RelativeSkillPath, Result};
-use super::transcript::{NormalizedTranscript, ToolName};
+use super::evals::{EvalError, GlobPattern, NonEmptyString, RelativeSkillPath, Result};
+use super::transcript::{NormalizedTranscript, StagedSkill, ToolName};
 use super::validation::ValidationError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -37,6 +37,12 @@ impl RegexPattern {
     pub fn compile(&self) -> Regex {
         Regex::new(&self.0).expect("pattern was validated at construction")
     }
+
+    pub fn compile_with(&self, flags: &RegexFlags) -> Regex {
+        let mut builder = regex::RegexBuilder::new(&self.0);
+        flags.apply(&mut builder);
+        builder.build().expect("pattern was validated at construction")
+    }
 }
 
 impl fmt::Display for RegexPattern {
@@ -52,6 +58,120 @@ impl<'de> Deserialize<'de> for RegexPattern {
     {
         let value = String::deserialize(deserializer)?;
         Self::parse(value).map_err(|e| de::Error::custom(format!("invalid regex: {e}")))
+    }
+}
+
+/// Regex flags, mapped one-to-one onto what the `regex` crate's builder
+/// offers: `i` for case-insensitive, `m` for multi-line (`^`/`$` match at
+/// line boundaries), and `s` for dot-matches-newline. Anything else is
+/// rejected rather than silently ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, JsonSchema)]
+#[schemars(schema_with = "regex_flags_schema")]
+pub struct RegexFlags(String);
+
+fn regex_flags_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "pattern": "^[ims]*$"
+    })
+}
+
+impl RegexFlags {
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, String> {
+        let value = value.into();
+        if let Some(c) = value.chars().find(|c| !matches!(c, 'i' | 'm' | 's')) {
+            return Err(format!("unsupported regex flag '{c}': only i, m, and s are supported"));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn apply(&self, builder: &mut regex::RegexBuilder) {
+        for flag in self.0.chars() {
+            match flag {
+                'i' => {
+                    builder.case_insensitive(true);
+                }
+                'm' => {
+                    builder.multi_line(true);
+                }
+                's' => {
+                    builder.dot_matches_new_line(true);
+                }
+                other => unreachable!("flag '{other}' should have been rejected at construction"),
+            }
+        }
+    }
+}
+
+impl fmt::Display for RegexFlags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RegexFlags {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
+/// An exact number of regex matches a `regex` grader must find.
+///
+/// Zero is refused: `negate` without a `count` already asks for the pattern
+/// to be absent, so `count: 0` would only be a second spelling of that same
+/// check, in either polarity of `negate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(schema_with = "match_count_schema")]
+pub struct MatchCount(usize);
+
+fn match_count_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "integer",
+        "minimum": 1
+    })
+}
+
+impl MatchCount {
+    pub fn parse(value: usize) -> std::result::Result<Self, String> {
+        if value == 0 {
+            return Err(
+                "count 0 duplicates what negate without a count already means; drop count and use negate to ask for zero matches"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(&self) -> usize {
+        self.0
+    }
+}
+
+impl fmt::Display for MatchCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for MatchCount {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = usize::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
     }
 }
 
@@ -179,6 +299,10 @@ pub enum Grader {
         target: GradeTarget,
         #[serde(default)]
         negate: bool,
+        #[serde(default, skip_serializing_if = "RegexFlags::is_empty")]
+        flags: RegexFlags,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<MatchCount>,
     },
     Contains {
         text: NonEmptyString,
@@ -190,7 +314,9 @@ pub enum Grader {
         negate: bool,
     },
     FileExists {
-        path: RelativeSkillPath,
+        path: GlobPattern,
+        #[serde(default = "default_exists", skip_serializing_if = "is_default_exists")]
+        exists: bool,
     },
     ToolUsed {
         tool: ToolName,
@@ -248,9 +374,14 @@ impl Grader {
                 pattern,
                 target,
                 negate,
+                flags,
+                count,
             } => {
                 let verb = if *negate { "does not match" } else { "matches" };
-                format!("{target} {verb} regex /{pattern}/")
+                match count {
+                    Some(n) => format!("{target} {verb} regex /{pattern}/{flags} exactly {n} time(s)"),
+                    None => format!("{target} {verb} regex /{pattern}/{flags}"),
+                }
             }
             Self::Contains {
                 text,
@@ -265,7 +396,10 @@ impl Grader {
                 };
                 format!("{target} {verb} '{text}'{suffix}")
             }
-            Self::FileExists { path } => format!("file '{path}' exists"),
+            Self::FileExists { path, exists } => match exists {
+                true => format!("file '{path}' exists"),
+                false => format!("file '{path}' does not exist"),
+            },
             Self::ToolUsed {
                 tool,
                 input_match,
@@ -373,6 +507,14 @@ pub struct CaseGrader {
 
 fn is_not_negated(negate: &bool) -> bool {
     !*negate
+}
+
+fn default_exists() -> bool {
+    true
+}
+
+fn is_default_exists(exists: &bool) -> bool {
+    *exists == default_exists()
 }
 
 fn is_default_arm(arm: &GraderArm) -> bool {
@@ -533,18 +675,28 @@ impl<'a> GradeInput<'a> {
     /// directory, then the run directory for files placed there out of band.
     /// An unfound path reports as the workspace candidate, since that is where
     /// the agent was asked to write.
-    pub fn resolve(&self, path: &RelativeSkillPath) -> PathBuf {
-        let workspace_candidate = self.workspace_dir.join(path.as_path());
+    pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
+        let path = path.as_ref();
+        let workspace_candidate = self.workspace_dir.join(path);
         for candidate in [
-            self.outputs_dir.join(path.as_path()),
+            self.outputs_dir.join(path),
             workspace_candidate.clone(),
-            self.run_dir.join(path.as_path()),
+            self.run_dir.join(path),
         ] {
             if candidate.exists() {
                 return candidate;
             }
         }
         workspace_candidate
+    }
+
+    /// What this run staged, as the run itself recorded it. A run whose transcript
+    /// could not be read is treated as one that staged somewhere unrecorded, since
+    /// that is the reading that cannot credit the agent with the harness's work.
+    fn staged_skill(&self) -> StagedSkill {
+        self.transcript
+            .map(|transcript| transcript.staged_skill.clone())
+            .unwrap_or_default()
     }
 
     pub(crate) fn target_content(&self, target: &GradeTarget) -> TargetContent {
@@ -574,39 +726,113 @@ fn collect_text(dir: &Path, parts: &mut Vec<String>) {
     }
 }
 
+/// Walks each directory in priority order looking for a file whose path,
+/// relative to that directory and written with `/` separators, matches the
+/// glob's regex. Returns the first match.
+fn find_glob_match(searches: &[(&Path, &Regex)], staged: &StagedSkill) -> Option<PathBuf> {
+    searches
+        .iter()
+        .find_map(|(dir, regex)| walk_for_glob_match(dir, dir, regex, staged))
+}
+
+fn walk_for_glob_match(base: &Path, dir: &Path, regex: &Regex, staged: &StagedSkill) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = walk_for_glob_match(base, &path, regex, staged) {
+                return Some(found);
+            }
+        } else if let Ok(relative) = path.strip_prefix(base) {
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            if staged.planted(&relative) {
+                continue;
+            }
+            if regex.is_match(&relative) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
     match grader {
         Grader::Llm { criterion, target } => GraderOutcome::Deferred {
             criterion: criterion.to_string(),
             target: target.clone(),
         },
-        Grader::FileExists { path } => {
-            let resolved = input.resolve(path);
-            let evidence = match std::fs::metadata(&resolved) {
-                Ok(meta) if meta.is_file() => {
-                    format!("'{}' exists and holds {} bytes", resolved.display(), meta.len())
+        Grader::FileExists { path, exists } => {
+            let (found, evidence) = match path.as_literal_path() {
+                Some(literal) => {
+                    let resolved = input.resolve(literal);
+                    match std::fs::metadata(&resolved) {
+                        Ok(meta) if meta.is_file() => (
+                            true,
+                            format!("'{}' exists and holds {} bytes", resolved.display(), meta.len()),
+                        ),
+                        Ok(_) => (false, format!("'{}' exists but is not a file", resolved.display())),
+                        Err(e) => (false, format!("'{}' could not be read: {e}", resolved.display())),
+                    }
                 }
-                Ok(_) => format!("'{}' exists but is not a file", resolved.display()),
-                Err(e) => format!("'{}' could not be read: {e}", resolved.display()),
+                None => {
+                    // The run directory is deliberately not searched, and neither is the
+                    // skill this run staged into its workspace. A literal path names one
+                    // file and an author who names `transcript.jsonl` meant it, but a glob
+                    // is a description, and `timing.json` at the run root or the staged
+                    // `SKILL.md` would answer it with a file the agent never wrote.
+                    //
+                    // The output tree is searched under a pattern that has had any
+                    // `outputs/` prefix dropped, since paths taken relative to that tree
+                    // do not carry one; the workspace keeps the pattern as written,
+                    // because in the layout where the tree sits inside the workspace that
+                    // is exactly how the same files read from there.
+                    let staged = input.staged_skill();
+                    let in_outputs = path.within_outputs().compile();
+                    let as_written = path.compile();
+                    let searches = [(input.outputs_dir, &in_outputs), (input.workspace_dir, &as_written)];
+                    match find_glob_match(&searches, &staged) {
+                        Some(matched) => (true, format!("'{}' matches glob '{path}'", matched.display())),
+                        None => (false, format!("no file matches glob '{path}'")),
+                    }
+                }
             };
-            GraderOutcome::from_bool(resolved.is_file(), evidence)
+            GraderOutcome::from_bool(found == *exists, evidence)
         }
         Grader::Regex {
             pattern,
             target,
             negate,
+            flags,
+            count,
         } => match input.target_content(target) {
             TargetContent::Missing(reason) => GraderOutcome::Failed { evidence: reason },
             TargetContent::Image { .. } => GraderOutcome::Failed {
                 evidence: format!("{target} is an image; a pattern can only match text"),
             },
             TargetContent::Text(text) => {
-                let found = pattern.compile().find(&text);
-                let evidence = match &found {
-                    Some(m) => format!("{target} matched /{pattern}/ at byte {}: '{}'", m.start(), m.as_str()),
-                    None => format!("{target} did not match /{pattern}/"),
-                };
-                GraderOutcome::from_bool(found.is_some() != *negate, evidence)
+                let regex = pattern.compile_with(flags);
+                match count {
+                    Some(expected) => {
+                        let actual = regex.find_iter(&text).count();
+                        let evidence = format!(
+                            "{target} matched /{pattern}/{flags} {actual} time(s), expected exactly {expected}"
+                        );
+                        GraderOutcome::from_bool((actual == expected.get()) != *negate, evidence)
+                    }
+                    None => {
+                        let found = regex.find(&text);
+                        let evidence = match &found {
+                            Some(m) => format!(
+                                "{target} matched /{pattern}/{flags} at byte {}: '{}'",
+                                m.start(),
+                                m.as_str()
+                            ),
+                            None => format!("{target} did not match /{pattern}/{flags}"),
+                        };
+                        GraderOutcome::from_bool(found.is_some() != *negate, evidence)
+                    }
+                }
             }
         },
         Grader::Contains {
@@ -845,7 +1071,10 @@ fn is_subsequence(expected: &[ToolName], observed: &[&ToolName]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::SkillDisclosure;
+    use crate::agentskills::prompt::StagedSkillDir;
     use crate::agentskills::redact::redact_transcript_bytes;
+    use crate::agentskills::report::ScenarioKind;
     use crate::agentskills::transcript::{normalize_stream_json, TranscriptFormat, WorkspaceBoundary};
 
     const CLAUDE_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}
@@ -899,6 +1128,28 @@ mod tests {
             std::fs::write(self.skill_dir.join(name), contents).unwrap();
         }
 
+        fn write_to_run_dir(&self, name: &str, contents: &str) {
+            std::fs::write(self.run_dir.join(name), contents).unwrap();
+        }
+
+        /// Moves the output tree beside the workspace instead of inside it, which is
+        /// the layout `run_context` picks whenever `<run>/outputs` is a directory.
+        /// No workspace-relative path carries an `outputs/` prefix in that layout.
+        fn outputs_beside_the_workspace(&mut self) {
+            let relocated = self.run_dir.join("outputs");
+            std::fs::rename(&self.outputs_dir, &relocated).unwrap();
+            self.outputs_dir = relocated;
+        }
+
+        /// Plants a file where the harness stages a skill, and records the staging the
+        /// way a real run would, so a grader reads the same evidence it would in one.
+        fn stage_skill(&mut self, staged: StagedSkill, relative: &str, contents: &str) {
+            let path = self.workspace_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+            self.transcript.staged_skill = staged;
+        }
+
         fn input(&self) -> GradeInput<'_> {
             GradeInput {
                 final_text: "Wrote the report to outputs/report.md",
@@ -914,6 +1165,10 @@ mod tests {
     }
 
     fn path(value: &str) -> RelativeSkillPath {
+        serde_json::from_value(serde_json::json!(value)).unwrap()
+    }
+
+    fn glob(value: &str) -> GlobPattern {
         serde_json::from_value(serde_json::json!(value)).unwrap()
     }
 
@@ -942,9 +1197,106 @@ mod tests {
             pattern: RegexPattern::parse(r"\d+%").unwrap(),
             target: GradeTarget::File(path("report.md")),
             negate: false,
+            flags: RegexFlags::default(),
+            count: None,
         };
         let outcome = evaluate(&grader, &fixture.input());
         assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_case_insensitive_flag_matches_regardless_of_case() {
+        let fixture = Fixture::new();
+        let grader = Grader::Regex {
+            pattern: RegexPattern::parse("TITLE").unwrap(),
+            target: GradeTarget::File(path("report.md")),
+            negate: false,
+            flags: RegexFlags::parse("i").unwrap(),
+            count: None,
+        };
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn without_the_flag_the_same_pattern_fails_on_case() {
+        let fixture = Fixture::new();
+        let grader = Grader::Regex {
+            pattern: RegexPattern::parse("TITLE").unwrap(),
+            target: GradeTarget::File(path("report.md")),
+            negate: false,
+            flags: RegexFlags::default(),
+            count: None,
+        };
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unsupported_flag_is_rejected_at_parse_time() {
+        let err = RegexFlags::parse("x").unwrap_err();
+        assert!(err.contains("unsupported regex flag"), "{err}");
+    }
+
+    #[test]
+    fn count_requires_an_exact_number_of_matches() {
+        let fixture = Fixture::new();
+        let grader = Grader::Regex {
+            pattern: RegexPattern::parse("e").unwrap(),
+            target: GradeTarget::File(path("report.md")),
+            negate: false,
+            flags: RegexFlags::default(),
+            count: Some(MatchCount::parse(1).unwrap()),
+        };
+        // "# Title\nRevenue grew 12% in Q3.\n" has more than one 'e'.
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn absence_of_the_pattern_is_expressed_with_negate_not_count_zero() {
+        let fixture = Fixture::new();
+        let grader = Grader::Regex {
+            pattern: RegexPattern::parse("zzz").unwrap(),
+            target: GradeTarget::File(path("report.md")),
+            negate: true,
+            flags: RegexFlags::default(),
+            count: None,
+        };
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn count_zero_is_rejected_at_parse_time() {
+        let err = MatchCount::parse(0).unwrap_err();
+        assert!(err.contains("negate"), "{err}");
+    }
+
+    #[test]
+    fn negate_with_count_asks_for_anything_other_than_that_count() {
+        let fixture = Fixture::new();
+        let grader = Grader::Regex {
+            pattern: RegexPattern::parse("e").unwrap(),
+            target: GradeTarget::File(path("report.md")),
+            negate: true,
+            flags: RegexFlags::default(),
+            count: Some(MatchCount::parse(1).unwrap()),
+        };
+        // "# Title\nRevenue grew 12% in Q3.\n" has more than one 'e', so negate
+        // flips the "not exactly 1" mismatch into a pass.
+        assert!(matches!(
+            evaluate(&grader, &fixture.input()),
+            GraderOutcome::Passed { .. }
+        ));
     }
 
     #[test]
@@ -982,13 +1334,20 @@ mod tests {
         let fixture = Fixture::new();
         let outcome = evaluate(
             &Grader::FileExists {
-                path: path("report.md"),
+                path: glob("report.md"),
+                exists: true,
             },
             &fixture.input(),
         );
         assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
 
-        let outcome = evaluate(&Grader::FileExists { path: path("nope.md") }, &fixture.input());
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("nope.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
         assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
     }
 
@@ -999,7 +1358,8 @@ mod tests {
 
         let outcome = evaluate(
             &Grader::FileExists {
-                path: path("summary.md"),
+                path: glob("summary.md"),
+                exists: true,
             },
             &fixture.input(),
         );
@@ -1012,10 +1372,226 @@ mod tests {
     #[test]
     fn an_unfound_path_is_reported_against_the_workspace_not_the_run_directory() {
         let fixture = Fixture::new();
-        match evaluate(&Grader::FileExists { path: path("nope.md") }, &fixture.input()) {
+        match evaluate(
+            &Grader::FileExists {
+                path: glob("nope.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        ) {
             GraderOutcome::Failed { evidence } => assert!(evidence.contains("workspace/nope.md"), "{evidence}"),
             other => panic!("expected fail, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn exists_false_passes_when_the_file_is_absent() {
+        let fixture = Fixture::new();
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("nope.md"),
+                exists: false,
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn exists_false_fails_when_the_file_is_present() {
+        let fixture = Fixture::new();
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("report.md"),
+                exists: false,
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    fn staged_at(disclosure: SkillDisclosure) -> StagedSkill {
+        StagedSkill::At {
+            directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_glob_does_not_answer_with_the_skill_the_harness_staged() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(
+            staged_at(SkillDisclosure::Announced),
+            ".skill/SKILL.md",
+            "---\nname: demo-skill\n---\n",
+        );
+
+        match evaluate(
+            &Grader::FileExists {
+                path: glob("**/SKILL.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        ) {
+            GraderOutcome::Failed { .. } => {}
+            other => panic!("the agent wrote no SKILL.md; the harness staged one: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exists_false_over_a_glob_is_not_failed_by_the_skill_staged_under_a_plain_name() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(
+            staged_at(SkillDisclosure::Unannounced),
+            "skills/demo-skill/SKILL.md",
+            "---\nname: demo-skill\n---\n",
+        );
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("skills/**/*.md"),
+                exists: false,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "an unannounced skill is staged under a plain directory, and it is still not the agent's: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_transcript_that_never_recorded_its_staging_is_read_against_every_place_one_is_staged() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(
+            StagedSkill::Unrecorded,
+            ".skill/SKILL.md",
+            "---\nname: demo-skill\n---\n",
+        );
+
+        match evaluate(
+            &Grader::FileExists {
+                path: glob("**/SKILL.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        ) {
+            GraderOutcome::Failed { .. } => {}
+            other => panic!("an older transcript cannot say the agent wrote this: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_glob_still_answers_with_a_file_the_agent_wrote_where_a_skill_could_have_been_staged() {
+        let mut fixture = Fixture::new();
+        fixture.stage_skill(StagedSkill::Nothing, ".skill/SKILL.md", "written by the agent\n");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("**/SKILL.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "this arm staged nothing, so every file under the workspace is the agent's: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_glob_does_not_answer_with_the_harnesss_own_run_artifacts() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir("timing.json", r#"{"duration_ms":42}"#);
+
+        match evaluate(
+            &Grader::FileExists {
+                path: glob("**/*.json"),
+                exists: true,
+            },
+            &fixture.input(),
+        ) {
+            GraderOutcome::Failed { .. } => {}
+            other => panic!("the agent wrote no json; only trg did: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exists_false_over_a_glob_is_not_failed_by_a_file_trg_wrote_itself() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir("grading.json", "{}");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("*.json"),
+                exists: false,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "a case cannot be failed by an artifact it has no way to avoid: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_glob_written_from_the_current_directory_matches_the_same_files() {
+        let fixture = Fixture::new();
+        fixture.write_to_workspace("summary.md", "May revenue was up.\n");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("./*.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+        assert!(
+            matches!(outcome, GraderOutcome::Passed { .. }),
+            "a leading ./ is how half the world writes a relative path: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_glob_matches_a_file_under_outputs() {
+        let fixture = Fixture::new();
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("*.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+        match outcome {
+            GraderOutcome::Passed { evidence } => assert!(evidence.contains("report.md"), "{evidence}"),
+            other => panic!("expected pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_glob_that_matches_nothing_fails() {
+        let fixture = Fixture::new();
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("*.json"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_double_star_glob_matches_across_directories() {
+        let fixture = Fixture::new();
+        fixture.write_to_workspace("summary.md", "notes\n");
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("**/*.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
     }
 
     #[test]
@@ -1253,6 +1829,8 @@ mod tests {
             pattern: RegexPattern::parse(r"\b42\b").unwrap(),
             target: GradeTarget::FinalText,
             negate: false,
+            flags: RegexFlags::default(),
+            count: None,
         };
         assert!(matches!(evaluate(&grader, &input), GraderOutcome::Passed { .. }));
     }
@@ -1442,6 +2020,8 @@ mod tests {
                     pattern: RegexPattern::parse("foo").unwrap(),
                     target: GradeTarget::FinalText,
                     negate: false,
+                    flags: RegexFlags::default(),
+                    count: None,
                 },
                 "final text matches regex /foo/",
             ),
@@ -1454,7 +2034,13 @@ mod tests {
                 },
                 "file 'out.md' does not contain 'bar'",
             ),
-            (Grader::FileExists { path: path("out.md") }, "file 'out.md' exists"),
+            (
+                Grader::FileExists {
+                    path: glob("out.md"),
+                    exists: true,
+                },
+                "file 'out.md' exists",
+            ),
             (
                 Grader::ToolUsed {
                     tool: tool("Read"),
@@ -1740,5 +2326,63 @@ mod tests {
             evaluate(&grader, &fixture.input()),
             GraderOutcome::Passed { .. }
         ));
+    }
+
+    #[test]
+    fn an_outputs_prefixed_glob_answers_the_same_wherever_the_run_put_the_output_tree() {
+        for beside in [false, true] {
+            let mut fixture = Fixture::new();
+            if beside {
+                fixture.outputs_beside_the_workspace();
+            }
+            let outcome = evaluate(
+                &Grader::FileExists {
+                    path: glob("outputs/**/*.md"),
+                    exists: true,
+                },
+                &fixture.input(),
+            );
+            assert!(
+                matches!(outcome, GraderOutcome::Passed { .. }),
+                "outputs beside the workspace: {beside}, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_outputs_prefixed_glob_is_not_answered_by_a_file_outside_the_output_tree() {
+        let mut fixture = Fixture::new();
+        fixture.outputs_beside_the_workspace();
+        fixture.write_to_workspace("notes.md", "scratch the agent left in its working directory");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("outputs/note?.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+
+        assert!(
+            matches!(outcome, GraderOutcome::Failed { .. }),
+            "dropping the prefix must not let the pattern reach the workspace: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_glob_that_names_no_output_directory_is_unchanged_by_the_prefix_rule() {
+        let mut fixture = Fixture::new();
+        fixture.outputs_beside_the_workspace();
+        fixture.write_to_workspace("notes.md", "scratch the agent left in its working directory");
+
+        let outcome = evaluate(
+            &Grader::FileExists {
+                path: glob("note?.md"),
+                exists: true,
+            },
+            &fixture.input(),
+        );
+
+        assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
     }
 }

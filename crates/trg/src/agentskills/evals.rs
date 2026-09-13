@@ -5,6 +5,7 @@ use super::runner::TimingFile;
 use super::validation::{ValidationError, ValidationErrors};
 use super::workspace_scaffold::WorkspaceScaffold;
 use crate::fs::FileSystem;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -155,6 +156,26 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
+/// Rejects an absolute path or one that escapes the directory it is declared
+/// relative to, shared by every value object that names a path a case must
+/// not be able to point outside the skill it belongs to.
+pub(crate) fn validate_relative_path(noun: &str, value: &str) -> std::result::Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{noun} must not be empty"));
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Err(format!("{noun} '{value}' must be relative to the skill directory"));
+    }
+    if !path
+        .components()
+        .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
+    {
+        return Err(format!("{noun} '{value}' must stay inside the skill directory"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct RelativeSkillPath(String);
 
@@ -165,6 +186,12 @@ impl RelativeSkillPath {
 
     pub fn as_path(&self) -> &Path {
         Path::new(&self.0)
+    }
+}
+
+impl AsRef<Path> for RelativeSkillPath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
     }
 }
 
@@ -180,26 +207,132 @@ impl<'de> Deserialize<'de> for RelativeSkillPath {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if value.trim().is_empty() {
-            return Err(de::Error::custom("path must not be empty"));
-        }
-        let path = Path::new(&value);
-        if path.is_absolute() {
-            return Err(de::Error::custom(format!(
-                "path '{}' must be relative to the skill directory",
-                value
-            )));
-        }
-        if !path
-            .components()
-            .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
-        {
-            return Err(de::Error::custom(format!(
-                "path '{}' must stay inside the skill directory",
-                value
-            )));
-        }
+        validate_relative_path("path", &value).map_err(de::Error::custom)?;
         Ok(RelativeSkillPath(value))
+    }
+}
+
+/// A path relative to the skill directory that may use glob wildcards.
+///
+/// The supported dialect is deliberately small: `*` matches within one path
+/// segment, `**` matches across segments (including zero of them), and `?`
+/// matches a single character other than `/`. Character classes and brace
+/// alternation (`[`, `]`, `{`, `}`) are rejected outright rather than given a
+/// meaning the eval author did not ask for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+pub struct GlobPattern(String);
+
+impl GlobPattern {
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, String> {
+        let value = value.into();
+        validate_relative_path("pattern", &value)?;
+        if let Some(c) = value.chars().find(|c| matches!(c, '[' | ']' | '{' | '}' | '\\')) {
+            return Err(format!(
+                "pattern '{value}' must not contain '{c}': only *, **, and ? are supported"
+            ));
+        }
+        let normalized = normalize_glob(&value);
+        if normalized.is_empty() {
+            return Err(format!("pattern '{value}' names no path"));
+        }
+        Ok(GlobPattern(normalized))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// True when the pattern names an exact path with no wildcard.
+    pub fn is_literal(&self) -> bool {
+        !self.0.contains(['*', '?'])
+    }
+
+    pub fn as_literal_path(&self) -> Option<&Path> {
+        self.is_literal().then(|| Path::new(self.0.as_str()))
+    }
+
+    /// The same pattern as it reads from inside the output directory.
+    ///
+    /// `outputs/` is a spelling of that directory, not a path segment that is
+    /// always there to walk into: grading resolves the output tree beside the
+    /// workspace in one run layout and inside it in another, so a pattern naming
+    /// `outputs/` matches nothing at all in the first. Dropping the prefix before
+    /// matching against the output tree makes the pattern answer the same way in
+    /// both, which is how a literal `outputs/...` path is already resolved.
+    pub fn within_outputs(&self) -> Self {
+        match self.0.strip_prefix("outputs/") {
+            Some(rest) if !rest.is_empty() => Self(rest.to_string()),
+            _ => self.clone(),
+        }
+    }
+
+    /// Compiles the glob into a regex anchored to a full match against a
+    /// `/`-separated relative path.
+    pub fn compile(&self) -> Regex {
+        Regex::new(&format!("^{}$", glob_to_regex_source(&self.0))).expect("glob was validated at construction")
+    }
+}
+
+/// Drops the `./` segments `validate_relative_path` allows, so a pattern has one
+/// spelling by the time it is compiled. The walk that a glob is matched against
+/// yields paths relative to a directory, which never carry a `./` prefix, and a
+/// dot compiled as the literal it is would quietly match nothing at all.
+fn normalize_glob(value: &str) -> String {
+    Path::new(value)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Translates the supported glob dialect (`*`, `**`, `?`) into a regex
+/// fragment. `*` stays within a path segment, `**/` consumes zero or more
+/// whole segments, a bare `**` matches anything (including `/`), and `?`
+/// matches one character other than `/`. Everything else is escaped literally.
+fn glob_to_regex_source(glob: &str) -> String {
+    let mut out = String::new();
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                if chars.peek() == Some(&'/') {
+                    chars.next();
+                    out.push_str("(?:.*/)?");
+                } else {
+                    out.push_str(".*");
+                }
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push_str("[^/]"),
+            other => out.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    out
+}
+
+impl AsRef<Path> for GlobPattern {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl fmt::Display for GlobPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for GlobPattern {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
     }
 }
 
@@ -1397,6 +1530,57 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("must stay inside the skill directory"));
+    }
+
+    #[test]
+    fn glob_pattern_accepts_the_supported_wildcards() {
+        let pattern: GlobPattern = serde_json::from_value(serde_json::json!("**/*.md")).unwrap();
+        assert_eq!(pattern.as_str(), "**/*.md");
+        assert!(!pattern.is_literal());
+    }
+
+    #[test]
+    fn glob_pattern_without_wildcards_is_literal() {
+        let pattern: GlobPattern = serde_json::from_value(serde_json::json!("report.md")).unwrap();
+        assert!(pattern.is_literal());
+        assert_eq!(pattern.as_literal_path(), Some(Path::new("report.md")));
+    }
+
+    #[test]
+    fn glob_pattern_rejects_character_classes() {
+        let err = GlobPattern::parse("file[0-9].md").unwrap_err();
+        assert!(err.contains("only *, **, and ? are supported"), "{err}");
+    }
+
+    #[test]
+    fn glob_pattern_rejects_a_path_that_escapes_the_skill_directory() {
+        let err = GlobPattern::parse("../outside.md").unwrap_err();
+        assert!(err.contains("must stay inside the skill directory"), "{err}");
+    }
+
+    #[test]
+    fn glob_pattern_compiles_a_star_to_stay_within_one_segment() {
+        let pattern = GlobPattern::parse("*.md").unwrap();
+        let regex = pattern.compile();
+        assert!(regex.is_match("report.md"));
+        assert!(!regex.is_match("nested/report.md"));
+    }
+
+    #[test]
+    fn glob_pattern_compiles_a_double_star_to_cross_segments() {
+        let pattern = GlobPattern::parse("**/*.md").unwrap();
+        let regex = pattern.compile();
+        assert!(regex.is_match("report.md"));
+        assert!(regex.is_match("nested/deeper/report.md"));
+        assert!(!regex.is_match("report.txt"));
+    }
+
+    #[test]
+    fn glob_pattern_compiles_a_question_mark_to_one_character() {
+        let pattern = GlobPattern::parse("log?.txt").unwrap();
+        let regex = pattern.compile();
+        assert!(regex.is_match("log1.txt"));
+        assert!(!regex.is_match("log12.txt"));
     }
 
     #[test]
