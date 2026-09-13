@@ -680,6 +680,11 @@ rather than as a failed run. A blank reference in particular would be cleared by
 any output at all, which is the one answer a comparison must never give by
 accident.
 
+The same line holds from the other side: a run whose target is empty or missing
+falls short of its baseline without a judge being asked. Nothing is not at least
+as good as something, and a comparison between a reference and an empty string is
+one a judge can only answer by guessing.
+
 Both sides are held to the same share of the judge payload. A long run does not
 get to push the reference out of the request, because a comparison against a
 clipped reference is a comparison between two different things.
