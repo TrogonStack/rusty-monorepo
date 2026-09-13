@@ -1158,7 +1158,6 @@ mod tests {
         fs::write(
             run_dir.join("grading.json"),
             r#"{
-  "schema_version": "trg.skills-eval.grading.v2",
   "assertion_results": [
     {
       "assertion": "file 'summary.md' exists",
@@ -1207,7 +1206,6 @@ mod tests {
         fs::write(
             run.join("grading.json"),
             r#"{
-  "schema_version": "trg.skills-eval.grading.v1",
   "assertion_results": [
     {
       "assertion": "Includes a summary",
@@ -1288,7 +1286,6 @@ mod tests {
         fs::write(
             run.join("grading.json"),
             r#"{
-  "schema_version": "trg.skills-eval.grading.v1",
   "assertion_results": [
     {
       "assertion": "Includes a summary",

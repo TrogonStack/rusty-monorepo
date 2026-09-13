@@ -15,7 +15,7 @@ kinds, assertion strings) and emits **docs-compatible companion files**
 | Topic | agentskills.io | `trg` |
 | ----- | -------------- | ----- |
 | Workspace root | `iteration-N/eval-<id>/<scenario>/` | Canonical: `runs/run-###/workspace/`; docs layout mirrored under `iteration-N/` |
-| Session index | Spec report | `report.json` superset (`trg.skills-eval.report.v1`) |
+| Session index | Spec report | `report.json` superset |
 | Old skill scenario | `with_old_skill` (implied) | `old_skill` |
 | CLI workflow | Implied pipeline | Explicit subcommands: `run`, `grade`, `benchmark`, `verify`, `init`, `feedback`, `compare` |
 | Schema stability | Spec versioning | Pre-1.0 contract via `schema_version`; snapshot tests in repo |
@@ -86,20 +86,23 @@ hashes, skill integrity (tamper detection), CI context (GitHub Actions),
 
 ## Schema versioning
 
-All JSON artifacts carry a `schema_version` string (for example
-`trg.skills-eval.report.v1`). This is a **pre-1.0 contract**: field names and
-semantics may evolve within a major version only when backward compatible;
-breaking changes require a new version constant.
+JSON artifacts carry no `schema_version`. This is a **pre-1.0 contract**: field
+names and semantics may still evolve, and the published JSON Schemas under
+`crates/trg/schemas/` are the statement of the current shape.
 
-**Consumers must gate on `schema_version`.** Do not assume a field exists
-because the agentskills.io guide mentions it. Check the version your file
-carries.
+Artifacts did once carry a version string, but it never moved while the payload
+changed underneath it, so it told a consumer nothing it could act on. A version
+is worth reading only when something writes a new one, and nothing did.
 
-Worked example: `summary.unsupported` in `grading.json` appears only from
-`trg.skills-eval.grading.v2` onward, and `summary.excluded` only from `v4`. A
-consumer that reads either without checking the version will misread older
-bundles, and one that recomputes a pass rate without subtracting both
-`unsupported` and `excluded` will not match the rate the file reports.
+**Consumers should test for the field they need, not for a version.** Do not
+assume a field exists because the agentskills.io guide mentions it. Optional
+fields stay optional, so a reader that treats an absent field as absent, rather
+than inferring it from a version, keeps working across releases.
+
+Worked example: `summary.unsupported` and `summary.excluded` in `grading.json`
+are absent in bundles written before each was introduced. A consumer that
+recomputes a pass rate without subtracting both will not match the rate the file
+reports.
 
 ### Backward-compatibility contract
 
@@ -111,9 +114,10 @@ The repo commits frozen `report.json` fixtures under
 3. Both fixtures validate against `schemas/report.json.schema.json`.
 
 If you depend on `report.json` programmatically, treat these tests as the
-compatibility contract for `trg.skills-eval.report.v1`. A failing snapshot test
-means either a bug or an intentional version bump. Look for a new
-`schema_version`.
+compatibility contract. They are what actually holds the shape: the committed
+fixtures were written by a much older build and still deserialize because the
+fields stayed optional. A failing snapshot test means either a bug or a
+deliberate change to the shape.
 
 ---
 
@@ -170,7 +174,7 @@ signal.
 
 ## Assertion shape
 
-**Today (`trg.skills-eval.report.v1`):** `evals/evals.json` assertions are
+**Today:** `evals/evals.json` assertions are
 plain strings. Mechanical grading matches natural-language patterns; LLM grading
 handles the rest.
 

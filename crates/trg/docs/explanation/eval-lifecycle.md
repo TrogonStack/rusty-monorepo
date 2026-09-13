@@ -226,7 +226,7 @@ index, CLI workflow, and several policy defaults.
 
 | Topic | agentskills.io | `trg` |
 | ----- | -------------- | ----- |
-| Report schema | Spec-defined report format | Custom `trg.skills-eval.report.v1` schema |
+| Report schema | Spec-defined report format | Custom `report.json` schema |
 | Scenario names | `with_skill`, `without_skill`, `with_old_skill` | `with_skill`, `without_skill`, `old_skill` (no `with_` prefix on old) |
 | Old skill execution | Supported | Supported with `--old-skill-dir` when `--scenario old_skill` is included |
 | Grading | LLM + mechanical graders in pipeline | `eval grade` / `--grade`; mechanical + script + LLM modes |
