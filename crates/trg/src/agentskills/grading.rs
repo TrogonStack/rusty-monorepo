@@ -1136,11 +1136,18 @@ fn truncate_transcript_tail(text: &str, cap: usize) -> String {
     let mut used = 0usize;
     let mut first_kept = messages.len();
     for (index, message) in messages.iter().enumerate().rev() {
-        let added = message.len() + 1;
-        if used + added > cap {
+        // The join puts a newline *between* messages, so the last one kept carries
+        // none of its own. Charging it one spends a byte the output never writes,
+        // and a transcript over the cap by nothing more than that loses a whole
+        // message to pay for it.
+        let joined = match index == messages.len() - 1 {
+            true => message.len(),
+            false => message.len() + 1,
+        };
+        if used + joined > cap {
             break;
         }
-        used += added;
+        used += joined;
         first_kept = index;
     }
 
@@ -1155,6 +1162,8 @@ fn truncate_transcript_tail(text: &str, cap: usize) -> String {
     let first = messages[0];
     let remaining = cap.saturating_sub(used);
 
+    // Strictly less: what is left has to cover the newline that joins the first
+    // message to what follows, not only the message itself.
     if first.len() < remaining {
         let hidden = first_kept - 1;
         if hidden == 0 {
@@ -3058,6 +3067,70 @@ mod tests {
         assert!(
             truncated.contains("omitted"),
             "the elision must be visible rather than silent: {truncated}"
+        );
+    }
+
+    /// A transcript is written a line at a time, so it ends with a newline that the
+    /// join never writes back. Counted against the budget anyway, a transcript that is
+    /// over the cap by that byte and nothing else pays for it with a whole message.
+    #[test]
+    fn a_transcript_over_the_cap_by_only_its_trailing_newline_keeps_every_message() {
+        let messages = ["FIRST_MESSAGE", "MIDDLE_MESSAGE", "LAST_MESSAGE"];
+        let joined = messages.join("\n");
+        let transcript = format!("{joined}\n");
+        let cap = joined.len();
+        assert!(transcript.len() > cap, "the transcript is over the cap by its newline");
+
+        let truncated = truncate(&transcript, cap, TruncateDirection::Tail);
+
+        assert_eq!(
+            truncated, joined,
+            "nothing was over budget, so nothing may be dropped or annotated"
+        );
+    }
+
+    /// What is left over is whatever the tail did not spend, so an overstated tail
+    /// understates it. A first message that fits the room actually left is dropped and
+    /// reported as omitted.
+    #[test]
+    fn a_first_message_that_fits_the_leftover_budget_exactly_is_kept() {
+        let first = "FIRST";
+        let last = "LAST";
+        let transcript = format!("{first}\n{}\n{last}", "M".repeat(100));
+        let cap = first.len() + 1 + last.len();
+
+        let truncated = truncate(&transcript, cap, TruncateDirection::Tail);
+
+        assert!(
+            truncated.contains(first),
+            "the first message fits the room left, so the judge must still see how the run began: {truncated}"
+        );
+        assert!(truncated.contains(last), "the tail must survive: {truncated}");
+        assert!(
+            !truncated.contains("from the start"),
+            "the first message was kept, so nothing was omitted from the start: {truncated}"
+        );
+    }
+
+    /// The other side of the same boundary: the newline the first message is joined by
+    /// is a real byte, so a first message that would fit only without it does not fit,
+    /// and keeping it would spend more of the judge's budget than the cap allows.
+    #[test]
+    fn a_first_message_one_byte_past_the_leftover_budget_is_not_kept() {
+        let first = "FIRSTX";
+        let last = "LAST";
+        let transcript = format!("{first}\n{}\n{last}", "M".repeat(100));
+        let cap = first.len() + last.len();
+
+        let truncated = truncate(&transcript, cap, TruncateDirection::Tail);
+
+        assert!(
+            !truncated.contains(first),
+            "the first message is one byte past what is left, so it cannot be kept: {truncated}"
+        );
+        assert!(
+            truncated.contains("from the start"),
+            "dropping the opening of the run must be said out loud: {truncated}"
         );
     }
 
