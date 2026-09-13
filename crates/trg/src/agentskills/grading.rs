@@ -522,7 +522,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             }
         };
 
-        if stopped_by_cost_ceiling(run) {
+        if !run.started() {
             report.run_statuses.record(&run.status);
             continue;
         }
@@ -796,16 +796,6 @@ fn grade_declaratively(
             ));
         }
     })
-}
-
-/// Whether the cost ceiling stopped this run before it started.
-///
-/// Such a run has no workspace and no transcript, so there is nothing for a grader
-/// to read. Grading it anyway would read the absence as a wrong answer and fail every
-/// assertion, turning a spending decision into a reported regression, and an LLM judge
-/// would bill the pass that has already run out of money to do it.
-fn stopped_by_cost_ceiling(run: &RunRecord) -> bool {
-    run.failure_kind.as_deref() == Some(crate::agentskills::budget::FAILURE_KIND_BUDGET)
 }
 
 /// A case whose every check is arm-scoped would otherwise measure nothing at
@@ -2427,9 +2417,11 @@ mod tests {
     use super::*;
     use crate::agentskills::evals::RelativeSkillPath;
     use crate::agentskills::report::{
-        build_report_bundle, write_report_bundle, BuildReportOptions, RunMetrics, RunPaths, ScenarioKind,
-        WriteReportOptions,
+        build_report_bundle, write_report_bundle, BuildReportOptions, RunMetrics, RunNotStarted, RunPaths,
+        ScenarioKind, WriteReportOptions,
     };
+    use crate::agentskills::runner::capabilities::HarnessControl;
+    use crate::agentskills::runner::Runner;
     use crate::agentskills::transcript::write_normalized_transcript;
     use crate::fs::testutil::MemFS;
     use std::fs;
@@ -2754,6 +2746,43 @@ mod tests {
             without_skill.case_score,
             Some(0.0),
             "a case that scored and failed everything is a zero, not a missing score"
+        );
+    }
+
+    #[test]
+    fn a_run_the_harness_never_started_is_withheld_from_grading() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, ARM_SCOPED_SUITE);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: ReportDocument = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document.runs[0].not_started(RunNotStarted::ControlUnsupported {
+            control: HarnessControl::ConversationSeeding,
+            runner: Runner::ClaudeCode,
+        });
+        let abandoned = report_dir.join(&document.runs[0].paths.workspace);
+        fs::remove_dir_all(&abandoned).unwrap();
+        document.runs[1].status = "completed".to_string();
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.runs_graded, 1,
+            "a run that never reached the harness has no workspace to grade"
+        );
+        assert_eq!(report.run_statuses.skipped, 1);
+        assert_eq!(report.run_statuses.completed, 1);
+        assert_eq!(
+            report.failed, 0,
+            "a run trg declined to start must not be reported as a regression"
         );
     }
 

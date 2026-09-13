@@ -1136,6 +1136,11 @@ harness would misreport the case's own precondition, and a suite whose results
 depended on that silent substitution would be exactly the kind of result trg
 exists to keep from happening.
 
+Such a run is recorded with `status: skipped` and `failure_kind: unsupported`,
+and `grade` passes over it for the same reason it passes over a run the cost
+ceiling refused: nothing was asked of the runner, so there is no workspace or
+transcript to read and no pass rate to charge the case with.
+
 ---
 
 ## Choosing which scenarios run
