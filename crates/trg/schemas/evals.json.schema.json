@@ -5,6 +5,19 @@
       "oneOf": [
         {
           "properties": {
+            "count": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MatchCount"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "flags": {
+              "$ref": "#/$defs/RegexFlags"
+            },
             "negate": {
               "default": false,
               "type": "boolean"
@@ -69,8 +82,11 @@
         },
         {
           "properties": {
+            "exists": {
+              "type": "boolean"
+            },
             "path": {
-              "$ref": "#/$defs/RelativeSkillPath"
+              "$ref": "#/$defs/GlobPattern"
             },
             "type": {
               "const": "file_exists",
@@ -413,6 +429,10 @@
       ],
       "type": "string"
     },
+    "GlobPattern": {
+      "description": "A path relative to the skill directory that may use glob wildcards.\n\nThe supported dialect is deliberately small: `*` matches within one path\nsegment, `**` matches across segments (including zero of them), and `?`\nmatches a single character other than `/`. Character classes and brace\nalternation (`[`, `]`, `{`, `}`) are rejected outright rather than given a\nmeaning the eval author did not ask for.",
+      "type": "string"
+    },
     "GradeTarget": {
       "oneOf": [
         {
@@ -473,8 +493,18 @@
       ],
       "type": "string"
     },
+    "MatchCount": {
+      "description": "An exact number of regex matches a `regex` grader must find.\n\nZero is refused: `negate` without a `count` already asks for the pattern\nto be absent, so `count: 0` would only be a second spelling of that same\ncheck, in either polarity of `negate`.",
+      "minimum": 1,
+      "type": "integer"
+    },
     "NonEmptyString": {
       "minLength": 1,
+      "type": "string"
+    },
+    "RegexFlags": {
+      "description": "Regex flags, mapped one-to-one onto what the `regex` crate's builder\noffers: `i` for case-insensitive, `m` for multi-line (`^`/`$` match at\nline boundaries), and `s` for dot-matches-newline. Anything else is\nrejected rather than silently ignored.",
+      "pattern": "^[ims]*$",
       "type": "string"
     },
     "RegexPattern": {
