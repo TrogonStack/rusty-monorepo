@@ -285,9 +285,9 @@ every reader and to every runner.
 
 | `type` | Fields | Checks |
 | ------ | ------ | ------ |
-| `regex` | `pattern`, `target`, `negate` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
+| `regex` | `pattern`, `target`, `negate`, `flags`, `count` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
 | `contains` | `text`, `target`, `case`, `negate` | The target contains the text. `case` is `insensitive` (default) or `sensitive` |
-| `file_exists` | `path` | The run produced the file |
+| `file_exists` | `path`, `exists` | The run produced a file at `path`, which may be a glob. `exists` defaults to `true`; set it to `false` to assert that nothing matches |
 | `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
 | `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
@@ -346,6 +346,61 @@ would quietly match nothing under another. See
 
 An unusable pattern is rejected when the manifest is parsed, not when the
 grader runs.
+
+### Matching a file by name, or asserting one is absent
+
+`file_exists`'s `path` accepts the same wildcards a shell glob does, resolved
+against the same `outputs/`, workspace, run-directory order every other
+relative path uses:
+
+| Wildcard | Matches |
+| -------- | ------- |
+| `*` | Any run of characters other than `/`, within one path segment |
+| `**/` | Zero or more whole path segments |
+| `**` | Any run of characters, including `/`, when it is not followed by `/` |
+| `?` | Any single character other than `/` |
+
+```json
+{ "type": "file_exists", "path": "outputs/**/*.md" }
+```
+
+Character classes (`[...]`), brace expansion (`{...}`), and escaping (`\`) are
+not part of this dialect; a pattern containing `[`, `]`, `{`, `}`, or `\` is
+rejected when the manifest is parsed; use `*` and `?` for wildcards. A `path`
+with none of `*` or `?` is a literal path, matched the same way it always was.
+
+`exists` defaults to `true`. Setting it to `false` turns the same grader into
+its own negation, for asserting that a run did *not* produce a matching file,
+without reaching for a `negate` field that `file_exists` has never had:
+
+```json
+{ "type": "file_exists", "path": "outputs/*.tmp", "exists": false }
+```
+
+### Regex flags and exact match counts
+
+`regex` accepts `flags`, a string combining any of `i` (case-insensitive), `m`
+(`^`/`$` match at line boundaries, not only at the start and end of the whole
+target), and `s` (`.` also matches newlines). These are the modes the `regex`
+crate itself exposes; any other letter is rejected when the manifest is
+parsed.
+
+```json
+{ "type": "regex", "pattern": "^error:", "target": "transcript", "flags": "im" }
+```
+
+`count` asks for an exact number of non-overlapping matches instead of "at
+least one":
+
+```json
+{ "type": "regex", "pattern": "TODO", "count": 3 }
+```
+
+Combined with `negate`, `count` asks for anything other than that number.
+Without `count`, `regex` keeps checking for presence, as it always has.
+`count` must be at least 1: "the pattern never appears" is already what
+`negate` without a `count` means, so `count: 0` would only be a second way to
+write the same check and is rejected when the manifest is parsed.
 
 ### Stating that a tool or the skill must not be reached for
 
