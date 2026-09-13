@@ -34,6 +34,13 @@
             "null"
           ]
         },
+        "ungraded": {
+          "description": "No grader could answer this assertion at all: the text matched no mechanical\npattern and no judge was consulted. Distinct from `unsupported`, which means a\ngrader existed and the harness could not answer it, and from `excluded`, which\nmeans the author scoped it to the other arm.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "unsupported": {
           "description": "Present when the property cannot be observed on the runner that produced\nthe run. Such a result is neither a pass nor a failure, so it is excluded\nfrom `summary.pass_rate`.",
           "type": [
@@ -124,6 +131,13 @@
           "type": "integer"
         },
         "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ungraded": {
+          "default": 0,
+          "description": "No grader could even attempt these, so they carry no signal either way.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
