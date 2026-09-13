@@ -203,6 +203,252 @@ impl<'de> Deserialize<'de> for RelativeSkillPath {
     }
 }
 
+/// Whether a fixture's copy in the workspace may be changed by a run.
+///
+/// A run that is handed a read-only fixture is being asked whether it can do its job
+/// without touching a file it has no business changing. Writable stays the default so
+/// every fixture declared before this existed keeps its original meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureMutability {
+    #[default]
+    Writable,
+    ReadOnly,
+}
+
+impl FixtureMutability {
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
+}
+
+/// A `files` entry on an `EvalCase`.
+///
+/// The wire form stays a bare string for the common, writable case: a suite authored
+/// before read-only fixtures existed must keep parsing, and must keep round-tripping
+/// as a string rather than being rewritten into the object form the first time the
+/// suite is saved back out. Only a fixture that opts into `read_only` pays for the
+/// object form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[schemars(schema_with = "eval_fixture_schema")]
+pub struct EvalFixture {
+    path: RelativeSkillPath,
+    mutability: FixtureMutability,
+}
+
+fn eval_fixture_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "A fixture path, or an object naming its path and mutability",
+        "oneOf": [
+            { "type": "string", "minLength": 1 },
+            {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "minLength": 1 },
+                    "mode": { "type": "string", "enum": ["writable", "read_only"] }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+impl EvalFixture {
+    pub fn path(&self) -> &RelativeSkillPath {
+        &self.path
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.path.as_str()
+    }
+
+    pub fn as_path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.mutability.is_read_only()
+    }
+}
+
+impl fmt::Display for EvalFixture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.path, f)
+    }
+}
+
+impl<'de> Deserialize<'de> for EvalFixture {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EvalFixtureVisitor;
+
+        impl<'de> Visitor<'de> for EvalFixtureVisitor {
+            type Value = EvalFixture;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a relative path string, or an object with \"path\" and optional \"mode\"")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let path = RelativeSkillPath::deserialize(de::value::StrDeserializer::new(value))?;
+                Ok(EvalFixture {
+                    path,
+                    mutability: FixtureMutability::Writable,
+                })
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_map<A>(self, map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "snake_case", deny_unknown_fields)]
+                struct EvalFixtureObject {
+                    path: RelativeSkillPath,
+                    #[serde(default)]
+                    mode: FixtureMutability,
+                }
+
+                let object = EvalFixtureObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(EvalFixture {
+                    path: object.path,
+                    mutability: object.mode,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(EvalFixtureVisitor)
+    }
+}
+
+impl Serialize for EvalFixture {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.mutability {
+            // A writable fixture must keep serializing as a bare string: rewriting it into
+            // object form the first time a suite round-trips through this type would change
+            // the file on disk for every suite that has never heard of read-only fixtures.
+            FixtureMutability::Writable => serializer.serialize_str(self.path.as_str()),
+            FixtureMutability::ReadOnly => {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("EvalFixture", 2)?;
+                state.serialize_field("path", &self.path)?;
+                state.serialize_field("mode", &self.mutability)?;
+                state.end()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl EvalFixture {
+    pub fn writable(path: RelativeSkillPath) -> Self {
+        EvalFixture {
+            path,
+            mutability: FixtureMutability::Writable,
+        }
+    }
+
+    pub fn read_only(path: RelativeSkillPath) -> Self {
+        EvalFixture {
+            path,
+            mutability: FixtureMutability::ReadOnly,
+        }
+    }
+}
+
+#[cfg(test)]
+mod eval_fixture_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_string_parses_as_writable() {
+        let fixture: EvalFixture = serde_json::from_value(serde_json::json!("evals/files/input.csv")).unwrap();
+        assert!(!fixture.is_read_only());
+        assert_eq!(fixture.as_str(), "evals/files/input.csv");
+    }
+
+    #[test]
+    fn a_writable_fixture_round_trips_as_a_bare_string() {
+        let fixture = EvalFixture::writable(RelativeSkillPath("evals/files/input.csv".to_string()));
+        let value = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(value, serde_json::json!("evals/files/input.csv"));
+    }
+
+    #[test]
+    fn an_object_form_fixture_without_mode_is_writable() {
+        let fixture: EvalFixture =
+            serde_json::from_value(serde_json::json!({ "path": "evals/files/input.csv" })).unwrap();
+        assert!(!fixture.is_read_only());
+    }
+
+    #[test]
+    fn an_object_form_fixture_can_declare_read_only() {
+        let fixture: EvalFixture = serde_json::from_value(serde_json::json!({
+            "path": "evals/files/input.csv",
+            "mode": "read_only",
+        }))
+        .unwrap();
+        assert!(fixture.is_read_only());
+        assert_eq!(fixture.as_str(), "evals/files/input.csv");
+    }
+
+    #[test]
+    fn a_read_only_fixture_round_trips_as_an_object() {
+        let fixture = EvalFixture::read_only(RelativeSkillPath("evals/files/input.csv".to_string()));
+        let value = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "path": "evals/files/input.csv", "mode": "read_only" })
+        );
+    }
+
+    /// The object form must still refuse an escaping path: `RelativeSkillPath`'s own
+    /// validation is what a fixture path routes through no matter which wire shape it
+    /// arrived in, and this is the shape most likely to be built by hand and skip it.
+    #[test]
+    fn the_object_form_still_rejects_a_path_that_escapes_the_skill_directory() {
+        let error = serde_json::from_value::<EvalFixture>(serde_json::json!({
+            "path": "../outside.txt",
+            "mode": "read_only",
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("must stay inside the skill directory"));
+    }
+
+    #[test]
+    fn a_bare_string_still_rejects_an_absolute_path() {
+        let error = serde_json::from_value::<EvalFixture>(serde_json::json!("/etc/passwd")).unwrap_err();
+        assert!(error.to_string().contains("must be relative"));
+    }
+
+    #[test]
+    fn the_object_form_rejects_unknown_fields() {
+        let error = serde_json::from_value::<EvalFixture>(serde_json::json!({
+            "path": "evals/files/input.csv",
+            "mode": "read_only",
+            "unexpected": true,
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unexpected") || error.to_string().contains("unknown field"));
+    }
+}
+
 fn default_schema_version() -> u32 {
     1
 }
@@ -272,7 +518,7 @@ pub struct EvalCase {
     pub prompt: NonEmptyString,
     pub expected_output: NonEmptyString,
     #[serde(default)]
-    pub files: Vec<RelativeSkillPath>,
+    pub files: Vec<EvalFixture>,
     #[serde(default)]
     pub assertions: Vec<NonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -568,7 +814,7 @@ fn lint_fixture_files(
     fs: &impl FileSystem,
     skill_path: &Path,
     eval_id: &str,
-    files: &[RelativeSkillPath],
+    files: &[EvalFixture],
     max_fixture_bytes: Option<u64>,
 ) -> Vec<EvalLintWarning> {
     let limit = effective_max_fixture_bytes(max_fixture_bytes);
@@ -1274,6 +1520,7 @@ mod tests {
             output_tokens: Some(300),
             cost_usd: Some(0.42),
             final_text: "done".to_string(),
+            read_only_fixture_violations: Vec::new(),
         };
 
         write_timing_file(&timing_path, &outcome).unwrap();
@@ -1382,7 +1629,9 @@ mod tests {
             "Analyze the attached data without paths",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/input.csv".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/input.csv".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
@@ -1399,8 +1648,8 @@ mod tests {
             "A detailed analysis output",
         );
         eval.files = vec![
-            RelativeSkillPath("evals/files/input.csv".to_string()),
-            RelativeSkillPath("evals/files/input.csv".to_string()),
+            EvalFixture::writable(RelativeSkillPath("evals/files/input.csv".to_string())),
+            EvalFixture::writable(RelativeSkillPath("evals/files/input.csv".to_string())),
         ];
         let suite = sample_suite_with_eval(eval);
 
@@ -1763,7 +2012,9 @@ mod tests {
             "Analyze evals/files/large.csv carefully",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/large.csv".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/large.csv".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());
@@ -1783,7 +2034,9 @@ mod tests {
             "Analyze evals/files/small.csv carefully",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/small.csv".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/small.csv".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());
@@ -1803,7 +2056,9 @@ mod tests {
             "Analyze evals/files/binary.bin carefully",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/binary.bin".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/binary.bin".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());

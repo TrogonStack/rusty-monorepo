@@ -429,6 +429,13 @@ pub struct RunRecord {
     pub cache: Option<RunCacheInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_integrity: Option<SkillIntegrityReport>,
+    /// Read-only fixture paths whose staged copy did not match its source after the run.
+    ///
+    /// Kept apart from `skill_integrity` because that field describes the skill directory,
+    /// not the fixtures staged alongside it, and because grading needs to fail a case over
+    /// this without also having to interpret a report meant as diagnostic-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_fixture_violations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -876,6 +883,7 @@ fn build_runs(
                     metrics: RunMetrics::default(),
                     cache: None,
                     skill_integrity: None,
+                    read_only_fixture_violations: Vec::new(),
                     warnings: Vec::new(),
                 });
                 run_number += 1;

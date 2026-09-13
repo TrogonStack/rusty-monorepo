@@ -1207,6 +1207,7 @@ mod fake_runner {
                 output_tokens: Some(0),
                 cost_usd,
                 final_text: format!("transient-{count}"),
+                read_only_fixture_violations: Vec::new(),
             };
         }
 
@@ -1220,6 +1221,7 @@ mod fake_runner {
             output_tokens: Some(0),
             cost_usd,
             final_text: format!("run-{count}"),
+            read_only_fixture_violations: Vec::new(),
         }
     }
 
@@ -1269,6 +1271,12 @@ fn apply_outcome(
     run.metrics.input_tokens = outcome.input_tokens;
     run.metrics.output_tokens = outcome.output_tokens;
     run.metrics.cost_usd = outcome.cost_usd;
+
+    run.read_only_fixture_violations = outcome.read_only_fixture_violations.clone();
+    for path in &outcome.read_only_fixture_violations {
+        run.warnings
+            .push(format!("read-only fixture '{path}' was modified during the run"));
+    }
 
     run.artifacts.retain(|artifact| {
         artifact
