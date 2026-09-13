@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::agentskills::grading::{grade_report_bundle, GradeOptions, GradeReport, GraderMode};
 use crate::agentskills::judge::JudgeProvider;
+use crate::agentskills::judge_votes::JudgeVotes;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
@@ -44,6 +45,14 @@ pub struct GradeArgs {
     )]
     pub grader_command: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = JudgeVotes::single(),
+        help = "Opinions to take from the LLM judge on each assertion, decided by majority. Must be odd, so the panel cannot tie. Costs one judge request per vote per assertion"
+    )]
+    pub grader_votes: JudgeVotes,
+
     #[arg(long, help = "Fail when evidence is missing or assertions require LLM grading")]
     pub strict: bool,
 
@@ -63,6 +72,7 @@ impl GradeArgs {
             grader_provider: self.grader_provider,
             grader_model: self.grader_model,
             grader_command: self.grader_command,
+            grader_votes: self.grader_votes,
             strict: self.strict,
         };
         let (code, report) = grade_report_dir_with_report(&self.report_dir, options, self.output_format);
@@ -229,6 +239,7 @@ mod tests {
             grader_provider: JudgeProvider::default(),
             grader_model: None,
             grader_command: None,
+            grader_votes: JudgeVotes::single(),
             strict: false,
             output_format: OutputFormat::Text,
         }
@@ -305,6 +316,7 @@ echo '{"passed": true, "evidence": "script confirmed custom check", "rationale":
             grader_provider: JudgeProvider::default(),
             grader_model: None,
             grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
             strict: false,
             output_format: OutputFormat::Text,
         }
