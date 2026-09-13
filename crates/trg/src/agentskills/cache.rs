@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::report::{EnvironmentPolicy, RunRecord, ScenarioKind, SkillStaging};
+use super::report::{EnvironmentPolicy, PermissionGrant, RunRecord, ScenarioKind, SkillStaging};
 use super::runner::Runner;
 
 pub use super::prompt::PROMPT_CONTRACT_VERSION;
@@ -78,6 +78,14 @@ pub struct CacheKeyInput {
     /// report a policy the run never ran with.
     #[serde(default)]
     pub environment: EnvironmentPolicy,
+    /// What the run's harness was allowed to do without being asked.
+    ///
+    /// A grant decides what the harness could actually carry out, so a run answers only
+    /// for the grant it ran under. Serving a workspace-write run to an invocation that
+    /// asked for an unrestricted one would report a grant the run never had, which is the
+    /// reproducibility the grant exists to provide reported away by the cache.
+    #[serde(default)]
+    pub permission: PermissionGrant,
     #[serde(default)]
     pub skill_staging: SkillStaging,
     /// What the case's workspace scaffold said, for a case that declares one.
@@ -470,6 +478,7 @@ mod tests {
             attempt: 1,
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             environment: EnvironmentPolicy::default(),
+            permission: PermissionGrant::default(),
             skill_staging: SkillStaging::default(),
             scaffold_hash: None,
         }
@@ -515,6 +524,26 @@ mod tests {
         assert!(
             !serialized.contains("scaffold_hash"),
             "an absent scaffold must not reach the key: {serialized}"
+        );
+    }
+
+    /// A run the harness carried out under one grant is not the run another grant asked
+    /// for, and serving it would put a grant in the report that no harness ever ran with.
+    #[test]
+    fn a_run_from_another_permission_grant_is_a_different_run() {
+        let workspace_write = CacheKeyInput {
+            permission: PermissionGrant::WorkspaceWrite,
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture")
+        };
+        let unrestricted = CacheKeyInput {
+            permission: PermissionGrant::Unrestricted,
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture")
+        };
+
+        assert_ne!(
+            CacheKey::from_input(&workspace_write),
+            CacheKey::from_input(&unrestricted),
+            "the grant a run was carried out under belongs in its identity"
         );
     }
 

@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 
 use super::{
@@ -8,6 +10,7 @@ use super::{
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
 use crate::agentskills::redact::redact_command_args;
+use crate::agentskills::report::PermissionGrant;
 
 const PROGRAM: &str = "cursor-agent";
 const INSTALL_HINT: &str = "install Cursor Agent CLI and ensure `cursor-agent` is on PATH";
@@ -16,41 +19,57 @@ pub fn check_available() -> Result<(), EvalError> {
     check_runner_version(PROGRAM, INSTALL_HINT)
 }
 
+/// Translate a grant into cursor-agent's own flags.
+///
+/// `--force` ("Force allow commands unless explicitly denied") is cursor-agent's only
+/// documented non-interactive grant, so both levels collapse into it: cursor-agent draws no
+/// boundary between them for us to translate. It also has `--sandbox enabled|disabled`, but
+/// that flag's boundary is undocumented, so trg does not reach for it here.
+fn permission_args(_grant: PermissionGrant) -> &'static [&'static str] {
+    &["--force"]
+}
+
+/// The arguments are `OsString` because one of them is a path, and a path is not always
+/// valid UTF-8. Rendering it into a `String` to build the list would hand the harness a
+/// lossily rewritten workspace to work in.
+fn build_args(workspace_dir: &Path, model: Option<&str>, permission: PermissionGrant, prompt: &str) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("-p"),
+        OsString::from("--output-format"),
+        OsString::from("stream-json"),
+    ];
+    args.extend(permission_args(permission).iter().map(OsString::from));
+    args.push(OsString::from("--workspace"));
+    args.push(workspace_dir.as_os_str().to_os_string());
+
+    if let Some(model) = model {
+        args.push(OsString::from("--model"));
+        args.push(OsString::from(model));
+    }
+
+    args.push(OsString::from(prompt));
+    args
+}
+
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     let prepared = prepare_workspace(request, Runner::CursorAgent)?;
 
+    let args = build_args(
+        request.workspace_dir,
+        request.runner_model,
+        request.permission,
+        &prepared.prompt,
+    );
+
     let mut command = Command::new(PROGRAM);
-    command
-        .arg("-p")
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--force")
-        .arg("--workspace")
-        .arg(request.workspace_dir);
+    command.args(&args);
 
-    if let Some(model) = request.runner_model {
-        command.arg("--model").arg(model);
-    }
-
-    command.arg(&prepared.prompt);
-
-    let mut cmd_args = vec![
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--force",
-        "--workspace",
-        request.workspace_dir.to_str().unwrap_or("."),
-    ];
-    if let Some(model) = request.runner_model {
-        cmd_args.push("--model");
-        cmd_args.push(model);
-    }
-    cmd_args.push(&prepared.prompt);
     if let Some(run_dir) = request.transcript_path.parent() {
+        let recorded: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let borrowed: Vec<&str> = recorded.iter().map(String::as_str).collect();
         write_runner_invocation_metadata(
             run_dir,
-            redact_command_args(PROGRAM, &cmd_args),
+            redact_command_args(PROGRAM, &borrowed),
             prepared.environment.recorded_vars(),
         )?;
     }
@@ -195,5 +214,29 @@ mod tests {
         let outcome = parse_outcome(stdout, 0, true, Some(0));
         assert!(matches!(outcome.status, RunStatus::Failed));
         assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
+    }
+
+    #[test]
+    fn both_grants_collapse_to_the_same_force_flag() {
+        assert_eq!(permission_args(PermissionGrant::WorkspaceWrite), &["--force"]);
+        assert_eq!(permission_args(PermissionGrant::Unrestricted), &["--force"]);
+    }
+
+    #[test]
+    fn the_built_invocation_carries_the_force_flag() {
+        let args = build_args(Path::new("/ws"), None, PermissionGrant::WorkspaceWrite, "do it");
+        let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
+        assert_eq!(
+            borrowed,
+            vec![
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--force",
+                "--workspace",
+                "/ws",
+                "do it"
+            ]
+        );
     }
 }

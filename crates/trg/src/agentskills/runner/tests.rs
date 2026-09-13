@@ -42,6 +42,7 @@ fn bash_request<'a>(
         timeout_secs,
         skill_staging: crate::agentskills::report::SkillStaging::Symlink,
         environment: crate::agentskills::report::EnvironmentPolicy::Scrubbed,
+        permission: crate::agentskills::report::PermissionGrant::WorkspaceWrite,
         scaffold_permission: crate::agentskills::workspace_scaffold::ScaffoldPermission::Withheld,
     }
 }

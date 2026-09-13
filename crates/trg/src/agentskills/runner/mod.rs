@@ -29,7 +29,7 @@ use super::evals::{EvalCase, EvalError};
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
-use super::report::{EnvironmentPolicy, ScenarioKind, SkillStaging};
+use super::report::{EnvironmentPolicy, PermissionGrant, ScenarioKind, SkillStaging};
 use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
 use environment::RunEnvironment;
@@ -111,6 +111,7 @@ pub struct EvalRunRequest<'a> {
     pub timeout_secs: Option<u64>,
     pub skill_staging: SkillStaging,
     pub environment: EnvironmentPolicy,
+    pub permission: PermissionGrant,
     pub scaffold_permission: ScaffoldPermission,
 }
 
@@ -803,6 +804,7 @@ mod workspace_tests {
             timeout_secs: None,
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
+            permission: PermissionGrant::WorkspaceWrite,
             scaffold_permission: ScaffoldPermission::Withheld,
         }
     }
