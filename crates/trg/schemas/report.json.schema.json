@@ -39,14 +39,17 @@
           "minimum": 0,
           "type": "integer"
         },
-        "spent_usd": {
-          "format": "double",
-          "minimum": 0.0,
-          "type": "number"
+        "spent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/PassSpend"
+            }
+          ],
+          "description": "A number only when the harness that ran the pass publishes a price for a run.\nA harness that publishes none leaves a ledger holding zero, and writing that zero\nhere would report a free pass instead of an unpriced one."
         }
       },
       "required": [
-        "spent_usd",
+        "spent",
         "exhausted",
         "runs_skipped"
       ],
@@ -529,6 +532,47 @@
         "extra"
       ],
       "type": "object"
+    },
+    "PassSpend": {
+      "description": "What a pass spent, or why nobody can say.\n\nA harness that publishes no price leaves a ledger holding zero, and a zero in a spend\nfield reads as a cheap pass rather than an unanswered question. Only a total someone\nactually priced is ever written as a number.",
+      "oneOf": [
+        {
+          "description": "The harness priced its runs, and this is what they came to.",
+          "properties": {
+            "kind": {
+              "const": "priced",
+              "type": "string"
+            },
+            "usd": {
+              "format": "double",
+              "minimum": 0.0,
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "usd"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The harness reports no price for a run, so this pass has no total to report.",
+          "properties": {
+            "harness": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unpriced",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "harness"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "ProducerSection": {
       "properties": {

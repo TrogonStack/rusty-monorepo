@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::fs::FileSystem;
 
+use super::budget::PassSpend;
 use super::cache::RunCacheInfo;
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
 use super::evals::{parse_eval_suite, EvalError, EvalSuite, Result};
@@ -232,8 +233,10 @@ pub struct BudgetReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("exclusiveMinimum" = 0.0))]
     pub ceiling_usd: Option<f64>,
-    #[schemars(range(min = 0.0))]
-    pub spent_usd: f64,
+    /// A number only when the harness that ran the pass publishes a price for a run.
+    /// A harness that publishes none leaves a ledger holding zero, and writing that zero
+    /// here would report a free pass instead of an unpriced one.
+    pub spent: PassSpend,
     pub exhausted: bool,
     pub runs_skipped: usize,
 }

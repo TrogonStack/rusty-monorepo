@@ -14,6 +14,35 @@ pub const COMPARISON_SCHEMA: &str = include_str!("../../schemas/comparison.json.
 pub const TIMING_SCHEMA: &str = include_str!("../../schemas/timing.json.schema.json");
 pub const EVALS_SCHEMA: &str = include_str!("../../schemas/evals.json.schema.json");
 
+/// Whether this build of `trg` can hold an artifact against its schema.
+///
+/// Schema validation is a Cargo feature. A build without it turns every check into a
+/// pass, which is the one answer a verification command must never give quietly: the
+/// operator reads a clean exit as proof the bundle conforms, when nothing looked at it.
+/// Carried as a value so a command can refuse rather than silently answer for a check it
+/// did not make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaValidation {
+    /// The validator is compiled in, so a check is a check.
+    Compiled,
+    /// The validator was compiled out, so every artifact would pass unexamined.
+    Absent,
+}
+
+impl SchemaValidation {
+    pub const fn of_this_build() -> Self {
+        if cfg!(any(feature = "schema-validation", test)) {
+            Self::Compiled
+        } else {
+            Self::Absent
+        }
+    }
+
+    pub fn is_compiled(self) -> bool {
+        matches!(self, Self::Compiled)
+    }
+}
+
 pub fn validate_artifact(schema: &str, json: &serde_json::Value) -> Result<()> {
     #[cfg(any(feature = "schema-validation", test))]
     {

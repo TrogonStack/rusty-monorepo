@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::budget::HarnessPricing;
 use super::errors::SkillError;
 use super::evals::EVAL_SUITE_DIR_NAME;
 use super::evals::{EvalCase, EvalError};
@@ -70,6 +71,20 @@ impl Runner {
             Self::CursorAgent => "cursor-agent",
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+        }
+    }
+
+    /// Whether this harness reports what a run cost.
+    ///
+    /// Only claude-code publishes a dollar figure alongside its result. The others report
+    /// tokens and leave the price to whoever holds the rate card, so nothing downstream
+    /// can total what a pass of theirs spent or hold it to a ceiling.
+    pub fn pricing(self) -> HarnessPricing {
+        match self {
+            Self::ClaudeCode => HarnessPricing::Publishes,
+            Self::CursorAgent | Self::Codex => HarnessPricing::Silent {
+                harness: self.display_name().to_string(),
+            },
         }
     }
 

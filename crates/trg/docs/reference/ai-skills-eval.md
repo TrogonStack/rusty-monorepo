@@ -47,7 +47,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
 | `--attempts` | integer | `3` | Draw each (case × scenario) cell this many times. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
-| `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. Accepts a finite amount greater than zero; a ceiling of zero or less could admit nothing and is refused. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
+| `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. Accepts a finite amount greater than zero; a ceiling of zero or less could admit nothing and is refused, as is any ceiling over a runner that publishes no price. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
@@ -134,7 +134,7 @@ the grading for that run.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: require at least one `grading.json` and fail on failed assertions |
+| `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: hold every artifact against its schema, require at least one `grading.json`, and fail on failed assertions. Refused outright on a build compiled without the `schema-validation` feature. See [What strict mode needs from the build](#what-strict-mode-needs-from-the-build) |
 | `--require-assertions` | bool | `false` | Fail when an eval case declares neither an assertion nor a grader |
 | `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
@@ -142,6 +142,19 @@ the grading for that run.
 `verify` also accepts the threshold and regression flags (`--min-pass-rate`,
 `--max-tokens`, `--baseline`, `--strict-ci`, and the `--fail-on-*` family). See
 [Pass-rate thresholds](../how-to/run-in-ci.md#pass-rate-thresholds).
+
+### What strict mode needs from the build
+
+Schema validation is the Cargo feature `schema-validation`, on by default, so an
+ordinary `cargo build` and every released binary can validate. A build made with
+`--no-default-features` compiles the validator out, and every artifact then
+passes without being read.
+
+That is the one failure a verification command must not have quietly, so
+`--mode strict` refuses to run on such a build rather than exiting clean on a
+bundle nothing examined. `--mode lenient` never claimed to check a schema and is
+unaffected. If you see the refusal, rebuild with the feature; do not reach for
+`--mode lenient` and read its clean exit as conformance.
 
 ### Example (text)
 
@@ -450,7 +463,7 @@ subcommands run.
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `ceiling_usd` | number | Value of `--max-cost-usd`, always greater than zero. Absent when the pass ran with no ceiling |
-| `spent_usd` | number | Total reported cost across every runner invocation in the pass, including attempts `--retries` discarded |
+| `spent` | object | What the pass spent, or why nobody can say. `{"kind": "priced", "usd": N}` when the runner publishes a price for a run, totalling every runner invocation in the pass including attempts `--retries` discarded. `{"kind": "unpriced", "harness": "codex"}` when it publishes none, since a zero there would report a free pass rather than an unpriced one |
 | `exhausted` | bool | Whether spend had reached the ceiling by the time the pass finished |
 | `runs_skipped` | integer | Runs not started because the ledger had already refused them |
 
@@ -1032,6 +1045,14 @@ away. The report keeps only the attempt that stuck, so a ceiling that counted
 what the report shows would let a flaky pass bill several times over what it
 was allowed.
 
+Charged, that is, whenever the invocation came back with a price. An attempt
+that timed out or died in the runner never reaches the event that carries one,
+so there is no figure to charge and the ledger adds nothing: a missing price is
+not a free run, it is one nobody can bill yet. A pass flaky enough to burn most
+of its attempts that way can therefore spend past its ceiling without the
+ledger seeing it. Nothing here can close that, since the only harness that
+publishes a price publishes it once, at the end of a run that finished.
+
 A run the ledger refuses is recorded with `status: skipped` and
 `failure_kind: budget`, carrying a warning naming what the pass had spent and
 the ceiling it hit. It is not a failed run: nothing was asked of the runner and
@@ -1041,9 +1062,13 @@ pass rate. A run already served from cache is unaffected
 by the ceiling, since a cache hit costs nothing and reusing it is exactly what
 a budget is for.
 
-Only the `claude-code` runner reports what a run cost today, so `--max-cost-usd`
-never binds a `codex` or `cursor-agent` pass: nothing accumulates against the
-ledger, so it never refuses a run.
+Only the `claude-code` runner publishes what a run cost today. A ceiling over
+`codex` or `cursor-agent` would sit at zero spend for the life of the pass,
+admit every run, and leave the operator believing a limit was holding while the
+bill grew, so `--max-cost-usd` on either is refused at the command line before
+a report exists to be read as bounded. Those passes still run without a
+ceiling, and their `budget.spent` says `unpriced` and names the harness rather
+than reporting a total of zero that nobody measured.
 
 `trg` exits `2` instead of `0` when the pass got less than it asked for or paid
 more than it allowed: either a run was refused, or spend went strictly past the
