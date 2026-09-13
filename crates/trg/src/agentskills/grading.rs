@@ -99,6 +99,26 @@ pub struct AssertionGradeResult {
     pub votes: Option<JudgeVoteTally>,
 }
 
+/// Which single bucket a result belongs to.
+///
+/// The three markers are independent options, so one result can carry several
+/// at once and anything counting over them has to decide which wins. Deciding
+/// that here, once, is what stops a printed list from naming assertions that
+/// the number printed beside it does not count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertionOutcome {
+    /// Deliberately out of scope for this arm, which settles the result no
+    /// matter what else is true of it: a check nobody was going to score loses
+    /// nothing by also having been unanswerable.
+    Excluded,
+    /// The harness cannot answer this kind of question at all.
+    Unsupported,
+    /// In scope and answerable in principle, but nothing attempted it.
+    Ungraded,
+    /// Counted for or against the skill.
+    Scored,
+}
+
 impl AssertionGradeResult {
     pub fn is_unsupported(&self) -> bool {
         self.unsupported.is_some()
@@ -112,8 +132,20 @@ impl AssertionGradeResult {
         self.ungraded.is_some()
     }
 
+    pub fn outcome(&self) -> AssertionOutcome {
+        if self.is_excluded() {
+            AssertionOutcome::Excluded
+        } else if self.is_unsupported() {
+            AssertionOutcome::Unsupported
+        } else if self.is_ungraded() {
+            AssertionOutcome::Ungraded
+        } else {
+            AssertionOutcome::Scored
+        }
+    }
+
     pub fn is_scored(&self) -> bool {
-        !self.is_unsupported() && !self.is_excluded() && !self.is_ungraded()
+        self.outcome() == AssertionOutcome::Scored
     }
 }
 
@@ -137,6 +169,18 @@ pub struct GradingSummary {
     pub pass_rate: Option<f64>,
 }
 
+/// The assertions the ungraded count counted.
+///
+/// The number and the list beneath it are two views of one set, so they are
+/// taken with one predicate rather than two that have to be kept in step.
+fn ungraded_assertion_texts(results: &[AssertionGradeResult]) -> Vec<String> {
+    results
+        .iter()
+        .filter(|result| result.outcome() == AssertionOutcome::Ungraded)
+        .map(|result| result.assertion.clone())
+        .collect()
+}
+
 /// The single place the grading arithmetic lives, so the writer and both
 /// validators cannot drift from one another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,16 +195,19 @@ pub struct GradingCounts {
 
 impl GradingCounts {
     pub fn tally(results: &[AssertionGradeResult]) -> Self {
-        let excluded = results.iter().filter(|r| r.is_excluded()).count();
-        let unsupported = results
-            .iter()
-            .filter(|r| !r.is_excluded() && r.is_unsupported())
-            .count();
-        let ungraded = results
-            .iter()
-            .filter(|r| !r.is_excluded() && !r.is_unsupported() && r.is_ungraded())
-            .count();
-        let passed = results.iter().filter(|r| r.is_scored() && r.passed).count();
+        let mut passed = 0;
+        let mut unsupported = 0;
+        let mut excluded = 0;
+        let mut ungraded = 0;
+        for result in results {
+            match result.outcome() {
+                AssertionOutcome::Excluded => excluded += 1,
+                AssertionOutcome::Unsupported => unsupported += 1,
+                AssertionOutcome::Ungraded => ungraded += 1,
+                AssertionOutcome::Scored if result.passed => passed += 1,
+                AssertionOutcome::Scored => {}
+            }
+        }
         let total = results.len();
         Self {
             passed,
@@ -488,12 +535,9 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         restore_when_nothing_would_be_scored(&mut assertion_results);
 
         report.assertions_graded += assertion_results.len();
-        report.ungraded_assertions.extend(
-            assertion_results
-                .iter()
-                .filter(|r| r.is_ungraded())
-                .map(|r| r.assertion.clone()),
-        );
+        report
+            .ungraded_assertions
+            .extend(ungraded_assertion_texts(&assertion_results));
         let counts = GradingCounts::tally(&assertion_results);
         report.passed += counts.passed;
         report.failed += counts.failed;
@@ -2344,6 +2388,42 @@ mod tests {
             Some(1.0),
             "pass_rate is over the scored assertions, so an ungraded one cannot dilute it"
         );
+    }
+
+    /// An arm-scoped check that nothing could attempt carries the excluded and the
+    /// ungraded marker at once, so every count taken over those markers has to agree
+    /// on which one wins. Excluded wins, because a check nobody was going to score
+    /// loses nothing by also having been unanswerable. The list and the number are
+    /// asserted together: letting them drift is how a report names assertions that
+    /// the figure printed beside them does not count.
+    #[test]
+    fn an_excluded_assertion_that_nothing_attempted_is_counted_and_listed_the_same_way() {
+        let mut unattempted_and_out_of_scope = needs_llm_result("b", "no judge was consulted");
+        unattempted_and_out_of_scope.excluded = Some("scored in the with-skill arm only".to_string());
+        let results = vec![
+            result_for_test("a", true),
+            unattempted_and_out_of_scope,
+            needs_llm_result("c", "no judge was consulted"),
+        ];
+
+        assert!(
+            results[1].is_ungraded(),
+            "the ungraded marker is still there for a second predicate to misread"
+        );
+        assert_eq!(results[1].outcome(), AssertionOutcome::Excluded);
+
+        let counts = GradingCounts::tally(&results);
+        assert_eq!(counts.excluded, 1);
+        assert_eq!(counts.ungraded, 1, "only the check that was in scope went unmeasured");
+        assert_eq!(counts.failed, 0);
+
+        let listed = ungraded_assertion_texts(&results);
+        assert_eq!(
+            listed.len(),
+            counts.ungraded,
+            "the assertions listed as ungraded must be the ones the count counted"
+        );
+        assert_eq!(listed, vec!["c".to_string()]);
     }
 
     #[test]
