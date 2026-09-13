@@ -46,13 +46,42 @@ impl HarnessControl {
     }
 }
 
+/// The concrete shape of a control once a harness offers it: a flag, a subcommand, an
+/// env var, or a fact the harness simply reports. Kept apart from `ControlSupport` so the
+/// question "what does the harness expose" has a value even when trg does not drive it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ControlSupport {
+pub enum ControlMechanism {
     Flag(&'static str),
     Subcommand(&'static str),
     EnvVar(&'static str),
     Reported,
+}
+
+impl ControlMechanism {
+    fn describe(self) -> String {
+        match self {
+            Self::Flag(flag) => format!("`{flag}`"),
+            Self::Subcommand(subcommand) => format!("`{subcommand}` subcommand"),
+            Self::EnvVar(var) => format!("`{var}`"),
+            Self::Reported => "reported".to_string(),
+        }
+    }
+}
+
+/// Whether a harness offers a control is a fact about its own CLI; whether trg drives that
+/// control is a fact about trg's invocation code. A single `Flag`-like value used to answer
+/// both questions at once, which let a cell claim a mechanism no runner ever read. Keeping
+/// `Driven` apart from `Offered` means only a cell trg actually exercises can hand out a
+/// mechanism string, so an argument builder can never be built from a cell trg does not
+/// drive.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ControlSupport {
+    /// The harness does not offer this control.
     Absent,
+    /// The harness offers it; trg does not exercise it.
+    Offered(ControlMechanism),
+    /// The harness offers it and trg builds its invocation from this cell.
+    Driven(ControlMechanism),
 }
 
 impl ControlSupport {
@@ -62,41 +91,45 @@ impl ControlSupport {
 
     pub fn flag(self) -> Option<&'static str> {
         match self {
-            Self::Flag(flag) => Some(flag),
+            Self::Driven(ControlMechanism::Flag(flag)) => Some(flag),
             _ => None,
         }
     }
 
     pub fn describe(self) -> String {
         match self {
-            Self::Flag(flag) => format!("`{flag}`"),
-            Self::Subcommand(subcommand) => format!("`{subcommand}` subcommand"),
-            Self::EnvVar(var) => format!("`{var}`"),
-            Self::Reported => "reported".to_string(),
             Self::Absent => "no".to_string(),
+            Self::Offered(mechanism) => format!("{} (harness only)", mechanism.describe()),
+            Self::Driven(mechanism) => mechanism.describe(),
         }
     }
 }
 
 impl Runner {
     pub fn support(self, control: HarnessControl) -> ControlSupport {
+        use ControlMechanism::{EnvVar, Flag, Reported, Subcommand};
+
         match (self, control) {
-            (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Flag("--allowedTools"),
+            (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Offered(Flag("--allowedTools")),
             (Self::ClaudeCode, HarnessControl::TurnCap) => ControlSupport::Absent,
-            (Self::ClaudeCode, HarnessControl::SystemPromptAppend) => ControlSupport::Flag("--append-system-prompt"),
-            (Self::ClaudeCode, HarnessControl::McpServers) => ControlSupport::Flag("--mcp-config"),
-            (Self::ClaudeCode, HarnessControl::SandboxLevels) => ControlSupport::Flag("--permission-mode"),
-            (Self::ClaudeCode, HarnessControl::ConversationResume) => ControlSupport::Flag("--resume"),
-            (Self::ClaudeCode, HarnessControl::RunScopedConfigHome) => ControlSupport::EnvVar("CLAUDE_CONFIG_DIR"),
-            (Self::ClaudeCode, HarnessControl::CostReporting) => ControlSupport::Reported,
+            (Self::ClaudeCode, HarnessControl::SystemPromptAppend) => {
+                ControlSupport::Offered(Flag("--append-system-prompt"))
+            }
+            (Self::ClaudeCode, HarnessControl::McpServers) => ControlSupport::Offered(Flag("--mcp-config")),
+            (Self::ClaudeCode, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("--permission-mode")),
+            (Self::ClaudeCode, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--resume")),
+            (Self::ClaudeCode, HarnessControl::RunScopedConfigHome) => {
+                ControlSupport::Driven(EnvVar("CLAUDE_CONFIG_DIR"))
+            }
+            (Self::ClaudeCode, HarnessControl::CostReporting) => ControlSupport::Driven(Reported),
 
             (Self::Codex, HarnessControl::ToolAllowlist) => ControlSupport::Absent,
             (Self::Codex, HarnessControl::TurnCap) => ControlSupport::Absent,
             (Self::Codex, HarnessControl::SystemPromptAppend) => ControlSupport::Absent,
             (Self::Codex, HarnessControl::McpServers) => ControlSupport::Absent,
-            (Self::Codex, HarnessControl::SandboxLevels) => ControlSupport::Flag("-s"),
-            (Self::Codex, HarnessControl::ConversationResume) => ControlSupport::Subcommand("resume"),
-            (Self::Codex, HarnessControl::RunScopedConfigHome) => ControlSupport::EnvVar("CODEX_HOME"),
+            (Self::Codex, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("-s")),
+            (Self::Codex, HarnessControl::ConversationResume) => ControlSupport::Offered(Subcommand("resume")),
+            (Self::Codex, HarnessControl::RunScopedConfigHome) => ControlSupport::Driven(EnvVar("CODEX_HOME")),
             (Self::Codex, HarnessControl::CostReporting) => ControlSupport::Absent,
 
             (Self::CursorAgent, HarnessControl::ToolAllowlist) => ControlSupport::Absent,
@@ -106,8 +139,8 @@ impl Runner {
             // cursor-agent accepts a sandbox level through --force, but it is the CLI's
             // only documented non-interactive grant: both permission grants collapse onto
             // this one flag rather than onto two distinct levels.
-            (Self::CursorAgent, HarnessControl::SandboxLevels) => ControlSupport::Flag("--force"),
-            (Self::CursorAgent, HarnessControl::ConversationResume) => ControlSupport::Flag("--resume"),
+            (Self::CursorAgent, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("--force")),
+            (Self::CursorAgent, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--resume")),
             (Self::CursorAgent, HarnessControl::RunScopedConfigHome) => ControlSupport::Absent,
             (Self::CursorAgent, HarnessControl::CostReporting) => ControlSupport::Absent,
         }
@@ -136,7 +169,7 @@ mod tests {
 
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::ToolAllowlist),
-            ControlSupport::Flag("--allowedTools")
+            ControlSupport::Offered(ControlMechanism::Flag("--allowedTools"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::TurnCap),
@@ -144,27 +177,27 @@ mod tests {
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::SystemPromptAppend),
-            ControlSupport::Flag("--append-system-prompt")
+            ControlSupport::Offered(ControlMechanism::Flag("--append-system-prompt"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::McpServers),
-            ControlSupport::Flag("--mcp-config")
+            ControlSupport::Offered(ControlMechanism::Flag("--mcp-config"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::SandboxLevels),
-            ControlSupport::Flag("--permission-mode")
+            ControlSupport::Driven(ControlMechanism::Flag("--permission-mode"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::ConversationResume),
-            ControlSupport::Flag("--resume")
+            ControlSupport::Offered(ControlMechanism::Flag("--resume"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::RunScopedConfigHome),
-            ControlSupport::EnvVar("CLAUDE_CONFIG_DIR")
+            ControlSupport::Driven(ControlMechanism::EnvVar("CLAUDE_CONFIG_DIR"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::CostReporting),
-            ControlSupport::Reported
+            ControlSupport::Driven(ControlMechanism::Reported)
         );
 
         assert_eq!(
@@ -182,15 +215,15 @@ mod tests {
         );
         assert_eq!(
             Runner::Codex.support(HarnessControl::SandboxLevels),
-            ControlSupport::Flag("-s")
+            ControlSupport::Driven(ControlMechanism::Flag("-s"))
         );
         assert_eq!(
             Runner::Codex.support(HarnessControl::ConversationResume),
-            ControlSupport::Subcommand("resume")
+            ControlSupport::Offered(ControlMechanism::Subcommand("resume"))
         );
         assert_eq!(
             Runner::Codex.support(HarnessControl::RunScopedConfigHome),
-            ControlSupport::EnvVar("CODEX_HOME")
+            ControlSupport::Driven(ControlMechanism::EnvVar("CODEX_HOME"))
         );
         assert_eq!(
             Runner::Codex.support(HarnessControl::CostReporting),
@@ -215,11 +248,11 @@ mod tests {
         );
         assert_eq!(
             Runner::CursorAgent.support(HarnessControl::SandboxLevels),
-            ControlSupport::Flag("--force")
+            ControlSupport::Driven(ControlMechanism::Flag("--force"))
         );
         assert_eq!(
             Runner::CursorAgent.support(HarnessControl::ConversationResume),
-            ControlSupport::Flag("--resume")
+            ControlSupport::Offered(ControlMechanism::Flag("--resume"))
         );
         assert_eq!(
             Runner::CursorAgent.support(HarnessControl::RunScopedConfigHome),
@@ -232,6 +265,48 @@ mod tests {
     }
 
     #[test]
+    fn every_driven_flag_is_carried_by_the_invocation_it_drives() {
+        use crate::agentskills::report::PermissionGrant;
+        use std::ffi::OsString;
+        use std::path::Path;
+
+        let argv_for = |runner: Runner| -> Vec<OsString> {
+            match runner {
+                Runner::ClaudeCode => {
+                    super::super::claude_code::build_args("do the thing", None, PermissionGrant::Unrestricted)
+                }
+                Runner::Codex => super::super::codex::build_args(
+                    Path::new("/workspace"),
+                    Path::new("/workspace/outputs/final.md"),
+                    None,
+                    PermissionGrant::Unrestricted,
+                    "do the thing",
+                ),
+                Runner::CursorAgent => super::super::cursor_agent::build_args(
+                    Path::new("/workspace"),
+                    None,
+                    PermissionGrant::Unrestricted,
+                    "do the thing",
+                ),
+            }
+        };
+
+        for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+            let argv = argv_for(runner);
+            for control in HarnessControl::ALL {
+                if let ControlSupport::Driven(ControlMechanism::Flag(flag)) = runner.support(control) {
+                    assert!(
+                        argv.contains(&OsString::from(flag)),
+                        "{} declares '{}' driven via {flag} but its built invocation does not carry it",
+                        runner.display_name(),
+                        control.label()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_matrix_and_config_home_agree() {
         use super::super::environment::HarnessConfigHome;
 
@@ -239,7 +314,7 @@ mod tests {
             let support = runner.support(HarnessControl::RunScopedConfigHome);
             match runner.config_home() {
                 HarnessConfigHome::Redirectable { var, .. } => {
-                    assert_eq!(support, ControlSupport::EnvVar(var));
+                    assert_eq!(support, ControlSupport::Driven(ControlMechanism::EnvVar(var)));
                 }
                 HarnessConfigHome::HomeRelative { .. } => {
                     assert_eq!(support, ControlSupport::Absent);
@@ -253,7 +328,8 @@ mod tests {
         use crate::agentskills::budget::HarnessPricing;
 
         for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
-            let reports_cost = runner.support(HarnessControl::CostReporting) == ControlSupport::Reported;
+            let reports_cost =
+                runner.support(HarnessControl::CostReporting) == ControlSupport::Driven(ControlMechanism::Reported);
             let publishes = matches!(runner.pricing(), HarnessPricing::Publishes);
             assert_eq!(reports_cost, publishes);
         }
@@ -333,10 +409,30 @@ mod tests {
 
     #[test]
     fn describe_renders_each_shape() {
-        assert_eq!(ControlSupport::Flag("--force").describe(), "`--force`");
-        assert_eq!(ControlSupport::Subcommand("resume").describe(), "`resume` subcommand");
-        assert_eq!(ControlSupport::EnvVar("CODEX_HOME").describe(), "`CODEX_HOME`");
-        assert_eq!(ControlSupport::Reported.describe(), "reported");
         assert_eq!(ControlSupport::Absent.describe(), "no");
+        assert_eq!(
+            ControlSupport::Driven(ControlMechanism::Flag("--force")).describe(),
+            "`--force`"
+        );
+        assert_eq!(
+            ControlSupport::Driven(ControlMechanism::Subcommand("resume")).describe(),
+            "`resume` subcommand"
+        );
+        assert_eq!(
+            ControlSupport::Driven(ControlMechanism::EnvVar("CODEX_HOME")).describe(),
+            "`CODEX_HOME`"
+        );
+        assert_eq!(
+            ControlSupport::Driven(ControlMechanism::Reported).describe(),
+            "reported"
+        );
+        assert_eq!(
+            ControlSupport::Offered(ControlMechanism::Flag("--allowedTools")).describe(),
+            "`--allowedTools` (harness only)"
+        );
+        assert_eq!(
+            ControlSupport::Offered(ControlMechanism::Subcommand("resume")).describe(),
+            "`resume` subcommand (harness only)"
+        );
     }
 }

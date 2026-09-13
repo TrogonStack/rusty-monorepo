@@ -1035,17 +1035,34 @@ could then score differently on two machines.
 Every runner drives a different CLI, and no two of those CLIs expose the same
 controls. `no` in the table below is not a placeholder: it means the control is
 absent from that harness's own `--help`, so trg has nothing to drive it with.
-The table below is checked against the same declaration trg builds its
-invocations from, so a test fails if the two ever disagree.
+
+A cell without a qualifier names the mechanism trg's own invocation is built
+from. A cell marked `(harness only)` names a control the harness offers that
+trg does not exercise; it is recorded because it is a fact about the CLI worth
+keeping visible, not because trg does anything with it.
+
+The table is checked against the same declaration trg reads `support()` from,
+so a test fails if the two ever disagree. That guarantees the doc matches the
+declaration and nothing further.
+
+A driven cell carries a second check, and how much that check is worth depends
+on the mechanism. A driven flag is searched for in the argv the runner actually
+builds, so promoting a cell to driven without wiring the flag fails the suite.
+The two driven cells that are not flags, `run-scoped config home` and `cost
+reporting`, are held against the neighbouring declarations they have to agree
+with, `config_home()` and `pricing()`, because the variable is exported outside
+argv construction and cost reporting is a fact about parsing the harness's own
+output. Those two are consistency checks between declarations rather than
+evidence that the export or the parse happens.
 
 | Control | `claude-code` | `codex` | `cursor-agent` |
 | ------- | ------------- | ------- | -------------- |
-| tool allowlist | `--allowedTools` | no | no |
+| tool allowlist | `--allowedTools` (harness only) | no | no |
 | turn cap | no | no | no |
-| system prompt append | `--append-system-prompt` | no | no |
-| mcp servers | `--mcp-config` | no | no |
+| system prompt append | `--append-system-prompt` (harness only) | no | no |
+| mcp servers | `--mcp-config` (harness only) | no | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
-| conversation resume | `--resume` | `resume` subcommand | `--resume` |
+| conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) |
 | run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no |
 | cost reporting | reported | no | no |
 

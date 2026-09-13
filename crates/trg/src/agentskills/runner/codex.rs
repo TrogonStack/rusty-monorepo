@@ -35,7 +35,7 @@ fn permission_sandbox(grant: PermissionGrant) -> &'static str {
 /// The arguments are `OsString` because two of them are paths, and a path is not always
 /// valid UTF-8. Rendering one into a `String` to build the list would hand the harness a
 /// lossily rewritten directory to work in.
-fn build_args(
+pub(crate) fn build_args(
     workspace_dir: &Path,
     final_text_path: &Path,
     model: Option<&str>,
