@@ -295,6 +295,7 @@ every reader and to every runner.
 | `llm` | `criterion`, `target` | Handed to the LLM judge, which is the only grader that costs a request |
 | `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
 | `schema_validation` | `schema`, `target` | The target parses as JSON and validates against the named JSON Schema document. `schema` is a relative path inside the skill directory, resolved the same way `files` and `scaffold` are |
+| `baseline` | `reference`, `criterion`, `target` | The target is at least as good as a reference output already in the suite, judged on `criterion`. Costs judge requests. See [Holding a run to a reference output](#holding-a-run-to-a-reference-output) |
 
 Every grader also accepts `arm`, which decides whether its result counts toward
 the score. See [Arm-scoped graders](#arm-scoped-graders).
@@ -646,6 +647,47 @@ side that lost.
 judge request per vote per LLM-graded assertion. Mechanical, declarative, and
 script graders are unaffected: they answer the same way every time, so there is
 nothing for a second opinion to settle.
+
+### Holding a run to a reference output
+
+A `baseline` grader asks a comparative question the other graders cannot: not
+whether the run cleared some property, but whether it is *at least as good as*
+an output already accepted. `reference` is a relative path inside the skill
+directory, resolved the way `schema_validation` resolves its schema, and
+`criterion` says on what footing the two are being compared.
+
+```json
+{ "type": "baseline", "reference": "evals/golden/summary.md", "criterion": "covers every column in the input" }
+```
+
+Three properties are worth knowing before writing one.
+
+**The judge is not told which output is the reference.** The two are shown as A
+and B, and which label the run gets is fixed by the case id and the criterion.
+A judge that knows which side is the incumbent answers a different question from
+the one the case wrote down, and the position the run is shown in is itself a
+bias, so the assignment varies between criteria and stays put across re-grades
+of the same case.
+
+**A tie passes.** "At least as good as" is the whole of what a baseline asks, so
+only a run the judge places behind the reference has failed it. This is what
+makes a baseline usable as a regression gate on the `old_skill` arm, where the
+expected outcome is that nothing got worse rather than that everything improved.
+
+**A reference that is missing or blank is a defect in the case.** It is reported
+as a failure to grade, the same way `schema_validation` reports a broken schema,
+rather than as a failed run. A blank reference in particular would be cleared by
+any output at all, which is the one answer a comparison must never give by
+accident.
+
+Both sides are held to the same share of the judge payload. A long run does not
+get to push the reference out of the request, because a comparison against a
+clipped reference is a comparison between two different things.
+
+A baseline costs judge requests, `--grader-votes` of them, exactly as an `llm`
+grader does. Under `--grader script` the reference is handed to the script in
+the payload as `baseline`, so the script can answer the comparison rather than
+grading the run on its own.
 
 ### Schema validation
 

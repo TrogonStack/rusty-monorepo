@@ -264,6 +264,35 @@
             "schema"
           ],
           "type": "object"
+        },
+        {
+          "description": "Is this run at least as good as a reference output the suite already accepts?",
+          "properties": {
+            "criterion": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "reference": {
+              "$ref": "#/$defs/RelativeSkillPath"
+            },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
+            "type": {
+              "const": "baseline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "reference",
+            "criterion"
+          ],
+          "type": "object"
         }
       ],
       "properties": {

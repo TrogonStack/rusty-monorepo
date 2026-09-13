@@ -18,7 +18,7 @@
 //! | Row count | `row count is 10`, `data.csv has 10 rows`, `10 rows in data.csv` |
 //! | Schema validation | `validates against schema foo`, `schema validation for out.json` |
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -26,9 +26,11 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::compare::{parse_winner, shuffle_swap, BlindLabel, ComparisonWinner};
 use super::evals::{EvalCase, EvalError, EvalSuite, Result};
 use super::graders::{
-    self, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, TargetContent, TargetDeclaration,
+    self, BaselineReference, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, TargetContent,
+    TargetDeclaration,
 };
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
@@ -416,7 +418,7 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
         GraderMode::Auto => suite.evals.iter().any(|case| {
             case.graders
                 .iter()
-                .any(|declared| matches!(declared.grader, Grader::Llm { .. }))
+                .any(|declared| matches!(declared.grader, Grader::Llm { .. } | Grader::Baseline { .. }))
                 || case
                     .assertions
                     .iter()
@@ -631,7 +633,7 @@ fn grade_assertion(
 ) -> Result<AssertionGradeResult> {
     let options = session.options;
     match options.grader {
-        GraderMode::Script => grade_with_script(assertion, eval_case, ctx, options),
+        GraderMode::Script => grade_with_script(assertion, None, eval_case, ctx, options),
         GraderMode::Llm => grade_with_llm(assertion, &TargetDeclaration::Default, declarative, ctx, session),
         GraderMode::None | GraderMode::Auto => {
             if let Some(kind) = parse_mechanical_kind(assertion) {
@@ -757,8 +759,31 @@ fn grade_declaratively(
         GraderOutcome::Deferred { criterion, target } => {
             let mut result = match options.grader {
                 GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, &target, declarative, ctx, session)?,
-                GraderMode::Script => grade_with_script(&criterion, eval_case, ctx, options)?,
+                GraderMode::Script => grade_with_script(&criterion, None, eval_case, ctx, options)?,
                 GraderMode::None => needs_llm_result(&criterion, "grader mode is none, so no judge was consulted"),
+            };
+            result.excluded = excluded;
+            result.name = name;
+            result
+        }
+        GraderOutcome::Comparison {
+            criterion,
+            target,
+            reference,
+        } => {
+            let mut result = match options.grader {
+                GraderMode::Llm | GraderMode::Auto => grade_against_baseline(
+                    &assertion,
+                    &criterion,
+                    &target,
+                    &reference,
+                    eval_case,
+                    declarative,
+                    ctx,
+                    session,
+                )?,
+                GraderMode::Script => grade_with_script(&criterion, Some(&reference), eval_case, ctx, options)?,
+                GraderMode::None => needs_llm_result(&assertion, "grader mode is none, so no judge was consulted"),
             };
             result.excluded = excluded;
             result.name = name;
@@ -905,8 +930,13 @@ fn script_crashed_result(assertion: &str, command: &str, output: &std::process::
     }
 }
 
+/// `baseline` is `Some` only for a `baseline` grader, and carrying it here is what
+/// keeps `--grader script` from quietly answering a different question: a script
+/// handed only the criterion would grade the run on its own, which is not what a
+/// comparison asked.
 fn grade_with_script(
     assertion: &str,
+    baseline: Option<&BaselineReference>,
     eval_case: &EvalCase,
     ctx: &RunContext,
     options: &GradeOptions,
@@ -921,6 +951,12 @@ fn grade_with_script(
         "outputs": ctx.outputs_dir,
         "transcript": ctx.transcript_path,
     });
+    if let Some(baseline) = baseline {
+        input["baseline"] = serde_json::json!({
+            "reference": baseline.declared(),
+            "content": baseline.text(),
+        });
+    }
     if let Some(hints) = &eval_case.grader_hints {
         input["grader_hints"] =
             serde_json::Value::Object(hints.iter().map(|(key, value)| (key.clone(), value.clone())).collect());
@@ -1057,6 +1093,186 @@ fn grade_with_llm(
         ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
     })
+}
+
+/// Which blind label the run's own output was given for one baseline comparison.
+///
+/// The judge is never told which side is the reference, because a judge that knows
+/// which output is the incumbent is answering a different question from the one the
+/// case wrote down. Which label the run gets is fixed by the case and the criterion,
+/// the same deterministic rule `compare` already uses to debias its pairs, so
+/// re-grading a report asks the judge the question it asked before rather than its
+/// mirror image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BaselinePairing {
+    run: BlindLabel,
+}
+
+impl BaselinePairing {
+    /// Each side is held to the same share of the payload rather than letting a
+    /// short output pass its unused share to the other, which is what
+    /// `PayloadBudget` does for a list of artifacts. Rolling the leftover across
+    /// would let the judge read one side whole and the other clipped, and "at least
+    /// as good as" answered against a clipped reference compares two different
+    /// things.
+    const SIDE_BYTES: usize = PayloadBudget::TOTAL_BYTES / 2;
+
+    fn for_criterion(eval_case_id: &str, criterion: &str) -> Self {
+        let run = if shuffle_swap(&format!("{eval_case_id}:{criterion}")) {
+            BlindLabel::B
+        } else {
+            BlindLabel::A
+        };
+        Self { run }
+    }
+
+    fn reference(self) -> BlindLabel {
+        match self.run {
+            BlindLabel::A => BlindLabel::B,
+            BlindLabel::B => BlindLabel::A,
+        }
+    }
+
+    fn outputs(self, run: &str, reference: &str, direction: TruncateDirection) -> BTreeMap<&'static str, String> {
+        BTreeMap::from([
+            (self.run.as_str(), Self::fit(run, direction)),
+            (self.reference().as_str(), Self::fit(reference, direction)),
+        ])
+    }
+
+    fn fit(text: &str, direction: TruncateDirection) -> String {
+        if text.len() <= Self::SIDE_BYTES {
+            return text.to_string();
+        }
+        truncate(text, Self::SIDE_BYTES, direction)
+    }
+
+    /// A tie passes. "At least as good as" is the whole of what a baseline asks, so
+    /// a run that matches the reference has met it; only a run the judge puts behind
+    /// the reference has not.
+    fn at_least_as_good(self, winner: ComparisonWinner) -> bool {
+        match winner {
+            ComparisonWinner::Tie => true,
+            ComparisonWinner::A => self.run == BlindLabel::A,
+            ComparisonWinner::B => self.run == BlindLabel::B,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BaselineJudgeResponse {
+    better: String,
+    evidence: String,
+    #[serde(default)]
+    rationale: Option<String>,
+}
+
+const BASELINE_GRADER_SYSTEM_PROMPT: &str = "You are comparing two anonymous outputs, labeled A and B, \
+     against one criterion. Say which one better satisfies the criterion, or answer tie when neither is \
+     better than the other. Respond with JSON: {\"better\":\"A|B|tie\",\"evidence\":\"...\",\"rationale\":\"...\"}. \
+     Quote both outputs in `evidence`. One of them is a reference and one is a new run; you are not told \
+     which, and you must not guess.";
+
+/// Grade a run against a reference output the suite already accepts.
+///
+/// A missing or unreadable target is settled here rather than sent to the judge:
+/// a run that produced nothing is not at least as good as a reference that exists,
+/// and there is nothing for a judge to read but the absence.
+#[allow(clippy::too_many_arguments)]
+fn grade_against_baseline(
+    assertion: &str,
+    criterion: &str,
+    target: &GradeTarget,
+    reference: &BaselineReference,
+    eval_case: &EvalCase,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    session: &GradeSession,
+) -> Result<AssertionGradeResult> {
+    let run_output = match declarative.input(ctx).target_content(target) {
+        TargetContent::Text(text) => text,
+        TargetContent::Missing(reason) => return Ok(baseline_shortfall(assertion, reason)),
+        TargetContent::Image { .. } => {
+            return Ok(baseline_shortfall(
+                assertion,
+                format!("{target} is an image, and a baseline reference is compared as text"),
+            ))
+        }
+    };
+
+    let direction = match target {
+        GradeTarget::Transcript => TruncateDirection::Tail,
+        _ => TruncateDirection::Head,
+    };
+    let pairing = BaselinePairing::for_criterion(eval_case.id.as_str(), criterion);
+    let payload = serde_json::to_string(&serde_json::json!({
+        "criterion": criterion,
+        "outputs": pairing.outputs(&run_output, reference.text(), direction),
+    }))?;
+
+    let endpoint = session.endpoint()?;
+    let request = JudgeRequest::new(BASELINE_GRADER_SYSTEM_PROMPT, payload);
+
+    let votes = session.options.grader_votes;
+    let mut opinions = Vec::with_capacity(votes.count() as usize);
+    for _ in votes.ballots() {
+        let reply = judge::judge(endpoint, &request, "--grader-model")?;
+        let parsed: BaselineJudgeResponse = judge::parse_json_reply(&reply, "--grader-model")?;
+        let winner = parse_winner(&parsed.better)?;
+        opinions.push((pairing.at_least_as_good(winner), parsed));
+    }
+
+    let verdict = tally_opinions(opinions).ok_or_else(|| {
+        EvalError::Validation(
+            ValidationError::for_field("--grader-votes", "no judge opinion was taken for this comparison").into(),
+        )
+    })?;
+
+    let passed = verdict.tally.majority_passed();
+    let standing = if passed {
+        "is at least as good as"
+    } else {
+        "falls short of"
+    };
+    Ok(AssertionGradeResult {
+        name: None,
+        assertion: assertion.to_string(),
+        passed,
+        evidence: format!(
+            "the run {standing} baseline '{}': {}",
+            reference.declared(),
+            verdict.opinion.evidence
+        ),
+        grader: GraderInfo {
+            kind: GraderKind::Llm,
+            model: Some(endpoint.model.to_string()),
+            command: None,
+        },
+        rationale: verdict.opinion.rationale,
+        unsupported: None,
+        excluded: None,
+        ungraded: None,
+        votes: (!votes.is_single()).then_some(verdict.tally),
+    })
+}
+
+fn baseline_shortfall(assertion: &str, evidence: impl Into<String>) -> AssertionGradeResult {
+    AssertionGradeResult {
+        name: None,
+        assertion: assertion.to_string(),
+        passed: false,
+        evidence: evidence.into(),
+        grader: GraderInfo {
+            kind: GraderKind::Declarative,
+            model: None,
+            command: None,
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: None,
+        votes: None,
+    }
 }
 
 const LLM_GRADER_SYSTEM_PROMPT: &str = "You are grading one assertion about the output of a single agent run. \
@@ -2706,6 +2922,128 @@ mod tests {
         assert!(err.to_string().contains("--grader-model"), "{err}");
     }
 
+    #[test]
+    fn a_declared_baseline_grader_needs_a_judge_under_auto() {
+        let suite = suite_from(
+            r#"{
+                "schema_version": 3,
+                "skill_name": "demo-skill",
+                "evals": [
+                    {
+                        "id": "case-a",
+                        "prompt": "p",
+                        "expected_output": "o",
+                        "graders": [{"type": "baseline", "reference": "golden.md", "criterion": "is as complete"}]
+                    }
+                ]
+            }"#,
+        );
+        let options = GradeOptions {
+            grader: GraderMode::Auto,
+            ..GradeOptions::default()
+        };
+
+        assert!(
+            suite_needs_a_judge(&options, &suite),
+            "a comparison is a judgement call, so the credential is demanded before the first run is graded"
+        );
+        let err = GradeSession::open(&options, &suite).unwrap_err();
+        assert!(err.to_string().contains("--grader-model"), "{err}");
+    }
+
+    #[test]
+    fn a_baseline_comparison_is_put_to_the_judge_blind_and_the_same_way_every_time() {
+        let pairing = BaselinePairing::for_criterion("case-a", "is as complete");
+        let outputs = pairing.outputs("what the run wrote", "the reference", TruncateDirection::Head);
+
+        assert_eq!(outputs.len(), 2, "the judge is shown both sides and nothing else");
+        assert_eq!(
+            outputs.keys().copied().collect::<Vec<_>>(),
+            vec!["A", "B"],
+            "the labels carry no hint of which side is which"
+        );
+        assert_eq!(outputs[pairing.run.as_str()], "what the run wrote");
+        assert_eq!(outputs[pairing.reference().as_str()], "the reference");
+        assert_ne!(pairing.run, pairing.reference());
+
+        assert_eq!(
+            pairing,
+            BaselinePairing::for_criterion("case-a", "is as complete"),
+            "re-grading a report must ask the judge the question it asked before, not its mirror"
+        );
+    }
+
+    #[test]
+    fn which_side_a_baseline_puts_first_is_decided_by_the_case_and_the_criterion() {
+        let pairings: Vec<BlindLabel> = [
+            "is as complete",
+            "is as well organized",
+            "is as precise",
+            "reads as well",
+        ]
+        .into_iter()
+        .map(|criterion| BaselinePairing::for_criterion("case-a", criterion).run)
+        .collect();
+
+        assert!(
+            pairings.contains(&BlindLabel::A) && pairings.contains(&BlindLabel::B),
+            "a fixed position would leave every comparison carrying the judge's position bias, got {pairings:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_the_judge_cannot_separate_from_its_baseline_has_met_it() {
+        for run in [BlindLabel::A, BlindLabel::B] {
+            let pairing = BaselinePairing { run };
+            let reference = pairing.reference();
+
+            assert!(
+                pairing.at_least_as_good(ComparisonWinner::Tie),
+                "at least as good is met by a tie, or no baseline could ever be held"
+            );
+            assert!(pairing.at_least_as_good(winner_of(run)));
+            assert!(!pairing.at_least_as_good(winner_of(reference)));
+        }
+    }
+
+    fn winner_of(label: BlindLabel) -> ComparisonWinner {
+        match label {
+            BlindLabel::A => ComparisonWinner::A,
+            BlindLabel::B => ComparisonWinner::B,
+        }
+    }
+
+    #[test]
+    fn both_sides_of_a_baseline_comparison_are_clipped_to_the_same_size() {
+        let pairing = BaselinePairing::for_criterion("case-a", "is as complete");
+        let run = "r".repeat(BaselinePairing::SIDE_BYTES * 2);
+        let reference = "f".repeat(BaselinePairing::SIDE_BYTES * 4);
+
+        let outputs = pairing.outputs(&run, &reference, TruncateDirection::Head);
+
+        let shown = |label: BlindLabel| outputs[label.as_str()].len();
+        assert_eq!(
+            shown(pairing.run),
+            shown(pairing.reference()),
+            "reading one side whole and the other clipped compares two different things"
+        );
+        assert!(shown(pairing.run) < run.len());
+    }
+
+    #[test]
+    fn a_short_baseline_reference_is_never_clipped_to_make_room_for_a_long_run() {
+        let pairing = BaselinePairing::for_criterion("case-a", "is as complete");
+        let reference = "the whole reference answer";
+
+        let outputs = pairing.outputs(
+            &"r".repeat(BaselinePairing::SIDE_BYTES * 3),
+            reference,
+            TruncateDirection::Head,
+        );
+
+        assert_eq!(outputs[pairing.reference().as_str()], reference);
+    }
+
     fn run_record_with_artifacts(artifacts: Vec<serde_json::Value>) -> RunRecord {
         RunRecord {
             id: "run-001".to_string(),
@@ -3989,10 +4327,96 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         }))
         .unwrap();
 
-        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+        let result = grade_with_script("custom assertion", None, &eval_case, &ctx, &options).unwrap();
         assert!(result.passed);
         assert_eq!(result.grader.kind, GraderKind::Script);
         assert!(result.evidence.contains("script verified"));
+    }
+
+    fn baseline_case() -> EvalCase {
+        serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+        }))
+        .unwrap()
+    }
+
+    fn reference_in(dir: &Path, text: &str) -> BaselineReference {
+        let resolved = dir.join("golden.md");
+        fs::create_dir_all(dir).unwrap();
+        fs::write(&resolved, text).unwrap();
+        BaselineReference::read(
+            &serde_json::from_value(serde_json::json!("golden.md")).unwrap(),
+            &resolved,
+        )
+        .unwrap()
+    }
+
+    /// A run that produced nothing is not at least as good as a reference that
+    /// exists, and there is nothing for a judge to read but the absence. Billing one
+    /// to be told so is the cost half of the same mistake.
+    #[test]
+    fn a_run_that_produced_nothing_falls_short_of_its_baseline_without_a_judge_being_asked() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let reference = reference_in(&ctx.skill_dir, "The reference answer.\n");
+        let options = GradeOptions {
+            grader: GraderMode::Llm,
+            ..GradeOptions::default()
+        };
+        let session = GradeSession {
+            options: &options,
+            judge: None,
+        };
+
+        let result = grade_against_baseline(
+            "final text is at least as good as baseline 'golden.md' on: is as complete",
+            "is as complete",
+            &GradeTarget::File(serde_json::from_value(serde_json::json!("missing.json")).unwrap()),
+            &reference,
+            &baseline_case(),
+            &DeclarativeContext::load(&ctx),
+            &ctx,
+            &session,
+        )
+        .unwrap();
+
+        assert!(!result.passed);
+        assert_eq!(result.grader.kind, GraderKind::Declarative);
+        assert!(result.grader.model.is_none(), "no judge answered this one");
+    }
+
+    #[test]
+    fn a_baseline_graded_by_script_hands_the_script_what_it_must_compare_against() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/bash
+payload=$(cat)
+case "$payload" in
+  *"The reference answer."*) echo '{"passed": true, "evidence": "the reference reached the script"}' ;;
+  *) echo '{"passed": false, "evidence": "the script was asked to compare against nothing"}' ;;
+esac
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let reference = reference_in(&ctx.skill_dir, "The reference answer.\n");
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            ..GradeOptions::default()
+        };
+
+        let result = grade_with_script("is as complete", Some(&reference), &baseline_case(), &ctx, &options).unwrap();
+
+        assert!(result.passed, "{}", result.evidence);
     }
 
     /// A crash is not a verdict. Counting a broken grader as a failed assertion reports that
@@ -4030,7 +4454,7 @@ exit 3
         }))
         .unwrap();
 
-        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+        let result = grade_with_script("custom assertion", None, &eval_case, &ctx, &options).unwrap();
 
         assert!(
             result.is_ungraded(),
@@ -4080,7 +4504,7 @@ exit 4
         }))
         .unwrap();
 
-        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+        let result = grade_with_script("custom assertion", None, &eval_case, &ctx, &options).unwrap();
 
         assert!(
             result.is_ungraded(),
@@ -4128,7 +4552,8 @@ echo '{"passed": true, "evidence": "script verified"}'
                 "grader_hints": { "blob": "x".repeat(512 * 1024) },
             }))
             .unwrap();
-            let _ = done.send(grade_with_script("custom assertion", &eval_case, &ctx, &options).map(|r| r.passed));
+            let _ =
+                done.send(grade_with_script("custom assertion", None, &eval_case, &ctx, &options).map(|r| r.passed));
         });
 
         match finished.recv_timeout(std::time::Duration::from_secs(60)) {
