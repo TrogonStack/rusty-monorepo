@@ -744,7 +744,9 @@ fn build_dimensions(
     let mut eval_cases = Vec::with_capacity(suite.evals.len());
 
     for eval_case in &suite.evals {
-        let mut assertion_ids = Vec::with_capacity(eval_case.assertions.len());
+        // Assertion ids come first so a suite with no graders keeps producing the
+        // ids it always has; grader ids are appended after.
+        let mut assertion_ids = Vec::with_capacity(eval_case.assertions.len() + eval_case.graders.len());
         for (index, assertion) in eval_case.assertions.iter().enumerate() {
             let assertion_id = format!("{}:a{index}", eval_case.id);
             assertion_ids.push(assertion_id.clone());
@@ -753,6 +755,16 @@ fn build_dimensions(
                 eval_case_id: eval_case.id.to_string(),
                 text: assertion.as_str().to_string(),
                 name: None,
+            });
+        }
+        for (index, grader) in eval_case.graders.iter().enumerate() {
+            let assertion_id = format!("{}:g{index}", eval_case.id);
+            assertion_ids.push(assertion_id.clone());
+            assertions.push(AssertionDimension {
+                id: assertion_id,
+                eval_case_id: eval_case.id.to_string(),
+                text: grader.grader.describe(),
+                name: grader.name.as_ref().map(ToString::to_string),
             });
         }
 
@@ -953,7 +965,10 @@ mod tests {
                         "prompt": "prompt a",
                         "expected_output": "output a",
                         "files": ["fixture.txt"],
-                        "assertions": ["assert a"]
+                        "assertions": ["assert a"],
+                        "graders": [
+                            { "type": "contains", "text": "total", "name": "mentions-total" }
+                        ]
                     },
                     {
                         "id": "case-b",
@@ -985,14 +1000,18 @@ mod tests {
         assert_eq!(dimensions.eval_cases[0].slug, "case-a");
         assert_eq!(dimensions.eval_cases[0].name.as_deref(), Some("Case A"));
         assert_eq!(dimensions.eval_cases[0].description.as_deref(), Some("Covers case A."));
-        assert_eq!(dimensions.eval_cases[0].assertion_ids, vec!["case-a:a0"]);
+        assert_eq!(dimensions.eval_cases[0].assertion_ids, vec!["case-a:a0", "case-a:g0"]);
         assert_eq!(dimensions.eval_cases[1].name, None);
         assert_eq!(dimensions.eval_cases[1].description, None);
         assert_eq!(dimensions.eval_cases[1].assertion_ids, vec!["case-b:a0", "case-b:a1"]);
-        assert_eq!(dimensions.assertions.len(), 3);
+        assert_eq!(dimensions.assertions.len(), 4);
         assert_eq!(dimensions.assertions[0].id, "case-a:a0");
         assert_eq!(dimensions.assertions[0].eval_case_id, "case-a");
         assert_eq!(dimensions.assertions[0].name, None);
+        assert_eq!(dimensions.assertions[1].id, "case-a:g0");
+        assert_eq!(dimensions.assertions[1].eval_case_id, "case-a");
+        assert_eq!(dimensions.assertions[1].text, "final text contains 'total'");
+        assert_eq!(dimensions.assertions[1].name.as_deref(), Some("mentions-total"));
         assert_eq!(dimensions.scenarios.len(), 2);
         assert_eq!(dimensions.model_configs[0].capture_status, "partial");
         assert_eq!(dimensions.model_configs[0].label, "ci-default");
