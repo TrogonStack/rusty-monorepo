@@ -27,7 +27,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::evals::{EvalCase, EvalError, EvalSuite, Result};
-use super::graders::{self, CaseGrader, GradeInput, Grader, GraderOutcome};
+use super::graders::{self, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, TargetContent};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
@@ -351,6 +351,9 @@ struct RunContext {
     outputs_dir: PathBuf,
     transcript_path: PathBuf,
     skill_dir: PathBuf,
+    /// Outputs-relative paths the run created, read from the artifact index
+    /// already persisted onto the run record rather than walked again here.
+    created_files: Vec<String>,
 }
 
 /// The grading options plus the judge they resolve to, resolved once per
@@ -529,7 +532,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         }
 
         for assertion in &case.assertions {
-            assertion_results.push(grade_assertion(assertion.as_str(), case, &ctx, &session)?);
+            assertion_results.push(grade_assertion(assertion.as_str(), case, &declarative, &ctx, &session)?);
         }
 
         restore_when_nothing_would_be_scored(&mut assertion_results);
@@ -575,6 +578,7 @@ fn run_context(report_dir: &Path, run: &RunRecord, skill_path: &Path) -> RunCont
         workspace_dir.join("outputs")
     };
     let transcript_path = run_dir.join("transcript.jsonl");
+    let created_files = created_files_from_artifacts(run);
 
     RunContext {
         run_dir,
@@ -582,7 +586,20 @@ fn run_context(report_dir: &Path, run: &RunRecord, skill_path: &Path) -> RunCont
         outputs_dir,
         transcript_path,
         skill_dir: skill_path.to_path_buf(),
+        created_files,
     }
+}
+
+/// Recovers outputs-relative filenames from the artifact index the run already
+/// recorded, so `GradeTarget::CreatedFiles` does not re-walk the output directory.
+fn created_files_from_artifacts(run: &RunRecord) -> Vec<String> {
+    let prefix = format!("{}/", run.paths.outputs);
+    run.artifacts
+        .iter()
+        .filter(|artifact| artifact.get("kind").and_then(serde_json::Value::as_str) == Some("output"))
+        .filter_map(|artifact| artifact.get("path").and_then(serde_json::Value::as_str))
+        .map(|path| path.strip_prefix(prefix.as_str()).unwrap_or(path).to_string())
+        .collect()
 }
 
 fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
@@ -599,13 +616,14 @@ fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
 fn grade_assertion(
     assertion: &str,
     eval_case: &EvalCase,
+    declarative: &DeclarativeContext,
     ctx: &RunContext,
     session: &GradeSession,
 ) -> Result<AssertionGradeResult> {
     let options = session.options;
     match options.grader {
         GraderMode::Script => grade_with_script(assertion, eval_case, ctx, options),
-        GraderMode::Llm => grade_with_llm(assertion, ctx, session),
+        GraderMode::Llm => grade_with_llm(assertion, &GradeTarget::default(), declarative, ctx, session),
         GraderMode::None | GraderMode::Auto => {
             if let Some(kind) = parse_mechanical_kind(assertion) {
                 let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
@@ -665,6 +683,7 @@ impl DeclarativeContext {
             raw_transcript: &self.raw_transcript,
             transcript: self.transcript.as_ref(),
             skill_dir: &ctx.skill_dir,
+            created_files: &ctx.created_files,
         }
     }
 }
@@ -726,9 +745,9 @@ fn grade_declaratively(
             ungraded: None,
             votes: None,
         },
-        GraderOutcome::Deferred { criterion } => {
+        GraderOutcome::Deferred { criterion, target } => {
             let mut result = match options.grader {
-                GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, ctx, session)?,
+                GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, &target, declarative, ctx, session)?,
                 GraderMode::Script => grade_with_script(&criterion, eval_case, ctx, options)?,
                 GraderMode::None => needs_llm_result(&criterion, "grader mode is none, so no judge was consulted"),
             };
@@ -944,7 +963,13 @@ struct ScriptGraderResponse {
     rationale: Option<String>,
 }
 
-fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> Result<AssertionGradeResult> {
+fn grade_with_llm(
+    assertion: &str,
+    target: &GradeTarget,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    session: &GradeSession,
+) -> Result<AssertionGradeResult> {
     if let Some(kind) = parse_mechanical_kind(assertion) {
         let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
         return Ok(AssertionGradeResult {
@@ -966,7 +991,10 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
     }
 
     let endpoint = session.endpoint()?;
-    let request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, llm_grader_payload(assertion, ctx)?);
+    let request = JudgeRequest::new(
+        LLM_GRADER_SYSTEM_PROMPT,
+        llm_grader_payload(assertion, target, declarative, ctx)?,
+    );
 
     let votes = session.options.grader_votes;
     let mut opinions = Vec::with_capacity(votes.count() as usize);
@@ -1005,15 +1033,106 @@ const LLM_GRADER_SYSTEM_PROMPT: &str = "You are grading one assertion about the 
      Quote the material in `evidence`; do not restate the assertion as its own evidence. \
      Respond with JSON: {\"passed\": true|false, \"evidence\": \"...\", \"rationale\": \"...\"}.";
 
-/// How much of one artifact the judge is shown.
+/// Total bytes of content one judge request may carry, across every artifact
+/// placed into it.
 ///
-/// Bounded so a run that wrote a large file does not turn one assertion into an
-/// unbounded request.
-const LLM_GRADER_EXCERPT_BYTES: usize = 8_000;
+/// Previously each artifact (the final text, and separately every output file)
+/// got its own 8,000-byte excerpt with no cap on how many artifacts a run could
+/// contribute, so a run with many output files could inflate one assertion into
+/// an unbounded request. The cap now applies once, to the request as a whole.
+#[derive(Debug, Clone, Copy)]
+struct PayloadBudget {
+    remaining_bytes: usize,
+    remaining_slots: usize,
+}
 
-fn llm_grader_payload(assertion: &str, ctx: &RunContext) -> Result<String> {
-    let final_text = std::fs::read_to_string(ctx.outputs_dir.join(FINAL_MD)).unwrap_or_default();
-    let mut outputs = serde_json::Map::new();
+impl PayloadBudget {
+    const TOTAL_BYTES: usize = 8_000;
+
+    fn new(slots: usize) -> Self {
+        Self {
+            remaining_bytes: Self::TOTAL_BYTES,
+            remaining_slots: slots.max(1),
+        }
+    }
+
+    /// Each remaining artifact claims an equal share of what is left, so one
+    /// large early artifact does not starve every artifact placed after it,
+    /// and a share an artifact does not need rolls forward to the rest.
+    fn place(&mut self, text: &str, direction: TruncateDirection) -> Placement {
+        let share = self.remaining_bytes / self.remaining_slots.max(1);
+        self.remaining_slots = self.remaining_slots.saturating_sub(1);
+
+        if share == 0 {
+            return Placement::Omitted;
+        }
+        if text.len() <= share {
+            self.remaining_bytes -= text.len();
+            return Placement::Whole(text.to_string());
+        }
+        self.remaining_bytes -= share;
+        Placement::Truncated(truncate(text, share, direction))
+    }
+}
+
+enum Placement {
+    Whole(String),
+    Truncated(String),
+    Omitted,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TruncateDirection {
+    Head,
+    Tail,
+}
+
+fn truncate(text: &str, cap: usize, direction: TruncateDirection) -> String {
+    match direction {
+        TruncateDirection::Head => {
+            let mut end = cap;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}\n[truncated after {end} bytes]", &text[..end])
+        }
+        // A transcript's interesting part is usually its end (the final tool
+        // calls and the answer the run converged on), not its start, so the
+        // judge keeps the tail rather than the head.
+        TruncateDirection::Tail => {
+            let mut start = text.len() - cap;
+            while start < text.len() && !text.is_char_boundary(start) {
+                start += 1;
+            }
+            let shown = text.len() - start;
+            format!(
+                "[showing the last {shown} bytes; earlier content truncated]\n{}",
+                &text[start..]
+            )
+        }
+    }
+}
+
+fn llm_grader_payload(
+    assertion: &str,
+    target: &GradeTarget,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+) -> Result<String> {
+    match target {
+        GradeTarget::FinalText | GradeTarget::AnyOutput => legacy_structured_payload(assertion, declarative, ctx),
+        GradeTarget::Transcript | GradeTarget::File(_) | GradeTarget::CreatedFiles => {
+            single_target_payload(assertion, target, declarative, ctx)
+        }
+    }
+}
+
+/// The payload shape used before the judge could be aimed at anything but the
+/// final text plus the run's output files. Kept byte-for-byte for a suite that
+/// does not declare a `target`, and reused for `any_output` since that target
+/// already means the same "final text plus everything written" scope.
+fn legacy_structured_payload(assertion: &str, declarative: &DeclarativeContext, ctx: &RunContext) -> Result<String> {
+    let mut output_files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&ctx.outputs_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1025,27 +1144,82 @@ fn llm_grader_payload(assertion: &str, ctx: &RunContext) -> Result<String> {
                 continue;
             }
             if let Ok(text) = std::fs::read_to_string(&path) {
-                outputs.insert(name, serde_json::Value::String(excerpt(&text)));
+                output_files.push((name, text));
             }
         }
     }
+    output_files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(serde_json::to_string(&serde_json::json!({
+    let mut budget = PayloadBudget::new(1 + output_files.len());
+    let mut omitted = 0usize;
+
+    let final_text = match budget.place(&declarative.final_text, TruncateDirection::Head) {
+        Placement::Whole(text) | Placement::Truncated(text) => text,
+        Placement::Omitted => {
+            omitted += 1;
+            String::new()
+        }
+    };
+
+    let mut outputs = serde_json::Map::new();
+    for (name, text) in output_files {
+        match budget.place(&text, TruncateDirection::Head) {
+            Placement::Whole(text) | Placement::Truncated(text) => {
+                outputs.insert(name, serde_json::Value::String(text));
+            }
+            Placement::Omitted => omitted += 1,
+        }
+    }
+
+    let mut payload = serde_json::json!({
         "assertion": assertion,
-        "final_text": excerpt(&final_text),
+        "final_text": final_text,
         "outputs": outputs,
-    }))?)
+    });
+    if omitted > 0 {
+        payload["artifacts_omitted"] =
+            serde_json::Value::String(format!("{omitted} artifact(s) omitted: judge payload budget exhausted"));
+    }
+
+    Ok(serde_json::to_string(&payload)?)
 }
 
-fn excerpt(text: &str) -> String {
-    if text.len() <= LLM_GRADER_EXCERPT_BYTES {
-        return text.to_string();
+/// The payload shape for a judge aimed at one specific target. Self-describing
+/// (it names the target) since, unlike the legacy shape, the judge is not
+/// implicitly looking at "the run's output" but at whatever was declared.
+fn single_target_payload(
+    assertion: &str,
+    target: &GradeTarget,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+) -> Result<String> {
+    let content = declarative.input(ctx).target_content(target);
+    let direction = match target {
+        GradeTarget::Transcript => TruncateDirection::Tail,
+        _ => TruncateDirection::Head,
+    };
+
+    let mut payload = serde_json::json!({
+        "assertion": assertion,
+        "target": target.to_string(),
+    });
+
+    match content {
+        TargetContent::Text(text) => match PayloadBudget::new(1).place(&text, direction) {
+            Placement::Whole(text) | Placement::Truncated(text) => {
+                payload["content"] = serde_json::Value::String(text);
+            }
+            Placement::Omitted => {
+                payload["artifacts_omitted"] =
+                    serde_json::Value::String("1 artifact(s) omitted: judge payload budget exhausted".to_string());
+            }
+        },
+        TargetContent::Missing(reason) => {
+            payload["missing_reason"] = serde_json::Value::String(reason);
+        }
     }
-    let mut end = LLM_GRADER_EXCERPT_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}\n[truncated after {end} bytes]", &text[..end])
+
+    Ok(serde_json::to_string(&payload)?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1841,8 +2015,10 @@ fn extract_regex_pattern(text: &AssertionText) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::RelativeSkillPath;
     use crate::agentskills::report::{
-        build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
+        build_report_bundle, write_report_bundle, BuildReportOptions, RunMetrics, RunPaths, ScenarioKind,
+        WriteReportOptions,
     };
     use crate::agentskills::transcript::write_normalized_transcript;
     use crate::fs::testutil::MemFS;
@@ -2348,6 +2524,308 @@ mod tests {
         assert!(err.to_string().contains("--grader-model"), "{err}");
     }
 
+    fn run_record_with_artifacts(artifacts: Vec<serde_json::Value>) -> RunRecord {
+        RunRecord {
+            id: "run-001".to_string(),
+            eval_case_id: "case-a".to_string(),
+            eval_slug: "case-a".to_string(),
+            scenario_id: ScenarioKind::WithSkill,
+            iteration: 1,
+            model_config_id: "ci-default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt: 1,
+            failure_kind: None,
+            runner_invocations: 1,
+            status: "completed".to_string(),
+            paths: RunPaths {
+                workspace: "runs/run-001/workspace".to_string(),
+                outputs: "runs/run-001/workspace/outputs".to_string(),
+            },
+            mirror_path: "iteration-1/eval-case-a/with-skill/".to_string(),
+            artifacts,
+            metrics: RunMetrics {
+                duration_ms: Some(1),
+                exit_code: Some(0),
+                total_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cost_usd: None,
+            },
+            cache: None,
+            skill_integrity: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn created_files_from_artifacts_strips_the_outputs_prefix_and_ignores_other_kinds() {
+        let run = run_record_with_artifacts(vec![
+            serde_json::json!({
+                "kind": "output",
+                "path": "runs/run-001/workspace/outputs/report.md",
+                "size_bytes": 4,
+                "sha256": "abc",
+            }),
+            serde_json::json!({
+                "kind": "output",
+                "path": "runs/run-001/workspace/outputs/sub/data.json",
+                "size_bytes": 2,
+                "sha256": "def",
+            }),
+            serde_json::json!({
+                "kind": "transcript",
+                "path": "runs/run-001/transcript.jsonl",
+            }),
+        ]);
+
+        let created = created_files_from_artifacts(&run);
+
+        assert_eq!(created, vec!["report.md".to_string(), "sub/data.json".to_string()]);
+    }
+
+    fn declarative_context(final_text: &str, raw_transcript: &str) -> DeclarativeContext {
+        DeclarativeContext {
+            final_text: final_text.to_string(),
+            raw_transcript: raw_transcript.to_string(),
+            transcript: None,
+        }
+    }
+
+    #[test]
+    fn the_default_target_reproduces_the_pre_target_payload_shape() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
+        let declarative = declarative_context("the final answer", "irrelevant to this target");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "final_text": "the final answer",
+                "outputs": {"out.txt": "an output file"},
+            })
+        );
+    }
+
+    #[test]
+    fn any_output_target_uses_the_same_structured_shape_as_the_default() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
+        let declarative = declarative_context("the final answer", "irrelevant to this target");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "final_text": "the final answer",
+                "outputs": {"out.txt": "an output file"},
+            })
+        );
+    }
+
+    #[test]
+    fn transcript_target_names_itself_and_carries_the_transcript() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let declarative = declarative_context("the final answer", "the agent read the config then wrote it back");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "target": "transcript",
+                "content": "the agent read the config then wrote it back",
+            })
+        );
+    }
+
+    #[test]
+    fn file_target_reports_missing_reason_when_the_file_does_not_exist() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let declarative = declarative_context("the final answer", "");
+
+        let path: RelativeSkillPath = serde_json::from_value(serde_json::json!("missing.json")).unwrap();
+        let target = GradeTarget::File(path);
+        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["assertion"], "the assertion");
+        assert_eq!(value["target"], "file 'missing.json'");
+        assert!(value.get("content").is_none());
+        assert!(value["missing_reason"].as_str().unwrap().contains("missing.json"));
+    }
+
+    #[test]
+    fn created_files_target_lists_what_the_run_produced() {
+        let tmp = tempdir().unwrap();
+        let mut ctx = ctx_with_outputs(tmp.path());
+        ctx.created_files = vec!["report.md".to_string(), "sub/data.json".to_string()];
+        let declarative = declarative_context("the final answer", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::CreatedFiles, &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "target": "created files",
+                "content": "report.md\nsub/data.json",
+            })
+        );
+    }
+
+    #[test]
+    fn payload_budget_divides_across_every_artifact_and_flags_what_it_drops() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        // Far larger than the whole request budget, so this artifact alone
+        // must be truncated no matter how the remaining budget is split.
+        let oversized = "a".repeat(PayloadBudget::TOTAL_BYTES * 5);
+        fs::write(ctx.outputs_dir.join("a.txt"), &oversized).unwrap();
+        fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
+        let declarative = declarative_context("c", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        let a = value["outputs"]["a.txt"].as_str().unwrap();
+        assert!(
+            a.len() < oversized.len(),
+            "an oversized artifact must be truncated, got {} bytes back unchanged",
+            a.len()
+        );
+        assert!(a.contains("[truncated after"), "truncation must stay visible: {a}");
+        // What b.txt received is whatever a.txt's truncation left unused,
+        // rolled forward, so its exact size depends on that share; only its
+        // content need survive untouched, since one byte never needs truncating.
+        assert_eq!(value["outputs"]["b.txt"], "b");
+        assert_eq!(value["final_text"], "c");
+        assert!(value.get("artifacts_omitted").is_none());
+    }
+
+    #[test]
+    fn an_artifact_needing_less_than_its_share_leaves_the_rest_for_the_one_after_it() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        // With 3 artifacts, final_text's initial share is TOTAL_BYTES / 3, but
+        // final_text ("c") needs almost none of it. a.txt is bigger than that
+        // fixed share, so it is only placed whole if the unused share rolled
+        // forward into a.txt's own share instead of being wasted.
+        let fixed_share = PayloadBudget::TOTAL_BYTES / 3;
+        let a_len = fixed_share + 500;
+        fs::write(ctx.outputs_dir.join("a.txt"), "a".repeat(a_len)).unwrap();
+        fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
+        let declarative = declarative_context("c", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        let a = value["outputs"]["a.txt"].as_str().unwrap();
+        assert_eq!(
+            a.len(),
+            a_len,
+            "a.txt fits within the rolled-forward share and must not be truncated: {a}"
+        );
+        assert!(!a.contains("[truncated after"));
+    }
+
+    #[test]
+    fn payload_budget_answers_a_placement_it_was_never_told_to_expect() {
+        let mut budget = PayloadBudget::new(1);
+
+        assert!(matches!(
+            budget.place("first", TruncateDirection::Head),
+            Placement::Whole(_)
+        ));
+        assert!(matches!(
+            budget.place("second", TruncateDirection::Head),
+            Placement::Whole(_)
+        ));
+    }
+
+    #[test]
+    fn payload_budget_omits_rather_than_silently_dropping_when_slots_outnumber_bytes() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        for i in 0..(PayloadBudget::TOTAL_BYTES + 10) {
+            fs::write(ctx.outputs_dir.join(format!("file-{i}.txt")), "x").unwrap();
+        }
+        let declarative = declarative_context("final", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        let note = value["artifacts_omitted"]
+            .as_str()
+            .expect("omissions must be reported, not silent");
+        assert!(note.contains("omitted"));
+        // The budget's per-slot share is a non-decreasing ratio, so every omission
+        // sits in a prefix of the placement order: final_text plus the first ten
+        // output files (the ones seen while remaining_slots still exceeds 8000)
+        // before the ratio recovers to one byte per slot for the rest. A count
+        // that drifts from 11 means an artifact was silently dropped somewhere
+        // in the loop without being tallied.
+        assert!(
+            note.contains("11 artifact"),
+            "expected exactly 11 omissions (final_text plus the first ten output files): {note}"
+        );
+    }
+
+    #[test]
+    fn transcript_truncation_keeps_the_tail_not_the_head() {
+        let head = "A".repeat(50);
+        let tail = "B".repeat(50);
+        let long_transcript = format!("{head}{tail}");
+
+        let truncated = truncate(&long_transcript, 50, TruncateDirection::Tail);
+
+        assert!(!truncated.contains('A'), "the head must be dropped: {truncated}");
+        assert!(truncated.contains(&tail));
+    }
+
+    #[test]
+    fn an_oversized_transcript_reaches_the_judge_tail_truncated_via_the_full_payload() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let head = "A".repeat(50);
+        let tail = "B".repeat(PayloadBudget::TOTAL_BYTES + 100);
+        let declarative = declarative_context("final", &format!("{head}{tail}"));
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let content = value["content"].as_str().unwrap();
+
+        assert!(
+            !content.contains('A'),
+            "the head must be dropped through the full payload path: {content}"
+        );
+    }
+
+    #[test]
+    fn final_text_truncation_keeps_the_head_not_the_tail() {
+        let head = "A".repeat(50);
+        let tail = "B".repeat(50);
+        let long_text = format!("{head}{tail}");
+
+        let truncated = truncate(&long_text, 50, TruncateDirection::Head);
+
+        assert!(!truncated.contains('B'), "the tail must be dropped: {truncated}");
+        assert!(truncated.contains(&head));
+    }
+
     #[test]
     fn a_free_text_assertion_no_mechanical_pattern_recognizes_needs_a_judge_under_auto() {
         let suite = suite_from(
@@ -2659,6 +3137,7 @@ mod tests {
             outputs_dir: outputs,
             transcript_path: run_dir.join("transcript.jsonl"),
             skill_dir: dir.join("skill"),
+            created_files: Vec::new(),
         }
     }
 

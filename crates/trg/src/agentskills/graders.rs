@@ -71,6 +71,10 @@ pub enum GradeTarget {
     Transcript,
     AnyOutput,
     File(RelativeSkillPath),
+    /// The set of files the run created under `outputs/`, one per line. Backed by
+    /// the same index the report itself is built from, so "the agent created a
+    /// file called X" is checkable without walking the directory a second time.
+    CreatedFiles,
 }
 
 impl fmt::Display for GradeTarget {
@@ -80,6 +84,7 @@ impl fmt::Display for GradeTarget {
             Self::Transcript => f.write_str("transcript"),
             Self::AnyOutput => f.write_str("any output file"),
             Self::File(path) => write!(f, "file '{path}'"),
+            Self::CreatedFiles => f.write_str("created files"),
         }
     }
 }
@@ -154,6 +159,8 @@ pub enum Grader {
     },
     Llm {
         criterion: NonEmptyString,
+        #[serde(default)]
+        target: GradeTarget,
     },
     ValidJson {
         #[serde(default)]
@@ -229,7 +236,10 @@ impl Grader {
                 true => "the skill was not engaged".to_string(),
                 false => "the skill was engaged".to_string(),
             },
-            Self::Llm { criterion } => criterion.to_string(),
+            Self::Llm { criterion, target } => match target {
+                GradeTarget::FinalText => criterion.to_string(),
+                other => format!("{other}: {criterion}"),
+            },
             Self::ValidJson { target } => format!("{target} is valid json"),
             Self::SchemaValidation { schema, target } => format!("{target} validates against schema '{schema}'"),
         }
@@ -370,6 +380,7 @@ pub enum GraderOutcome {
     /// The grader is a judgement call and must be handed to the LLM grader.
     Deferred {
         criterion: String,
+        target: GradeTarget,
     },
     /// The case, not the run, is malformed: a named schema is missing, unreadable, or
     /// not itself a valid JSON Schema document. Distinct from `Unsupported`, which
@@ -399,6 +410,9 @@ pub struct GradeInput<'a> {
     pub raw_transcript: &'a str,
     pub transcript: Option<&'a NormalizedTranscript>,
     pub skill_dir: &'a Path,
+    /// The paths this run created under `outputs/`, as already indexed for the
+    /// report. Backs `GradeTarget::CreatedFiles` without a second directory walk.
+    pub created_files: &'a [String],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -435,7 +449,7 @@ impl<'a> GradeInput<'a> {
         workspace_candidate
     }
 
-    fn target_content(&self, target: &GradeTarget) -> TargetContent {
+    pub(crate) fn target_content(&self, target: &GradeTarget) -> TargetContent {
         match target {
             GradeTarget::FinalText => TargetContent::Text(self.final_text.to_string()),
             GradeTarget::Transcript => TargetContent::Text(self.raw_transcript.to_string()),
@@ -445,6 +459,7 @@ impl<'a> GradeInput<'a> {
                 collect_text(self.outputs_dir, &mut parts);
                 TargetContent::Text(parts.join("\n"))
             }
+            GradeTarget::CreatedFiles => TargetContent::Text(self.created_files.join("\n")),
         }
     }
 }
@@ -463,8 +478,9 @@ fn collect_text(dir: &Path, parts: &mut Vec<String>) {
 
 pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
     match grader {
-        Grader::Llm { criterion } => GraderOutcome::Deferred {
+        Grader::Llm { criterion, target } => GraderOutcome::Deferred {
             criterion: criterion.to_string(),
+            target: target.clone(),
         },
         Grader::FileExists { path } => {
             let resolved = input.resolve(path);
@@ -778,6 +794,7 @@ mod tests {
                 raw_transcript: "",
                 transcript: Some(&self.transcript),
                 skill_dir: &self.skill_dir,
+                created_files: &[],
             }
         }
     }
@@ -1046,6 +1063,7 @@ mod tests {
             raw_transcript: "",
             transcript: Some(&transcript),
             skill_dir: dir.path(),
+            created_files: &[],
         };
 
         for grader in [
@@ -1083,6 +1101,7 @@ mod tests {
             raw_transcript: "",
             transcript: Some(&transcript),
             skill_dir: dir.path(),
+            created_files: &[],
         };
 
         assert!(matches!(
@@ -1114,6 +1133,7 @@ mod tests {
             raw_transcript: "",
             transcript: Some(&transcript),
             skill_dir: dir.path(),
+            created_files: &[],
         };
         let grader = Grader::Regex {
             pattern: RegexPattern::parse(r"\b42\b").unwrap(),
@@ -1134,6 +1154,7 @@ mod tests {
             raw_transcript: "",
             transcript: None,
             skill_dir: dir.path(),
+            created_files: &[],
         };
         match evaluate(&Grader::SkillUsed { negate: false }, &input) {
             GraderOutcome::Unsupported { reason } => assert!(reason.contains("no normalized transcript"), "{reason}"),
@@ -1213,15 +1234,89 @@ mod tests {
             raw_transcript: "",
             transcript: None,
             skill_dir: dir.path(),
+            created_files: &[],
         };
         let grader = Grader::Llm {
             criterion: text("The summary avoids filler phrasing"),
+            target: GradeTarget::default(),
         };
         assert_eq!(
             evaluate(&grader, &input),
             GraderOutcome::Deferred {
-                criterion: "The summary avoids filler phrasing".to_string()
+                criterion: "The summary avoids filler phrasing".to_string(),
+                target: GradeTarget::FinalText,
             }
+        );
+    }
+
+    /// A declared target on an `llm` grader must survive to the deferred
+    /// outcome, since that is what tells the judge what to look at.
+    #[test]
+    fn llm_grader_carries_its_declared_target_into_the_deferred_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = GradeInput {
+            final_text: "done",
+            run_dir: dir.path(),
+            workspace_dir: dir.path(),
+            outputs_dir: dir.path(),
+            raw_transcript: "the agent checked the config twice",
+            transcript: None,
+            skill_dir: dir.path(),
+            created_files: &[],
+        };
+        let grader = Grader::Llm {
+            criterion: text("the agent checked the existing config before overwriting it"),
+            target: GradeTarget::Transcript,
+        };
+        assert_eq!(
+            evaluate(&grader, &input),
+            GraderOutcome::Deferred {
+                criterion: "the agent checked the existing config before overwriting it".to_string(),
+                target: GradeTarget::Transcript,
+            }
+        );
+    }
+
+    #[test]
+    fn created_files_target_lists_what_the_run_produced() {
+        let fixture = Fixture::new();
+        let created = vec!["report.md".to_string(), "sub/data.json".to_string()];
+        let input = GradeInput {
+            created_files: &created,
+            ..fixture.input()
+        };
+        let grader = Grader::Contains {
+            text: text("sub/data.json"),
+            target: GradeTarget::CreatedFiles,
+            case: MatchCase::Sensitive,
+            negate: false,
+        };
+        assert!(matches!(evaluate(&grader, &input), GraderOutcome::Passed { .. }));
+
+        let missing = Grader::Contains {
+            text: text("never-written.txt"),
+            target: GradeTarget::CreatedFiles,
+            case: MatchCase::Sensitive,
+            negate: false,
+        };
+        assert!(matches!(evaluate(&missing, &input), GraderOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn llm_grader_description_is_unchanged_by_the_default_target_but_names_a_declared_one() {
+        let default_target = Grader::Llm {
+            criterion: text("the summary avoids filler phrasing"),
+            target: GradeTarget::default(),
+        };
+        assert_eq!(default_target.describe(), "the summary avoids filler phrasing");
+
+        let declared_target = Grader::Llm {
+            criterion: text("the summary avoids filler phrasing"),
+            target: GradeTarget::Transcript,
+        };
+        assert_eq!(
+            declared_target.describe(),
+            "transcript: the summary avoids filler phrasing"
         );
     }
 
