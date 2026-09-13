@@ -290,6 +290,123 @@ impl GraderArm {
     }
 }
 
+/// A tool a `tool_order` pair names: either just its name, or its name
+/// together with a pattern the call's arguments must match.
+///
+/// Folding the qualified shape into an object rather than adding a second
+/// `input_match` field to `ToolOrderCheck` is what lets `before` and `after`
+/// each carry their own pattern independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ToolReference {
+    Named(ToolName),
+    WithInputMatch { tool: ToolName, input_match: RegexPattern },
+}
+
+impl ToolReference {
+    fn tool(&self) -> &ToolName {
+        match self {
+            Self::Named(tool) => tool,
+            Self::WithInputMatch { tool, .. } => tool,
+        }
+    }
+
+    fn input_match(&self) -> Option<&RegexPattern> {
+        match self {
+            Self::Named(_) => None,
+            Self::WithInputMatch { input_match, .. } => Some(input_match),
+        }
+    }
+}
+
+impl fmt::Display for ToolReference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.input_match() {
+            Some(pattern) => write!(f, "'{}'{}", self.tool(), naming(pattern)),
+            None => write!(f, "'{}'", self.tool()),
+        }
+    }
+}
+
+/// What a `tool_order` grader checks: either a whole ordered subsequence, or
+/// that one tool ran before another.
+///
+/// The two shapes are pulled apart rather than folded into optional fields on
+/// one struct, because "tools" and "before"/"after" answer different
+/// questions, and a case that set both, or only one of the pair, would be
+/// ambiguous about which question it meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolOrderCheck {
+    Subsequence(Vec<ToolName>),
+    Pair {
+        before: ToolReference,
+        after: ToolReference,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct DeclaredToolOrderCheck {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 2))]
+    tools: Option<Vec<ToolName>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before: Option<ToolReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    after: Option<ToolReference>,
+}
+
+impl ToolOrderCheck {
+    fn parse(declared: DeclaredToolOrderCheck) -> std::result::Result<Self, String> {
+        match (declared.tools, declared.before, declared.after) {
+            (Some(tools), None, None) => Ok(Self::Subsequence(tools)),
+            (None, Some(before), Some(after)) => Ok(Self::Pair { before, after }),
+            (None, None, None) => Err("tool_order needs either 'tools' or a 'before'/'after' pair".to_string()),
+            (None, Some(_), None) | (None, None, Some(_)) => {
+                Err("tool_order's 'before' and 'after' must both be given, or neither".to_string())
+            }
+            (Some(_), _, _) => Err("tool_order accepts 'tools' or 'before'/'after', not both".to_string()),
+        }
+    }
+
+    fn declare(&self) -> DeclaredToolOrderCheck {
+        match self {
+            Self::Subsequence(tools) => DeclaredToolOrderCheck {
+                tools: Some(tools.clone()),
+                before: None,
+                after: None,
+            },
+            Self::Pair { before, after } => DeclaredToolOrderCheck {
+                tools: None,
+                before: Some(before.clone()),
+                after: Some(after.clone()),
+            },
+        }
+    }
+}
+
+impl Serialize for ToolOrderCheck {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        self.declare().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolOrderCheck {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let declared = DeclaredToolOrderCheck::deserialize(deserializer)?;
+        Self::parse(declared).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for ToolOrderCheck {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        DeclaredToolOrderCheck::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        DeclaredToolOrderCheck::json_schema(generator)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Grader {
@@ -326,8 +443,8 @@ pub enum Grader {
         calls: CallBounds,
     },
     ToolOrder {
-        #[schemars(length(min = 2))]
-        tools: Vec<ToolName>,
+        #[serde(flatten)]
+        check: ToolOrderCheck,
     },
     SkillUsed {
         #[serde(default, skip_serializing_if = "is_not_negated")]
@@ -414,10 +531,15 @@ impl Grader {
                     None => counted,
                 }
             }
-            Self::ToolOrder { tools } => {
-                let names = tools.iter().map(ToolName::as_str).collect::<Vec<_>>().join(" then ");
-                format!("tools were used in order: {names}")
-            }
+            Self::ToolOrder { check } => match check {
+                ToolOrderCheck::Subsequence(tools) => {
+                    let names = tools.iter().map(ToolName::as_str).collect::<Vec<_>>().join(" then ");
+                    format!("tools were used in order: {names}")
+                }
+                ToolOrderCheck::Pair { before, after } => {
+                    format!("tool {before} was used before tool {after}")
+                }
+            },
             Self::SkillUsed { negate } => match negate {
                 true => "the skill was not engaged".to_string(),
                 false => "the skill was engaged".to_string(),
@@ -869,15 +991,22 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                 format!("'{tool}' was called {observed} time(s){qualifier}, expected {calls}"),
             )
         }),
-        Grader::ToolOrder { tools } => with_transcript(input, |transcript| {
-            let observed = transcript.tool_sequence();
-            let matched = is_subsequence(tools, &observed);
-            let rendered = observed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ");
-            let verb = if matched { "contains" } else { "does not contain" };
-            GraderOutcome::from_bool(
-                matched,
-                format!("observed tool order [{rendered}] {verb} the expected order"),
-            )
+        Grader::ToolOrder { check } => with_transcript(input, |transcript| match check {
+            ToolOrderCheck::Subsequence(tools) => {
+                let observed = transcript.tool_sequence();
+                let matched = is_subsequence(tools, &observed);
+                let rendered = observed.iter().map(|t| t.as_str()).collect::<Vec<_>>().join(", ");
+                let verb = if matched { "contains" } else { "does not contain" };
+                GraderOutcome::from_bool(
+                    matched,
+                    format!("observed tool order [{rendered}] {verb} the expected order"),
+                )
+            }
+            ToolOrderCheck::Pair { before, after } => {
+                let matched = before_after_holds(transcript, before, after);
+                let verb = if matched { "was" } else { "was not" };
+                GraderOutcome::from_bool(matched, format!("tool {before} {verb} used before tool {after}"))
+            }
         }),
         Grader::SkillUsed { negate } => with_transcript(input, |transcript| {
             let engagement = transcript.skill_engagement();
@@ -1066,6 +1195,40 @@ fn is_subsequence(expected: &[ToolName], observed: &[&ToolName]) -> bool {
     expected
         .iter()
         .all(|wanted| cursor.any(|seen| seen.eq_ignore_case(wanted.as_str())))
+}
+
+fn matches_tool_reference(tool: &ToolName, paths: &[String], reference: &ToolReference) -> bool {
+    if !tool.eq_ignore_case(reference.tool().as_str()) {
+        return false;
+    }
+    match reference.input_match() {
+        None => true,
+        Some(pattern) => {
+            let matcher = pattern.compile();
+            paths.iter().any(|value| matcher.is_match(value))
+        }
+    }
+}
+
+/// Whether some call matching `before` happened, and some call matching
+/// `after` happened later in the run's actual chronological order.
+///
+/// Only the first `before` match anchors the search: a call cannot count as
+/// both halves of the pair at once, but a run that repeats `before` after
+/// already satisfying `after` still passes, since the pair asks "did before
+/// happen and then after", not "did every before precede every after".
+fn before_after_holds(transcript: &NormalizedTranscript, before: &ToolReference, after: &ToolReference) -> bool {
+    let mut seen_before = false;
+    for (tool, paths) in transcript.tool_call_inputs() {
+        if !seen_before && matches_tool_reference(tool, paths, before) {
+            seen_before = true;
+            continue;
+        }
+        if seen_before && matches_tool_reference(tool, paths, after) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -1717,7 +1880,7 @@ mod tests {
         let fixture = Fixture::new();
         let outcome = evaluate(
             &Grader::ToolOrder {
-                tools: vec![tool("Read"), tool("Write")],
+                check: ToolOrderCheck::Subsequence(vec![tool("Read"), tool("Write")]),
             },
             &fixture.input(),
         );
@@ -1725,11 +1888,130 @@ mod tests {
 
         let outcome = evaluate(
             &Grader::ToolOrder {
-                tools: vec![tool("Write"), tool("Read")],
+                check: ToolOrderCheck::Subsequence(vec![tool("Write"), tool("Read")]),
             },
             &fixture.input(),
         );
         assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn tool_order_pair_holds_when_before_precedes_after() {
+        let fixture = Fixture::new();
+        let outcome = evaluate(
+            &Grader::ToolOrder {
+                check: ToolOrderCheck::Pair {
+                    before: ToolReference::Named(tool("Read")),
+                    after: ToolReference::Named(tool("Write")),
+                },
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
+
+        let outcome = evaluate(
+            &Grader::ToolOrder {
+                check: ToolOrderCheck::Pair {
+                    before: ToolReference::Named(tool("Write")),
+                    after: ToolReference::Named(tool("Read")),
+                },
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn tool_order_pair_can_be_qualified_by_input_match() {
+        let fixture = Fixture::new();
+        let outcome = evaluate(
+            &Grader::ToolOrder {
+                check: ToolOrderCheck::Pair {
+                    before: ToolReference::WithInputMatch {
+                        tool: tool("Bash"),
+                        input_match: RegexPattern::parse("^ls$").unwrap(),
+                    },
+                    after: ToolReference::Named(tool("Write")),
+                },
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
+
+        let outcome = evaluate(
+            &Grader::ToolOrder {
+                check: ToolOrderCheck::Pair {
+                    before: ToolReference::WithInputMatch {
+                        tool: tool("Bash"),
+                        input_match: RegexPattern::parse("npm test").unwrap(),
+                    },
+                    after: ToolReference::Named(tool("Write")),
+                },
+            },
+            &fixture.input(),
+        );
+        assert!(matches!(outcome, GraderOutcome::Failed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn tool_order_check_requires_tools_or_a_complete_before_after_pair() {
+        let neither = serde_json::from_value::<Grader>(serde_json::json!({ "type": "tool_order" })).unwrap_err();
+        assert!(neither.to_string().contains("before"), "{neither}");
+
+        let only_before = serde_json::from_value::<Grader>(serde_json::json!({
+            "type": "tool_order",
+            "before": "Read"
+        }))
+        .unwrap_err();
+        assert!(only_before.to_string().contains("both"), "{only_before}");
+
+        let both = serde_json::from_value::<Grader>(serde_json::json!({
+            "type": "tool_order",
+            "tools": ["Read", "Write"],
+            "before": "Read",
+            "after": "Write"
+        }))
+        .unwrap_err();
+        assert!(both.to_string().contains("not both"), "{both}");
+    }
+
+    #[test]
+    fn tool_order_pair_round_trips_through_the_fields_a_case_declares() {
+        let declared = serde_json::json!({
+            "type": "tool_order",
+            "before": "Read",
+            "after": { "tool": "Bash", "input_match": "npm test" }
+        });
+        let grader: Grader = serde_json::from_value(declared.clone()).unwrap();
+        assert_eq!(
+            grader,
+            Grader::ToolOrder {
+                check: ToolOrderCheck::Pair {
+                    before: ToolReference::Named(tool("Read")),
+                    after: ToolReference::WithInputMatch {
+                        tool: tool("Bash"),
+                        input_match: RegexPattern::parse("npm test").unwrap(),
+                    },
+                },
+            }
+        );
+        assert_eq!(serde_json::to_value(grader).unwrap(), declared);
+    }
+
+    #[test]
+    fn tool_order_subsequence_shape_is_unchanged_by_the_redesign() {
+        let declared = serde_json::json!({
+            "type": "tool_order",
+            "tools": ["Read", "Write"]
+        });
+        let grader: Grader = serde_json::from_value(declared.clone()).unwrap();
+        assert_eq!(
+            grader,
+            Grader::ToolOrder {
+                check: ToolOrderCheck::Subsequence(vec![tool("Read"), tool("Write")]),
+            }
+        );
+        assert_eq!(serde_json::to_value(grader).unwrap(), declared);
     }
 
     #[test]
@@ -1764,7 +2046,13 @@ mod tests {
                 calls: CallBounds::at_least_once(),
             },
             Grader::ToolOrder {
-                tools: vec![tool("Read"), tool("Write")],
+                check: ToolOrderCheck::Subsequence(vec![tool("Read"), tool("Write")]),
+            },
+            Grader::ToolOrder {
+                check: ToolOrderCheck::Pair {
+                    before: ToolReference::Named(tool("Read")),
+                    after: ToolReference::Named(tool("Write")),
+                },
             },
         ] {
             match evaluate(&grader, &input) {
@@ -2059,9 +2347,21 @@ mod tests {
             ),
             (
                 Grader::ToolOrder {
-                    tools: vec![tool("Read"), tool("Write")],
+                    check: ToolOrderCheck::Subsequence(vec![tool("Read"), tool("Write")]),
                 },
                 "tools were used in order: Read then Write",
+            ),
+            (
+                Grader::ToolOrder {
+                    check: ToolOrderCheck::Pair {
+                        before: ToolReference::Named(tool("Read")),
+                        after: ToolReference::WithInputMatch {
+                            tool: tool("Bash"),
+                            input_match: RegexPattern::parse("npm test").unwrap(),
+                        },
+                    },
+                },
+                "tool 'Read' was used before tool 'Bash' with an argument matching /npm test/",
             ),
             (Grader::SkillUsed { negate: false }, "the skill was engaged"),
             (Grader::SkillUsed { negate: true }, "the skill was not engaged"),
