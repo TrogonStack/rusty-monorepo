@@ -44,6 +44,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--force` | bool | `false` | Overwrite an existing report directory if it already exists |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 | `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
+| `--permission` | enum | `workspace_write` | How much a run's harness may do without prompting; values: `workspace_write`, `unrestricted`. See [Run permission](#run-permission) |
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
 | `--attempts` | integer | `3` | Draw each (case × scenario) cell this many times. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
@@ -474,6 +475,7 @@ subcommands run.
 | `producer.name` | string | Always `trg` |
 | `producer.version` | string | `trg` crate version |
 | `environment` | string | Environment policy the runs were executed under: `scrubbed`, `isolated`, or `inherited` |
+| `permission` | string | Permission grant the runs were executed under: `workspace_write` or `unrestricted`. Absent in reports written before this field existed, which is equivalent to `workspace_write`. See [Run permission](#run-permission) |
 | `ci` | object | Present when running inside GitHub Actions (`GITHUB_ACTIONS=true`) |
 
 ### `suite` section
@@ -952,6 +954,35 @@ run directory, with secret-looking values left out.
 The policy is part of a run's cache identity, alongside `--skill-staging`. A
 completed run answers only for what it was allowed to see, so switching either
 flag executes again rather than serving a run that saw something else.
+
+---
+
+## Run permission
+
+A harness subprocess also needs to be told what it may do without asking, or
+it falls back to whatever permission settings happen to be saved on the
+operator's machine. `--permission` chooses the grant explicitly, so a run's
+score never depends on a setting nobody wrote down.
+
+| Grant | Meaning |
+| ----- | ------- |
+| `workspace_write` (default) | The run may write inside its workspace without prompting, and nothing wider |
+| `unrestricted` | The run may act without prompting anywhere, including outside its workspace |
+
+trg translates the grant into each harness's own flag:
+
+| Grant | `claude-code` | `codex` | `cursor-agent` |
+| ----- | ------------- | ------- | -------------- |
+| `workspace_write` | `--permission-mode acceptEdits` | `-s workspace-write` | `--force` |
+| `unrestricted` | `--permission-mode bypassPermissions` | `-s danger-full-access` | `--force` |
+
+`cursor-agent` has only one documented non-interactive flag, so both grants
+translate to `--force`; it draws no boundary between them for trg to translate.
+
+trg always passes one of these two grants explicitly. There is deliberately no
+mode that leaves the choice to the harness: a run whose permissions come from
+the operator's machine is not a measurement of the skill, since the same suite
+could then score differently on two machines.
 
 ---
 

@@ -123,6 +123,54 @@ impl EnvironmentPolicy {
     }
 }
 
+/// How much a run's harness subprocess may do to its workspace without asking first.
+///
+/// Every run passes one of these to its harness explicitly. A harness that is left to
+/// decide for itself falls back to whatever permission settings happen to be saved on the
+/// operator's machine, and a run shaped by the operator's machine is not a measurement of
+/// the skill: the same suite can score differently on two machines, and a run under an
+/// isolated environment has no saved settings to fall back on at all. There is deliberately
+/// no variant meaning "pass no grant and let the harness decide": that gap is the defect
+/// this type exists to make unrepresentable.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    clap::ValueEnum,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionGrant {
+    /// Let a run write inside its workspace without prompting, and nothing wider.
+    ///
+    /// The narrowest grant that still lets a run deliver its work unattended.
+    #[default]
+    #[value(name = "workspace_write")]
+    WorkspaceWrite,
+    /// Let a run act without prompting anywhere, including outside its workspace.
+    ///
+    /// Needed only when a case's task cannot be completed under workspace_write.
+    #[value(name = "unrestricted")]
+    Unrestricted,
+}
+
+impl PermissionGrant {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkspaceWrite => "workspace_write",
+            Self::Unrestricted => "unrestricted",
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, clap::ValueEnum, Serialize, Deserialize, JsonSchema,
 )]
@@ -166,6 +214,8 @@ pub struct BuildReportOptions {
     pub skill_staging: SkillStaging,
     /// How much of the operator's machine each run is allowed to see.
     pub environment: EnvironmentPolicy,
+    /// How much a run's harness subprocess may do without prompting.
+    pub permission: PermissionGrant,
     /// Which of the suite's cases this run covers.
     pub cases: CaseSelection,
 }
@@ -184,6 +234,7 @@ impl Default for BuildReportOptions {
             runner_version: None,
             skill_staging: SkillStaging::default(),
             environment: EnvironmentPolicy::default(),
+            permission: PermissionGrant::default(),
             cases: CaseSelection::default(),
         }
     }
@@ -252,6 +303,8 @@ pub struct ReportSection {
     pub runner_version: Option<String>,
     #[serde(default)]
     pub environment: EnvironmentPolicy,
+    #[serde(default)]
+    pub permission: PermissionGrant,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiSection>,
 }
@@ -530,6 +583,7 @@ pub fn build_report_bundle(
             runner_binary: options.runner_binary.clone(),
             runner_version: options.runner_version.clone(),
             environment: options.environment,
+            permission: options.permission,
             ci: build_ci_section(),
         },
         suite: SuiteSection {
@@ -1313,6 +1367,7 @@ mod tests {
                     runner_binary: None,
                     runner_version: None,
                     environment: EnvironmentPolicy::default(),
+                    permission: PermissionGrant::default(),
                     ci: None,
                 },
                 suite: SuiteSection {
@@ -1445,6 +1500,14 @@ mod tests {
                 .expect("v1-minimal fixture deserializes (required fields must stay optional or defaulted)");
             assert_eq!(document.runs.len(), 0);
             assert_eq!(document.report.iteration, 1);
+        }
+
+        #[test]
+        fn a_report_json_written_before_permission_existed_still_deserializes_as_workspace_write() {
+            let original = load_fixture_json("v1-minimal.json", FIXTURE_V1_MINIMAL);
+            let document: ReportDocument =
+                serde_json::from_value(original).expect("a report.json without a permission field still deserializes");
+            assert_eq!(document.report.permission, PermissionGrant::WorkspaceWrite);
         }
 
         #[test]

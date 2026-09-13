@@ -574,6 +574,21 @@
         }
       ]
     },
+    "PermissionGrant": {
+      "description": "How much a run's harness subprocess may do to its workspace without asking first.\n\nEvery run passes one of these to its harness explicitly. A harness that is left to\ndecide for itself falls back to whatever permission settings happen to be saved on the\noperator's machine, and a run shaped by the operator's machine is not a measurement of\nthe skill: the same suite can score differently on two machines, and a run under an\nisolated environment has no saved settings to fall back on at all. There is deliberately\nno variant meaning \"pass no grant and let the harness decide\": that gap is the defect\nthis type exists to make unrepresentable.",
+      "oneOf": [
+        {
+          "const": "workspace_write",
+          "description": "Let a run write inside its workspace without prompting, and nothing wider.\n\nThe narrowest grant that still lets a run deliver its work unattended.",
+          "type": "string"
+        },
+        {
+          "const": "unrestricted",
+          "description": "Let a run act without prompting anywhere, including outside its workspace.\n\nNeeded only when a case's task cannot be completed under workspace_write.",
+          "type": "string"
+        }
+      ]
+    },
     "ProducerSection": {
       "properties": {
         "name": {
@@ -619,6 +634,14 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "permission": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/PermissionGrant"
+            }
+          ],
+          "default": "workspace_write"
         },
         "producer": {
           "$ref": "#/$defs/ProducerSection"

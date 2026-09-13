@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 
 use super::{
@@ -8,12 +10,54 @@ use super::{
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, outputs_dir, path_within_base, FINAL_MD};
 use crate::agentskills::redact::redact_command_args;
+use crate::agentskills::report::PermissionGrant;
 
 const PROGRAM: &str = "codex";
 const INSTALL_HINT: &str = "install Codex CLI and ensure `codex` is on PATH";
 
 pub fn check_available() -> Result<(), EvalError> {
     check_runner_version(PROGRAM, INSTALL_HINT)
+}
+
+/// Translate a grant into the value codex's `-s` sandbox flag accepts.
+///
+/// `workspace-write` keeps codex's behavior exactly what it was before trg made the grant
+/// explicit. `danger-full-access` is codex's widest sandbox; codex has no third option that
+/// means "decide for yourself", which is the gap `PermissionGrant` closes.
+fn permission_sandbox(grant: PermissionGrant) -> &'static str {
+    match grant {
+        PermissionGrant::WorkspaceWrite => "workspace-write",
+        PermissionGrant::Unrestricted => "danger-full-access",
+    }
+}
+
+/// The arguments are `OsString` because two of them are paths, and a path is not always
+/// valid UTF-8. Rendering one into a `String` to build the list would hand the harness a
+/// lossily rewritten directory to work in.
+fn build_args(
+    workspace_dir: &Path,
+    final_text_path: &Path,
+    model: Option<&str>,
+    permission: PermissionGrant,
+    prompt: &str,
+) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("exec"),
+        OsString::from("--json"),
+        OsString::from("--skip-git-repo-check"),
+        OsString::from("-s"),
+        OsString::from(permission_sandbox(permission)),
+        OsString::from("-C"),
+        workspace_dir.as_os_str().to_os_string(),
+        OsString::from("-o"),
+        final_text_path.as_os_str().to_os_string(),
+    ];
+    if let Some(model) = model {
+        args.push(OsString::from("-m"));
+        args.push(OsString::from(model));
+    }
+    args.push(OsString::from(prompt));
+    args
 }
 
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
@@ -24,44 +68,23 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         detail: e.to_string(),
     })?;
 
+    let args = build_args(
+        request.workspace_dir,
+        &final_text_path,
+        request.runner_model,
+        request.permission,
+        &prepared.prompt,
+    );
+
     let mut command = Command::new(PROGRAM);
-    command
-        .arg("exec")
-        .arg("--json")
-        .arg("--skip-git-repo-check")
-        .arg("-s")
-        .arg("workspace-write")
-        .arg("-C")
-        .arg(request.workspace_dir)
-        .arg("-o")
-        .arg(&final_text_path);
+    command.args(&args);
 
-    if let Some(model) = request.runner_model {
-        command.arg("-m").arg(model);
-    }
-
-    command.arg(&prepared.prompt);
-
-    let mut cmd_args = vec![
-        "exec",
-        "--json",
-        "--skip-git-repo-check",
-        "-s",
-        "workspace-write",
-        "-C",
-        request.workspace_dir.to_str().unwrap_or("."),
-        "-o",
-        final_text_path.to_str().unwrap_or("outputs/final.md"),
-    ];
-    if let Some(model) = request.runner_model {
-        cmd_args.push("-m");
-        cmd_args.push(model);
-    }
-    cmd_args.push(&prepared.prompt);
     if let Some(run_dir) = request.transcript_path.parent() {
+        let recorded: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        let borrowed: Vec<&str> = recorded.iter().map(String::as_str).collect();
         write_runner_invocation_metadata(
             run_dir,
-            redact_command_args(PROGRAM, &cmd_args),
+            redact_command_args(PROGRAM, &borrowed),
             prepared.environment.recorded_vars(),
         )?;
     }
@@ -190,5 +213,66 @@ mod tests {
         let outcome = parse_outcome(stdout, 0, true, Some(0), String::new());
         assert!(matches!(outcome.status, RunStatus::Failed));
         assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
+    }
+
+    #[test]
+    fn workspace_write_keeps_codexs_original_sandbox_value() {
+        assert_eq!(permission_sandbox(PermissionGrant::WorkspaceWrite), "workspace-write");
+    }
+
+    #[test]
+    fn unrestricted_asks_codex_for_danger_full_access() {
+        assert_eq!(permission_sandbox(PermissionGrant::Unrestricted), "danger-full-access");
+    }
+
+    #[test]
+    fn the_built_invocation_carries_the_translated_sandbox_flag() {
+        let args = build_args(
+            Path::new("/ws"),
+            Path::new("/ws/outputs/final.md"),
+            None,
+            PermissionGrant::Unrestricted,
+            "do it",
+        );
+        let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
+        assert_eq!(
+            borrowed,
+            vec![
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-s",
+                "danger-full-access",
+                "-C",
+                "/ws",
+                "-o",
+                "/ws/outputs/final.md",
+                "do it",
+            ]
+        );
+    }
+
+    /// The value has to be the one the grant names rather than a constant. Reading the
+    /// grant to pick a value that never varies would translate nothing, and the flag would
+    /// go on meaning whatever it was hardcoded to.
+    #[test]
+    fn the_sandbox_flag_actually_follows_the_requested_grant() {
+        let sandbox_value_for = |grant: PermissionGrant| {
+            let args = build_args(
+                Path::new("/ws"),
+                Path::new("/ws/outputs/final.md"),
+                None,
+                grant,
+                "do it",
+            );
+            let position = args
+                .windows(2)
+                .position(|pair| pair[0] == "-s")
+                .expect("the invocation carries a -s flag");
+            args[position + 1].to_str().expect("test args are utf8").to_string()
+        };
+
+        assert_eq!(sandbox_value_for(PermissionGrant::WorkspaceWrite), "workspace-write");
+        assert_eq!(sandbox_value_for(PermissionGrant::Unrestricted), "danger-full-access");
     }
 }
