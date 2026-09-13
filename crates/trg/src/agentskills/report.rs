@@ -12,7 +12,7 @@ use super::budget::PassSpend;
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
-use super::evals::{EvalError, EvalSuite, Result};
+use super::evals::{EvalError, EvalPriority, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
@@ -370,6 +370,8 @@ pub struct EvalCaseDimension {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<EvalPriority>,
     pub prompt: String,
     pub expected_output: String,
     pub files: Vec<String>,
@@ -779,6 +781,7 @@ fn build_dimensions(
                 .description
                 .as_ref()
                 .map(|description| description.as_str().to_string()),
+            priority: eval_case.priority,
             prompt: eval_case.prompt.as_str().to_string(),
             expected_output: eval_case.expected_output.as_str().to_string(),
             files: eval_case.files.iter().map(|file| file.as_str().to_string()).collect(),
@@ -962,6 +965,7 @@ mod tests {
                         "id": "case-a",
                         "name": "Case A",
                         "description": "Covers case A.",
+                        "priority": "critical",
                         "prompt": "prompt a",
                         "expected_output": "output a",
                         "files": ["fixture.txt"],
@@ -1000,9 +1004,11 @@ mod tests {
         assert_eq!(dimensions.eval_cases[0].slug, "case-a");
         assert_eq!(dimensions.eval_cases[0].name.as_deref(), Some("Case A"));
         assert_eq!(dimensions.eval_cases[0].description.as_deref(), Some("Covers case A."));
+        assert_eq!(dimensions.eval_cases[0].priority, Some(EvalPriority::Critical));
         assert_eq!(dimensions.eval_cases[0].assertion_ids, vec!["case-a:a0", "case-a:g0"]);
         assert_eq!(dimensions.eval_cases[1].name, None);
         assert_eq!(dimensions.eval_cases[1].description, None);
+        assert_eq!(dimensions.eval_cases[1].priority, None);
         assert_eq!(dimensions.eval_cases[1].assertion_ids, vec!["case-b:a0", "case-b:a1"]);
         assert_eq!(dimensions.assertions.len(), 4);
         assert_eq!(dimensions.assertions[0].id, "case-a:a0");
