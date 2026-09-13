@@ -13,6 +13,7 @@ pub mod evals;
 pub mod feedback;
 pub mod graders;
 pub mod grading;
+pub mod html_report;
 pub mod improvement_bundle;
 pub mod iteration_summary;
 pub mod judge;
