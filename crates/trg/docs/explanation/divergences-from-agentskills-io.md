@@ -96,11 +96,10 @@ because the agentskills.io guide mentions it. Check the version your file
 carries.
 
 Worked example: `summary.unsupported` in `grading.json` appears only from
-`trg.skills-eval.grading.v2` onward, `summary.excluded` only from `v4`, and
-`graders` on an eval case requires manifest `schema_version: 3`. A consumer that
-reads any of them without checking the version will misread older bundles, and
-one that recomputes a pass rate without subtracting both `unsupported` and
-`excluded` will not match the rate the file reports.
+`trg.skills-eval.grading.v2` onward, and `summary.excluded` only from `v4`. A
+consumer that reads either without checking the version will misread older
+bundles, and one that recomputes a pass rate without subtracting both
+`unsupported` and `excluded` will not match the rate the file reports.
 
 ### Backward-compatibility contract
 
@@ -175,8 +174,8 @@ signal.
 plain strings. Mechanical grading matches natural-language patterns; LLM grading
 handles the rest.
 
-**Future (`schema_version >= v2`):** Structured assertion objects (kind, target,
-params) may be added. Plain strings will remain valid for v1 consumers.
+**Future:** Structured assertion objects (kind, target, params) may be added.
+Plain strings will remain valid.
 
 ---
 

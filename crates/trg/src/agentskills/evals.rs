@@ -20,25 +20,8 @@ use thiserror::Error;
 pub const EVAL_SUITE_DIR_NAME: &str = "evals";
 pub const EVAL_SUITE_MANIFEST_NAME: &str = "evals.json";
 
-pub const SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION: u32 = 3;
-pub const TYPED_GRADERS_MIN_SCHEMA_VERSION: u32 = 3;
 pub const DEFAULT_MAX_FIXTURE_BYTES: u64 = 5 * 1024 * 1024;
 const FIXTURE_BINARY_SAMPLE_BYTES: usize = 8 * 1024;
-
-const SUITE_V1_FIELDS: &[&str] = &["schema_version", "skill_name", "evals"];
-const CASE_V1_FIELDS: &[&str] = &["id", "prompt", "expected_output", "files", "assertions"];
-const CASE_V2_FIELDS: &[&str] = &[
-    "id",
-    "prompt",
-    "expected_output",
-    "files",
-    "assertions",
-    "tags",
-    "priority",
-    "timeout_secs",
-    "expected_output_files",
-    "grader_hints",
-];
 
 #[derive(Error, Debug)]
 pub enum EvalError {
@@ -326,82 +309,7 @@ impl EvalCase {
 
 pub fn parse_eval_suite(content: &str) -> Result<EvalSuite> {
     let value: serde_json::Value = serde_json::from_str(content)?;
-    validate_eval_manifest_version(&value)?;
     serde_json::from_value(value).map_err(EvalError::from)
-}
-
-fn validate_eval_manifest_version(value: &serde_json::Value) -> Result<()> {
-    let schema_version = value
-        .get("schema_version")
-        .and_then(|version| version.as_u64())
-        .unwrap_or(1) as u32;
-
-    if schema_version < 1 {
-        return Err(EvalError::Validation(
-            ValidationError::for_field(
-                "schema_version",
-                format!(
-                    "manifest schema_version {schema_version} is older than this trg build supports (min 1); update manifest or set schema_version to 1"
-                ),
-            )
-            .into(),
-        ));
-    }
-
-    if schema_version > SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION {
-        return Err(EvalError::Validation(
-            ValidationError::for_field(
-                "schema_version",
-                format!(
-                    "manifest schema_version {schema_version} is newer than this trg build supports (max {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}); upgrade trg or set schema_version to {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}"
-                ),
-            )
-            .into(),
-        ));
-    }
-
-    let case_fields = match schema_version {
-        1 => Some(CASE_V1_FIELDS),
-        2 => Some(CASE_V2_FIELDS),
-        _ => None,
-    };
-
-    if schema_version == 1 {
-        reject_unknown_fields(value, "manifest", schema_version, SUITE_V1_FIELDS)?;
-    }
-
-    if let Some(allowed) = case_fields {
-        if let Some(evals) = value.get("evals").and_then(|evals| evals.as_array()) {
-            for (index, eval) in evals.iter().enumerate() {
-                reject_unknown_fields(eval, &format!("evals[{index}]"), schema_version, allowed)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn reject_unknown_fields(value: &serde_json::Value, label: &str, schema_version: u32, allowed: &[&str]) -> Result<()> {
-    let Some(object) = value.as_object() else {
-        return Ok(());
-    };
-
-    for key in object.keys() {
-        if !allowed.contains(&key.as_str()) {
-            let known = allowed.join(", ");
-            return Err(EvalError::Validation(
-                ValidationError::for_field(
-                    label,
-                    format!(
-                        "unknown field '{key}' is not allowed in schema_version {schema_version} manifests (known fields: {known}); omit it or set schema_version to {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}"
-                    ),
-                )
-                .into(),
-            ));
-        }
-    }
-
-    Ok(())
 }
 
 pub fn effective_timeout_secs(case: &EvalCase, global_timeout_secs: Option<u64>) -> Option<u64> {
@@ -495,7 +403,6 @@ pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
     let skill_name_json = serde_json::to_string(skill_name).expect("string serialization to JSON is infallible");
     format!(
         r#"{{
-  "schema_version": 3,
   "skill_name": {skill_name_json},
   "evals": [
     {{
@@ -1574,7 +1481,7 @@ mod tests {
         let suite = scaffold_eval_suite("demo-skill");
         let json = serde_json::to_string_pretty(&suite).unwrap();
         let parsed = parse_eval_suite(&json).unwrap();
-        assert_eq!(parsed.schema_version, SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION);
+        assert_eq!(parsed.schema_version, 1);
         assert_eq!(parsed.skill_name.as_str(), "demo-skill");
         assert_eq!(parsed.evals.len(), 2);
         assert_eq!(parsed.evals[0].id.as_str(), "produces-a-summary");
@@ -1590,29 +1497,26 @@ mod tests {
     }
 
     #[test]
-    fn typed_graders_are_rejected_before_the_schema_version_that_introduced_them() {
-        let json = format!(
-            r#"{{
-  "schema_version": {},
+    fn a_manifest_that_omits_schema_version_still_parses_documented_fields() {
+        let json = r#"{
   "skill_name": "demo-skill",
   "evals": [
-    {{
+    {
       "id": "one",
       "prompt": "A sufficiently long prompt here",
       "expected_output": "A detailed analysis output",
-      "graders": [{{ "type": "skill_used" }}]
-    }}
+      "tags": ["smoke"],
+      "grader_hints": { "hint": "value" },
+      "graders": [{ "type": "skill_used" }]
+    }
   ]
-}}"#,
-            TYPED_GRADERS_MIN_SCHEMA_VERSION - 1
-        );
+}"#;
 
-        let err = parse_eval_suite(&json).unwrap_err().to_string();
-        assert!(err.contains("graders"), "{err}");
-        assert!(
-            err.contains(&format!("schema_version to {SUPPORTED_EVAL_MANIFEST_SCHEMA_VERSION}")),
-            "{err}"
-        );
+        let suite = parse_eval_suite(json).expect("a manifest without schema_version must still parse");
+        assert_eq!(suite.schema_version, 1);
+        assert_eq!(suite.evals[0].tags.as_deref(), Some(&["smoke".to_string()][..]));
+        assert!(suite.evals[0].grader_hints.is_some());
+        assert!(!suite.evals[0].graders.is_empty());
     }
 
     #[test]
@@ -1682,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_v1_manifest_rejects_unknown_fields() {
+    fn a_manifest_without_schema_version_parses_case_metadata_fields() {
         let json = r#"{
   "skill_name": "demo-skill",
   "evals": [
@@ -1695,8 +1599,8 @@ mod tests {
   ]
 }"#;
 
-        let err = parse_eval_suite(json).unwrap_err();
-        assert!(err.to_string().contains("unknown field 'tags'"));
+        let suite = parse_eval_suite(json).expect("tags must parse without a declared schema_version");
+        assert_eq!(suite.evals[0].tags.as_deref(), Some(&["smoke".to_string()][..]));
     }
 
     #[test]
@@ -1719,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_v2_manifest_rejects_a_misspelled_field_with_a_version_scoped_message() {
+    fn parse_rejects_a_misspelled_case_field_regardless_of_schema_version() {
         let json = r#"{
   "schema_version": 2,
   "skill_name": "demo-skill",
@@ -1736,8 +1640,8 @@ mod tests {
 }"#;
 
         let err = parse_eval_suite(json).unwrap_err().to_string();
-        assert!(err.contains("unknown field 'assertion'"), "{err}");
-        assert!(err.contains("known fields: "), "{err}");
+        assert!(err.contains("unknown field `assertion`"), "{err}");
+        assert!(err.contains("expected one of"), "{err}");
     }
 
     #[test]
@@ -1787,8 +1691,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_schema_version_below_minimum() {
-        let json = r#"{
+    fn parse_accepts_any_schema_version_value_as_inert() {
+        let below_minimum = r#"{
   "schema_version": 0,
   "skill_name": "demo-skill",
   "evals": [
@@ -1799,15 +1703,10 @@ mod tests {
     }
   ]
 }"#;
+        let suite = parse_eval_suite(below_minimum).expect("schema_version 0 must no longer be rejected");
+        assert_eq!(suite.schema_version, 0);
 
-        let err = parse_eval_suite(json).unwrap_err();
-        assert!(err.to_string().contains("schema_version 0"));
-        assert!(err.to_string().contains("min 1"));
-    }
-
-    #[test]
-    fn parse_rejects_unsupported_schema_version() {
-        let json = r#"{
+        let far_beyond_any_release = r#"{
   "schema_version": 99,
   "skill_name": "demo-skill",
   "evals": [
@@ -1818,9 +1717,8 @@ mod tests {
     }
   ]
 }"#;
-
-        let err = parse_eval_suite(json).unwrap_err();
-        assert!(err.to_string().contains("schema_version 99"));
+        let suite = parse_eval_suite(far_beyond_any_release).expect("schema_version 99 must no longer be rejected");
+        assert_eq!(suite.schema_version, 99);
     }
 
     #[test]
