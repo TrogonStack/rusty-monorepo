@@ -373,6 +373,12 @@ const MCP_CONFIG_FILE_NAME: &str = "mcp-config.json";
 /// unable to disagree with the very `MockSet` a run's cache key was computed from, since
 /// both are reading the same already-resolved declarations rather than deriving them twice.
 pub fn materialize_mock_set(mock_set: &MockSet, run_dir: &Path, trg_binary: &Path) -> Result<PathBuf, MocksError> {
+    // Every path written here is resolved by someone else: the harness reads the config
+    // with its working directory set to the run's workspace, and it in turn spawns the
+    // mock server. A relative `--out-dir` would have all of them resolve under the
+    // workspace instead of the run directory, so the paths are pinned to a root once,
+    // here, rather than at each of the places that read them back.
+    let run_dir = &absolute_run_dir(run_dir)?;
     let mocks_dir = run_dir.join(MATERIALIZED_MOCKS_DIR_NAME);
     let calls_path = run_dir.join(MOCK_CALLS_LOG_NAME);
 
@@ -418,6 +424,15 @@ pub fn materialize_mock_set(mock_set: &MockSet, run_dir: &Path, trg_binary: &Pat
     let config_json = serde_json::to_string_pretty(&config).expect("mcp config serializes");
     write_file(&config_path, &config_json)?;
     Ok(config_path)
+}
+
+/// The run directory as a path that means the same thing from any working directory.
+fn absolute_run_dir(run_dir: &Path) -> Result<PathBuf, MocksError> {
+    create_dir(run_dir)?;
+    fs::canonicalize(run_dir).map_err(|source| MocksError::Io {
+        path: run_dir.to_path_buf(),
+        source,
+    })
 }
 
 fn create_dir(dir: &Path) -> Result<(), MocksError> {
@@ -1059,6 +1074,75 @@ mod tests {
         );
     }
 
+    /// Every path in the materialized config is resolved by somebody else. The harness is
+    /// started with its working directory set to the run's workspace and it spawns the mock
+    /// server from there, so a relative `--out-dir` handed through unchanged would send all
+    /// of them looking under the workspace. With `--strict-mcp-config` the harness then
+    /// refuses to start and an ordinary invocation cannot run a mocked case at all.
+    #[test]
+    fn a_relative_run_directory_still_names_the_mocks_somewhere_a_child_process_can_find_them() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\ncreated",
+        );
+        let mock_set = resolve_mock_set(&skill, "one").unwrap();
+        let run_dir = relative_to_current_dir(&temp.path().join("run-dir"));
+        assert!(
+            run_dir.is_relative(),
+            "the point of this test is a run directory that means different things from different places"
+        );
+
+        let config_path = materialize_mock_set(&mock_set, &run_dir, Path::new("/usr/local/bin/trg")).unwrap();
+
+        assert!(
+            config_path.is_absolute(),
+            "the harness is handed this path and reads it from the workspace, not from here"
+        );
+        let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        let args: Vec<String> = config["mcpServers"]["github"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        for flag in ["--mocks", "--calls"] {
+            let position = args.iter().position(|arg| arg == flag).expect("the flag is written");
+            let value = Path::new(&args[position + 1]);
+            assert!(
+                value.is_absolute(),
+                "{flag} is resolved by the mock server, not by us: {value:?}"
+            );
+            assert!(
+                value.starts_with(temp.path().canonicalize().unwrap()),
+                "{flag} points into the run: {value:?}"
+            );
+        }
+    }
+
+    /// A path to `target` that only means `target` from the current working directory, built
+    /// without moving the process, which every other test in this binary shares.
+    fn relative_to_current_dir(target: &Path) -> PathBuf {
+        let here = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let mut path = PathBuf::new();
+        for _ in here.components().skip(1) {
+            path.push("..");
+        }
+        let anchored = target
+            .parent()
+            .expect("the run directory has a parent")
+            .canonicalize()
+            .unwrap()
+            .join(target.file_name().expect("the run directory is named"));
+        for component in anchored.components().skip(1) {
+            path.push(component);
+        }
+        path
+    }
+
     #[test]
     fn materialize_writes_one_json_file_per_tool_and_an_mcp_config_naming_the_mock_server_subcommand() {
         let temp = tempdir().unwrap();
@@ -1074,6 +1158,7 @@ mod tests {
         let trg_binary = Path::new("/usr/local/bin/trg");
 
         let config_path = materialize_mock_set(&mock_set, &run_dir, trg_binary).unwrap();
+        let run_dir = run_dir.canonicalize().unwrap();
 
         let tool_json_path = run_dir.join("mcp-mocks/github/create_issue.json");
         assert!(tool_json_path.is_file());
