@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.10.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.9.0...trg@v0.10.0) (2026-09-13)
+
+
+### Features
+
+* **trg:** A case needs a directory before it needs more fields ([#146](https://github.com/TrogonStack/rusty-monorepo/issues/146)) ([dd3d8d3](https://github.com/TrogonStack/rusty-monorepo/commit/dd3d8d3141c662ceafd683c7e1b4140994f2233e))
+* **trg:** A harness must declare what it cannot do ([#145](https://github.com/TrogonStack/rusty-monorepo/issues/145)) ([ea5485a](https://github.com/TrogonStack/rusty-monorepo/commit/ea5485a2ec40c34db123dcebec53071a23582e34))
+* **trg:** A judge asked once cannot say whether it is sure ([#138](https://github.com/TrogonStack/rusty-monorepo/issues/138)) ([6624297](https://github.com/TrogonStack/rusty-monorepo/commit/662429717c483ecf2eef3e2ba57977116788ca9e))
+* **trg:** A pass that names no scenario gets a baseline to read against ([#137](https://github.com/TrogonStack/rusty-monorepo/issues/137)) ([e850e7b](https://github.com/TrogonStack/rusty-monorepo/commit/e850e7b1de99a6885bd6b96d127b085ceaf6ebe4))
+* **trg:** Bound what one eval pass may spend ([#135](https://github.com/TrogonStack/rusty-monorepo/issues/135)) ([d8329d3](https://github.com/TrogonStack/rusty-monorepo/commit/d8329d3a5f9fc91801436c65d9fbf7c8cdc6963d))
+* **trg:** Declare checks as data and report what a harness cannot answer ([#109](https://github.com/TrogonStack/rusty-monorepo/issues/109)) ([f4261dd](https://github.com/TrogonStack/rusty-monorepo/commit/f4261ddd7a9ea85594a818537053c51a62380558))
+* **trg:** Draw every eval cell more than once by default ([#129](https://github.com/TrogonStack/rusty-monorepo/issues/129)) ([7202f91](https://github.com/TrogonStack/rusty-monorepo/commit/7202f9147fbedb3fd4afe2034f9d19a1fe6b78b8))
+* **trg:** Execute more than one eval run at a time ([#128](https://github.com/TrogonStack/rusty-monorepo/issues/128)) ([8c2659c](https://github.com/TrogonStack/rusty-monorepo/commit/8c2659c12b598817574a8095bd7759f0390a71f3))
+* **trg:** Let a case ask whether the skill gets reached for at all ([#123](https://github.com/TrogonStack/rusty-monorepo/issues/123)) ([6be74b2](https://github.com/TrogonStack/rusty-monorepo/commit/6be74b204eb45110ee462c1706187b5422379ba6))
+* **trg:** Let a case say what state it is asking about ([#134](https://github.com/TrogonStack/rusty-monorepo/issues/134)) ([f0c7a5a](https://github.com/TrogonStack/rusty-monorepo/commit/f0c7a5a57d4d147fd25bddb35867febdeabaf213))
+* **trg:** Let a case state that a tool must not be reached for ([#130](https://github.com/TrogonStack/rusty-monorepo/issues/130)) ([3656f18](https://github.com/TrogonStack/rusty-monorepo/commit/3656f18277330ec9ee5e42474666e76dd63ffa16))
+* **trg:** Let the judge address any OpenAI-compatible endpoint ([#108](https://github.com/TrogonStack/rusty-monorepo/issues/108)) ([ef07863](https://github.com/TrogonStack/rusty-monorepo/commit/ef078630b0ca8b3568a5c4783578deec4614c454))
+* **trg:** Observe every harness's tool calls and report what left the workspace ([#116](https://github.com/TrogonStack/rusty-monorepo/issues/116)) ([728d658](https://github.com/TrogonStack/rusty-monorepo/commit/728d6580978f2b485ada38699f16f5815d5deb04))
+* **trg:** Read every harness transcript through one event vocabulary ([#107](https://github.com/TrogonStack/rusty-monorepo/issues/107)) ([a347293](https://github.com/TrogonStack/rusty-monorepo/commit/a3472936387881114383768acc0288a95b488c69))
+* **trg:** Say which command a case expected, not just which tool ([#131](https://github.com/TrogonStack/rusty-monorepo/issues/131)) ([7cd19d2](https://github.com/TrogonStack/rusty-monorepo/commit/7cd19d27787096188094c93532a8395b0a5044b1))
+* **trg:** Scope graders to the arm they can answer in ([#122](https://github.com/TrogonStack/rusty-monorepo/issues/122)) ([10caa5a](https://github.com/TrogonStack/rusty-monorepo/commit/10caa5a69f3b55d15f566a9df8e6f9a70ab0515e))
+* **trg:** Select part of an eval suite per run ([#125](https://github.com/TrogonStack/rusty-monorepo/issues/125)) ([78a369c](https://github.com/TrogonStack/rusty-monorepo/commit/78a369c52e4adfabad7c5f46c6c2a57792f385fc))
+
+
+### Bug Fixes
+
+* **trg:** A cached run must answer for the draw that asked ([#127](https://github.com/TrogonStack/rusty-monorepo/issues/127)) ([0f7b5e5](https://github.com/TrogonStack/rusty-monorepo/commit/0f7b5e50933d429fc1b250b3e0ed21c1439e043e))
+* **trg:** A cached run must not answer for an eval case it never ran ([#113](https://github.com/TrogonStack/rusty-monorepo/issues/113)) ([872a9f2](https://github.com/TrogonStack/rusty-monorepo/commit/872a9f2d8489443a59f5d43bb0e888c2ff7dad81))
+* **trg:** A failed run must not read as a skill that failed its assertions ([#115](https://github.com/TrogonStack/rusty-monorepo/issues/115)) ([8f23d65](https://github.com/TrogonStack/rusty-monorepo/commit/8f23d6507200f3826b8dc63ac8d9ffdb6dfcc776))
+* **trg:** A manifest that names no version should not get the narrowest one ([#142](https://github.com/TrogonStack/rusty-monorepo/issues/142)) ([082f368](https://github.com/TrogonStack/rusty-monorepo/commit/082f3681a852a5ba888a798873f2caa21acdf38c))
+* **trg:** A pass nobody can price should not report a total of zero ([#139](https://github.com/TrogonStack/rusty-monorepo/issues/139)) ([20312d8](https://github.com/TrogonStack/rusty-monorepo/commit/20312d8aa5987971928024b29ed16a9802cde1a9))
+* **trg:** A pass-rate gate nothing was measured against must not report green ([#132](https://github.com/TrogonStack/rusty-monorepo/issues/132)) ([66e7f68](https://github.com/TrogonStack/rusty-monorepo/commit/66e7f6860fbb070a8812b3323554c6420f24f0d2))
+* **trg:** A reused run must answer for the arm that asked ([#126](https://github.com/TrogonStack/rusty-monorepo/issues/126)) ([b568c8e](https://github.com/TrogonStack/rusty-monorepo/commit/b568c8e2b4d6f3b5ee59d29d90271ec8de0aa358))
+* **trg:** A run inherits nothing by accident ([#119](https://github.com/TrogonStack/rusty-monorepo/issues/119)) ([8d49745](https://github.com/TrogonStack/rusty-monorepo/commit/8d49745b8535b89f238204aca479e0bf27c26229))
+* **trg:** A run must not be able to read its own answer key ([#118](https://github.com/TrogonStack/rusty-monorepo/issues/118)) ([aac9bcd](https://github.com/TrogonStack/rusty-monorepo/commit/aac9bcd6e446a57e2f1a581174efc5b470752dcb))
+* **trg:** A run where nothing could be scored has no pass rate ([#114](https://github.com/TrogonStack/rusty-monorepo/issues/114)) ([39af3b4](https://github.com/TrogonStack/rusty-monorepo/commit/39af3b482b238aafca0d524c3364132e4a3bee3b))
+* **trg:** A run's permissions must come from the eval, not the machine ([#144](https://github.com/TrogonStack/rusty-monorepo/issues/144)) ([7cc7526](https://github.com/TrogonStack/rusty-monorepo/commit/7cc7526c1bc933e173c2e7171214667cc08f1f87))
+* **trg:** A score that could have been copied says so ([#124](https://github.com/TrogonStack/rusty-monorepo/issues/124)) ([0ca1c52](https://github.com/TrogonStack/rusty-monorepo/commit/0ca1c5269e3d582870f16a80c21d90ed8b07fd73))
+* **trg:** A timed out run must not leave agents running ([#120](https://github.com/TrogonStack/rusty-monorepo/issues/120)) ([a8188e9](https://github.com/TrogonStack/rusty-monorepo/commit/a8188e97f895f88a98daea2e72072e44a5af9ac4))
+* **trg:** A version nobody reads is not a contract ([#141](https://github.com/TrogonStack/rusty-monorepo/issues/141)) ([9cfaa4d](https://github.com/TrogonStack/rusty-monorepo/commit/9cfaa4d39cad8706b2a5851b402cae09835e3c12))
+* **trg:** Docs must not tell consumers to gate on a version that is gone ([#143](https://github.com/TrogonStack/rusty-monorepo/issues/143)) ([0cb60b0](https://github.com/TrogonStack/rusty-monorepo/commit/0cb60b0061baf23d9ae828ae6e96a3380d3c7b7a))
+* **trg:** Stop eval verify and run reuse from misreporting results ([#106](https://github.com/TrogonStack/rusty-monorepo/issues/106)) ([46304a5](https://github.com/TrogonStack/rusty-monorepo/commit/46304a5aef117b44578f89e136f67b60d17f8bad))
+* **trg:** Whether a bundle conforms cannot depend on how the suite scored ([#133](https://github.com/TrogonStack/rusty-monorepo/issues/133)) ([c11036a](https://github.com/TrogonStack/rusty-monorepo/commit/c11036a6419eeee40deed2cc2d077c3c1af27abe))
+
 ## [0.9.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.8.2...trg@v0.9.0) (2026-09-10)
 
 
