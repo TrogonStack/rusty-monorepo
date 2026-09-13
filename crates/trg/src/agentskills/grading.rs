@@ -87,10 +87,36 @@ pub struct AssertionGradeResult {
     /// work and not the premise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded: Option<String>,
+    /// No grader could answer this assertion at all: the text matched no mechanical
+    /// pattern and no judge was consulted. Distinct from `unsupported`, which means a
+    /// grader existed and the harness could not answer it, and from `excluded`, which
+    /// means the author scoped it to the other arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ungraded: Option<String>,
     /// How a panel of judges split, present only when more than one opinion was taken.
     /// A single opinion has no split to report, and `passed` already carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub votes: Option<JudgeVoteTally>,
+}
+
+/// Which single bucket a result belongs to.
+///
+/// The three markers are independent options, so one result can carry several
+/// at once and anything counting over them has to decide which wins. Deciding
+/// that here, once, is what stops a printed list from naming assertions that
+/// the number printed beside it does not count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertionOutcome {
+    /// Deliberately out of scope for this arm, which settles the result no
+    /// matter what else is true of it: a check nobody was going to score loses
+    /// nothing by also having been unanswerable.
+    Excluded,
+    /// The harness cannot answer this kind of question at all.
+    Unsupported,
+    /// In scope and answerable in principle, but nothing attempted it.
+    Ungraded,
+    /// Counted for or against the skill.
+    Scored,
 }
 
 impl AssertionGradeResult {
@@ -102,8 +128,24 @@ impl AssertionGradeResult {
         self.excluded.is_some()
     }
 
+    pub fn is_ungraded(&self) -> bool {
+        self.ungraded.is_some()
+    }
+
+    pub fn outcome(&self) -> AssertionOutcome {
+        if self.is_excluded() {
+            AssertionOutcome::Excluded
+        } else if self.is_unsupported() {
+            AssertionOutcome::Unsupported
+        } else if self.is_ungraded() {
+            AssertionOutcome::Ungraded
+        } else {
+            AssertionOutcome::Scored
+        }
+    }
+
     pub fn is_scored(&self) -> bool {
-        !self.is_unsupported() && !self.is_excluded()
+        self.outcome() == AssertionOutcome::Scored
     }
 }
 
@@ -116,12 +158,27 @@ pub struct GradingSummary {
     pub unsupported: usize,
     #[serde(default)]
     pub excluded: usize,
+    /// No grader could even attempt these, so they carry no signal either way.
+    #[serde(default)]
+    pub ungraded: usize,
     /// Over the scored assertions only, so an ungradable property cannot drag a
     /// skill's score down on a runner that simply cannot be observed. `null` when
     /// nothing was scored at all, because no assertion answered is not the same
     /// result as every assertion failed.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub pass_rate: Option<f64>,
+}
+
+/// The assertions the ungraded count counted.
+///
+/// The number and the list beneath it are two views of one set, so they are
+/// taken with one predicate rather than two that have to be kept in step.
+fn ungraded_assertion_texts(results: &[AssertionGradeResult]) -> Vec<String> {
+    results
+        .iter()
+        .filter(|result| result.outcome() == AssertionOutcome::Ungraded)
+        .map(|result| result.assertion.clone())
+        .collect()
 }
 
 /// The single place the grading arithmetic lives, so the writer and both
@@ -132,29 +189,38 @@ pub struct GradingCounts {
     pub failed: usize,
     pub unsupported: usize,
     pub excluded: usize,
+    pub ungraded: usize,
     pub total: usize,
 }
 
 impl GradingCounts {
     pub fn tally(results: &[AssertionGradeResult]) -> Self {
-        let excluded = results.iter().filter(|r| r.is_excluded()).count();
-        let unsupported = results
-            .iter()
-            .filter(|r| !r.is_excluded() && r.is_unsupported())
-            .count();
-        let passed = results.iter().filter(|r| r.is_scored() && r.passed).count();
+        let mut passed = 0;
+        let mut unsupported = 0;
+        let mut excluded = 0;
+        let mut ungraded = 0;
+        for result in results {
+            match result.outcome() {
+                AssertionOutcome::Excluded => excluded += 1,
+                AssertionOutcome::Unsupported => unsupported += 1,
+                AssertionOutcome::Ungraded => ungraded += 1,
+                AssertionOutcome::Scored if result.passed => passed += 1,
+                AssertionOutcome::Scored => {}
+            }
+        }
         let total = results.len();
         Self {
             passed,
-            failed: total - passed - unsupported - excluded,
+            failed: total - passed - unsupported - excluded - ungraded,
             unsupported,
             excluded,
+            ungraded,
             total,
         }
     }
 
     pub fn scored(self) -> usize {
-        self.total - self.unsupported - self.excluded
+        self.total - self.unsupported - self.excluded - self.ungraded
     }
 
     pub fn pass_rate(self) -> Option<f64> {
@@ -172,6 +238,7 @@ impl GradingCounts {
             total: self.total,
             unsupported: self.unsupported,
             excluded: self.excluded,
+            ungraded: self.ungraded,
             pass_rate: self.pass_rate(),
         }
     }
@@ -214,11 +281,16 @@ pub struct GradeReport {
     pub assertions_graded: usize,
     pub passed: usize,
     pub failed: usize,
-    pub needs_llm: usize,
+    /// Every assertion no grader could even attempt, mechanical or judge. Sourced
+    /// from the same tally as `unsupported` and `excluded` rather than a separate
+    /// count, so this can never disagree with what the grading files themselves say.
+    pub ungraded: usize,
     #[serde(default)]
     pub unsupported: usize,
     #[serde(default)]
     pub excluded: usize,
+    #[serde(default)]
+    pub ungraded_assertions: Vec<String>,
     #[serde(default)]
     pub run_statuses: GradedRunStatuses,
 }
@@ -278,6 +350,7 @@ struct RunContext {
     workspace_dir: PathBuf,
     outputs_dir: PathBuf,
     transcript_path: PathBuf,
+    skill_dir: PathBuf,
 }
 
 /// The grading options plus the judge they resolve to, resolved once per
@@ -349,17 +422,46 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
 
 #[derive(Debug, Clone)]
 pub(crate) enum MechanicalKind {
-    FileExists { path: String },
-    FileCount { count: usize, dir: Option<String> },
-    ValidJson { path: Option<String> },
-    ValidCsv { path: Option<String> },
-    ValidMarkdownHeadings { path: Option<String> },
-    ImageExists { path: String },
-    ImageDimensions { path: String, width: u32, height: u32 },
-    ContainsString { needle: String, path: Option<String> },
-    MatchesRegex { pattern: String, path: Option<String> },
-    RowCount { count: usize, path: Option<String> },
-    SchemaValidation { schema: String, path: Option<String> },
+    FileExists {
+        path: String,
+    },
+    FileCount {
+        count: usize,
+        dir: Option<String>,
+    },
+    ValidJson {
+        path: Option<String>,
+    },
+    ValidCsv {
+        path: Option<String>,
+    },
+    ValidMarkdownHeadings {
+        path: Option<String>,
+    },
+    ImageExists {
+        path: String,
+    },
+    ImageDimensions {
+        path: String,
+        width: u32,
+        height: u32,
+    },
+    ContainsString {
+        needle: String,
+        path: Option<String>,
+    },
+    MatchesRegex {
+        pattern: String,
+        path: Option<String>,
+    },
+    RowCount {
+        count: usize,
+        path: Option<String>,
+    },
+    SchemaValidation {
+        schema: Option<String>,
+        path: Option<String>,
+    },
 }
 
 pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport> {
@@ -391,9 +493,10 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         assertions_graded: 0,
         passed: 0,
         failed: 0,
-        needs_llm: 0,
+        ungraded: 0,
         unsupported: 0,
         excluded: 0,
+        ungraded_assertions: Vec::new(),
         run_statuses: GradedRunStatuses::default(),
     };
 
@@ -417,7 +520,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             continue;
         }
 
-        let ctx = run_context(report_dir, run);
+        let ctx = run_context(report_dir, run, &skill_path);
         let mut assertion_results = Vec::with_capacity(case.assertions.len() + case.graders.len());
 
         let declarative = DeclarativeContext::load(&ctx);
@@ -438,17 +541,16 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
 
         restore_when_nothing_would_be_scored(&mut assertion_results);
 
-        for result in &assertion_results {
-            if result.grader.kind == GraderKind::NeedsLlm {
-                report.needs_llm += 1;
-            }
-            report.assertions_graded += 1;
-        }
+        report.assertions_graded += assertion_results.len();
+        report
+            .ungraded_assertions
+            .extend(ungraded_assertion_texts(&assertion_results));
         let counts = GradingCounts::tally(&assertion_results);
         report.passed += counts.passed;
         report.failed += counts.failed;
         report.unsupported += counts.unsupported;
         report.excluded += counts.excluded;
+        report.ungraded += counts.ungraded;
 
         let grading = build_grading_file(assertion_results)?;
         validate_grading_document(&grading, options.strict)?;
@@ -468,7 +570,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     Ok(report)
 }
 
-fn run_context(report_dir: &Path, run: &RunRecord) -> RunContext {
+fn run_context(report_dir: &Path, run: &RunRecord, skill_path: &Path) -> RunContext {
     let workspace_dir = report_dir.join(&run.paths.workspace);
     let run_dir = workspace_dir
         .parent()
@@ -486,6 +588,7 @@ fn run_context(report_dir: &Path, run: &RunRecord) -> RunContext {
         workspace_dir,
         outputs_dir,
         transcript_path,
+        skill_dir: skill_path.to_path_buf(),
     }
 }
 
@@ -526,6 +629,7 @@ fn grade_assertion(
                     rationale: None,
                     unsupported: None,
                     excluded: None,
+                    ungraded: None,
                     votes: None,
                 })
             } else if options.grader == GraderMode::None {
@@ -567,6 +671,7 @@ impl DeclarativeContext {
             outputs_dir: &ctx.outputs_dir,
             raw_transcript: &self.raw_transcript,
             transcript: self.transcript.as_ref(),
+            skill_dir: &ctx.skill_dir,
         }
     }
 }
@@ -601,6 +706,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            ungraded: None,
             votes: None,
         },
         GraderOutcome::Failed { evidence } => AssertionGradeResult {
@@ -612,6 +718,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            ungraded: None,
             votes: None,
         },
         GraderOutcome::Unsupported { reason } => AssertionGradeResult {
@@ -623,6 +730,7 @@ fn grade_declaratively(
             rationale: None,
             unsupported: Some(reason),
             excluded,
+            ungraded: None,
             votes: None,
         },
         GraderOutcome::Deferred { criterion } => {
@@ -635,12 +743,14 @@ fn grade_declaratively(
             result.name = name;
             result
         }
+        GraderOutcome::AuthoringError { reason } => {
+            return Err(EvalError::Validation(
+                ValidationError::for_field(assertion, reason).into(),
+            ));
+        }
     })
 }
 
-/// A case whose every check is arm-scoped would otherwise measure nothing at
-/// all, which is never what the author meant by writing it, so the exclusions
-/// are lifted and the case is scored as declared.
 /// Whether the cost ceiling stopped this run before it started.
 ///
 /// Such a run has no workspace and no transcript, so there is nothing for a grader
@@ -651,9 +761,21 @@ fn stopped_by_cost_ceiling(run: &RunRecord) -> bool {
     run.failure_kind.as_deref() == Some(crate::agentskills::budget::FAILURE_KIND_BUDGET)
 }
 
+/// A case whose every check is arm-scoped would otherwise measure nothing at
+/// all, which is never what the author meant by writing it, so the exclusions
+/// are lifted and the case is scored as declared. But lifting them only helps
+/// when doing so would actually produce something scorable; a case that is
+/// entirely ungraded, or whose only observable checks are also unsupported,
+/// gains nothing from the lift and must not have it applied.
 fn restore_when_nothing_would_be_scored(results: &mut [AssertionGradeResult]) {
     let scored = results.iter().filter(|result| result.is_scored()).count();
-    if scored > 0 || !results.iter().any(AssertionGradeResult::is_excluded) {
+    if scored > 0 {
+        return;
+    }
+    let lifting_would_score = results
+        .iter()
+        .any(|result| result.is_excluded() && !result.is_unsupported() && !result.is_ungraded());
+    if !lifting_would_score {
         return;
     }
     for result in results.iter_mut() {
@@ -693,6 +815,70 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
         rationale: None,
         unsupported: None,
         excluded: None,
+        ungraded: Some(evidence.to_string()),
+        votes: None,
+    }
+}
+
+/// A grader script that did not exit cleanly graded nothing, whatever it printed.
+///
+/// Recording the crash as a failed assertion reads as evidence the skill did the wrong
+/// thing, which is the one thing it is not evidence of. Ungraded is the honest record, and
+/// the gate already refuses to pass a suite carrying anything ungraded, so a broken script
+/// still stops the build without discarding every other case in the run.
+/// The payload goes over on its own thread so that neither side can wedge the other.
+///
+/// A grader is free to print more than a pipe holds before it reads its input, and a parent that
+/// insists on finishing the write first would then wait on a buffer only the grader can drain
+/// while the grader waits on one only the parent can drain. Neither ever gives way.
+fn feed_payload(child: &mut std::process::Child, payload: Vec<u8>) -> Option<PayloadHandover> {
+    let mut stdin = child.stdin.take()?;
+    Some(std::thread::spawn(move || {
+        use std::io::Write;
+        stdin.write_all(&payload)
+    }))
+}
+
+type PayloadHandover = std::thread::JoinHandle<std::io::Result<()>>;
+
+/// A grader that stopped reading is answered by its exit status, not by the write that failed.
+///
+/// A script which exits before draining the payload closes the pipe under us, and reporting that
+/// as harness I/O aborts the entire run over one broken grader, discarding every case already
+/// paid for. Whatever it exited with is the honest account of what it did.
+fn payload_handed_over(handover: Option<PayloadHandover>) -> Result<()> {
+    let Some(handover) = handover else {
+        return Ok(());
+    };
+    match handover.join() {
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Ok(other) => other.map_err(EvalError::Io),
+        Err(_) => Err(EvalError::Io(std::io::Error::other(
+            "the thread handing the payload to the grader script panicked",
+        ))),
+    }
+}
+
+fn script_crashed_result(assertion: &str, command: &str, output: &std::process::Output) -> AssertionGradeResult {
+    let evidence = format!(
+        "script grader exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    AssertionGradeResult {
+        name: None,
+        assertion: assertion.to_string(),
+        passed: false,
+        evidence: evidence.clone(),
+        grader: GraderInfo {
+            kind: GraderKind::Script,
+            model: None,
+            command: Some(command.to_string()),
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: Some(evidence),
         votes: None,
     }
 }
@@ -726,14 +912,10 @@ fn grade_with_script(
         .spawn()
         .map_err(|e| EvalError::Validation(ValidationError::for_field("--grader-command", e.to_string()).into()))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin
-            .write_all(serde_json::to_string(&input)?.as_bytes())
-            .map_err(EvalError::Io)?;
-    }
-
+    let handover = feed_payload(&mut child, serde_json::to_string(&input)?.into_bytes());
     let output = child.wait_with_output().map_err(EvalError::Io)?;
+    payload_handed_over(handover)?;
+
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     let artifact_path = ctx.run_dir.join("grader-script-result.json");
@@ -748,25 +930,7 @@ fn grade_with_script(
     )?;
 
     if !output.status.success() {
-        return Ok(AssertionGradeResult {
-            name: None,
-            assertion: assertion.to_string(),
-            passed: false,
-            evidence: format!(
-                "script grader exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            grader: GraderInfo {
-                kind: GraderKind::Script,
-                model: None,
-                command: Some(command.to_string()),
-            },
-            rationale: None,
-            unsupported: None,
-            excluded: None,
-            votes: None,
-        });
+        return Ok(script_crashed_result(assertion, command, &output));
     }
 
     let parsed: ScriptGraderResponse = serde_json::from_str(&raw).map_err(|e| {
@@ -792,6 +956,7 @@ fn grade_with_script(
         rationale: parsed.rationale,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: None,
     })
 }
@@ -820,6 +985,7 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes: None,
         });
     }
@@ -854,6 +1020,7 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
         rationale: verdict.opinion.rationale,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
     })
 }
@@ -914,68 +1081,149 @@ struct LlmGraderResponse {
     rationale: Option<String>,
 }
 
-pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
-    let lower = assertion.trim().to_lowercase();
+/// The assertion as the author wrote it, beside an ASCII-lowercased copy used only to
+/// locate keywords.
+///
+/// Keyword matching has to ignore case; capture must not. Mapping each byte to itself or
+/// to exactly one other byte keeps the two copies index-aligned, so an offset found in
+/// `lower` names the same position in `original`, and every path, needle and pattern
+/// handed back is a slice of what was written. Nothing here can hand out lowercased text,
+/// which is the property that was missing when captures came off the lowercase copy.
+struct AssertionText {
+    original: String,
+    lower: String,
+}
 
-    if let Some(path) = extract_quoted_or_token_after(&lower, "file ", " exists") {
+impl AssertionText {
+    fn new(assertion: &str) -> Self {
+        let original = assertion.trim().to_string();
+        let lower = original.to_ascii_lowercase();
+        Self { original, lower }
+    }
+
+    fn contains(&self, needle: &str) -> bool {
+        self.lower.contains(needle)
+    }
+
+    fn starts_with(&self, prefix: &str) -> bool {
+        self.lower.starts_with(prefix)
+    }
+
+    fn ends_with(&self, suffix: &str) -> bool {
+        self.lower.ends_with(suffix)
+    }
+
+    fn after(&self, prefix: &str) -> Option<&str> {
+        let idx = self.lower.find(prefix)? + prefix.len();
+        Some(self.original[idx..].trim())
+    }
+
+    fn before(&self, suffix: &str) -> Option<&str> {
+        let idx = self.lower.find(suffix)?;
+        Some(self.original[..idx].trim())
+    }
+
+    fn between(&self, prefix: &str, suffix: &str) -> Option<&str> {
+        let start = self.lower.find(prefix)? + prefix.len();
+        let end = self.lower[start..].find(suffix)? + start;
+        Some(self.original[start..end].trim())
+    }
+
+    fn unquoted_after(&self, prefix: &str) -> Option<&str> {
+        non_empty(unquote(self.after(prefix)?))
+    }
+
+    fn unquoted_before(&self, suffix: &str) -> Option<&str> {
+        non_empty(unquote(self.before(suffix)?))
+    }
+
+    fn unquoted_between(&self, prefix: &str, suffix: &str) -> Option<&str> {
+        non_empty(unquote(self.between(prefix, suffix)?))
+    }
+}
+
+/// One matched pair of surrounding quotes, removed, and only a matched pair.
+///
+/// Authors quote a path that carries spaces, and each capture site used to decide for
+/// itself whether to strip them, so a site that forgot opened a file whose name included
+/// the quote characters. Trimming every quote at both ends is what the sites that
+/// remembered did, and that also eats an apostrophe the author meant to keep.
+fn unquote(value: &str) -> &str {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next_back()) {
+        (Some(open), Some(close)) if open == close && (open == '"' || open == '\'') => chars.as_str(),
+        _ => value,
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
+    let text = AssertionText::new(assertion);
+
+    if let Some(path) = extract_quoted_or_token_after(&text, "file ", " exists") {
         return Some(MechanicalKind::FileExists { path });
     }
-    if lower.ends_with(" exists") && !lower.contains("file count") && !lower.contains("image ") {
-        let path = lower.trim_end_matches(" exists").trim().to_string();
-        if !path.is_empty() && !path.contains(' ') {
-            return Some(MechanicalKind::FileExists { path });
+    if text.ends_with(" exists") && !text.contains("file count") && !text.contains("image ") {
+        if let Some(path) = extract_path_before(&text, " exists") {
+            if !path.contains(' ') {
+                return Some(MechanicalKind::FileExists { path });
+            }
         }
     }
 
-    if let Some(count) = extract_usize_after(&lower, "file count is ") {
+    if let Some(count) = extract_usize_after(&text, "file count is ") {
         return Some(MechanicalKind::FileCount { count, dir: None });
     }
-    if let Some(count) = extract_usize_before(&lower, " files") {
-        let dir = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(count) = extract_usize_before(&text, " files") {
+        let dir = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::FileCount { count, dir });
     }
-    if let Some(count) = extract_usize_after(&lower, "contains ") {
-        if lower.contains(" files") {
+    if let Some(count) = extract_usize_after(&text, "contains ") {
+        if text.contains(" files") {
             return Some(MechanicalKind::FileCount { count, dir: None });
         }
     }
 
-    if lower.contains("valid json") || lower.contains("is valid json") {
-        let path = extract_path_before(&lower, " is valid json").or_else(|| extract_path_before(&lower, "valid json"));
+    if text.contains("valid json") {
+        let path = extract_path_before(&text, " is valid json").or_else(|| extract_path_before(&text, "valid json"));
         return Some(MechanicalKind::ValidJson { path });
     }
 
-    if lower.contains("valid csv") || lower.contains("is valid csv") {
-        let path = extract_path_before(&lower, " is valid csv").or_else(|| extract_path_before(&lower, "valid csv"));
+    if text.contains("valid csv") {
+        let path = extract_path_before(&text, " is valid csv").or_else(|| extract_path_before(&text, "valid csv"));
         return Some(MechanicalKind::ValidCsv { path });
     }
 
-    if lower.contains("markdown headings") || lower.contains("valid markdown") {
-        let path = extract_path_before(&lower, " has valid markdown headings");
+    if text.contains("markdown headings") || text.contains("valid markdown") {
+        let path = extract_path_before(&text, " has valid markdown headings");
         return Some(MechanicalKind::ValidMarkdownHeadings { path });
     }
 
-    if let Some(path) = extract_after(&lower, "image exists at ") {
+    if let Some(path) = text.after("image exists at ") {
         return Some(MechanicalKind::ImageExists { path: path.to_string() });
     }
-    if lower.starts_with("image ") && lower.ends_with(" exists") {
-        let path = lower
-            .trim_start_matches("image ")
-            .trim_end_matches(" exists")
-            .trim()
-            .to_string();
-        return Some(MechanicalKind::ImageExists { path });
+    if text.starts_with("image ") && text.ends_with(" exists") {
+        if let Some(path) = text.between("image ", " exists") {
+            return Some(MechanicalKind::ImageExists { path: path.to_string() });
+        }
     }
 
-    if let Some(dims) = extract_dimensions(&lower) {
-        if let Some(path) = extract_path_before(&lower, " is ") {
+    if let Some(dims) = extract_dimensions(&text) {
+        if let Some(path) = extract_path_before(&text, " is ") {
             return Some(MechanicalKind::ImageDimensions {
-                path: path.to_string(),
+                path,
                 width: dims.0,
                 height: dims.1,
             });
         }
-        if lower.contains("image dimensions are ") {
+        if text.contains("image dimensions are ") {
             return Some(MechanicalKind::ImageDimensions {
                 path: "outputs".to_string(),
                 width: dims.0,
@@ -984,42 +1232,46 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
         }
     }
 
-    if let Some(needle) = extract_quoted(assertion, "contains ") {
-        let path = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(needle) = extract_quoted(&text, "contains ") {
+        let path = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::ContainsString { needle, path });
     }
-    if let Some(needle) = extract_quoted(assertion, "includes ") {
-        let path = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(needle) = extract_quoted(&text, "includes ") {
+        let path = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::ContainsString { needle, path });
     }
-    if lower.starts_with("output includes ") {
-        let needle = assertion.trim()[16..].trim().trim_matches('"').to_string();
-        return Some(MechanicalKind::ContainsString { needle, path: None });
+    if text.starts_with("output includes ") {
+        if let Some(rest) = text.unquoted_after("output includes ") {
+            return Some(MechanicalKind::ContainsString {
+                needle: rest.to_string(),
+                path: None,
+            });
+        }
     }
 
-    if let Some(pattern) = extract_regex_pattern(&lower) {
-        let path = extract_path_before(&lower, " matches");
+    if let Some(pattern) = extract_regex_pattern(&text) {
+        let path = extract_path_before(&text, " matches");
         return Some(MechanicalKind::MatchesRegex { pattern, path });
     }
 
-    if let Some(count) = extract_usize_after(&lower, "row count is ") {
-        let path = extract_before(&lower, " row count").map(str::to_string);
+    if let Some(count) = extract_usize_after(&text, "row count is ") {
+        let path = text.before(" row count").map(str::to_string);
         return Some(MechanicalKind::RowCount { count, path });
     }
-    if let Some(count) = extract_usize_before(&lower, " rows") {
-        let path = extract_before(&lower, " has ")
-            .or_else(|| extract_before(&lower, " in "))
-            .map(str::to_string);
+    if let Some(count) = extract_usize_before(&text, " rows") {
+        let path = text.before(" has ").or_else(|| text.before(" in ")).map(str::to_string);
         return Some(MechanicalKind::RowCount { count, path });
     }
 
-    if lower.contains("schema validation") || lower.contains("validates against schema ") {
-        let schema = extract_after(&lower, "validates against schema ")
-            .or_else(|| extract_after(&lower, "schema validation for "))
-            .unwrap_or("default")
-            .trim()
-            .to_string();
-        let path = extract_after(&lower, " for ").map(str::to_string);
+    if text.contains("schema validation") || text.contains("validates against schema ") {
+        let schema = text
+            .unquoted_between("validates against schema ", " for ")
+            .or_else(|| text.unquoted_after("validates against schema "))
+            .map(str::to_string);
+        let path = text
+            .unquoted_after(" for ")
+            .map(str::to_string)
+            .or_else(|| extract_path_before(&text, " validates against schema"));
         return Some(MechanicalKind::SchemaValidation { schema, path });
     }
 
@@ -1056,7 +1308,9 @@ fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool,
                 .as_ref()
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| ctx.outputs_dir.clone());
-            validate_json_file(&target)
+            Ok(graders::check_json_validity(&graders::TargetContent::from_path(
+                &target,
+            )))
         }
         MechanicalKind::ValidCsv { path } => {
             let target = path
@@ -1145,25 +1399,18 @@ fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool,
             Ok((rows == *count, format!("{} has {rows} data row(s)", target.display())))
         }
         MechanicalKind::SchemaValidation { schema, path } => {
+            let schema_name = schema.as_ref().ok_or_else(|| {
+                EvalError::Validation(
+                    ValidationError::for_field("schema validation", "does not name a schema to validate against")
+                        .into(),
+                )
+            })?;
             let target = path
                 .as_ref()
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| ctx.outputs_dir.join("output.json"));
-            let valid = target.is_file()
-                && serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&target).unwrap_or_default())
-                    .is_ok();
-            Ok((
-                valid,
-                format!(
-                    "schema '{schema}' validation on {}: {}",
-                    target.display(),
-                    if valid {
-                        "valid JSON document"
-                    } else {
-                        "invalid or missing"
-                    }
-                ),
-            ))
+            let content = graders::TargetContent::from_path(&target);
+            graders::check_schema_validation(&ctx.skill_dir.join(schema_name), &content)
         }
     }
 }
@@ -1199,17 +1446,6 @@ fn count_files(dir: &Path) -> Result<usize> {
         }
     }
     Ok(count)
-}
-
-fn validate_json_file(path: &Path) -> Result<(bool, String)> {
-    if !path.is_file() {
-        return Ok((false, format!("JSON file not found at {}", path.display())));
-    }
-    let content = std::fs::read_to_string(path)?;
-    match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(_) => Ok((true, format!("{} is valid JSON", path.display()))),
-        Err(e) => Ok((false, format!("{} is invalid JSON: {e}", path.display()))),
-    }
 }
 
 fn validate_csv_file(path: &Path) -> Result<(bool, String)> {
@@ -1447,6 +1683,15 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
             ),
         ));
     }
+    if grading.summary.ungraded != counts.ungraded {
+        errors.push(ValidationError::for_field(
+            "summary.ungraded",
+            format!(
+                "{} does not match {} ungraded results",
+                grading.summary.ungraded, counts.ungraded
+            ),
+        ));
+    }
     if grading.summary.total != grading.assertion_results.len() {
         errors.push(ValidationError::for_field(
             "summary.total",
@@ -1554,6 +1799,9 @@ fn update_report_after_grading(
             if let Some(reason) = &result.unsupported {
                 flattened["unsupported"] = serde_json::Value::String(reason.clone());
             }
+            if let Some(reason) = &result.ungraded {
+                flattened["ungraded"] = serde_json::Value::String(reason.clone());
+            }
             document.assertion_results.push(flattened);
         }
     }
@@ -1561,11 +1809,8 @@ fn update_report_after_grading(
     Ok(())
 }
 
-fn extract_quoted(source: &str, prefix: &str) -> Option<String> {
-    let lower = source.to_lowercase();
-    let idx = lower.find(&prefix.to_lowercase())?;
-    let rest = &source[idx + prefix.len()..];
-    let rest = rest.trim_start();
+fn extract_quoted(text: &AssertionText, prefix: &str) -> Option<String> {
+    let rest = text.after(prefix)?;
     if let Some(stripped) = rest.strip_prefix('"') {
         let end = stripped.find('"')?;
         return Some(stripped[..end].to_string());
@@ -1577,56 +1822,41 @@ fn extract_quoted(source: &str, prefix: &str) -> Option<String> {
     None
 }
 
-fn extract_quoted_or_token_after(lower: &str, prefix: &str, suffix: &str) -> Option<String> {
-    let start = lower.find(prefix)? + prefix.len();
-    let end = lower[start..].find(suffix)? + start;
-    let path = lower[start..end].trim().trim_matches('"').trim_matches('\'');
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
-    }
+fn extract_quoted_or_token_after(text: &AssertionText, prefix: &str, suffix: &str) -> Option<String> {
+    text.unquoted_between(prefix, suffix).map(str::to_string)
 }
 
-fn extract_after<'a>(lower: &'a str, prefix: &str) -> Option<&'a str> {
-    let idx = lower.find(prefix)? + prefix.len();
-    Some(lower[idx..].trim())
+fn extract_path_before(text: &AssertionText, suffix: &str) -> Option<String> {
+    text.unquoted_before(suffix).map(str::to_string)
 }
 
-fn extract_before<'a>(lower: &'a str, suffix: &str) -> Option<&'a str> {
-    let idx = lower.find(suffix)?;
-    Some(lower[..idx].trim())
+fn extract_usize_after(text: &AssertionText, prefix: &str) -> Option<usize> {
+    text.after(prefix)?.split_whitespace().next()?.parse().ok()
 }
 
-fn extract_path_before(lower: &str, suffix: &str) -> Option<String> {
-    extract_before(lower, suffix)
-        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-        .filter(|s| !s.is_empty())
+fn extract_usize_before(text: &AssertionText, suffix: &str) -> Option<usize> {
+    text.before(suffix)?.split_whitespace().last()?.parse().ok()
 }
 
-fn extract_usize_after(lower: &str, prefix: &str) -> Option<usize> {
-    let rest = extract_after(lower, prefix)?;
-    rest.split_whitespace().next()?.parse().ok()
-}
-
-fn extract_usize_before(lower: &str, suffix: &str) -> Option<usize> {
-    let before = extract_before(lower, suffix)?;
-    before.split_whitespace().last()?.parse().ok()
-}
-
-fn extract_dimensions(lower: &str) -> Option<(u32, u32)> {
+fn extract_dimensions(text: &AssertionText) -> Option<(u32, u32)> {
     let re = Regex::new(r"(\d+)\s*[x×]\s*(\d+)").ok()?;
-    let caps = re.captures(lower)?;
+    let caps = re.captures(&text.lower)?;
     Some((caps[1].parse().ok()?, caps[2].parse().ok()?))
 }
 
-fn extract_regex_pattern(lower: &str) -> Option<String> {
-    if let Some(start) = lower.find('/') {
-        if let Some(end) = lower[start + 1..].find('/') {
-            return Some(lower[start + 1..start + 1 + end].to_string());
-        }
-    }
-    None
+/// The pattern between the `/` delimiters of a `matches` assertion.
+///
+/// The delimiters are looked for after the keyword rather than from the start of the
+/// assertion, because a target path carries slashes of its own. Taking the first pair in
+/// the whole string swallowed the path and the keyword into the pattern, and made every
+/// later prose form unreachable for any assertion that named a path at all.
+fn extract_regex_pattern(text: &AssertionText) -> Option<String> {
+    const KEYWORD: &str = "matches";
+    let idx = text.lower.find(KEYWORD)? + KEYWORD.len();
+    let rest = &text.original[idx..];
+    let start = rest.find('/')?;
+    let end = rest[start + 1..].find('/')? + start + 1;
+    Some(rest[start + 1..end].to_string())
 }
 
 #[cfg(test)]
@@ -1931,6 +2161,7 @@ mod tests {
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes: None,
         };
 
@@ -2057,6 +2288,7 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                ungraded: None,
                 votes: None,
             },
             AssertionGradeResult {
@@ -2072,6 +2304,7 @@ mod tests {
                 rationale: None,
                 unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
                 excluded: None,
+                ungraded: None,
                 votes: None,
             },
         ]);
@@ -2099,6 +2332,7 @@ mod tests {
             rationale: None,
             unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
             excluded: None,
+            ungraded: None,
             votes: None,
         }]);
 
@@ -2135,6 +2369,104 @@ mod tests {
         assert_eq!(clean.describe_not_completed(), None);
     }
 
+    fn result_for_test(assertion: &str, passed: bool) -> AssertionGradeResult {
+        AssertionGradeResult {
+            name: None,
+            assertion: assertion.to_string(),
+            passed,
+            evidence: "e".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Mechanical,
+                model: None,
+                command: None,
+            },
+            rationale: None,
+            unsupported: None,
+            excluded: None,
+            ungraded: None,
+            votes: None,
+        }
+    }
+
+    #[test]
+    fn an_assertion_nothing_could_grade_is_not_counted_as_a_failure() {
+        let results = vec![
+            result_for_test("a", true),
+            needs_llm_result("b", "grader mode is none, so no judge was consulted"),
+        ];
+
+        let counts = GradingCounts::tally(&results);
+
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(
+            counts.failed, 0,
+            "an assertion no grader could attempt is not evidence the skill failed it"
+        );
+        assert_eq!(counts.passed, 1);
+        assert_eq!(counts.scored(), 1);
+
+        let summary = counts.summary();
+        assert_eq!(summary.ungraded, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(
+            summary.pass_rate,
+            Some(1.0),
+            "pass_rate is over the scored assertions, so an ungraded one cannot dilute it"
+        );
+    }
+
+    /// An arm-scoped check that nothing could attempt carries the excluded and the
+    /// ungraded marker at once, so every count taken over those markers has to agree
+    /// on which one wins. Excluded wins, because a check nobody was going to score
+    /// loses nothing by also having been unanswerable. The list and the number are
+    /// asserted together: letting them drift is how a report names assertions that
+    /// the figure printed beside them does not count.
+    #[test]
+    fn an_excluded_assertion_that_nothing_attempted_is_counted_and_listed_the_same_way() {
+        let mut unattempted_and_out_of_scope = needs_llm_result("b", "no judge was consulted");
+        unattempted_and_out_of_scope.excluded = Some("scored in the with-skill arm only".to_string());
+        let results = vec![
+            result_for_test("a", true),
+            unattempted_and_out_of_scope,
+            needs_llm_result("c", "no judge was consulted"),
+        ];
+
+        assert!(
+            results[1].is_ungraded(),
+            "the ungraded marker is still there for a second predicate to misread"
+        );
+        assert_eq!(results[1].outcome(), AssertionOutcome::Excluded);
+
+        let counts = GradingCounts::tally(&results);
+        assert_eq!(counts.excluded, 1);
+        assert_eq!(counts.ungraded, 1, "only the check that was in scope went unmeasured");
+        assert_eq!(counts.failed, 0);
+
+        let listed = ungraded_assertion_texts(&results);
+        assert_eq!(
+            listed.len(),
+            counts.ungraded,
+            "the assertions listed as ungraded must be the ones the count counted"
+        );
+        assert_eq!(listed, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn every_assertion_going_ungraded_leaves_no_pass_rate_at_all() {
+        let results = vec![needs_llm_result("a", "no judge was consulted")];
+
+        let counts = GradingCounts::tally(&results);
+
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.scored(), 0);
+        assert_eq!(
+            counts.pass_rate(),
+            None,
+            "nothing answered is not the same result as everything failed"
+        );
+    }
+
     #[test]
     fn grading_a_run_from_an_unobservable_runner_reports_unsupported_instead_of_failed() {
         let temp = tempdir().unwrap();
@@ -2155,7 +2487,7 @@ mod tests {
         assert_eq!(report.excluded, 0);
         assert_eq!(report.passed, 1);
         assert_eq!(report.failed, 0);
-        assert_eq!(report.needs_llm, 0);
+        assert_eq!(report.ungraded, 0);
         assert_eq!(report.run_statuses.skipped, 1);
         assert_eq!(report.run_statuses.completed, 0);
         assert_eq!(
@@ -2201,6 +2533,7 @@ mod tests {
             workspace_dir: workspace,
             outputs_dir: outputs,
             transcript_path: run_dir.join("transcript.jsonl"),
+            skill_dir: dir.join("skill"),
         }
     }
 
@@ -2334,6 +2667,148 @@ mod tests {
     }
 
     #[test]
+    fn parse_schema_validation_separates_the_schema_name_from_the_target_clause() {
+        let kind = parse_mechanical_kind("output.json validates against schema report for outputs/output.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "report" && path == "outputs/output.json"
+        ));
+    }
+
+    #[test]
+    fn parse_schema_validation_for_a_path_alone_names_no_schema() {
+        let kind = parse_mechanical_kind("schema validation for outputs/output.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation { schema: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_prose_schema_form_grades_the_target_it_names() {
+        let kind = parse_mechanical_kind("outputs/report.json validates against schema schemas/report.schema.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/report.schema.json" && path == "outputs/report.json"
+        ));
+    }
+
+    #[test]
+    fn a_quoted_prose_schema_name_is_read_without_its_quotes() {
+        let kind = parse_mechanical_kind("outputs/report.json validates against schema \"schemas/Report.schema.json\"");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/Report.schema.json" && path == "outputs/report.json"
+        ));
+    }
+
+    #[test]
+    fn a_quoted_prose_schema_target_is_read_without_its_quotes() {
+        let kind = parse_mechanical_kind("validates against schema report.schema.json for \"outputs/a report.json\"");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "report.schema.json" && path == "outputs/a report.json"
+        ));
+    }
+
+    /// An apostrophe inside a name is not a quote to strip, and a lone leading quote is not
+    /// a pair. Trimming every quote character at both ends got both of these wrong.
+    #[test]
+    fn unquoting_a_captured_name_leaves_an_unpaired_quote_alone() {
+        assert_eq!(unquote("\"schema.json\""), "schema.json");
+        assert_eq!(unquote("'schema.json'"), "schema.json");
+        assert_eq!(unquote("\"schema.json"), "\"schema.json");
+        assert_eq!(unquote("yordis's report.json"), "yordis's report.json");
+        assert_eq!(unquote("\""), "\"");
+    }
+
+    #[test]
+    fn a_prose_schema_name_and_target_keep_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind("outputs/Report.json validates against schema schemas/Report.schema.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/Report.schema.json" && path == "outputs/Report.json"
+        ));
+    }
+
+    #[test]
+    fn a_prose_target_keeps_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind(r#"contains "Hello World" in outputs/Report.md"#);
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::ContainsString {
+                ref needle,
+                path: Some(ref path),
+            }) if needle == "Hello World" && path == "outputs/Report.md"
+        ));
+    }
+
+    #[test]
+    fn a_prose_regex_keeps_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind("outputs/Report.md matches /Error [0-9]+/");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::MatchesRegex {
+                ref pattern,
+                path: Some(ref path),
+            }) if pattern == "Error [0-9]+" && path == "outputs/Report.md"
+        ));
+    }
+
+    #[test]
+    fn mechanical_schema_validation_is_an_authoring_error_when_no_schema_is_named() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
+
+        let kind = MechanicalKind::SchemaValidation {
+            schema: None,
+            path: Some("output.json".to_string()),
+        };
+        let err = evaluate_mechanical(&kind, &ctx).unwrap_err();
+        assert!(err.to_string().contains("does not name a schema"), "{err}");
+    }
+
+    #[test]
+    fn mechanical_schema_validation_resolves_the_schema_against_the_skill_directory() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::create_dir_all(&ctx.skill_dir).unwrap();
+        fs::write(
+            ctx.skill_dir.join("report.schema.json"),
+            r#"{"type": "object", "required": ["ok"]}"#,
+        )
+        .unwrap();
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
+
+        let kind = MechanicalKind::SchemaValidation {
+            schema: Some("report.schema.json".to_string()),
+            path: Some("output.json".to_string()),
+        };
+        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
+        assert!(passed);
+
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"nope": true}"#).unwrap();
+        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
+        assert!(!passed);
+    }
+
+    #[test]
     fn mechanical_valid_csv() {
         let tmp = tempdir().unwrap();
         let ctx = ctx_with_outputs(tmp.path());
@@ -2451,6 +2926,7 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                ungraded: None,
                 votes: None,
             }],
             summary: GradingSummary {
@@ -2459,6 +2935,7 @@ mod tests {
                 total: 1,
                 unsupported: 0,
                 excluded: 0,
+                ungraded: 0,
                 pass_rate: Some(1.0),
             },
         };
@@ -2507,6 +2984,149 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         assert!(result.evidence.contains("script verified"));
     }
 
+    /// A crash is not a verdict. Counting a broken grader as a failed assertion reports that
+    /// the skill did the wrong thing on the strength of evidence that says nothing about the
+    /// skill at all.
+    #[test]
+    fn a_crashed_grader_script_grades_nothing_rather_than_failing_the_assertion() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("broken-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+echo 'grader could not reach the model' >&2
+exit 3
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
+            grader_model: None,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
+            strict: false,
+        };
+        let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+        }))
+        .unwrap();
+
+        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+
+        assert!(
+            result.is_ungraded(),
+            "a grader that never exited cleanly attempted nothing"
+        );
+        assert!(!result.is_scored());
+        assert!(result.evidence.contains("grader could not reach the model"));
+
+        let counts = GradingCounts::tally(std::slice::from_ref(&result));
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(counts.failed, 0, "a broken grader must not read as the skill failing");
+    }
+
+    /// A payload too large for the pipe buffer cannot be handed over without the script reading
+    /// it, so the script exiting first closes the pipe every time rather than only when it wins
+    /// a race. That is the shape a real grader crash takes, and it must still reach a verdict.
+    #[test]
+    fn a_grader_that_exits_without_reading_its_payload_is_answered_by_its_exit_status() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("deaf-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+echo 'grader refused the payload' >&2
+exit 4
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
+            grader_model: None,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
+            strict: false,
+        };
+        let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+            "grader_hints": { "blob": "x".repeat(512 * 1024) },
+        }))
+        .unwrap();
+
+        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+
+        assert!(
+            result.is_ungraded(),
+            "a grader that never exited cleanly attempted nothing"
+        );
+        assert!(result.evidence.contains("grader refused the payload"));
+    }
+
+    /// Both pipes are filled past what they hold, in the one order that wedges a parent which
+    /// insists on finishing the write before it starts reading. The deadline is the assertion:
+    /// a regression here hangs rather than fails, and a hung test reports nothing at all.
+    #[test]
+    fn a_grader_printing_more_than_a_pipe_holds_does_not_wedge_the_harness() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("loud-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+awk 'BEGIN { while (i++ < 40000) print "padding for the stderr pipe" }' >&2
+echo '{"passed": true, "evidence": "script verified"}'
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outputs = tmp.path().to_path_buf();
+        let command = script.to_string_lossy().into_owned();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = ctx_with_outputs(&outputs);
+            let options = GradeOptions {
+                grader: GraderMode::Script,
+                grader_provider: JudgeProvider::default(),
+                grader_model: None,
+                grader_command: Some(command),
+                grader_votes: JudgeVotes::single(),
+                strict: false,
+            };
+            let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+                "id": "case",
+                "prompt": "prompt long enough",
+                "expected_output": "expected output",
+                "assertions": ["custom assertion"],
+                "grader_hints": { "blob": "x".repeat(512 * 1024) },
+            }))
+            .unwrap();
+            let _ = done.send(grade_with_script("custom assertion", &eval_case, &ctx, &options).map(|r| r.passed));
+        });
+
+        match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(Ok(passed)) => assert!(passed, "the grader reported a pass once both pipes drained"),
+            Ok(Err(e)) => panic!("grading the loud script failed: {e}"),
+            Err(_) => panic!("the harness and the grader each waited on a pipe only the other could drain"),
+        }
+    }
+
     fn result_with_votes(votes: Option<JudgeVoteTally>) -> AssertionGradeResult {
         AssertionGradeResult {
             name: None,
@@ -2521,6 +3141,7 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes,
         }
     }

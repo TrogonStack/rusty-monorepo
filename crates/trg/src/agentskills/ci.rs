@@ -53,6 +53,7 @@ pub struct ReportMetrics {
     pub failed_assertions: usize,
     pub unsupported_assertions: usize,
     pub excluded_assertions: usize,
+    pub ungraded_assertions: usize,
     pub pass_rate: Option<f64>,
     pub total_tokens: u64,
     pub input_tokens: u64,
@@ -69,6 +70,7 @@ pub enum CiViolationKind {
     MissingGrading,
     PassRateBelowMinimum,
     NothingScored,
+    Ungraded,
     PassRateRegression,
     TokenBudgetExceeded,
     InputTokenBudgetExceeded,
@@ -265,6 +267,20 @@ pub fn run_ci_checks(
             });
         }
         _ => {}
+    }
+
+    if metrics.ungraded_assertions > 0 {
+        violations.push(CiViolation {
+            kind: CiViolationKind::Ungraded,
+            message: format!(
+                "{} assertion(s) had no grader to attempt them, so the suite measured less than it declared",
+                metrics.ungraded_assertions
+            ),
+            run_id: None,
+            workspace: None,
+            file: None,
+            line: None,
+        });
     }
 
     if let Some(maximum) = thresholds.max_tokens {
@@ -502,6 +518,12 @@ pub fn print_human_summary(check: &CiCheckResult) {
             check.metrics.excluded_assertions
         );
     }
+    if check.metrics.ungraded_assertions > 0 {
+        println!(
+            "ungraded: {} (no grader could attempt these, so the suite measured less than it declared)",
+            check.metrics.ungraded_assertions
+        );
+    }
     if !check.violations.is_empty() {
         println!("ci checks: failed ({} violation(s))", check.violations.len());
         for violation in &check.violations {
@@ -519,6 +541,7 @@ fn merge_workspace_metrics(metrics: &mut ReportMetrics, workspace: &WorkspaceChe
     metrics.failed_assertions += workspace.failed_assertions;
     metrics.unsupported_assertions += workspace.unsupported_assertions;
     metrics.excluded_assertions += workspace.excluded_assertions;
+    metrics.ungraded_assertions += workspace.ungraded_assertions;
 }
 
 fn compute_pass_rate(passed: usize, total: usize) -> Option<f64> {
@@ -547,11 +570,13 @@ struct AssertionForAnnotations {
     unsupported: Option<String>,
     #[serde(default)]
     excluded: Option<String>,
+    #[serde(default)]
+    ungraded: Option<String>,
 }
 
 impl AssertionForAnnotations {
     fn is_scored(&self) -> bool {
-        self.unsupported.is_none() && self.excluded.is_none()
+        self.unsupported.is_none() && self.excluded.is_none() && self.ungraded.is_none()
     }
 }
 
@@ -579,6 +604,7 @@ mod tests {
             failed_assertions: total - passed,
             unsupported_assertions: 0,
             excluded_assertions: 0,
+            ungraded_assertions: 0,
             pass_rate: Some(pass_rate),
             total_tokens: tokens,
             input_tokens: tokens / 2,
@@ -811,6 +837,55 @@ mod tests {
     }
 
     #[test]
+    fn ungraded_results_are_not_annotated_as_failed_assertions() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(
+            workspace.join("grading.json"),
+            r#"{
+                "assertion_results": [
+                    {
+                        "assertion": "the report reads as encouraging",
+                        "passed": false,
+                        "evidence": "no mechanical pattern matched and no judge was consulted",
+                        "grader": {"kind": "needs_llm"},
+                        "ungraded": "no mechanical pattern matched and no judge was consulted"
+                    },
+                    {
+                        "assertion": "final text mentions the budget",
+                        "passed": false,
+                        "evidence": "final text (12 bytes) does not contain 'budget'",
+                        "grader": {"kind": "declarative"}
+                    }
+                ],
+                "summary": {"passed": 0, "failed": 1, "ungraded": 1, "total": 2, "pass_rate": 0.0}
+            }"#,
+        )
+        .unwrap();
+
+        let mut details = Vec::new();
+        collect_failed_assertions_in_workspace(&workspace, None, "workspace".to_string(), &mut details).unwrap();
+
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].text, "final text mentions the budget");
+    }
+
+    /// A gate that reports green over a suite it did not fully measure is worse than
+    /// one that reports red, because a passing gate is the one nobody looks behind.
+    #[test]
+    fn a_gate_refuses_to_pass_when_anything_went_ungraded() {
+        let metrics = ReportMetrics {
+            ungraded_assertions: 1,
+            ..sample_metrics(1.0, 10, 20)
+        };
+        let result = run_ci_checks(&metrics, CiPolicy::default(), &ThresholdConfig::default(), &[], &[]);
+
+        assert!(!result.passed);
+        assert!(result.violations.iter().any(|v| v.kind == CiViolationKind::Ungraded));
+    }
+
+    #[test]
     fn json_output_is_stable() {
         let output = EvalCommandJsonOutput {
             report_dir: "/tmp/report".to_string(),
@@ -826,7 +901,7 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         assert_eq!(
             json,
-            r#"{"report_dir":"/tmp/report","exit_code":0,"check":{"passed":true,"violations":[],"metrics":{"total_runs":1,"failed_runs":0,"skipped_runs":0,"completed_runs":1,"grading_files":1,"assertion_results":10,"passed_assertions":10,"failed_assertions":0,"unsupported_assertions":0,"excluded_assertions":0,"pass_rate":1.0,"total_tokens":10,"input_tokens":5,"output_tokens":5,"max_duration_ms":20,"total_duration_ms":20}}}"#
+            r#"{"report_dir":"/tmp/report","exit_code":0,"check":{"passed":true,"violations":[],"metrics":{"total_runs":1,"failed_runs":0,"skipped_runs":0,"completed_runs":1,"grading_files":1,"assertion_results":10,"passed_assertions":10,"failed_assertions":0,"unsupported_assertions":0,"excluded_assertions":0,"ungraded_assertions":0,"pass_rate":1.0,"total_tokens":10,"input_tokens":5,"output_tokens":5,"max_duration_ms":20,"total_duration_ms":20}}}"#
         );
     }
 
