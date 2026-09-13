@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::evals::{EvalError, Result};
 use super::report::ReportDocument;
+use crate::fs::FileSystem;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -186,9 +187,22 @@ pub fn detect_eval_suite_drift_vs_skill(
     report: &ReportDocument,
     skill_dir: &Path,
 ) -> Result<Option<EvalSuiteDriftReport>> {
-    let compiled = match super::case_directories::resolve_eval_suite(&crate::fs::RealFS, skill_dir) {
+    detect_eval_suite_drift_vs_skill_with_fs(report, skill_dir, &crate::fs::RealFS)
+}
+
+/// Same as [`detect_eval_suite_drift_vs_skill`], but takes the filesystem to resolve the
+/// suite through, so a test can inject an IO failure that a real filesystem would not
+/// reliably produce on demand (a missing suite, in contrast, is just an absent path).
+pub fn detect_eval_suite_drift_vs_skill_with_fs(
+    report: &ReportDocument,
+    skill_dir: &Path,
+    fs: &impl FileSystem,
+) -> Result<Option<EvalSuiteDriftReport>> {
+    let compiled = match super::case_directories::resolve_eval_suite(fs, skill_dir) {
         Ok(compiled) => compiled,
-        Err(EvalError::Io(_)) => return Ok(None),
+        // A missing suite is not drift; anything else the drift check cannot read is not
+        // "unchanged", it is unknown, and must not be reported as a clean bill of health.
+        Err(EvalError::Io(io_error)) if io_error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
 
@@ -482,5 +496,97 @@ mod tests {
         let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
         let loaded = load_report_document(&report_dir).unwrap();
         assert_eq!(loaded.suite.evals_hash, bundle.document.suite.evals_hash);
+    }
+
+    #[test]
+    fn a_genuinely_absent_suite_reports_no_drift() {
+        let fs = MemFS::new();
+        let skill_path = sample_skill(
+            &fs,
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [
+                    { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                ]
+            }"#,
+        );
+        let report = report_from_skill(&fs, &skill_path, 1);
+
+        // A different skill path in the same MemFS has nothing under it at all: no
+        // manifest, no case directories. That is the "no suite here" case, not a read
+        // failure, and it must report no drift.
+        let absent_skill_path = Path::new("no-such-skill");
+        let drift = detect_eval_suite_drift_vs_skill_with_fs(&report, absent_skill_path, &fs).unwrap();
+
+        assert!(drift.is_none());
+    }
+
+    #[test]
+    fn a_present_but_unreadable_suite_is_an_error_not_a_clean_bill_of_health() {
+        let fs = MemFS::new();
+        let skill_path = sample_skill(
+            &fs,
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [
+                    { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                ]
+            }"#,
+        );
+        let report = report_from_skill(&fs, &skill_path, 1);
+
+        let unreadable_fs = UnreadableEvalsDirFS {
+            evals_dir: skill_path.join("evals"),
+        };
+        let error = detect_eval_suite_drift_vs_skill_with_fs(&report, &skill_path, &unreadable_fs).unwrap_err();
+
+        assert!(matches!(error, EvalError::Io(io_error) if io_error.kind() == std::io::ErrorKind::PermissionDenied));
+    }
+
+    /// A filesystem whose `evals` directory exists but cannot be listed, so
+    /// `resolve_eval_suite` fails with an IO error that is not `NotFound`.
+    struct UnreadableEvalsDirFS {
+        evals_dir: std::path::PathBuf,
+    }
+
+    impl FileSystem for UnreadableEvalsDirFS {
+        fn read_to_string(&self, _path: &Path) -> std::io::Result<String> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))
+        }
+
+        fn read_bytes(&self, _path: &Path) -> std::io::Result<Vec<u8>> {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))
+        }
+
+        fn write(&self, _path: &Path, _contents: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn exists(&self, path: &Path) -> bool {
+            path == self.evals_dir
+        }
+
+        fn is_file(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn is_dir(&self, path: &Path) -> bool {
+            path == self.evals_dir
+        }
+
+        fn is_symlink(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn read_dir(&self, path: &Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+            if path == self.evals_dir {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission denied",
+                ))
+            } else {
+                Ok(Vec::new())
+            }
+        }
     }
 }
