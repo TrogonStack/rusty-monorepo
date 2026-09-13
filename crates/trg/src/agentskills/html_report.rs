@@ -835,6 +835,7 @@ mod tests {
                 metrics: RunMetrics::default(),
                 cache: None,
                 skill_integrity: None,
+                read_only_fixture_violations: Vec::new(),
                 warnings: Vec::new(),
             }],
             assertion_results: Vec::new(),
@@ -896,6 +897,7 @@ mod tests {
             rationale: Some(IMG_PAYLOAD.to_string()),
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes: None,
         };
 
@@ -965,6 +967,7 @@ mod tests {
             metrics: RunMetrics::default(),
             cache: None,
             skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
         }
     }
