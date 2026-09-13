@@ -412,6 +412,8 @@ pub struct WorkspaceCheckReport {
     pub unsupported_assertions: usize,
     #[serde(default)]
     pub excluded_assertions: usize,
+    #[serde(default)]
+    pub ungraded_assertions: usize,
     /// `null` when the workspace produced no scored assertion at all, so an
     /// unobservable runner is not reported as a total failure.
     pub pass_rate: Option<f64>,
@@ -758,6 +760,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
     let mut failed_assertions = 0;
     let mut unsupported_assertions = 0;
     let mut excluded_assertions = 0;
+    let mut ungraded_assertions = 0;
 
     if options.require_grading && grading_files.is_empty() {
         errors.push(ValidationError::for_field(
@@ -776,6 +779,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         failed_assertions += counts.failed;
         unsupported_assertions += counts.unsupported;
         excluded_assertions += counts.excluded;
+        ungraded_assertions += counts.ungraded;
     }
 
     for timing_path in &timing_files {
@@ -801,6 +805,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         failed_assertions,
         unsupported_assertions,
         excluded_assertions,
+        ungraded_assertions,
         pass_rate,
     })
 }
@@ -955,6 +960,16 @@ fn validate_grading_file(
             format!(
                 "{} does not match {} excluded assertion results",
                 grading.summary.excluded, counts.excluded
+            ),
+        ));
+    }
+
+    if grading.summary.ungraded != counts.ungraded {
+        errors.push(ValidationError::for_field(
+            format!("{} summary.ungraded", file_label),
+            format!(
+                "{} does not match {} ungraded assertion results",
+                grading.summary.ungraded, counts.ungraded
             ),
         ));
     }
