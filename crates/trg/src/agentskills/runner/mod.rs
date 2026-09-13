@@ -681,7 +681,9 @@ fn lock_fixture_permissions_platform(dest: &Path) -> std::io::Result<()> {
             lock_fixture_permissions_platform(&entry.path())?;
         }
     } else if metadata.is_file() {
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o444))?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(perms.mode() & !0o222);
+        std::fs::set_permissions(dest, perms)?;
     }
     Ok(())
 }
@@ -2016,6 +2018,46 @@ mod workspace_tests {
         let staged = workspace.join(relative);
         let mode = std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o444, "the staged fixture must carry no write bits");
+    }
+
+    /// `std::fs::copy` preserves the source's mode, so a fixture committed executable stages
+    /// executable. Locking it for read-only must remove permission to write it without also
+    /// taking away permission to run it, or the agent under test is handed a script it was
+    /// given specifically so it could run it.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_fixture_keeps_its_execute_bit_when_locked() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let relative = "evals/files/run.sh";
+        let (temp, skill_path) = skill_with_fixture(relative, "#!/bin/sh\necho hi\n");
+        std::fs::set_permissions(skill_path.join(relative), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let case = make_case_with_files(serde_json::json!([{ "path": relative, "mode": "read_only" }]));
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            SKILL_MD,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).expect("workspace prepares");
+
+        let staged = workspace.join(relative);
+        let mode = std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o222, 0, "the staged fixture must carry no write bits");
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "locking must not take away the execute bits the fixture was staged with"
+        );
     }
 
     /// A retry resets the workspace before staging again. If clearing a read-only fixture's
