@@ -292,6 +292,8 @@ every reader and to every runner.
 | `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
 | `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
+| `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
+| `schema_validation` | `schema`, `target` | The target parses as JSON and validates against the named JSON Schema document. `schema` is a relative path inside the skill directory, resolved the same way `files` and `scaffold` are |
 
 Every grader also accepts `arm`, which decides whether its result counts toward
 the score. See [Arm-scoped graders](#arm-scoped-graders).
@@ -469,6 +471,18 @@ judge request per vote per LLM-graded assertion. Mechanical, declarative, and
 script graders are unaffected: they answer the same way every time, so there is
 nothing for a second opinion to settle.
 
+### Schema validation
+
+A `schema_validation` grader, or the equivalent prose form (`"<target> validates
+against schema <name>"`), is answering a question about the target: whether it
+conforms to the named schema. A schema file that is missing, unreadable, or not
+itself a valid JSON Schema document is a defect in the case, not in the run
+being graded, so it is reported the same way any other malformed suite is: as a
+failure to grade at all, rather than as a failed assertion. The same rule holds
+for the prose form when it names no schema file; it does not fall back to
+checking that the target merely parses as JSON, since that would silently grade
+something other than what was written.
+
 ---
 
 ## Artifact: `report.json`
@@ -561,8 +575,11 @@ workspace tree.
 `unsupported` narrows `pass_rate` to scored results only. `pass_rate` is
 nullable, because a run where nothing could be scored has no pass rate and
 reporting `0.0` reads as a total failure. `excluded` takes an arm-scoped grader
-out of the score in both arms. `votes` is present only when a panel of judges
-decided the result.
+out of the score in both arms. `ungraded` marks an assertion no mechanical
+pattern recognized and no LLM judge was consulted for; it is neither a pass nor
+a fail, because nothing ever attempted it, and it stays out of `pass_rate` for
+the same reason `unsupported` does. `votes` is present only when a panel of
+judges decided the result.
 
 ```json
 {
@@ -586,6 +603,13 @@ decided the result.
       "evidence": "the run read the staged skill directory",
       "grader": { "kind": "declarative" },
       "excluded": "'skill_used' is settled by whether the skill was staged rather than by the run, so it is reported in both arms and scored in neither; declare 'arm': 'both' to score it anyway"
+    },
+    {
+      "assertion": "the report reads as encouraging to a first-time user",
+      "passed": false,
+      "evidence": "no mechanical pattern recognized this assertion and no LLM judge was resolved for this run",
+      "grader": { "kind": "needs_llm" },
+      "ungraded": "no mechanical pattern recognized this assertion and no LLM judge was resolved for this run"
     }
   ],
   "summary": {
@@ -593,7 +617,8 @@ decided the result.
     "failed": 0,
     "unsupported": 1,
     "excluded": 1,
-    "total": 3,
+    "ungraded": 1,
+    "total": 4,
     "pass_rate": 1.0
   }
 }
@@ -602,20 +627,31 @@ decided the result.
 | Field | Type | Notes |
 | ----- | ---- | ----- |
 | `assertion_results[].assertion` | string | Non-empty. Accepts `text` as an alias. For a typed grader, its rendered description |
-| `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` is present. An indicator rather than a score when `excluded` is present |
+| `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` or `ungraded` is present. An indicator rather than a score when `excluded` is present |
 | `assertion_results[].evidence` | string | Non-empty. A passing result must not merely restate its assertion |
 | `assertion_results[].grader.kind` | enum | `mechanical`, `declarative`, `llm`, `script`, `needs_llm`, or `none` |
 | `assertion_results[].name` | string | Present when the grader declared a `name` |
 | `assertion_results[].rationale` | string | Optional judge reasoning |
 | `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |
+| `assertion_results[].ungraded` | string | Present when no mechanical pattern recognized the assertion and no LLM judge was consulted. Why nothing attempted it |
 | `assertion_results[].votes` | object | Present only under `--grader-votes N` with `N` above 1. `{passed, failed}` opinions behind this result. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
 | `summary.passed` | integer | Must equal the count of scored, passing results |
 | `summary.failed` | integer | Must equal the count of scored, failing results |
 | `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` and not `excluded` |
 | `summary.excluded` | integer | Must equal the count of results carrying `excluded` |
+| `summary.ungraded` | integer | Must equal the count of results carrying `ungraded` |
 | `summary.total` | integer | Must equal `assertion_results` length |
-| `summary.pass_rate` | float or null | Must equal `passed / (total - unsupported - excluded)`, or `null` when nothing was scored |
+| `summary.pass_rate` | float or null | Must equal `passed / (total - unsupported - excluded - ungraded)`, or `null` when nothing was scored |
+
+An ungraded assertion forces `eval grade` to exit non-zero, in every mode and
+regardless of `--strict`, because a suite that measured less than it declared
+is not a passing suite just because nothing it did measure failed. The exit
+lists how many assertions went ungraded and which ones, capped, so the count is
+never the only thing an operator has to act on. `eval verify` and `eval ci`
+carry the same refusal: a non-zero `ungraded` count is reported as a violation
+of its own, so a `--min-pass-rate` gate cannot read a partially-measured suite
+as a clean pass.
 
 ---
 
