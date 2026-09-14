@@ -36,6 +36,7 @@ pub mod sampling;
 pub mod scenario_selection;
 pub mod schema_version;
 pub mod schemas;
+pub mod system_prompt_appendix;
 pub mod tool_grant;
 pub mod transcript;
 pub mod validation;

@@ -6,6 +6,7 @@ use super::model_name::ModelName;
 use super::outputs::guess_mime_type;
 use super::runner::TimingFile;
 use super::sampling::AttemptCount;
+use super::system_prompt_appendix::SystemPromptAppendix;
 use super::tool_grant::ToolGrant;
 use super::validation::{ValidationError, ValidationErrors};
 use super::workspace_scaffold::WorkspaceScaffold;
@@ -816,6 +817,15 @@ pub struct EvalCase {
     /// admits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<CaseEnv>,
+    /// Text appended to the harness's own system prompt for this case, for a case whose
+    /// question is about how the agent was instructed rather than about what it was asked.
+    ///
+    /// A harness that offers no way to append one cannot answer the question a case using
+    /// this is asking, so such a run is recorded as not started rather than run without it:
+    /// a run missing the instruction it was supposed to carry is not a weaker answer, it is
+    /// an answer to a different question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub append_system_prompt: Option<SystemPromptAppendix>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_output_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2117,6 +2127,7 @@ mod tests {
             attempts: None,
             model: None,
             env: None,
+            append_system_prompt: None,
             id: EvalCaseId(id.to_string()),
             name: None,
             description: None,
@@ -2651,6 +2662,42 @@ mod tests {
                 "prompt": "a prompt long enough to pass",
                 "expected_output": "an output long enough",
                 "env": { "PATH": "/evil/bin" }
+            }]
+        }));
+
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn a_suite_can_steer_a_case_with_its_own_system_prompt_appendix() {
+        let suite: EvalSuite = serde_json::from_value(serde_json::json!({
+            "skill_name": "demo",
+            "evals": [{
+                "id": "one",
+                "prompt": "a prompt long enough to pass",
+                "expected_output": "an output long enough",
+                "append_system_prompt": "Answer in British English."
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            suite.evals[0].append_system_prompt.as_ref().unwrap().as_str(),
+            "Answer in British English."
+        );
+    }
+
+    /// A blank appendix asks for the case to be steered and then steers it nowhere, so the
+    /// run would be recorded as carrying an instruction it never carried.
+    #[test]
+    fn a_suite_cannot_steer_a_case_with_a_blank_appendix() {
+        let refused = serde_json::from_value::<EvalSuite>(serde_json::json!({
+            "skill_name": "demo",
+            "evals": [{
+                "id": "one",
+                "prompt": "a prompt long enough to pass",
+                "expected_output": "an output long enough",
+                "append_system_prompt": "   "
             }]
         }));
 

@@ -622,6 +622,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `attempts` | integer | no | How many times this case is drawn, for a case whose stability is the question or whose cost makes the suite default too expensive. At least 1. Yields to an explicit `--attempts`. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `model` | string | no | The model this case wants, for a case whose question is about one model in particular. Overrides `--runner-model` |
 | `env` | object | no | Variables added to this case's own run. Names are confined to `EVAL_*`. See [Variables a case sets](#variables-a-case-sets) |
+| `append_system_prompt` | string | no | Text appended to the harness's own system prompt for this case. Not blank. Only `claude-code` can carry it; elsewhere the case is skipped. See [Steering a case's system prompt](#steering-a-cases-system-prompt) |
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
 | `grader_hints` | object | no | Passed through to a script grader on stdin |
 | `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
@@ -1925,6 +1926,31 @@ The variables reach the run under every policy, `inherited` included. They are
 recorded in the run's `env.json` under the same rule as everything else there: a
 name that reads as a secret is listed without its value.
 
+### Steering a case's system prompt
+
+A case whose question is about how the agent was instructed, rather than about
+what it was asked, declares `append_system_prompt`:
+
+```json
+{
+  "id": "keeps-the-house-spelling",
+  "prompt": "Summarise the release.",
+  "expected_output": "A summary in British English.",
+  "append_system_prompt": "Answer in British English."
+}
+```
+
+The text is appended to whatever system prompt the harness assembles for itself,
+and reaches it exactly as written. A blank one is rejected while the suite is
+read: it asks for the case to be steered and then steers it nowhere.
+
+Appending to the system prompt is a per-harness mechanism, and only `claude-code`
+offers one. See `system prompt append` in the harness support table above. On
+`codex` and `cursor-agent` the case is skipped, recorded with `status: skipped`
+and `failure_kind: unsupported`, rather than run without the appendix: a run
+missing the instruction it was supposed to carry is not a weaker answer to the
+case's question, it is an answer to a different one.
+
 ### `--environment isolated`
 
 The harness config home is where a harness keeps the per-user state that changes
@@ -2047,7 +2073,7 @@ together, never one without the other.
 | ------- | ------------- | ------- | -------------- |
 | tool allowlist | `--allowedTools` | no | no |
 | turn cap | no | no | no |
-| system prompt append | `--append-system-prompt` (harness only) | no | no |
+| system prompt append | `--append-system-prompt` | no | no |
 | mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | no | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
 | conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) |
