@@ -1201,7 +1201,7 @@ mod tests {
                 "skill_revisions": [],
                 "model_configs": [],
                 "scenarios": [],
-                "graders": []
+                "grading_strategies": []
             },
             "runs": runs,
             "assertion_results": [],
@@ -1945,7 +1945,7 @@ mod tests {
                 "skill_revisions": [],
                 "model_configs": [],
                 "scenarios": [],
-                "graders": []
+                "grading_strategies": []
             },
             "runs": [],
             "assertion_results": [],

@@ -74,10 +74,13 @@
       { "id": "without_skill", "kind": "without_skill" },
       { "id": "old_skill", "kind": "old_skill" }
     ],
-    "graders": [
+    "grading_strategies": [
       {
-        "kind": "mechanical",
-        "invoked_by": "eval grade"
+        "mode": "llm",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4",
+        "votes": 1,
+        "strict": false
       }
     ]
   },

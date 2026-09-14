@@ -35,7 +35,7 @@ use super::graders::{
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
-use super::report::{ReportDocument, RunRecord};
+use super::report::{GraderChoice, GradingStrategy, ReportDocument, RunRecord};
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
@@ -529,9 +529,9 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
 
     let session = GradeSession::open(&options, &suite)?;
-    let grader_config = build_grader_config(&options);
-    if document.dimensions.graders.is_empty() {
-        document.dimensions.graders.push(grader_config.clone());
+    let grading_strategy = build_grading_strategy(&options);
+    if document.dimensions.grading_strategies.is_empty() {
+        document.dimensions.grading_strategies.push(grading_strategy.clone());
     }
 
     let mut report = GradeReport {
@@ -616,7 +616,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         report.runs_graded += 1;
     }
 
-    update_report_after_grading(&mut document, &runs, report_dir, &grader_config)?;
+    update_report_after_grading(&mut document, &runs, report_dir, &grading_strategy)?;
     std::fs::write(report_dir.join("report.json"), serde_json::to_string_pretty(&document)?)?;
 
     Ok(report)
@@ -658,15 +658,23 @@ fn created_files_from_artifacts(run: &RunRecord) -> Vec<String> {
         .collect()
 }
 
-fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
-    serde_json::json!({
-        "mode": format!("{:?}", options.grader).to_lowercase(),
-        "provider": options.grader_provider.as_str(),
-        "model": options.grader_model,
-        "command": options.grader_command,
-        "votes": options.grader_votes.count(),
-        "strict": options.strict,
-    })
+fn build_grading_strategy(options: &GradeOptions) -> GradingStrategy {
+    let grader = match options.grader {
+        GraderMode::Auto => GraderChoice::Auto,
+        GraderMode::None => GraderChoice::None,
+        GraderMode::Llm => GraderChoice::Llm {
+            provider: options.grader_provider,
+            model: options.grader_model.clone(),
+            votes: options.grader_votes,
+        },
+        GraderMode::Script => GraderChoice::Script {
+            command: options.grader_command.clone(),
+        },
+    };
+    GradingStrategy {
+        grader,
+        strict: options.strict,
+    }
 }
 
 fn grade_assertion(
@@ -2423,11 +2431,11 @@ fn update_report_after_grading(
     document: &mut ReportDocument,
     runs: &[RunRecord],
     report_dir: &Path,
-    grader_config: &serde_json::Value,
+    grading_strategy: &GradingStrategy,
 ) -> Result<()> {
     document.assertion_results.clear();
-    if !document.dimensions.graders.iter().any(|g| g == grader_config) {
-        document.dimensions.graders.push(grader_config.clone());
+    if !document.dimensions.grading_strategies.contains(grading_strategy) {
+        document.dimensions.grading_strategies.push(grading_strategy.clone());
     }
 
     for run in runs {
@@ -3120,8 +3128,8 @@ mod tests {
         )
         .unwrap();
 
-        let grader_config = build_grader_config(&GradeOptions::default());
-        update_report_after_grading(&mut document, &runs, &report_dir, &grader_config).unwrap();
+        let grading_strategy = build_grading_strategy(&GradeOptions::default());
+        update_report_after_grading(&mut document, &runs, &report_dir, &grading_strategy).unwrap();
         std::fs::write(
             report_dir.join("report.json"),
             serde_json::to_string_pretty(&document).unwrap(),
@@ -3208,15 +3216,33 @@ mod tests {
     }
 
     #[test]
-    fn the_recorded_grader_config_tells_a_panel_from_a_single_opinion() {
-        let single = build_grader_config(&GradeOptions::default());
-        let panel = build_grader_config(&GradeOptions {
-            grader_votes: JudgeVotes::parse(3).unwrap(),
+    fn the_recorded_grading_strategy_tells_a_panel_from_a_single_opinion() {
+        let llm_options = GradeOptions {
+            grader: GraderMode::Llm,
             ..GradeOptions::default()
+        };
+        let single = build_grading_strategy(&llm_options);
+        let panel = build_grading_strategy(&GradeOptions {
+            grader_votes: JudgeVotes::parse(3).unwrap(),
+            ..llm_options
         });
 
-        assert_eq!(single["votes"], serde_json::json!(1));
-        assert_eq!(panel["votes"], serde_json::json!(3));
+        assert_eq!(
+            single.grader,
+            GraderChoice::Llm {
+                provider: JudgeProvider::default(),
+                model: None,
+                votes: JudgeVotes::single(),
+            }
+        );
+        assert_eq!(
+            panel.grader,
+            GraderChoice::Llm {
+                provider: JudgeProvider::default(),
+                model: None,
+                votes: JudgeVotes::parse(3).unwrap(),
+            }
+        );
     }
 
     #[test]

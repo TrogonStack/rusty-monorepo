@@ -18,6 +18,8 @@ use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
 };
+use super::judge::JudgeProvider;
+use super::judge_votes::JudgeVotes;
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
 use super::outputs::OUTPUTS_DIR;
 use super::runner::capabilities::HarnessControl;
@@ -362,7 +364,46 @@ pub struct DimensionsSection {
     pub skill_revisions: Vec<SkillRevisionDimension>,
     pub model_configs: Vec<ModelConfigDimension>,
     pub scenarios: Vec<ScenarioDimension>,
-    pub graders: Vec<serde_json::Value>,
+    /// The distinct grading strategies actually applied to this report.
+    ///
+    /// `eval grade` can run more than once over the same bundle, a rerun under a
+    /// different judge included, and each distinct strategy is recorded once here. This
+    /// is not the graders an eval case declares in its suite; those show up in
+    /// `assertions` by way of each case's `assertion_ids`.
+    pub grading_strategies: Vec<GradingStrategy>,
+}
+
+/// One grading strategy that was used to produce the results in this report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GradingStrategy {
+    #[serde(flatten)]
+    pub grader: GraderChoice,
+    /// Whether the pass that used this strategy rejected an ungradeable assertion
+    /// instead of recording it as ungraded.
+    pub strict: bool,
+}
+
+/// The grading method a pass chose, and only the settings that method uses.
+///
+/// A record shaped as a flat bag of optional fields lets a script grader's `command`
+/// and an LLM judge's `provider` and `model` sit side by side, empty rather than
+/// absent, on a pass that used neither. Tagging the choice keeps each field with the
+/// only mode it means anything for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum GraderChoice {
+    Auto,
+    None,
+    Llm {
+        provider: JudgeProvider,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        votes: JudgeVotes,
+    },
+    Script {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1034,7 +1075,7 @@ fn build_dimensions(
                 kind: *scenario,
             })
             .collect(),
-        graders: Vec::new(),
+        grading_strategies: Vec::new(),
     }
 }
 
@@ -1691,7 +1732,7 @@ mod tests {
                     skill_revisions: Vec::new(),
                     model_configs: Vec::new(),
                     scenarios: Vec::new(),
-                    graders: Vec::new(),
+                    grading_strategies: Vec::new(),
                 },
                 runs: Vec::new(),
                 assertion_results: Vec::new(),
