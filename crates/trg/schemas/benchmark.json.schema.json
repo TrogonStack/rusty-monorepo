@@ -330,6 +330,24 @@
       ],
       "type": "object"
     },
+    "Interval": {
+      "description": "The range a measurement is consistent with.",
+      "properties": {
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "type": "object"
+    },
     "IterationComparison": {
       "properties": {
         "by_scenario": {
@@ -523,6 +541,17 @@
           "format": "double",
           "type": "number"
         },
+        "assertion_pass_rate_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The 95% interval the draws behind both arms leave around `assertion_pass_rate`.\nAn interval that contains zero means these arms have not been told apart, however\nlarge the subtraction above it looks."
+        },
         "cost_usd": {
           "description": "Published only when both arms priced every run behind them, because a difference\nbetween two totals that cover different numbers of runs is not a cost difference.",
           "format": "double",
@@ -544,6 +573,17 @@
         "run_pass_rate": {
           "format": "double",
           "type": "number"
+        },
+        "run_pass_rate_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The 95% interval around `run_pass_rate`, read the same way."
         },
         "tokens_total": {
           "format": "int64",
