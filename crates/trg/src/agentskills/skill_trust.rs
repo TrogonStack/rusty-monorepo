@@ -22,6 +22,31 @@ use crate::config::trg_config_dir;
 
 const TRUST_FILE: &str = "trusted-skills.json";
 
+/// The tree the operator vouched for by running `trg` inside it.
+///
+/// The filesystem root is not one. A pass started there would be saying it has already
+/// read every skill on the machine, which is not a statement anyone makes by changing
+/// directory, and a container whose `WORKDIR` is `/` would make the gate unreachable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkingTree(PathBuf);
+
+impl WorkingTree {
+    pub fn parse(dir: &Path) -> Result<Self, String> {
+        let dir = canonical(dir);
+        if dir.parent().is_none() {
+            return Err(format!(
+                "'{}' is the whole filesystem rather than a tree anybody chose, so it vouches for nothing",
+                dir.display()
+            ));
+        }
+        Ok(Self(dir))
+    }
+
+    pub fn holds(&self, skill_dir: &Path) -> bool {
+        canonical(skill_dir).starts_with(&self.0)
+    }
+}
+
 /// Where a skill directory sits relative to the tree the operator invoked `trg` from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillOrigin {
@@ -34,11 +59,9 @@ pub enum SkillOrigin {
 
 impl SkillOrigin {
     pub fn of(skill_dir: &Path, working_dir: &Path) -> Self {
-        let skill = canonical(skill_dir);
-        let working = canonical(working_dir);
-        match skill.starts_with(&working) {
-            true => Self::Own,
-            false => Self::Foreign,
+        match WorkingTree::parse(working_dir) {
+            Ok(tree) if tree.holds(skill_dir) => Self::Own,
+            _ => Self::Foreign,
         }
     }
 
@@ -297,6 +320,25 @@ mod tests {
         store.save_to(&path).expect("save");
 
         assert!(TrustStore::load_from(&path).trusts(foreign.path()));
+    }
+
+    #[test]
+    fn the_filesystem_root_vouches_for_nothing_it_happens_to_contain() {
+        let skill = tempfile::tempdir().expect("temp dir");
+
+        assert!(WorkingTree::parse(Path::new("/")).is_err());
+        assert_eq!(SkillOrigin::of(skill.path(), Path::new("/")), SkillOrigin::Foreign);
+    }
+
+    #[test]
+    fn a_pass_run_from_the_filesystem_root_is_still_asked_about() {
+        let skill = tempfile::tempdir().expect("temp dir");
+        let mut store = TrustStore::default();
+
+        let refusal = admit_with(skill.path(), Path::new("/"), SkillTrust::Withheld, &mut store, |_| None)
+            .expect_err("nobody can be asked");
+
+        assert!(matches!(refusal, TrustRefusal::NothingToAsk { .. }));
     }
 
     #[test]

@@ -2096,6 +2096,11 @@ running it lets its author decide what an agent does as you; nothing here can
 ask, so pass --trust-skill to say you have read it
 ```
 
+The filesystem root is not a working tree for this purpose. A pass started there
+would be claiming every skill on the machine as its own, which is not something
+anyone says by changing directory, so such a pass is asked about the directory
+like any other.
+
 A directory under the working tree is never asked about. That is deliberate:
 a checkout evaluating its own skills, which is what CI does, is the operator's
 own tree by definition, so the gate is silent there rather than a flag every
