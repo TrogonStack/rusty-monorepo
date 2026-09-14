@@ -28,6 +28,15 @@ impl SchemaVersion {
         Self(1)
     }
 
+    /// The shape a document that carries no stamp at all holds.
+    ///
+    /// Pinned to 1 rather than tracking [`Self::current`]: those documents were written
+    /// before stamping existed and their shape does not change when ours does, so bumping
+    /// `current` must never re-label them as the newer shape.
+    pub const fn unstamped() -> Self {
+        Self(1)
+    }
+
     pub fn parse(version: u32) -> Result<Self, String> {
         if version == 0 {
             return Err(
@@ -43,10 +52,10 @@ impl SchemaVersion {
 }
 
 impl Default for SchemaVersion {
-    /// An artifact written before any artifact was stamped is shape 1, which is what
-    /// those documents in fact hold: the stamp was added without changing their shape.
+    /// Reached only through `#[serde(default)]` on an absent stamp, so it answers "what
+    /// shape is a document that carries none", not "what shape do we write".
     fn default() -> Self {
-        Self::current()
+        Self::unstamped()
     }
 }
 
@@ -125,8 +134,16 @@ mod tests {
 
     #[test]
     fn an_artifact_written_before_stamping_reads_as_the_shape_it_actually_holds() {
-        assert_eq!(SchemaVersion::default(), SchemaVersion::current());
-        assert_eq!(SchemaVersion::current().get(), 1);
+        assert_eq!(SchemaVersion::default(), SchemaVersion::unstamped());
+        assert_eq!(SchemaVersion::unstamped().get(), 1);
+    }
+
+    /// Pins the one thing that must survive the next bump of `current`: an absent stamp
+    /// keeps meaning shape 1, so documents written before stamping are never silently
+    /// re-labelled as a shape they were not written to.
+    #[test]
+    fn the_shape_of_an_unstamped_document_does_not_follow_the_shape_we_write() {
+        assert_eq!(SchemaVersion::unstamped().get(), 1);
     }
 
     #[test]
