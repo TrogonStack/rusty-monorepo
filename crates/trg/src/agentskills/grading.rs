@@ -1542,9 +1542,11 @@ fn llm_grader_payload(
         GradeTarget::AnyOutput => {
             legacy_structured_payload(assertion, declarative, ctx, OutputScope::Nested).map(JudgePayload::text_only)
         }
-        GradeTarget::Transcript | GradeTarget::File(_) | GradeTarget::CreatedFiles | GradeTarget::Files(_) => {
-            single_target_payload(assertion, target, declarative, ctx)
-        }
+        GradeTarget::Transcript
+        | GradeTarget::File(_)
+        | GradeTarget::CreatedFiles
+        | GradeTarget::Files(_)
+        | GradeTarget::MockCalls => single_target_payload(assertion, target, declarative, ctx),
     }
 }
 
@@ -2549,6 +2551,22 @@ mod tests {
         ]
     }"#;
 
+    const MOCK_CALLS_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "contains", "text": "github.create_issue", "target": "mock_calls"},
+                    {"type": "contains", "text": "all done"}
+                ]
+            }
+        ]
+    }"#;
+
     fn unobservable_report_dir(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
         unobservable_report_dir_with_suite(temp, UNOBSERVABLE_SUITE)
     }
@@ -2597,6 +2615,45 @@ mod tests {
         write_normalized_transcript(&transcript_path, &NormalizedTranscript::unavailable("codex")).unwrap();
 
         (report_dir, run_dir)
+    }
+
+    #[test]
+    fn a_mock_calls_grader_on_a_harness_that_hosts_no_mock_server_is_unsupported_not_failed() {
+        let temp = tempdir().unwrap();
+        let (report_dir, run_dir) = unobservable_report_dir_with_suite(&temp, MOCK_CALLS_SUITE);
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.unsupported, 1);
+        assert_eq!(report.passed, 1);
+        assert_eq!(
+            report.failed, 0,
+            "a harness that cannot host a mock must not read as a skill that called one wrong"
+        );
+
+        let grading: GradingFile =
+            serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+        let unsupported = grading
+            .assertion_results
+            .iter()
+            .find(|result| result.is_unsupported())
+            .unwrap();
+        assert!(
+            unsupported
+                .unsupported
+                .as_deref()
+                .unwrap()
+                .contains("no mcp mock server"),
+            "{unsupported:?}"
+        );
+        assert_eq!(grading.summary.pass_rate, Some(1.0));
     }
 
     const ENGAGED_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}

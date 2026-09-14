@@ -745,9 +745,12 @@ trg materializes the resolved mock set for a run into that run's own
 directory and generates an `--mcp-config` document that points each declared
 server at trg's own hidden `mock-server` subcommand, one invocation per
 server, so a harness never has to know a mock exists as anything other than
-an MCP server on stdio. `mock-calls.jsonl` is created for the run even if the
-skill never calls a mocked tool, so a reader can tell "declared but unused"
-apart from "the mock server never started".
+an MCP server on stdio. Each mock server creates `mock-calls.jsonl` as soon as
+it has loaded its mocks and before any call can reach it, so a reader can tell
+"declared but unused" from "no mock server ever came up": the first leaves an
+empty log, the second leaves no log at all. A grader aimed at the
+[`mock_calls` target](#grading-what-the-agent-asked-for) reads that same
+distinction.
 
 Resolved mock content is folded into the run's cache key. Changing a mock's
 `expect` map, body, or error message invalidates a cache entry the same way
@@ -803,7 +806,8 @@ entirely (`"arm": "with_only"`) rather than weighted to zero, and a negative
 weight has no share of a score to subtract from.
 
 `target` is `final_text` (default), `transcript`, `any_output`,
-`{"file": "<relative path>"}`, `{"files": "<glob>"}`, or `created_files`.
+`{"file": "<relative path>"}`, `{"files": "<glob>"}`, `created_files`, or
+`mock_calls`.
 `created_files` is the set of paths the run wrote under `outputs/`, read from
 the same index the report itself is built from, so checking that the agent
 created a file named `X` never re-walks the output directory.
@@ -841,6 +845,67 @@ when the declared value is `final_text`, the same value the field would have
 defaulted to: writing `target` at all is the author saying what to look at,
 which the shortcut cannot promise to honor since it grades from the criterion
 text rather than the declared target.
+
+### Grading what the agent asked for
+
+`mock_calls` is the one target that grades the request rather than the answer.
+Every other target describes what the agent produced; this one describes what
+it asked an [MCP mock](#mcp-mocks) for, so a case can hold a skill to the
+arguments it sends and not only to the prose it writes afterwards.
+
+The target is every call the run made, in the order the mock server answered
+them, one call per line:
+
+```
+<server>.<tool> <input as compact json>
+```
+
+For example:
+
+```
+github.create_issue {"labels":["bug"],"repo":"acme/widgets","title":"Flaky build"}
+github.close_issue {"number":41}
+```
+
+The rendering is the surface patterns are written against, not the raw
+`mock-calls.jsonl` the mock server writes. A pattern aimed at that file would
+be answering questions about field order and whitespace as much as about the
+call, and it would break the first time the log grew a field. Object keys are
+rendered in sorted order, so the same call renders the same way twice:
+
+```json
+{ "type": "regex", "pattern": "^github\\.create_issue .*\"repo\":\"acme/", "target": "mock_calls" }
+{ "type": "contains", "text": "github.close_issue", "target": "mock_calls", "negate": true }
+```
+
+`expect` violations are deliberately absent from the rendering. A run already
+reports each one as its own failing assertion, and repeating them here would
+let a single mismatch fail a case twice.
+
+A run that hosted its mocks and called none of them is an **empty** target, not
+a missing one. That is a real fact about the agent, and stating it as emptiness
+is what lets `negate` keep meaning what it says: "the agent never asked for a
+force push" has to pass on a run that asked for nothing at all.
+
+A run that left no call log at all hosted no mock server, and so has no such
+fact to report either way. The skill is never credited or blamed for a mock
+that was not there, but how that reads in a report depends on whether the run
+reached the harness, and the two are not interchangeable:
+
+- A case that declares mocks against a harness whose `mcp servers` cell is `no`
+  is never attempted. The run is reported with status `skipped` and
+  `mcp_unsupported`, and grading skips it whole, so **no assertion is created
+  for it at all**: it is counted in neither `passed`, `failed`, nor
+  `unsupported`.
+- A run that did reach the harness and still left no log, because the case
+  declares no mocks or because no mock server came up, is graded like any other.
+  **The assertion is created and comes back `unsupported`**, counted in
+  `unsupported` and left out of the pass rate the way every unsupported
+  assertion is.
+
+A log that is present but unreadable is neither of those. The run did host a
+mock server, so the assertion **fails** with the read error as its evidence,
+the same as any other target trg could not read.
 
 ### Asserting which command ran, not just that a tool was used
 
@@ -1091,9 +1156,9 @@ every file under `outputs/`, nested directories included, matching what a
 mechanical grader aimed at `any_output` already looks at. `final_text` (declared
 or defaulted) keeps looking only at what sits directly in `outputs/`, so a
 suite written before `any_output` walked subdirectories still grades the same
-way. `transcript`, `{"file": ...}`, `{"files": ...}`, and `created_files`
-instead get a payload that names its own target, since the judge is no longer
-implicitly looking at the run's output:
+way. `transcript`, `{"file": ...}`, `{"files": ...}`, `created_files`, and
+`mock_calls` instead get a payload that names its own target, since the judge
+is no longer implicitly looking at the run's output:
 
 ```json
 { "assertion": "...", "target": "transcript", "content": "..." }

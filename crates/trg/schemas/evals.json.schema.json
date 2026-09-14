@@ -552,6 +552,11 @@
             "files"
           ],
           "type": "object"
+        },
+        {
+          "const": "mock_calls",
+          "description": "Every call the run made against its MCP mocks, rendered one per line as\n`<server>.<tool> <input>`, the input as compact JSON with object keys in\nsorted order. The `expect` violations the mock server also logs are left\nout, since a run already reports each one as its own failing assertion.\n\nThis is the only target that grades the request rather than the answer: the\nother targets all describe what the agent produced, and this one describes\nwhat it asked for. A run that hosted mocks and called none of them is an\nempty target, so `negate` still means what it says; a run that hosted no\nmock server at all cannot answer the question either way.",
+          "type": "string"
         }
       ]
     },

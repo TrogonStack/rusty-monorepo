@@ -1465,16 +1465,16 @@ fn apply_outcome(
 /// attempt nobody kept are read back as violations of the run that was kept, and a
 /// clean invocation fails for a call it never made.
 ///
-/// Emptied rather than removed, and only where one already exists: the file is created up
-/// front precisely so that a declared tool nobody called still leaves an artifact, and
-/// deleting it would report that mock set as one whose server never started.
+/// Removed rather than emptied: the log exists only once a mock server has loaded its
+/// mocks, so an empty one left behind by an attempt whose server did come up would tell
+/// the next attempt's reader that a server came up for it too.
 fn discard_mock_calls_from_earlier_attempts(run_dir: &Path, run_id: &str) {
     let path = run_dir.join(MOCK_CALLS_LOG_NAME);
     if !path.is_file() {
         return;
     }
-    if let Err(e) = std::fs::write(&path, "") {
-        eprintln!("Run {run_id}: failed to clear the mock call log between attempts: {e}");
+    if let Err(e) = std::fs::remove_file(&path) {
+        eprintln!("Run {run_id}: failed to discard the mock call log between attempts: {e}");
     }
 }
 
@@ -3947,12 +3947,11 @@ mod tests {
     /// servers` control at all must never reach the runner: there is nothing honest a
     /// mocked run against such a harness could report, so it is skipped as `unsupported`
     /// rather than invoked and reported as though the skill had done something wrong.
-    /// The call log is created empty up front so that a declared tool nobody called can be
-    /// told apart from a mock server that never started. Clearing it between attempts must
-    /// preserve that: a run whose skill legitimately reached for nothing still owes the
-    /// reader the artifact saying so, and a missing file says something else entirely.
+    /// The log says a mock server came up, so an attempt must not inherit that claim from
+    /// the attempt before it: the next attempt's server writes the file when it has loaded
+    /// its mocks, and until it does the absence is what tells a grader nothing answered.
     #[test]
-    fn clearing_the_log_between_attempts_leaves_an_unused_mock_its_artifact() {
+    fn discarding_the_log_between_attempts_leaves_the_next_server_to_say_it_came_up() {
         let temp = tempfile::tempdir().unwrap();
         let run_dir = temp.path().join("run-1");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -3962,10 +3961,9 @@ mod tests {
         discard_mock_calls_from_earlier_attempts(&run_dir, "run-1");
 
         assert!(
-            log.is_file(),
-            "the artifact must survive, or a mock nobody called reads as a server that never started"
+            !log.exists(),
+            "an empty log left behind would credit this attempt with a mock server it never started"
         );
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "");
     }
 
     /// Where no mock set was materialized there is no log to clear, and inventing one would
