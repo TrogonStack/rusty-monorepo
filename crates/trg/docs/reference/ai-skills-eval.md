@@ -319,10 +319,29 @@ entirely (`"arm": "with_only"`) rather than weighted to zero, and a negative
 weight has no share of a score to subtract from.
 
 `target` is `final_text` (default), `transcript`, `any_output`,
-`{"file": "<relative path>"}`, or `created_files`. `created_files` is the set
-of paths the run wrote under `outputs/`, read from the same index the report
-itself is built from, so checking that the agent created a file named `X`
-never re-walks the output directory.
+`{"file": "<relative path>"}`, `{"files": "<glob>"}`, or `created_files`.
+`created_files` is the set of paths the run wrote under `outputs/`, read from
+the same index the report itself is built from, so checking that the agent
+created a file named `X` never re-walks the output directory.
+
+`{"files": "<glob>"}` is `any_output` narrowed to the files a pattern names,
+using the same wildcard dialect `file_exists` accepts. The matching files are
+read in path order and each is labelled with the path it came from, so the same
+run grades the same way twice and a verdict about one file is attributable to
+it. A file that cannot be read as UTF-8 text is labelled and named by size
+rather than skipped, since a label with nothing under it would read as a file
+the agent left empty.
+
+A leading `outputs/` is dropped before matching, the same way `file_exists`
+drops it, so `{"files": "outputs/**/*.md"}` and `{"files": "**/*.md"}` name the
+same set.
+
+Unlike `file_exists`, a `files` target searches only `outputs/`, never the
+workspace around it. Narrowing `any_output` must not read more than
+`any_output` does, and the workspace holds the agent's scratch files and the
+copy of the skill the harness staged. A pattern that matches nothing is a
+target that is **missing**, not one that is empty, so it fails where it is read
+instead of reaching a judge with nothing to look at.
 
 A relative path resolves against the workspace `outputs/` directory first, then
 the workspace itself, then the run directory. Declared outputs therefore win
@@ -588,9 +607,9 @@ every file under `outputs/`, nested directories included, matching what a
 mechanical grader aimed at `any_output` already looks at. `final_text` (declared
 or defaulted) keeps looking only at what sits directly in `outputs/`, so a
 suite written before `any_output` walked subdirectories still grades the same
-way. `transcript`, `{"file": ...}`, and `created_files` instead get a payload
-that names its own target, since the judge is no longer implicitly looking at
-the run's output:
+way. `transcript`, `{"file": ...}`, `{"files": ...}`, and `created_files`
+instead get a payload that names its own target, since the judge is no longer
+implicitly looking at the run's output:
 
 ```json
 { "assertion": "...", "target": "transcript", "content": "..." }

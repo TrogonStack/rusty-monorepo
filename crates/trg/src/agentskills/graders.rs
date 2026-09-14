@@ -252,6 +252,13 @@ pub enum GradeTarget {
     /// the same index the report itself is built from, so "the agent created a
     /// file called X" is checkable without walking the directory a second time.
     CreatedFiles,
+    /// The contents of every file under `outputs/` whose path matches a glob, in
+    /// path order and each labelled with the path it came from.
+    ///
+    /// This narrows `any_output`, it does not widen it: the same tree, restricted
+    /// to the files the pattern names. A pattern that matches nothing is a target
+    /// that is missing rather than one that is empty.
+    Files(GlobPattern),
 }
 
 impl fmt::Display for GradeTarget {
@@ -262,6 +269,7 @@ impl fmt::Display for GradeTarget {
             Self::AnyOutput => f.write_str("any output file"),
             Self::File(path) => write!(f, "file '{path}'"),
             Self::CreatedFiles => f.write_str("created files"),
+            Self::Files(pattern) => write!(f, "output files matching '{pattern}'"),
         }
     }
 }
@@ -963,7 +971,62 @@ impl<'a> GradeInput<'a> {
                 TargetContent::Text(parts.join("\n"))
             }
             GradeTarget::CreatedFiles => TargetContent::Text(self.created_files.join("\n")),
+            GradeTarget::Files(pattern) => self.matching_outputs(pattern),
         }
+    }
+
+    /// Reads the output files a glob names, in path order so the same run grades
+    /// the same way twice, each labelled so a verdict about one file is
+    /// attributable to it.
+    ///
+    /// Only `outputs/` is walked, which is the tree `any_output` covers. Searching
+    /// the workspace too would make a narrowed target read more than the wide one,
+    /// and would hand the judge the agent's scratch files and the skill the harness
+    /// staged alongside the work being graded.
+    fn matching_outputs(&self, pattern: &GlobPattern) -> TargetContent {
+        let regex = pattern.within_outputs().compile();
+        let mut matched = Vec::new();
+        collect_matching(self.outputs_dir, self.outputs_dir, &regex, &mut matched);
+        if matched.is_empty() {
+            return TargetContent::Missing(format!("no file under outputs/ matches '{pattern}'"));
+        }
+        matched.sort_by(|(left, _), (right, _)| left.cmp(right));
+        let parts: Vec<String> = matched
+            .into_iter()
+            .map(|(relative, body)| format!("=== {relative} ===\n{body}"))
+            .collect();
+        TargetContent::Text(parts.join("\n\n"))
+    }
+}
+
+/// Walks `dir` for files whose path relative to `base` matches `regex`.
+///
+/// A file that cannot be read as UTF-8 text is named with its size rather than
+/// skipped, because a label with nothing under it reads to a judge as a file the
+/// agent left empty, which is a different fact about the run.
+fn collect_matching(base: &Path, dir: &Path, regex: &Regex, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_matching(base, &path, regex, out);
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(base) else {
+            continue;
+        };
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if !regex.is_match(&relative) {
+            continue;
+        }
+        let body = match std::fs::read(&path) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(text) => text,
+                Err(e) => format!("<{} bytes that are not UTF-8 text>", e.as_bytes().len()),
+            },
+            Err(e) => format!("<unreadable: {e}>"),
+        };
+        out.push((relative, body));
     }
 }
 
@@ -1448,6 +1511,12 @@ mod tests {
             let relocated = self.run_dir.join("outputs");
             std::fs::rename(&self.outputs_dir, &relocated).unwrap();
             self.outputs_dir = relocated;
+        }
+
+        fn write_to_outputs(&self, relative: &str, contents: impl AsRef<[u8]>) {
+            let path = self.outputs_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
         }
 
         /// Plants a file where the harness stages a skill, and records the staging the
@@ -2910,6 +2979,125 @@ mod tests {
         assert_eq!(
             described,
             "final text is at least as good as baseline 'golden.md' on: covers every column"
+        );
+    }
+
+    fn glob_target_text(fixture: &Fixture, pattern: &str) -> TargetContent {
+        fixture.input().target_content(&GradeTarget::Files(glob(pattern)))
+    }
+
+    #[test]
+    fn a_glob_target_reads_only_the_output_files_it_names() {
+        let fixture = Fixture::new();
+        fixture.write_to_outputs("notes.txt", "not markdown");
+        fixture.write_to_outputs("sub/deep.md", "buried markdown");
+
+        let TargetContent::Text(text) = glob_target_text(&fixture, "**/*.md") else {
+            panic!("a glob that matches files reads as text");
+        };
+
+        assert!(text.contains("=== report.md ==="), "{text}");
+        assert!(text.contains("=== sub/deep.md ==="), "{text}");
+        assert!(text.contains("buried markdown"), "{text}");
+        assert!(
+            !text.contains("not markdown"),
+            "a .txt file is outside '**/*.md': {text}"
+        );
+    }
+
+    #[test]
+    fn a_glob_target_that_matches_nothing_is_missing_rather_than_empty() {
+        let fixture = Fixture::new();
+
+        let content = glob_target_text(&fixture, "**/*.csv");
+
+        let TargetContent::Missing(reason) = content else {
+            panic!("a glob that matches nothing must not read as an empty target: {content:?}");
+        };
+        assert!(reason.contains("**/*.csv"), "{reason}");
+    }
+
+    #[test]
+    fn a_glob_target_reads_its_files_in_path_order() {
+        let fixture = Fixture::new();
+        fixture.write_to_outputs("zebra.md", "last");
+        fixture.write_to_outputs("alpha.md", "first");
+        fixture.write_to_outputs("sub/middle.md", "nested");
+
+        let TargetContent::Text(text) = glob_target_text(&fixture, "**/*.md") else {
+            panic!("a glob that matches files reads as text");
+        };
+
+        let labels: Vec<&str> = text.lines().filter(|line| line.starts_with("=== ")).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "=== alpha.md ===",
+                "=== report.md ===",
+                "=== sub/middle.md ===",
+                "=== zebra.md ==="
+            ],
+            "the same run has to grade the same way twice"
+        );
+    }
+
+    #[test]
+    fn a_single_star_in_a_glob_target_does_not_reach_into_a_subdirectory() {
+        let fixture = Fixture::new();
+        fixture.write_to_outputs("sub/deep.md", "buried markdown");
+
+        let TargetContent::Text(text) = glob_target_text(&fixture, "*.md") else {
+            panic!("a glob that matches files reads as text");
+        };
+
+        assert!(text.contains("=== report.md ==="), "{text}");
+        assert!(!text.contains("deep.md"), "'*' stays within one segment: {text}");
+    }
+
+    #[test]
+    fn a_glob_target_names_a_file_it_cannot_read_as_text_rather_than_showing_it_as_empty() {
+        let fixture = Fixture::new();
+        fixture.write_to_outputs("blob.md", [0xff, 0xfe, 0x00, 0x01]);
+
+        let TargetContent::Text(text) = glob_target_text(&fixture, "blob.md") else {
+            panic!("a glob that matches a file reads as text");
+        };
+
+        assert!(text.contains("=== blob.md ==="), "{text}");
+        assert!(
+            text.contains("not UTF-8 text"),
+            "a label with nothing under it would read as a file the agent left empty: {text}"
+        );
+    }
+
+    #[test]
+    fn a_glob_target_naming_the_output_directory_reads_the_same_files_as_one_that_does_not() {
+        for pattern in ["**/*.md", "outputs/**/*.md"] {
+            let fixture = Fixture::new();
+            fixture.write_to_outputs("sub/deep.md", "buried markdown");
+
+            let TargetContent::Text(text) = glob_target_text(&fixture, pattern) else {
+                panic!("'{pattern}' matched nothing");
+            };
+
+            assert!(text.contains("=== report.md ==="), "{pattern}: {text}");
+            assert!(text.contains("=== sub/deep.md ==="), "{pattern}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_glob_target_does_not_read_the_workspace_outside_outputs() {
+        let fixture = Fixture::new();
+        fixture.write_to_workspace("scratch.md", "working notes the agent did not publish");
+
+        let TargetContent::Text(text) = glob_target_text(&fixture, "**/*.md") else {
+            panic!("a glob that matches files reads as text");
+        };
+
+        assert!(text.contains("=== report.md ==="), "{text}");
+        assert!(
+            !text.contains("working notes"),
+            "narrowing any_output must not read more than any_output does: {text}"
         );
     }
 }
