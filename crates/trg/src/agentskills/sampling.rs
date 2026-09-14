@@ -6,6 +6,8 @@
 //! nothing to do with the skill, and a comparison between two arms built from single
 //! draws reports a difference that is mostly the spread of each arm.
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::RangeInclusive;
 use std::str::FromStr;
@@ -15,7 +17,8 @@ use std::str::FromStr;
 /// Three by default. One draw reports no spread at all, and two cannot say which of the
 /// pair was the outlier; three is the smallest count that shows a cell is unstable while
 /// still costing an amount an operator will accept for every pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
 pub struct AttemptCount(u32);
 
 impl AttemptCount {
@@ -59,6 +62,34 @@ impl AttemptCount {
 impl Default for AttemptCount {
     fn default() -> Self {
         Self::recommended()
+    }
+}
+
+impl<'de> Deserialize<'de> for AttemptCount {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = u32::deserialize(deserializer)?;
+        Self::parse(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for AttemptCount {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AttemptCount".into()
+    }
+
+    /// Written by hand rather than derived, and kept as strict as `Deserialize`, because a
+    /// schema looser than its own parser lets `eval verify --mode strict` call a suite
+    /// conformant that `eval run` then refuses to read.
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "How many draws are taken of this cell. At least 1: a cell nobody draws is not reported.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295u32
+        })
     }
 }
 
@@ -112,5 +143,48 @@ mod tests {
         assert_eq!(three.draws().collect::<Vec<_>>(), vec![1, 2, 3]);
         assert_eq!(three.runs_for(4), 12);
         assert_eq!(AttemptCount::single().runs_for(4), 4);
+    }
+}
+
+#[cfg(test)]
+mod schema_agrees_with_the_parser {
+    use super::*;
+
+    fn validator() -> jsonschema::Validator {
+        jsonschema::validator_for(&serde_json::to_value(schemars::schema_for!(AttemptCount)).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_schema_refuses_every_value_deserialize_refuses() {
+        let validator = validator();
+        for refused in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(4294967296u64),
+            serde_json::json!("3"),
+            serde_json::json!(1.5),
+        ] {
+            assert!(
+                serde_json::from_value::<AttemptCount>(refused.clone()).is_err(),
+                "deserialize admitted {refused}"
+            );
+            assert!(!validator.is_valid(&refused), "the schema admitted {refused}");
+        }
+    }
+
+    #[test]
+    fn the_schema_admits_every_count_deserialize_admits() {
+        let validator = validator();
+        for admitted in [
+            serde_json::json!(1),
+            serde_json::json!(3),
+            serde_json::json!(4294967295u32),
+        ] {
+            assert!(
+                serde_json::from_value::<AttemptCount>(admitted.clone()).is_ok(),
+                "deserialize refused {admitted}"
+            );
+            assert!(validator.is_valid(&admitted), "the schema refused {admitted}");
+        }
     }
 }
