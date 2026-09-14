@@ -80,7 +80,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         write_runner_invocation_metadata(
             run_dir,
             redact_command_args(PROGRAM, &borrowed),
-            prepared.environment.recorded_vars(),
+            prepared.environment.record(),
         )?;
     }
 

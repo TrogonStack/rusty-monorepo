@@ -1930,8 +1930,12 @@ works. It reproduces the behaviour of releases before this flag existed, and
 because it is recorded in `report.json` a reader can tell that a comparison was
 made against an unknown baseline.
 
-Every policy writes the variables a run actually received to `env.json` in the
-run directory, with secret-looking values left out.
+Every policy writes what a run actually received to `env.json` in the run
+directory: the variables, with secret-looking values left out, and a
+`config_home` entry naming where the harness's config home was, whether it was
+the operator's or one made for this run, and how it was found, a variable the
+harness honours or a fallback under `HOME`. `cursor-agent` has no variable to
+name its config home, so this is the only record of where it was.
 
 The policy is part of a run's cache identity, alongside `--skill-staging`. A
 completed run answers only for what it was allowed to see, so switching either
