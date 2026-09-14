@@ -113,6 +113,50 @@ Report directories are named `<timestamp>-<random-hex>`. Re-running without
 
 ---
 
+## `eval grade`
+
+Grade a completed eval report bundle, writing `grading.json` per run.
+
+```text
+trg ai skills eval grade <REPORT_DIR> [OPTIONS]
+```
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a report bundle directory containing `report.json` |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--grader` | enum | `auto` | Grading strategy. Values: `auto`, `none`, `llm`, `script` |
+| `--grader-provider` | enum | `openai` | Judge backend for LLM grading. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
+| `--grader-model` | string | *(unset)* | Model identifier for LLM grading |
+| `--grader-command` | string | *(unset)* | External grader script. Reads JSON from stdin: `{assertion, workspace, outputs, transcript}`. Writes `{passed, evidence, rationale?}` to stdout |
+| `--grader-votes` | integer | `1` | Opinions to take from the LLM judge on each assertion, decided by majority. Must be odd, so the panel cannot tie. Costs one judge request per vote per assertion |
+| `--strict` | bool | `false` | Fail when evidence is missing or assertions require LLM grading |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Grading completed with no failed and no ungraded assertions |
+| `1` | Grading itself failed, or completed with a failed or ungraded assertion. An assertion left ungraded, meaning no grader could attempt it, fails the command even when `--strict` is not set |
+
+### Example
+
+```shell
+$ trg ai skills eval grade ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+Graded 1 run(s)
+  assertions: 1/1 passed
+```
+
+---
+
 ## `eval verify`
 
 Verify grading and timing artifacts under a workspace directory.
@@ -206,6 +250,334 @@ $ trg ai skills eval verify ./report/runs/run-001/workspace --output-format json
     "pass_rate": 1.0
   }
 }
+```
+
+---
+
+## `eval init`
+
+Scaffold `evals/evals.json` for a skill directory.
+
+```text
+trg ai skills eval init --skill-dir <DIR> [OPTIONS]
+```
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--skill-dir` | path | *(required)* | Path to a skill directory containing `SKILL.md` |
+| `--force` | bool | `false` | Overwrite an existing `evals/evals.json` |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
+
+The scaffold it writes declares two eval cases and passes `eval verify --mode
+strict` unmodified.
+
+### Example
+
+```shell
+$ trg ai skills eval init --skill-dir ./skills/my-skill
+Created ./skills/my-skill/evals/evals.json
+```
+
+---
+
+## `eval benchmark`
+
+Aggregate a report bundle's grading and timing artifacts into `benchmark.json`,
+written both at the report root and under its iteration layout directory.
+
+```text
+trg ai skills eval benchmark <REPORT_DIR> [OPTIONS]
+```
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to the report directory containing `report.json` |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
+| `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket` (report failed runs as a separate bucket, apart from completed runs), `exclude` (drop failed and timed-out runs from aggregation), `zero` (fold them into the completed bucket, scored as zero) |
+| `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
+| `--output-format` | enum | `text` | `text` prints the report directory path; `json` prints the `benchmark.json` document on stdout |
+
+### Example
+
+```shell
+$ trg ai skills eval benchmark ./artifacts/my-skill/20260526T120000Z-abc
+./artifacts/my-skill/20260526T120000Z-abc
+```
+
+---
+
+## `eval iteration-summary`
+
+Summarize assertion stability, skill impact, flakiness, and metric outliers for
+a report bundle, writing `iteration-summary.json`.
+
+```text
+trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
+```
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to the report directory containing `report.json` |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
+| `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
+| `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
+
+### Example
+
+```shell
+$ trg ai skills eval iteration-summary ./artifacts/my-skill/20260526T120000Z-abc
+```
+
+---
+
+## `eval feedback`
+
+Manage human review feedback artifacts for a report bundle. A subcommand
+group: `init`, `list`, and `validate`.
+
+```text
+trg ai skills eval feedback <SUBCOMMAND>
+```
+
+### `eval feedback init`
+
+Scaffold an empty `feedback.json` beside `workspace/` for every run in a
+report bundle that does not already have one, then sync the feedback summary
+into `report.json`.
+
+```text
+trg ai skills eval feedback init <REPORT_DIR> [OPTIONS]
+```
+
+#### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
+
+#### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--reviewer` | string | *(defaults to `git config user.email`)* | Reviewer identity recorded in `feedback.json`. The command fails if this is unset and git has no `user.email` configured |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
+
+#### Example
+
+```shell
+$ trg ai skills eval feedback init ./artifacts/my-skill/20260526T120000Z-abc --reviewer reviewer@example.com
+Initialized feedback for 1 run(s) (0 already existed)
+```
+
+### `eval feedback list`
+
+List runs in a report bundle that still need human review, meaning they have
+no `feedback.json` yet.
+
+```text
+trg ai skills eval feedback list <REPORT_DIR> [OPTIONS]
+```
+
+#### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
+
+#### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--output-format` | enum | `text` | `text` prints the run IDs pending review, or a message that none are pending; `json` prints a machine-readable document |
+
+#### Exit codes
+
+Exits `0` whether or not any run is pending review. A caller distinguishes
+the two by the printed list, or by the `pending` array under `--output-format
+json`, not by the exit code.
+
+#### Example
+
+```shell
+$ trg ai skills eval feedback list ./artifacts/my-skill/20260526T120000Z-abc
+Runs needing review:
+  run-001
+```
+
+### `eval feedback validate`
+
+Schema-validate every `feedback.json` file in a report bundle, then sync the
+feedback summary into `report.json` when validation passes.
+
+```text
+trg ai skills eval feedback validate <REPORT_DIR> [OPTIONS]
+```
+
+#### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
+
+#### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--output-format` | enum | `text` | `text` prints a human summary or the validation errors; `json` prints a machine-readable document. Under `json`, the verdict rides in the document (`validated`, `errors`) rather than on stderr |
+
+#### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Every `feedback.json` in the bundle validated |
+| `1` | At least one `feedback.json` failed validation |
+
+#### Example
+
+```shell
+$ trg ai skills eval feedback validate ./artifacts/my-skill/20260526T120000Z-abc
+Validated 1 feedback file(s)
+```
+
+---
+
+## `eval compare`
+
+Blindly compare scenario outputs within a report directory, judging each pair
+with the configured judge and recording the result as a `comparisons[]` entry
+in `report.json` (and `comparison.json` under iteration layout directories,
+with `--emit-comparison-json`).
+
+```text
+trg ai skills eval compare <REPORT_DIR> [OPTIONS]
+```
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
+| `--pair` | string | *(unset)* | Scenario pair to compare, as `<A>:<B>`. Repeatable. Each side is `with_skill`, `without_skill`, or `old_skill`, and the two sides must differ |
+| `--judge` | enum | `none` | Judge used to decide each pair. Values: `none`, `llm`, `script`. With `none`, or with no `--pair` given, the command runs no comparisons |
+| `--judge-provider` | enum | `openai` | Judge backend for `--judge llm`. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
+| `--judge-model` | string | *(unset)* | Model identifier for LLM judging. Required when `--judge llm` |
+| `--judge-command` | string | *(unset)* | External judge command. Reads JSON from stdin, writes JSON to stdout. Required when `--judge script` |
+| `--emit-comparison-json` | bool | `false` | Write `comparison.json` under iteration layout directories when present |
+| `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
+| `--output-format` | enum | `text` | `text` prints a one-line summary; `json` prints a machine-readable document |
+
+### Example
+
+```shell
+$ trg ai skills eval compare ./report --pair with_skill:without_skill --judge none
+Comparison skipped
+```
+
+---
+
+## `eval next-iteration`
+
+Build an improvement bundle from a prior iteration's report bundle, for skill
+revision.
+
+```text
+trg ai skills eval next-iteration [REPORT_DIR] [OPTIONS]
+```
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to the previous iteration report directory containing `report.json`. Optional; `--from` is an alternative to it, and one of the two is required |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--from` | path | *(unset)* | Previous iteration report directory, as an alternative to the positional `REPORT_DIR` |
+| `--skill-dir` | path | *(defaults to `skill_path` from `report.json`)* | Skill directory used to detect eval suite drift |
+| `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the current `evals/evals.json` hash differs from the prior iteration |
+| `--output-format` | enum | `text` | `text` prints the bundle paths; `json` prints a machine-readable document |
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Bundle written |
+| `1` | Neither `REPORT_DIR` nor `--from` was given, or building the bundle failed |
+
+### Example
+
+```shell
+$ trg ai skills eval next-iteration --from ./artifacts/my-skill/20260526T120000Z-abc
+Improvement bundle written to ./artifacts/my-skill/next-iteration
+  ./artifacts/my-skill/next-iteration/improvement.md
+  ./artifacts/my-skill/next-iteration/improvement.json
+```
+
+---
+
+## `eval mock-server`
+
+The subcommand a run's generated `--mcp-config` names as the mock MCP
+server's `command`, one invocation per mocked server. See [How a run drives a
+mock](#how-a-run-drives-a-mock).
+
+It is hidden from `--help`: `eval run` is the only thing that generates the
+`--mocks`, `--server`, and `--calls` arguments it needs, so it exists for a
+harness to invoke on the operator's behalf rather than for an operator to
+type by hand.
+
+---
+
+## `eval html-report`
+
+Render a local-only, self-contained HTML report over a report bundle.
+
+```text
+trg ai skills eval html-report <REPORT_DIR> [OPTIONS]
+```
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to the report directory containing `report.json` |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--output-format` | enum | `text` | `text` prints the report directory path and the HTML file path; `json` prints a machine-readable document |
+
+### Example
+
+```shell
+$ trg ai skills eval html-report ./artifacts/my-skill/20260526T120000Z-abc
+./artifacts/my-skill/20260526T120000Z-abc
+html report: ./artifacts/my-skill/20260526T120000Z-abc/report.html
 ```
 
 ---
