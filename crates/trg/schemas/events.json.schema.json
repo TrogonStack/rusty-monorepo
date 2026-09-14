@@ -1,0 +1,212 @@
+{
+  "$defs": {
+    "SkillName": {
+      "description": "The name a skill goes by, which is the name a harness's own skill tool\nreports when it invokes one.",
+      "type": "string"
+    },
+    "StagedSkill": {
+      "description": "Where the run that produced a transcript staged its own skill.\n\n`STAGED_SKILL_DIRS` says where a run could stage a skill, not where this one\ndid, so reading a named path against all of them credits an arm that merely\nlooked at `skills/` with reaching for a skill it was never given, and the arm\nthat loses its reading is the control the comparison rests on. The run knows\nwhat it staged, so it records it and each reader judges a path against that.",
+      "oneOf": [
+        {
+          "description": "A transcript from before a run recorded what it staged, which can only be\nread against every directory a run stages at.",
+          "properties": {
+            "kind": {
+              "const": "unrecorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The arm that runs without a skill, so no path it named is this run's.",
+          "properties": {
+            "kind": {
+              "const": "nothing",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "directory": {
+              "$ref": "#/$defs/StagedSkillDir"
+            },
+            "kind": {
+              "const": "at",
+              "type": "string"
+            },
+            "name": {
+              "$ref": "#/$defs/StagedSkillName"
+            }
+          },
+          "required": [
+            "kind",
+            "directory"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StagedSkillDir": {
+      "description": "The workspace-relative directory a run's skill is staged in.",
+      "type": "string"
+    },
+    "StagedSkillName": {
+      "description": "What a run recorded about the name of the skill it staged.\n\nA native skill tool call reports the skill it invoked by name, and the name is\nthe only thing in that call that tells this run's skill from one the harness\ncarries of its own. A transcript written before the name was recorded cannot\ntell them apart, and being unable to say which skill was invoked is not\nevidence that the wrong one was, so it keeps the reading it was written under.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "unrecorded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "known",
+              "type": "string"
+            },
+            "name": {
+              "$ref": "#/$defs/SkillName"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ToolName": {
+      "type": "string"
+    },
+    "ToolVisibility": {
+      "description": "Whether a harness exposes its tool calls in a form we can parse today.\n\n`Unavailable` is deliberately distinct from \"no tools were used\": a grader that\ndepends on tool observation must report itself unsupported rather than silently\npass or fail when the harness cannot be observed.",
+      "enum": [
+        "observed",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "TranscriptEvent": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "assistant_text",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "tool_call",
+              "type": "string"
+            },
+            "paths": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "tool": {
+              "$ref": "#/$defs/ToolName"
+            }
+          },
+          "required": [
+            "kind",
+            "tool"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "terminal",
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "ok"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorkspaceEscape": {
+      "description": "A path a run named that resolves outside the workspace it was given.",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolName"
+        }
+      },
+      "required": [
+        "tool",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/events.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "events": {
+      "items": {
+        "$ref": "#/$defs/TranscriptEvent"
+      },
+      "type": "array"
+    },
+    "runner": {
+      "type": "string"
+    },
+    "staged_skill": {
+      "$ref": "#/$defs/StagedSkill"
+    },
+    "tool_visibility": {
+      "$ref": "#/$defs/ToolVisibility"
+    },
+    "workspace_escapes": {
+      "items": {
+        "$ref": "#/$defs/WorkspaceEscape"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "runner",
+    "tool_visibility",
+    "events"
+  ],
+  "title": "trg skills eval events",
+  "type": "object"
+}

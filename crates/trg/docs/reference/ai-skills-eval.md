@@ -2485,6 +2485,12 @@ Alongside the redacted transcript, each run gets
 `runs/<run-id>/events.json`: the same turn reduced to one event vocabulary, so a
 grader is written once rather than once per harness.
 
+The shape below is generated from `NormalizedTranscript` and published as
+`crates/trg/schemas/events.json.schema.json`, alongside the schemas for the
+other artifacts on this page. The field table exists to walk through it in
+prose; the schema is what `eval verify --mode strict` actually holds a bundle's
+`events.json` to.
+
 ```json
 {
   "runner": "claude",
