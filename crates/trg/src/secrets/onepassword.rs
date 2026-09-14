@@ -896,18 +896,23 @@ mod tests {
             Self::scripted(&body)
         }
 
-        fn scripted(body: &str) -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
+        /// The one executable these tests run, checked into the tree rather
+        /// than written here.
+        ///
+        /// A file this process has just written can still be open for writing
+        /// in a child it forked for some other test running alongside, and
+        /// executing such a file fails with `ETXTBSY`. Linking to a file
+        /// nothing writes removes that race; the per-test behaviour travels in
+        /// a body script, which the stub reads rather than executes.
+        fn shim() -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/op-stub.sh")
+        }
 
+        fn scripted(body: &str) -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             let bin = dir.path().join("op");
-            let argv = dir.path().join("argv");
-            let script = format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {argv}; done\n{body}",
-                argv = sh_quote(&argv.display().to_string()),
-            );
-            std::fs::write(&bin, script).expect("write stub");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+            std::fs::write(bin.with_extension("body"), body).expect("write body");
+            std::os::unix::fs::symlink(Self::shim(), &bin).expect("link stub");
 
             Self { dir }
         }
@@ -916,14 +921,7 @@ mod tests {
         /// timeout — as if `op` were blocked on an unlock prompt no one is
         /// watching for.
         fn hanging() -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let dir = tempfile::tempdir().expect("tempdir");
-            let bin = dir.path().join("op");
-            std::fs::write(&bin, "#!/bin/sh\nsleep 300\n").expect("write stub");
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("chmod");
-
-            Self { dir }
+            Self::scripted("sleep 300\n")
         }
 
         fn backend(&self) -> OnePasswordBackend {
@@ -931,7 +929,7 @@ mod tests {
         }
 
         fn argv(&self) -> Vec<String> {
-            std::fs::read_to_string(self.dir.path().join("argv"))
+            std::fs::read_to_string(self.dir.path().join("op.argv"))
                 .unwrap_or_default()
                 .lines()
                 .map(str::to_string)
