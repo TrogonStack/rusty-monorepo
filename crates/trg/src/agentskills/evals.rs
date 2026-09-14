@@ -1493,6 +1493,107 @@ mod tests {
         assert_eq!(report.assertion_count, 1);
     }
 
+    /// The worked example in docs/how-to/write-assertions.md is what a reader is told to
+    /// copy, so nothing else proves it still loads through the parser that `eval run` uses.
+    #[test]
+    fn write_assertions_doc_worked_example_loads_through_the_real_parser() {
+        let fs = MemFS::new();
+        fs.insert(
+            Path::new("/csv-analyzer/evals/evals.json"),
+            r#"{
+  "skill_name": "csv-analyzer",
+  "evals": [
+    {
+      "id": "analyze-sales",
+      "prompt": "Analyze evals/files/sales.csv and write a summary.",
+      "expected_output": "A markdown summary with revenue totals by month.",
+      "files": ["evals/files/sales.csv"],
+      "graders": [
+        { "type": "file_exists", "path": "summary.md" },
+        { "type": "contains", "text": "May", "target": { "file": "summary.md" } },
+        { "type": "regex", "pattern": "\\$[0-9,]+", "target": { "file": "summary.md" } },
+        { "type": "tool_used", "tool": "Read" },
+        {
+          "type": "llm",
+          "criterion": "The summary reads as a coherent narrative rather than a data dump.",
+          "target": { "file": "summary.md" }
+        }
+      ]
+    }
+  ]
+}"#,
+        );
+        fs.insert(
+            Path::new("/csv-analyzer/evals/files/sales.csv"),
+            "month,revenue\nMay,10000",
+        );
+
+        let report = check_eval_suite(
+            &fs,
+            Path::new("/csv-analyzer"),
+            "csv-analyzer",
+            EvalCheckOptions {
+                require_assertions: true,
+                ..EvalCheckOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.eval_count, 1);
+        assert_eq!(report.file_count, 1);
+        assert_eq!(report.assertion_count, 0);
+
+        let suite = load_eval_suite(&fs, Path::new("/csv-analyzer")).unwrap();
+        assert_eq!(suite.evals[0].graders.len(), 5);
+    }
+
+    /// The same doc's fixture-pairing example, where neither check has a typed equivalent,
+    /// so both are declared as `llm` rather than left as an implicit assertion fallback.
+    #[test]
+    fn write_assertions_doc_fixture_pairing_example_loads_through_the_real_parser() {
+        let fs = MemFS::new();
+        fs.insert(
+            Path::new("/csv-analyzer/evals/evals.json"),
+            r#"{
+  "skill_name": "csv-analyzer",
+  "evals": [
+    {
+      "id": "merge-reports",
+      "prompt": "Merge evals/files/q1.csv and evals/files/q2.csv into a single report.",
+      "expected_output": "Combined quarterly report.",
+      "files": [
+        "evals/files/q1.csv",
+        "evals/files/q2.csv"
+      ],
+      "graders": [
+        { "type": "llm", "criterion": "The workspace contains exactly one combined output file." },
+        { "type": "llm", "criterion": "The combined output includes rows from both input files." }
+      ]
+    }
+  ]
+}"#,
+        );
+        fs.insert(Path::new("/csv-analyzer/evals/files/q1.csv"), "month,revenue\nJan,5000");
+        fs.insert(Path::new("/csv-analyzer/evals/files/q2.csv"), "month,revenue\nFeb,6000");
+
+        let report = check_eval_suite(
+            &fs,
+            Path::new("/csv-analyzer"),
+            "csv-analyzer",
+            EvalCheckOptions {
+                require_assertions: true,
+                ..EvalCheckOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.eval_count, 1);
+        assert_eq!(report.file_count, 2);
+
+        let suite = load_eval_suite(&fs, Path::new("/csv-analyzer")).unwrap();
+        assert_eq!(suite.evals[0].graders.len(), 2);
+    }
+
     #[test]
     fn check_eval_suite_rejects_fixture_exceeding_byte_limit() {
         let fs = MemFS::new();
