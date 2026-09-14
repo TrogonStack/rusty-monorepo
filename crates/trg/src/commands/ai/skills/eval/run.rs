@@ -260,6 +260,12 @@ pub struct RunArgs {
     )]
     pub allow_scaffold: bool,
 
+    #[arg(
+        long,
+        help = "Run a skill directory from outside this working tree without being asked about it. Its prompts decide what an agent does with your own credentials, so a foreign directory is asked about once and remembered; pass this where there is nobody to ask, such as CI"
+    )]
+    pub trust_skill: bool,
+
     #[command(flatten)]
     pub ci: EvalCiArgs,
 }
@@ -425,6 +431,14 @@ impl RunArgs {
             eval_dir,
             ..BuildReportOptions::default()
         };
+
+        let operator = crate::agentskills::skill_trust::SkillTrust::granted(self.trust_skill);
+        for dir in std::iter::once(&self.skill_dir).chain(self.old_skill_dir.iter()) {
+            if let Err(e) = crate::agentskills::skill_trust::admit(dir, operator) {
+                eprintln!("{e}");
+                return ExitCode::GateFailed;
+            }
+        }
 
         let bundle = match build_report_bundle(
             fs,
@@ -1758,6 +1772,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -1866,6 +1881,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -1997,6 +2013,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2044,6 +2061,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2107,6 +2125,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2254,6 +2273,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2366,6 +2386,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2421,6 +2442,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2476,6 +2498,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2523,6 +2546,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2572,6 +2596,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2638,6 +2663,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2788,6 +2814,7 @@ mod tests {
             attempts: Some(AttemptCount::single()),
             concurrency: RunConcurrency::serial(),
             allow_scaffold: false,
+            trust_skill: true,
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -3087,6 +3114,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3121,6 +3149,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3172,6 +3201,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3206,6 +3236,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3254,6 +3285,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3332,6 +3364,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3404,6 +3437,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3542,6 +3576,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3588,6 +3623,7 @@ mod tests {
                 permission: PermissionGrant::WorkspaceWrite,
                 allowed_tools: Vec::new(),
                 allow_scaffold: false,
+                trust_skill: true,
                 cases: Vec::new(),
                 tags: Vec::new(),
                 max_cost_usd: None,
@@ -3660,6 +3696,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -3711,6 +3748,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -4243,6 +4281,7 @@ mod tests {
             permission: PermissionGrant::WorkspaceWrite,
             allowed_tools: Vec::new(),
             allow_scaffold: false,
+            trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,

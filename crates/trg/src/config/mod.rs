@@ -200,7 +200,11 @@ pub struct ResolvedMcpServer {
 }
 
 pub fn trg_config_path() -> PathBuf {
-    env_config_dir().join("trg").join("config.toml")
+    trg_config_dir().join("config.toml")
+}
+
+pub fn trg_config_dir() -> PathBuf {
+    env_config_dir().join("trg")
 }
 
 fn env_config_dir() -> PathBuf {

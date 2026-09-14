@@ -56,6 +56,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--allow-scaffold` | bool | `false` | Run the `scaffold` a case declares. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
+| `--trust-skill` | bool | `false` | Run a skill directory from outside this working tree without being asked about it. See [Running a skill from outside your working tree](#running-a-skill-from-outside-your-working-tree) |
 
 ### Runner values
 
@@ -2078,6 +2079,39 @@ trg always passes one of these two grants explicitly. There is deliberately no
 mode that leaves the choice to the harness: a run whose permissions come from
 the operator's machine is not a measurement of the skill, since the same suite
 could then score differently on two machines.
+
+---
+
+## Running a skill from outside your working tree
+
+A skill is prompts, and a pass runs them through a harness holding the
+operator's own credentials. Evaluating a skill directory someone else wrote is
+therefore closer to running their program than to reading their file, so a
+directory that does not live under the working tree is asked about before
+anything executes:
+
+```text
+skill directory '/tmp/downloaded/csv-analyzer' is outside this working tree, and
+running it lets its author decide what an agent does as you; nothing here can
+ask, so pass --trust-skill to say you have read it
+```
+
+A directory under the working tree is never asked about. That is deliberate:
+a checkout evaluating its own skills, which is what CI does, is the operator's
+own tree by definition, so the gate is silent there rather than a flag every
+pipeline has to learn.
+
+The answer is remembered per directory in `trusted-skills.json` under
+`$XDG_CONFIG_HOME/trg` (falling back to `~/.config/trg`), so a foreign
+directory is asked about once rather than every pass. It is remembered by
+directory and not by content: a directory whose contents change is still the
+one you vouched for, and re-reading it when it changes is the operator's
+business, the same as for any dependency.
+
+Where there is nobody to ask, the run is refused rather than admitted.
+`--trust-skill` is the way to say the reading already happened, which is what a
+CI job pointed at a vendored third-party skill should pass. `--old-skill-dir`
+is held to the same gate, since an `old_skill` arm executes its directory too.
 
 ---
 
