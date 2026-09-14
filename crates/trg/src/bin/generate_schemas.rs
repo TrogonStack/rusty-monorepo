@@ -15,6 +15,7 @@ use trg::agentskills::iteration_summary::IterationSummaryDocument;
 use trg::agentskills::report::ReportDocument;
 use trg::agentskills::runner::environment::RecordedEnvironment;
 use trg::agentskills::runner::TimingFile;
+use trg::agentskills::transcript::NormalizedTranscript;
 
 fn main() -> std::io::Result<()> {
     let schemas_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schemas");
@@ -26,6 +27,7 @@ fn main() -> std::io::Result<()> {
         "trg skills eval comparison",
     )?;
     write_schema::<RecordedEnvironment>(&schemas_dir, "env.json.schema.json", "trg skills eval run environment")?;
+    write_schema::<NormalizedTranscript>(&schemas_dir, "events.json.schema.json", "trg skills eval events")?;
     write_schema::<EvalSuite>(&schemas_dir, "evals.json.schema.json", "trg skills eval suite")?;
     write_schema::<FeedbackDocument>(&schemas_dir, "feedback.json.schema.json", "trg skills eval feedback")?;
     write_schema::<GradingFile>(&schemas_dir, "grading.json.schema.json", "trg skills eval grading")?;

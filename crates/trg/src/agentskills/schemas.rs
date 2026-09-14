@@ -2,6 +2,7 @@ use std::path::Path;
 
 use super::evals::{collect_named_files, EvalError, Result};
 use super::feedback::FEEDBACK_FILE_NAME;
+use super::transcript::NORMALIZED_TRANSCRIPT_FILE;
 use super::validation::ValidationError;
 
 pub const REPORT_SCHEMA: &str = include_str!("../../schemas/report.json.schema.json");
@@ -14,6 +15,7 @@ pub const COMPARISON_SCHEMA: &str = include_str!("../../schemas/comparison.json.
 pub const TIMING_SCHEMA: &str = include_str!("../../schemas/timing.json.schema.json");
 pub const EVALS_SCHEMA: &str = include_str!("../../schemas/evals.json.schema.json");
 pub const ENV_SCHEMA: &str = include_str!("../../schemas/env.json.schema.json");
+pub const EVENTS_SCHEMA: &str = include_str!("../../schemas/events.json.schema.json");
 
 /// Whether this build of `trg` can hold an artifact against its schema.
 ///
@@ -79,6 +81,7 @@ pub fn validate_report_bundle_schemas(report_dir: &Path) -> Result<()> {
     validate_named_artifacts(report_dir, "grading.json", GRADING_SCHEMA)?;
     validate_named_artifacts(report_dir, "timing.json", TIMING_SCHEMA)?;
     validate_named_artifacts(report_dir, "env.json", ENV_SCHEMA)?;
+    validate_named_artifacts(report_dir, NORMALIZED_TRANSCRIPT_FILE, EVENTS_SCHEMA)?;
     validate_named_artifacts(report_dir, FEEDBACK_FILE_NAME, FEEDBACK_SCHEMA)?;
     validate_named_artifacts(report_dir, "comparison.json", COMPARISON_SCHEMA)?;
     validate_benchmark_artifacts(report_dir)?;
@@ -152,7 +155,7 @@ mod tests {
     use super::*;
     use crate::agentskills::benchmark::{build_benchmark, BenchmarkOptions};
     use crate::agentskills::compare::{run_comparisons, CompareOptions, JudgeKind, ScenarioPair};
-    use crate::agentskills::evals::{parse_eval_suite, scaffold_eval_suite};
+    use crate::agentskills::evals::{parse_eval_suite, scaffold_eval_suite, SkillDisclosure};
     use crate::agentskills::feedback::{
         init_feedback, FeedbackCategory, FeedbackDocument, FeedbackNote, FeedbackSeverity,
     };
@@ -161,11 +164,15 @@ mod tests {
         build_improvement_bundle, testutil::sample_prior_iteration_fixture, NextIterationOptions,
     };
     use crate::agentskills::iteration_summary::{build_iteration_summary_document, IterationSummaryOptions};
+    use crate::agentskills::prompt::{SkillName, StagedSkillDir};
     use crate::agentskills::report::{
         build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
     };
     use crate::agentskills::runner::usage::HarnessTokenUsage;
     use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus};
+    use crate::agentskills::transcript::{
+        NormalizedTranscript, StagedSkill, StagedSkillName, ToolName, ToolVisibility, TranscriptEvent, WorkspaceEscape,
+    };
     use crate::fs::testutil::MemFS;
     use chrono::{SecondsFormat, Utc};
     use std::path::Path;
@@ -182,6 +189,7 @@ mod tests {
         TIMING_SCHEMA,
         EVALS_SCHEMA,
         ENV_SCHEMA,
+        EVENTS_SCHEMA,
     ];
 
     #[test]
@@ -308,6 +316,67 @@ mod tests {
 
         let json = serde_json::to_value(&document).unwrap();
         validate_artifact(FEEDBACK_SCHEMA, &json).unwrap();
+    }
+
+    #[test]
+    fn events_json_round_trip_validates() {
+        let directory = StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Announced, "demo-skill")
+            .expect("with-skill scenario stages a directory");
+        let mut transcript = NormalizedTranscript::new(
+            "claude-code",
+            ToolVisibility::Observed,
+            vec![
+                TranscriptEvent::ToolCall {
+                    tool: ToolName::new("Read").unwrap(),
+                    paths: vec![".skill/SKILL.md".to_string()],
+                },
+                TranscriptEvent::Terminal { ok: true },
+            ],
+        )
+        .staged_at(StagedSkill::At {
+            directory,
+            name: StagedSkillName::known(SkillName::parse("demo-skill").unwrap()),
+        });
+        transcript.workspace_escapes.push(WorkspaceEscape {
+            tool: ToolName::new("Read").unwrap(),
+            path: "/somewhere/outside/notes.md".to_string(),
+        });
+
+        let json = serde_json::to_value(&transcript).unwrap();
+        validate_artifact(EVENTS_SCHEMA, &json).unwrap();
+    }
+
+    #[test]
+    fn events_json_bundle_validates() {
+        let temp = tempdir().unwrap();
+        let fs = MemFS::new();
+        let skill_path = sample_skill(&fs);
+        let bundle = build_report_bundle(
+            &fs,
+            &skill_path,
+            &skill_path,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions::default(),
+        )
+        .unwrap();
+        let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
+
+        let run = &bundle.document.runs[0];
+        let run_dir = report_dir.join(&run.paths.workspace).parent().unwrap().to_path_buf();
+        let transcript = NormalizedTranscript::new(
+            "claude-code",
+            ToolVisibility::Observed,
+            vec![TranscriptEvent::Terminal { ok: true }],
+        );
+        std::fs::write(
+            run_dir.join("events.json"),
+            serde_json::to_string_pretty(&transcript).unwrap(),
+        )
+        .unwrap();
+
+        validate_report_bundle_schemas(&report_dir).unwrap();
     }
 
     fn write_benchmark_fixture_report(report_dir: &Path) {
