@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::fs::FileSystem;
 
-use super::budget::{PassSpend, FAILURE_KIND_BUDGET};
+use super::budget::{PassSpend, RunCost, FAILURE_KIND_BUDGET};
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
@@ -825,19 +825,121 @@ impl JsonSchema for CacheTokens {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default)]
 pub struct RunMetrics {
     pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// The tokens every harness agrees to count the same way: input plus output, never a
     /// cached count folded in. See `cached_tokens` for what each harness billed again.
     pub total_tokens: Option<u64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<CacheTokens>,
-    pub cost_usd: Option<f64>,
+    /// What this run cost, or why nobody can say.
+    ///
+    /// A bare number here could not tell a harness that prices nothing from a harness
+    /// that priced everything but this run, so a reader totalling a mixed history counted
+    /// the first as a run that cost nothing.
+    pub cost: Option<RunCost>,
+}
+
+#[derive(Deserialize)]
+struct DeclaredRunMetrics {
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    exit_code: Option<i32>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    cached_tokens: Option<CacheTokens>,
+    #[serde(default)]
+    cost: Option<RunCost>,
+    /// Written by every release before a run's cost said which harness could not price
+    /// it. Read as a priced run, because only a harness that prices its runs ever wrote
+    /// a number here.
+    #[serde(default)]
+    cost_usd: Option<f64>,
+}
+
+/// The shape a run's metrics are written in, which is the shape every earlier release
+/// still reads. `cost_usd` was that release's whole vocabulary for cost, so a run that
+/// carries a price keeps publishing one; a run nobody priced has no number to put there,
+/// which is what its absence has always meant.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "RunMetrics")]
+struct SerializedRunMetrics<'a> {
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    /// The tokens every harness agrees to count the same way: input plus output, never a
+    /// cached count folded in. See `cached_tokens` for what each harness billed again.
+    total_tokens: Option<u64>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_tokens: Option<CacheTokens>,
+    /// What this run cost, or why nobody can say.
+    ///
+    /// A bare number here could not tell a harness that prices nothing from a harness
+    /// that priced everything but this run, so a reader totalling a mixed history counted
+    /// the first as a run that cost nothing.
+    cost: Option<&'a RunCost>,
+    /// The price alone, for readers written before `cost` could say why a run carries
+    /// none. Absent for exactly the runs that carry no price.
+    cost_usd: Option<f64>,
+}
+
+impl<'a> From<&'a RunMetrics> for SerializedRunMetrics<'a> {
+    fn from(metrics: &'a RunMetrics) -> Self {
+        Self {
+            duration_ms: metrics.duration_ms,
+            exit_code: metrics.exit_code,
+            total_tokens: metrics.total_tokens,
+            input_tokens: metrics.input_tokens,
+            output_tokens: metrics.output_tokens,
+            cached_tokens: metrics.cached_tokens,
+            cost: metrics.cost.as_ref(),
+            cost_usd: metrics.cost.as_ref().and_then(RunCost::usd),
+        }
+    }
+}
+
+impl Serialize for RunMetrics {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        SerializedRunMetrics::from(self).serialize(serializer)
+    }
+}
+
+impl JsonSchema for RunMetrics {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RunMetrics".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        SerializedRunMetrics::json_schema(generator)
+    }
+}
+
+impl<'de> Deserialize<'de> for RunMetrics {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let declared = DeclaredRunMetrics::deserialize(deserializer)?;
+        Ok(Self {
+            duration_ms: declared.duration_ms,
+            exit_code: declared.exit_code,
+            total_tokens: declared.total_tokens,
+            input_tokens: declared.input_tokens,
+            output_tokens: declared.output_tokens,
+            cached_tokens: declared.cached_tokens,
+            cost: declared
+                .cost
+                .or_else(|| declared.cost_usd.map(|usd| RunCost::Priced { usd })),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2029,6 +2131,67 @@ mod tests {
             let json = serde_json::to_value(read_only).unwrap();
             assert_eq!(json, serde_json::json!({ "read_tokens": 10 }));
             assert_eq!(serde_json::from_value::<CacheTokens>(json).unwrap(), read_only);
+        }
+    }
+
+    mod run_cost {
+        use super::*;
+
+        /// A harness that prices nothing and a harness that priced everything but this run
+        /// are two different facts, and the field that held only a number carried neither.
+        #[test]
+        fn a_run_no_harness_priced_names_the_harness_and_publishes_no_number() {
+            let metrics = RunMetrics {
+                cost: Some(RunCost::Unpriced {
+                    harness: "codex".to_string(),
+                }),
+                ..RunMetrics::default()
+            };
+
+            let json = serde_json::to_value(&metrics).unwrap();
+
+            assert_eq!(json["cost"]["kind"], "unpriced");
+            assert_eq!(json["cost"]["harness"], "codex");
+            assert!(json["cost_usd"].is_null());
+        }
+
+        /// The field an earlier release wrote is the field its readers still look at.
+        #[test]
+        fn a_priced_run_still_publishes_the_bare_number() {
+            let metrics = RunMetrics {
+                cost: Some(RunCost::Priced { usd: 0.42 }),
+                ..RunMetrics::default()
+            };
+
+            let json = serde_json::to_value(&metrics).unwrap();
+
+            assert_eq!(json["cost_usd"], 0.42);
+            assert_eq!(json["cost"]["kind"], "priced");
+        }
+
+        /// Only a harness that prices its runs ever wrote a number here, so a report
+        /// carrying one is a priced run however old the release that wrote it.
+        #[test]
+        fn a_report_written_before_a_run_could_say_why_it_has_no_price_reads_as_priced() {
+            let metrics: RunMetrics = serde_json::from_value(serde_json::json!({ "cost_usd": 0.42 })).unwrap();
+
+            assert_eq!(metrics.cost, Some(RunCost::Priced { usd: 0.42 }));
+        }
+
+        #[test]
+        fn a_report_that_says_why_a_run_has_no_price_is_read_over_the_bare_number() {
+            let metrics: RunMetrics = serde_json::from_value(serde_json::json!({
+                "cost": { "kind": "unpriced", "harness": "codex" },
+                "cost_usd": 0.42
+            }))
+            .unwrap();
+
+            assert_eq!(
+                metrics.cost,
+                Some(RunCost::Unpriced {
+                    harness: "codex".to_string()
+                })
+            );
         }
     }
 

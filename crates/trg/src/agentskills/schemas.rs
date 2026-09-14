@@ -282,7 +282,7 @@ mod tests {
                 input_tokens: None,
                 output_tokens: None,
                 cached_tokens: None,
-                cost_usd: None,
+                cost: None,
                 final_text: String::new(),
                 exit_code: None,
                 failure_kind: None,

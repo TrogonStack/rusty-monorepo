@@ -1599,8 +1599,9 @@ fn validate_timing_file(path: &Path, timing: &TimingFile, errors: &mut Validatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::budget::RunCost;
     use crate::agentskills::report::CacheTokens;
-    use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus};
+    use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus, Runner};
     use crate::fs::testutil::MemFS;
     use std::fs;
     use tempfile::tempdir;
@@ -2052,7 +2053,7 @@ mod tests {
             input_tokens: Some(700),
             output_tokens: Some(300),
             cached_tokens: Some(CacheTokens::parse(Some(50), None).unwrap()),
-            cost_usd: Some(0.42),
+            cost: Some(RunCost::Priced { usd: 0.42 }),
             final_text: "done".to_string(),
             read_only_fixture_violations: Vec::new(),
         };
@@ -2066,7 +2067,79 @@ mod tests {
         assert_eq!(timing.input_tokens, Some(700));
         assert_eq!(timing.output_tokens, Some(300));
         assert_eq!(timing.cached_tokens, Some(CacheTokens::parse(Some(50), None).unwrap()));
-        assert_eq!(timing.cost_usd, Some(0.42));
+        assert_eq!(timing.cost, Some(RunCost::Priced { usd: 0.42 }));
+    }
+
+    /// A harness that prices none of its runs and a harness that priced every run but this
+    /// one are two different facts about a bill. An absent number carries neither, and the
+    /// reader totalling a mixed history adds it as a zero.
+    #[test]
+    fn a_timing_file_for_a_harness_that_prices_nothing_names_the_harness() {
+        let tmp = tempdir().unwrap();
+        let timing_path = tmp.path().join("run").join("timing.json");
+        let outcome = EvalRunOutcome {
+            cost: Runner::Codex.pricing().price(None),
+            ..priced_outcome()
+        };
+
+        write_timing_file(&timing_path, &outcome).unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(&fs::read_to_string(&timing_path).unwrap()).unwrap();
+        assert_eq!(written["cost"]["kind"], "unpriced");
+        assert_eq!(written["cost"]["harness"], "codex");
+        assert!(
+            written.get("cost_usd").is_none(),
+            "a run nobody priced has no number to publish under the field that only ever held one"
+        );
+        assert_eq!(
+            read_timing_file(&timing_path).unwrap().cost,
+            Some(RunCost::Unpriced {
+                harness: "codex".to_string()
+            })
+        );
+    }
+
+    /// The field an earlier release wrote is the field its readers still look at, so a run
+    /// that carries a price keeps publishing one under that name.
+    #[test]
+    fn a_timing_file_for_a_priced_run_still_publishes_the_bare_number() {
+        let tmp = tempdir().unwrap();
+        let timing_path = tmp.path().join("run").join("timing.json");
+
+        write_timing_file(&timing_path, &priced_outcome()).unwrap();
+
+        let written: serde_json::Value = serde_json::from_str(&fs::read_to_string(&timing_path).unwrap()).unwrap();
+        assert_eq!(written["cost_usd"], 0.42);
+        assert_eq!(written["cost"]["kind"], "priced");
+    }
+
+    /// Only a harness that prices its runs ever wrote this number, so a file carrying one
+    /// is a priced run however old the release that wrote it.
+    #[test]
+    fn a_timing_file_written_before_a_run_could_say_why_it_has_no_price_reads_as_priced() {
+        let tmp = tempdir().unwrap();
+        let timing_path = tmp.path().join("timing.json");
+        fs::write(&timing_path, r#"{ "duration_ms": 2500, "cost_usd": 0.42 }"#).unwrap();
+
+        let timing = read_timing_file(&timing_path).unwrap();
+
+        assert_eq!(timing.cost, Some(RunCost::Priced { usd: 0.42 }));
+    }
+
+    fn priced_outcome() -> EvalRunOutcome {
+        EvalRunOutcome {
+            status: RunStatus::Completed,
+            failure_kind: None,
+            duration_ms: 2500,
+            exit_code: Some(0),
+            total_tokens: Some(1000),
+            input_tokens: Some(700),
+            output_tokens: Some(300),
+            cached_tokens: None,
+            cost: Runner::ClaudeCode.pricing().price(Some(0.42)),
+            final_text: "done".to_string(),
+            read_only_fixture_violations: Vec::new(),
+        }
     }
 
     #[test]

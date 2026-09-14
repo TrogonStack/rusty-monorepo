@@ -3503,7 +3503,7 @@ mod tests {
                 input_tokens: None,
                 output_tokens: None,
                 cached_tokens: None,
-                cost_usd: None,
+                cost: None,
             },
             cache: None,
             skill_integrity: None,

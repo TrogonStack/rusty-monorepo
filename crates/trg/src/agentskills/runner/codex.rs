@@ -101,7 +101,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
 
     if captured.timed_out {
         let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
-        let outcome = timeout_outcome(timeout_ms, captured.exit_code);
+        let outcome = timeout_outcome(Runner::Codex, timeout_ms, captured.exit_code);
         write_timing(request, &outcome)?;
         return Ok(outcome);
     }
@@ -142,7 +142,7 @@ fn parse_outcome(
     let text = match std::str::from_utf8(stdout) {
         Ok(text) => text,
         Err(_) => {
-            return runner_failure_outcome(wall_ms, exit_code, final_text);
+            return runner_failure_outcome(Runner::Codex, wall_ms, exit_code, final_text);
         }
     };
 
@@ -162,11 +162,11 @@ fn parse_outcome(
     }
 
     let Some(terminal) = terminal else {
-        return runner_failure_outcome(wall_ms, exit_code, final_text);
+        return runner_failure_outcome(Runner::Codex, wall_ms, exit_code, final_text);
     };
 
     if !exit_ok {
-        return runner_failure_outcome(wall_ms, exit_code, final_text);
+        return runner_failure_outcome(Runner::Codex, wall_ms, exit_code, final_text);
     }
 
     let usage = terminal.get("usage");
@@ -191,7 +191,7 @@ fn parse_outcome(
         input_tokens,
         output_tokens,
         cached_tokens,
-        None,
+        Runner::Codex.pricing().price(None),
         final_text,
     )
 }

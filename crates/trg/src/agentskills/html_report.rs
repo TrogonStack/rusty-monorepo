@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::budget::RunCost;
 use super::eval_suite_drift::load_report_document;
 use super::evals::Result;
 use super::grading::{AssertionGradeResult, GraderInfo, GraderKind, GradingFile, GradingSummary};
@@ -566,7 +567,7 @@ fn render_run_metrics(run: &RunRecord) -> String {
     if let Some(total_tokens) = run.metrics.total_tokens {
         parts.push(format!("{total_tokens} tokens"));
     }
-    if let Some(cost_usd) = run.metrics.cost_usd {
+    if let Some(cost_usd) = run.metrics.cost.as_ref().and_then(RunCost::usd) {
         parts.push(format!("${cost_usd:.4}"));
     }
     if let Some(exit_code) = run.metrics.exit_code {

@@ -17,7 +17,7 @@ pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome
 
     if captured.timed_out {
         let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
-        return Ok(timeout_outcome(timeout_ms, captured.exit_code));
+        return Ok(timeout_outcome(Runner::ClaudeCode, timeout_ms, captured.exit_code));
     }
 
     let exit_ok = captured.exit_code == Some(0);
@@ -38,6 +38,7 @@ pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome
 
     if !exit_ok || !has_result {
         return Ok(runner_failure_outcome(
+            Runner::ClaudeCode,
             captured.duration_ms,
             captured.exit_code,
             final_text,

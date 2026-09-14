@@ -96,6 +96,10 @@
           "total": 300,
           "input": 200,
           "output": 100,
+          "cost": {
+            "kind": "whole",
+            "usd": 0.01
+          },
           "cost_usd": 0.01
         },
         "missing_grading": 0,
