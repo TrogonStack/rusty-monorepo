@@ -338,6 +338,10 @@
       },
       "type": "object"
     },
+    "CompanionSkill": {
+      "description": "A skill directory a case stages beside the one under test.\n\nDeclared relative to the skill directory, the way `files` and `scaffold` are. That is\nalso what settles the skill-trust question: `validate_relative_path` refuses an absolute\npath and refuses one that climbs out, so a companion always resolves inside the skill\ndirectory the trust gate already admitted. Staging one therefore executes against no\ndirectory the operator has not already answered for, and the gate is satisfied by\nconstruction rather than skipped.",
+      "type": "string"
+    },
     "ConversationHistory": {
       "allOf": [
         {
@@ -390,6 +394,13 @@
             }
           ],
           "description": "How many times this case is drawn, for a case whose stability is the question or\nwhose cost makes the suite default too expensive.\n\nYields to an explicit `--attempts`, so an operator can still force a cheap smoke\npass or a deep one over a whole suite. Absent means the case takes the pass default."
+        },
+        "companion_skills": {
+          "description": "Other skill directories staged beside the one under test, present only to be passed\nover. See [`CompanionSkill`].\n\nOnly an unannounced case may declare them, and a case that declares them anyway is\nrefused when the suite loads rather than at the point one would have been staged.\nAn announced prompt names the skill and the directory it sits in, so it has already\nmade the routing decision a distractor exists to leave open; staging one would put a\nskill in the workspace that the prompt ruled out before the run began. Refusing it\nwhere the suite is read means both authoring layouts are covered by one check and\nthe case never costs a run to find out, which the run-time refusals cannot claim:\nthose exist for facts only the chosen harness can supply.",
+          "items": {
+            "$ref": "#/$defs/CompanionSkill"
+          },
+          "type": "array"
         },
         "conversation_history": {
           "anyOf": [

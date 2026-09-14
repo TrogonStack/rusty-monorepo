@@ -998,6 +998,16 @@ impl RunExecution<'_> {
             },
         };
 
+        let companion_hash =
+            match crate::agentskills::companion_skills::companion_digest(self.skill_path, &case.companion_skills) {
+                Ok(digest) => digest.map(|digest| digest.as_str().to_string()),
+                Err(e) => {
+                    eprintln!("Run {}: failed to hash companion skills: {}", run.id, e);
+                    run.status = "failed".to_string();
+                    return;
+                }
+            };
+
         let resolved_model = effective_model(case, self.runner_model);
         run.runner_model = resolved_model.cloned();
 
@@ -1029,6 +1039,7 @@ impl RunExecution<'_> {
             tool_grant: tool_grant.clone(),
             skill_staging: self.skill_staging,
             scaffold_hash,
+            companion_hash,
         };
         let reuse_input = ReuseKeyInput::of(&key_input);
         let cache_key = CacheKey::from_input(&key_input);

@@ -124,11 +124,20 @@ already made the routing decision for the run. Set
   "files": ["evals/files/sales.csv"],
   "tags": ["triggering"],
   "skill_disclosure": "unannounced",
+  "companion_skills": ["evals/companions/pdf-forms", "evals/companions/release-notes"],
   "graders": [
     { "type": "skill_used" }
   ]
 }
 ```
+
+`companion_skills` is the other half of the same question. A workspace holding
+only the skill under test answers the routing decision for the run: there was
+nothing else to reach for, so a skill that won reads the same as a skill that
+was the only option. Each path names a skill directory of its own inside the
+skill directory, with a `SKILL.md` whose `description` is plausible enough that
+passing it over is a decision. They stage as siblings of the skill under test,
+in every arm, and only an unannounced case may declare them.
 
 Two things about `skill_used` that decide whether this case says anything:
 

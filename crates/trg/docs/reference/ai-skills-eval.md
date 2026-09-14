@@ -619,6 +619,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `assertions` | string[] | no | Natural-language checks, retained for compatibility. `graders` is the supported mechanism. Under `--grader auto` (the default) and `--grader none`, graded mechanically when a known pattern matches and recorded ungraded when none does; `--grader llm` sends it to the judge and `--grader script` to the script grader. See [Prose assertions](#prose-assertions) |
 | `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
+| `companion_skills` | string[] | no | Relative paths to other skill directories inside the skill directory, staged beside the one under test so an unannounced case has something to pass over. Only an unannounced case may declare them. See [Skills staged only to be passed over](#skills-staged-only-to-be-passed-over) |
 | `tags` | string[] | no | Free-form labels. `--tag` selects by them. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `priority` | enum | no | `low`, `normal`, `high`, or `critical` |
 | `timeout_secs` | integer | no | Per-case runner timeout override |
@@ -1172,7 +1173,8 @@ produces a score. Such a case does widen the arm gap, and that is the author's
 declared intent rather than an accident of scaffolding: a triggering case is
 asking exactly whether the skill was reached for. Write it with
 `"skill_disclosure": "unannounced"` so the answer is the run's own, not the
-prompt's. See [Measuring triggering](#measuring-triggering).
+prompt's, and name `companion_skills` so the run had something else it could
+have reached for. See [Measuring triggering](#measuring-triggering).
 
 ### The LLM judge
 
@@ -1754,10 +1756,10 @@ handed. It cannot also measure whether the skill's own `description` wins the
 run's routing decision, because the prompt already made that decision. Those
 are two different questions, and `skill_disclosure` says which one a case asks.
 
-| `skill_disclosure` | Prompt | Skill staged at |
-| ------------------ | ------ | --------------- |
-| `announced` (default) | Names the staged directory, the skill `name`, and its `description` | `.skill/`, or `.old-skill/` in the `old_skill` arm |
-| `unannounced` | Says nothing about the skill | `skills/<skill-name>/` |
+| `skill_disclosure` | Prompt | Skill staged at | `companion_skills` |
+| ------------------ | ------ | --------------- | ------------------ |
+| `announced` (default) | Names the staged directory, the skill `name`, and its `description` | `.skill/`, or `.old-skill/` in the `old_skill` arm | Refused when the suite loads |
+| `unannounced` | Says nothing about the skill | `skills/<skill-name>/` | Staged as siblings under `skills/` |
 
 An unannounced case gets the same prompt in both arms, so the only difference
 between them is whether the skill is in the workspace. It is staged under a
@@ -1782,6 +1784,56 @@ announcing the skill, because such a case cannot pass or fail for the reason it
 was written. The `init` scaffold's `triggers-the-skill` case is unannounced for
 that reason, and its prompt is a placeholder: replace it with the words a user
 would actually use, naming neither the skill nor where it lives.
+
+### Skills staged only to be passed over
+
+An unannounced case asks whether the run reached for the skill on its own. A
+workspace holding exactly one skill answers that for it: there was nothing else
+to reach for, and a skill that won cannot be told apart from a skill that was
+the only option on offer. `companion_skills` names other skill directories to
+stage beside the one under test, so the decision is the run's own.
+
+```json
+{
+  "id": "reaches-for-the-skill",
+  "prompt": "I have a quarterly sales export in evals/files/sales.csv and I need the monthly revenue picture out of it.",
+  "expected_output": "The run locates the skill on its own and follows it rather than improvising.",
+  "files": ["evals/files/sales.csv"],
+  "skill_disclosure": "unannounced",
+  "companion_skills": ["evals/companions/pdf-forms", "evals/companions/release-notes"],
+  "graders": [{ "type": "skill_used" }]
+}
+```
+
+Each path is relative to the skill directory, the way `files` and `scaffold`
+are, and must be a skill directory in its own right: a `SKILL.md` carrying a
+`name` and a `description`, since the description is what a run routes on. Each
+one stages at `skills/<its own name>/`, a sibling of the skill under test, so a
+listing of the workspace reports them as peers and no prompt has to change.
+
+- Only an unannounced case may declare them. An announced prompt names the
+  skill and the directory it sits in, so it has already made the routing
+  decision a distractor exists to leave open. A companion on an announced case
+  is refused by name when the suite is read, before a run is spent on it.
+- Two companions carrying the same skill `name` would stage as one directory,
+  handing the run fewer skills to choose between than the case declares. That
+  is refused, naming both.
+- A companion carrying the skill under test's own `name` would replace the
+  skill being measured, and is refused for the same reason. The `old_skill`
+  arm stages its revision under that revision's own name, which
+  `--allow-skill-name-mismatch` lets differ, so a companion wearing the older
+  name is refused in that arm too rather than staged over the revision the arm
+  was drawn to measure.
+- `--skill-staging` decides how they land, `symlink` or `copy`, exactly as it
+  does for the skill under test, and each companion's own eval suite directory
+  is withheld from the workspace the same way.
+- Every arm stages them, the `without_skill` arm included. The arms are meant
+  to differ in the skill under test and nothing else, so staging distractors in
+  only one of them would make the gap between the arms partly the gap between a
+  populated workspace and an empty one.
+- A companion is an input to the run. Editing one changes the case's cache key,
+  so the next pass draws the case again rather than serving the grade from
+  before the edit.
 
 ---
 
@@ -1889,8 +1941,12 @@ Running both arms by default doubles the runs of a pass that also leaves
 | Kind | CLI value | Runner behavior |
 | ---- | --------- | --------------- |
 | With skill | `with_skill` | Stages skill to `.skill/` in workspace; prompt prefixed with skill frontmatter. An unannounced case stages to `skills/<skill-name>/` and prefixes nothing |
-| Without skill | `without_skill` | Raw eval prompt; nothing staged |
+| Without skill | `without_skill` | Raw eval prompt; the skill under test is not staged |
 | Old skill | `old_skill` | Stages the `--old-skill-dir` revision to `.old-skill/` in the workspace; prompt prefixed with that revision's frontmatter |
+
+A case's `companion_skills` are staged in every kind, the one that stages no
+skill included, so the arms differ in the skill under test alone. See
+[Skills staged only to be passed over](#skills-staged-only-to-be-passed-over).
 
 ### The eval suite is withheld from the workspace
 

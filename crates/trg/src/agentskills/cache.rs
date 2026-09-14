@@ -119,6 +119,14 @@ pub struct CacheKeyInput {
     /// before this field readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaffold_hash: Option<String>,
+    /// What the case's companion skills held, for a case that declares any.
+    ///
+    /// The distractors decide what the run had to choose between, and nothing else here
+    /// notices one of them changing: `evals_hash` covers the bytes that name the path and
+    /// `skill_hash` is the digest of the skill under test. A case that declares none
+    /// serializes as it always did, which leaves entries written before this field readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_hash: Option<String>,
 }
 
 /// What a completed run has to match to be served to a run that asked for any completed
@@ -134,7 +142,8 @@ pub struct CacheKeyInput {
 ///
 /// It cannot forget the scaffold either, for the same reason it cannot forget the fixtures:
 /// both decide what was in the directory the run worked in, and a run answers only for the
-/// directory it was handed.
+/// directory it was handed. Nor the companion skills, which are in that directory too and
+/// are the very thing an unannounced case asks the run to choose between.
 ///
 /// Nor the tool grant, for the same reason again. What a run could reach decides what it
 /// could do, so serving a run made under one grant to a request made under another answers
@@ -153,6 +162,8 @@ pub struct ReuseKeyInput {
     #[serde(default)]
     pub scaffold_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_grant: Option<ToolGrant>,
 }
 
@@ -167,6 +178,7 @@ impl ReuseKeyInput {
             scenario: key_input.scenario,
             attempt: key_input.attempt,
             scaffold_hash: key_input.scaffold_hash.clone(),
+            companion_hash: key_input.companion_hash.clone(),
             tool_grant: key_input.tool_grant.clone(),
         }
     }
@@ -557,6 +569,7 @@ mod tests {
             tool_grant: None,
             skill_staging: SkillStaging::default(),
             scaffold_hash: None,
+            companion_hash: None,
         }
     }
 
@@ -600,6 +613,49 @@ mod tests {
         assert!(
             !serialized.contains("scaffold_hash"),
             "an absent scaffold must not reach the key: {serialized}"
+        );
+    }
+
+    /// The distractors are what an unannounced case asks the run to choose between, so a
+    /// run answers only for the set it was handed.
+    #[test]
+    fn a_run_handed_other_companion_skills_is_a_different_run() {
+        let base = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture");
+        let staged = CacheKeyInput {
+            companion_hash: Some("sha256:companions".to_string()),
+            ..base.clone()
+        };
+        let edited = CacheKeyInput {
+            companion_hash: Some("sha256:companions-edited".to_string()),
+            ..base.clone()
+        };
+
+        assert_ne!(
+            CacheKey::from_input(&staged),
+            CacheKey::from_input(&edited),
+            "an edited distractor is not the distractor the run passed over"
+        );
+        assert_ne!(
+            CacheKey::from_input(&staged),
+            CacheKey::from_input(&base),
+            "a run that had something to choose between is not the run that had nothing"
+        );
+        assert_ne!(
+            ReuseKeyInput::of(&staged),
+            ReuseKeyInput::of(&edited),
+            "--reuse-completed cannot forget it either"
+        );
+    }
+
+    /// A case that declares no companions has to key exactly as it did before the field
+    /// existed, or every entry already on disk is evicted for nothing.
+    #[test]
+    fn a_case_with_no_companion_skills_keys_as_it_did_before() {
+        let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture");
+        let serialized = serde_json::to_string(&input).unwrap();
+        assert!(
+            !serialized.contains("companion_hash"),
+            "an absent companion set must not reach the key: {serialized}"
         );
     }
 

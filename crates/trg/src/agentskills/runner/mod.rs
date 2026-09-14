@@ -26,6 +26,7 @@ use thiserror::Error;
 
 use super::budget::{HarnessPricing, RunCost};
 use super::case_directories::EVAL_CASE_PROMPT_FILE_NAME;
+use super::companion_skills::{resolve_companions, CompanionFailure, StagedCompanion};
 use super::errors::SkillError;
 use super::evals::{EvalCase, EvalDirName, EvalError, EVAL_SUITE_MANIFEST_NAME};
 use super::mocks::MaterializedMcpConfig;
@@ -514,6 +515,16 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
         )?;
     }
 
+    for companion in companions_to_stage(request)? {
+        stage_skill_into_workspace(
+            companion.source(),
+            request.workspace_dir,
+            companion.directory().as_str(),
+            request.skill_staging,
+            &request.eval_dir,
+        )?;
+    }
+
     for fixture in &request.eval.files {
         stage_eval_file(request.skill_path, request.workspace_dir, fixture.as_str())?;
         if fixture.is_read_only() {
@@ -616,6 +627,55 @@ fn skill_to_stage<'a>(request: &'a EvalRunRequest<'a>) -> Result<Option<SkillSta
             }
         }),
     )
+}
+
+/// The companions this run stages, in every arm including the one with no skill.
+///
+/// The without-skill arm gets them too, and that is what keeps the delta a delta. The arms
+/// are supposed to differ in the skill under test and nothing else; staging distractors in
+/// only one of them would make them differ in the skill under test plus however many other
+/// skills the case declared, and the gap between the two would then be partly the gap
+/// between a workspace with three skills and a workspace with none. With the companions in
+/// both, what the control measures is a run that had everything the treatment had except
+/// the skill being scored, which is the comparison the arm exists to make.
+///
+/// The old-skill arm follows for the same reason: it compares two versions of one skill,
+/// and neither version is being asked to compete against a different set of distractors.
+///
+/// `skills/<name>/` is derived from the skill under test's own `SKILL.md` in every arm,
+/// including the one that stages no skill, so a companion that would land on it is refused
+/// on the strength of what the case declares rather than on which arm happened to run. The
+/// arm's own staged directory is reserved alongside it, because the `old_skill` arm stages
+/// that revision under the revision's own name and `--allow-skill-name-mismatch` lets that
+/// name differ: without it, a companion wearing the older name would be staged over the
+/// revision the arm exists to measure, and the arm would report on the companion.
+fn companions_to_stage(request: &EvalRunRequest) -> Result<Vec<StagedCompanion>, RunnerError> {
+    if request.eval.companion_skills.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let summary = SkillSummary::from_skill_md(request.skill_md).map_err(skill_error_to_runner)?;
+    let mut reserved = vec![StagedSkillDir::companion(&summary.name)];
+    if let Some(plan) = skill_to_stage(request)? {
+        if !reserved.iter().any(|taken| taken.as_str() == plan.directory.as_str()) {
+            reserved.push(plan.directory);
+        }
+    }
+
+    resolve_companions(
+        &crate::fs::RealFS,
+        request.skill_path,
+        &request.eval.companion_skills,
+        &reserved,
+    )
+    .map_err(companion_error_to_runner)
+}
+
+fn companion_error_to_runner(err: CompanionFailure) -> RunnerError {
+    RunnerError::InvalidOutput {
+        program: "trg".to_string(),
+        detail: err.to_string(),
+    }
 }
 
 /// What this run staged, for the transcript to carry to whoever grades it.
@@ -1627,6 +1687,258 @@ mod workspace_tests {
                 "{staging:?}: the skill must be discoverable from the workspace"
             );
         }
+    }
+
+    fn write_companion_skill(dir: &Path, name: &str, description: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n# Companion\n"),
+        )
+        .unwrap();
+    }
+
+    fn companion_fixture() -> (tempfile::TempDir, PathBuf, EvalCase) {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(&skill_path).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        write_companion_skill(
+            &skill_path.join("evals/companions/other-skill"),
+            "other-skill",
+            "Does a different job entirely.",
+        );
+        let case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "triggers-the-skill",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "skill_disclosure": "unannounced",
+            "companion_skills": ["evals/companions/other-skill"],
+        }))
+        .unwrap();
+        (temp, skill_path, case)
+    }
+
+    /// A workspace holding one skill answers the routing question for the run. The
+    /// companion is what leaves the question open, so it has to arrive as a peer of the
+    /// skill under test rather than anywhere a prompt would have to point at.
+    #[test]
+    fn an_unannounced_case_stages_its_companions_beside_the_skill_under_test() {
+        for staging in [SkillStaging::Symlink, SkillStaging::Copy] {
+            let (temp, skill_path, case) = companion_fixture();
+            let workspace = temp.path().join("ws");
+            let transcript = workspace.join("transcript.jsonl");
+            let stderr = workspace.join("stderr.log");
+            let skill_md = std::fs::read_to_string(skill_path.join("SKILL.md")).unwrap();
+            let mut request = test_request(
+                &case,
+                ScenarioKind::WithSkill,
+                &skill_md,
+                &skill_path,
+                &workspace,
+                &transcript,
+                &stderr,
+                None,
+                None,
+            );
+            request.skill_staging = staging;
+
+            let prepared = prepare_workspace(&request, Runner::ClaudeCode).unwrap();
+
+            assert!(
+                workspace.join("skills/test-skill/SKILL.md").is_file(),
+                "{staging:?}: the skill under test still has to be there"
+            );
+            assert!(
+                workspace.join("skills/other-skill/SKILL.md").is_file(),
+                "{staging:?}: the companion has to be a peer of it"
+            );
+            assert!(
+                !prepared.prompt.contains("other-skill"),
+                "{staging:?}: a distractor the prompt names is not one the run had to pass over"
+            );
+        }
+    }
+
+    /// The control arm exists so the gap between the arms is the skill under test. Staging
+    /// the distractors in only one arm would make the gap the skill plus every other skill
+    /// the case declared, which is not the quantity the arm was built to isolate.
+    #[test]
+    fn the_without_skill_arm_gets_the_same_companions_so_the_arms_differ_only_in_the_skill() {
+        let (temp, skill_path, case) = companion_fixture();
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let skill_md = std::fs::read_to_string(skill_path.join("SKILL.md")).unwrap();
+        let request = test_request(
+            &case,
+            ScenarioKind::WithoutSkill,
+            &skill_md,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        prepare_workspace(&request, Runner::ClaudeCode).unwrap();
+
+        assert!(
+            workspace.join("skills/other-skill/SKILL.md").is_file(),
+            "the control arm has to hold the same distractors the treatment arm does"
+        );
+        assert!(
+            !workspace.join("skills/test-skill").exists(),
+            "the one thing the control arm must not hold is the skill under test"
+        );
+    }
+
+    /// Two companions landing on one directory would stage as one skill, so the run would
+    /// be handed fewer choices than the case declares while the case still reads as having
+    /// declared them.
+    #[test]
+    fn two_companions_that_stage_as_one_directory_stop_the_run_rather_than_overwrite() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(&skill_path).unwrap();
+        let skill_md = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+        std::fs::write(skill_path.join("SKILL.md"), skill_md).unwrap();
+        write_companion_skill(&skill_path.join("evals/a/other-skill"), "other-skill", "One of two.");
+        write_companion_skill(
+            &skill_path.join("evals/b/other-skill"),
+            "other-skill",
+            "The other of two.",
+        );
+        let case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "triggers-the-skill",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "skill_disclosure": "unannounced",
+            "companion_skills": ["evals/a/other-skill", "evals/b/other-skill"],
+        }))
+        .unwrap();
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            skill_md,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        let error = prepare_workspace(&request, Runner::ClaudeCode).expect_err("the collision stops the run");
+
+        assert!(
+            error.to_string().contains("evals/b/other-skill"),
+            "the refusal has to name the companion that collided: {error}"
+        );
+    }
+
+    /// The `old_skill` arm stages the older revision under that revision's own name, which
+    /// `--allow-skill-name-mismatch` lets differ from the current one. A companion wearing
+    /// the older name would be staged over it, and the arm would report on the companion
+    /// rather than on the revision it was drawn to measure.
+    #[test]
+    fn a_companion_wearing_the_old_revisions_name_is_refused_rather_than_staged_over_it() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(&skill_path).unwrap();
+        let skill_md = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+        std::fs::write(skill_path.join("SKILL.md"), skill_md).unwrap();
+        let old_skill_path = temp.path().join("old-skill");
+        let old_skill_md = "---\nname: renamed-skill\ndescription: The revision before the rename.\n---\n# Skill\n";
+        std::fs::create_dir_all(&old_skill_path).unwrap();
+        std::fs::write(old_skill_path.join("SKILL.md"), old_skill_md).unwrap();
+        write_companion_skill(
+            &skill_path.join("evals/companions/renamed-skill"),
+            "renamed-skill",
+            "Wears the name the skill answered to before the rename.",
+        );
+        let case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "triggers-the-skill",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "skill_disclosure": "unannounced",
+            "companion_skills": ["evals/companions/renamed-skill"],
+        }))
+        .unwrap();
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::OldSkill,
+            skill_md,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            Some(old_skill_md),
+            Some(old_skill_path.as_path()),
+        );
+
+        let error = prepare_workspace(&request, Runner::ClaudeCode).expect_err("the collision stops the run");
+
+        assert!(
+            error.to_string().contains("evals/companions/renamed-skill"),
+            "the refusal has to name the companion: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("skills/renamed-skill/SKILL.md")).unwrap(),
+            old_skill_md,
+            "the revision the arm measures has to be the one still standing"
+        );
+    }
+
+    /// A directory with no `SKILL.md` stages as a folder no run can route to, so a case
+    /// declaring one would read as offering a choice while offering nothing to choose.
+    #[test]
+    fn a_companion_that_is_not_a_skill_directory_stops_the_run() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals/companions/empty")).unwrap();
+        let skill_md = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+        std::fs::write(skill_path.join("SKILL.md"), skill_md).unwrap();
+        let case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "triggers-the-skill",
+            "prompt": "do the thing",
+            "expected_output": "done",
+            "skill_disclosure": "unannounced",
+            "companion_skills": ["evals/companions/empty"],
+        }))
+        .unwrap();
+        let workspace = temp.path().join("ws");
+        let transcript = workspace.join("transcript.jsonl");
+        let stderr = workspace.join("stderr.log");
+        let request = test_request(
+            &case,
+            ScenarioKind::WithSkill,
+            skill_md,
+            &skill_path,
+            &workspace,
+            &transcript,
+            &stderr,
+            None,
+            None,
+        );
+
+        let error = prepare_workspace(&request, Runner::ClaudeCode).expect_err("an invalid companion stops the run");
+
+        assert!(
+            error.to_string().contains("evals/companions/empty"),
+            "the refusal has to name the companion: {error}"
+        );
     }
 
     /// The suite carries every case's expected output and its graders' literal patterns.
