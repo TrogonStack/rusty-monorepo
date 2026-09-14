@@ -4,6 +4,7 @@ use super::grading::{self, GradingFile};
 use super::model_name::ModelName;
 use super::outputs::guess_mime_type;
 use super::runner::TimingFile;
+use super::sampling::AttemptCount;
 use super::tool_grant::ToolGrant;
 use super::validation::{ValidationError, ValidationErrors};
 use super::workspace_scaffold::WorkspaceScaffold;
@@ -788,6 +789,14 @@ pub struct EvalCase {
     pub priority: Option<EvalPriority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u32>,
+    /// How many times this case is drawn, for a case whose stability is the question or
+    /// whose cost makes the suite default too expensive.
+    ///
+    /// Yields to an explicit `--attempts`, so an operator can still force a cheap smoke
+    /// pass or a deep one over a whole suite. Absent means the case takes the pass default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<AttemptCount>,
+
     /// The model this case wants, for a case whose question is about one model in
     /// particular.
     ///
@@ -847,6 +856,19 @@ pub fn parse_eval_suite(content: &str) -> Result<EvalSuite> {
 
 pub fn effective_timeout_secs(case: &EvalCase, global_timeout_secs: Option<u64>) -> Option<u64> {
     case.timeout_secs.map(u64::from).or(global_timeout_secs)
+}
+
+/// How many draws a run of this case takes, once the case's own count and the operator's
+/// `--attempts` are combined.
+///
+/// The operator wins when they said anything at all, which is why `operator_attempts` is
+/// optional rather than defaulted at the CLI: a count defaulted there is indistinguishable
+/// from one an operator typed, and a case pinning five draws would then silently override
+/// an operator asking for one.
+pub fn effective_attempts(case: &EvalCase, operator_attempts: Option<AttemptCount>) -> AttemptCount {
+    operator_attempts
+        .or(case.attempts)
+        .unwrap_or_else(AttemptCount::recommended)
 }
 
 /// The model a run of this case executes under, once the case's own choice and the
@@ -2081,6 +2103,7 @@ mod tests {
 
     fn sample_eval_case(id: &str, prompt: &str, expected_output: &str) -> EvalCase {
         EvalCase {
+            attempts: None,
             model: None,
             id: EvalCaseId(id.to_string()),
             name: None,
@@ -2490,6 +2513,45 @@ mod tests {
 }"#;
         let suite = parse_eval_suite(far_beyond_any_release).expect("schema_version 99 must no longer be rejected");
         assert_eq!(suite.schema_version, 99);
+    }
+
+    /// A case whose stability is the question needs more draws than the pass default, and a
+    /// case that is expensive needs fewer, without either one dictating the whole suite.
+    #[test]
+    fn a_case_can_pin_its_own_draw_count() {
+        let mut eval = sample_eval_case("one", "prompt long enough here", "output long");
+
+        eval.attempts = Some(AttemptCount::parse(7).unwrap());
+        assert_eq!(effective_attempts(&eval, None).count(), 7);
+
+        eval.attempts = None;
+        assert_eq!(effective_attempts(&eval, None), AttemptCount::recommended());
+    }
+
+    /// An operator forcing a cheap smoke pass or a deep one has to be able to override every
+    /// case, which is why the CLI count is optional rather than defaulted: a defaulted count
+    /// is indistinguishable from one they typed.
+    #[test]
+    fn an_operator_who_names_a_count_overrides_every_case_that_pinned_one() {
+        let mut eval = sample_eval_case("one", "prompt long enough here", "output long");
+        eval.attempts = Some(AttemptCount::parse(7).unwrap());
+
+        assert_eq!(effective_attempts(&eval, Some(AttemptCount::single())).count(), 1);
+    }
+
+    #[test]
+    fn a_suite_cannot_pin_a_case_to_zero_draws() {
+        let refused = serde_json::from_value::<EvalSuite>(serde_json::json!({
+            "skill_name": "demo",
+            "evals": [{
+                "id": "one",
+                "prompt": "a prompt long enough to pass",
+                "expected_output": "an output long enough",
+                "attempts": 0
+            }]
+        }));
+
+        assert!(refused.is_err());
     }
 
     /// A case that asks about one model in particular has to get that model even when the

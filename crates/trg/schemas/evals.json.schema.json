@@ -1,5 +1,11 @@
 {
   "$defs": {
+    "AttemptCount": {
+      "description": "How many draws are taken of this cell. At least 1: a cell nobody draws is not reported.",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "type": "integer"
+    },
     "CaseGrader": {
       "description": "A grader as a case declares it, together with the arm scope that decides\nwhether its result counts toward the score.",
       "oneOf": [
@@ -350,6 +356,17 @@
             "$ref": "#/$defs/NonEmptyString"
           },
           "type": "array"
+        },
+        "attempts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AttemptCount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How many times this case is drawn, for a case whose stability is the question or\nwhose cost makes the suite default too expensive.\n\nYields to an explicit `--attempts`, so an operator can still force a cheap smoke\npass or a deep one over a whole suite. Absent means the case takes the pass default."
         },
         "conversation_history": {
           "anyOf": [

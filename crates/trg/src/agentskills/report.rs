@@ -13,7 +13,7 @@ use super::budget::{PassSpend, FAILURE_KIND_BUDGET};
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
-use super::evals::{EvalDirName, EvalError, EvalPriority, EvalSuite, Result};
+use super::evals::{effective_attempts, EvalDirName, EvalError, EvalPriority, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
@@ -209,7 +209,8 @@ pub struct BuildReportOptions {
     pub report_id: Option<String>,
     pub generated_at: Option<String>,
     pub iteration: Option<u32>,
-    pub attempts: AttemptCount,
+    /// What the operator asked for, or `None` when they said nothing and each case decides.
+    pub attempts: Option<AttemptCount>,
     /// Filesystem path used to read the old skill directory (for hashing).
     pub old_skill_path: Option<PathBuf>,
     /// User-supplied path recorded in report metadata.
@@ -243,7 +244,7 @@ impl Default for BuildReportOptions {
             report_id: None,
             generated_at: None,
             iteration: None,
-            attempts: AttemptCount::single(),
+            attempts: Some(AttemptCount::single()),
             old_skill_path: None,
             user_old_skill_path: None,
             runner: None,
@@ -931,7 +932,7 @@ pub fn build_report_bundle(
         &eval_slugs,
         options.skill_staging,
     );
-    let summaries = build_summaries(scenarios, suite.evals.len(), attempts);
+    let summaries = build_summaries(scenarios, &suite, attempts);
 
     let report_id = options.report_id.unwrap_or_else(generate_report_id);
     let generated_at = options
@@ -1188,7 +1189,7 @@ fn build_runs(
     scenarios: &[ScenarioKind],
     model_config_label: &str,
     iteration: u32,
-    attempts: AttemptCount,
+    attempts: Option<AttemptCount>,
     eval_slugs: &std::collections::HashMap<String, String>,
     _skill_staging: SkillStaging,
 ) -> (Vec<RunRecord>, Vec<String>) {
@@ -1202,8 +1203,10 @@ fn build_runs(
             .cloned()
             .unwrap_or_else(|| super::layout::eval_slug(eval_case.id.as_str()));
 
+        let draws = effective_attempts(eval_case, attempts);
+
         for scenario in scenarios {
-            for attempt in attempts.draws() {
+            for attempt in draws.draws() {
                 let run_id = format!("run-{run_number:03}");
                 let workspace_path = format!("runs/{run_id}/workspace");
                 let outputs_path = format!("{workspace_path}/{OUTPUTS_DIR}");
@@ -1212,7 +1215,7 @@ fn build_runs(
                     &eval_slug,
                     scenario.as_str(),
                     attempt,
-                    attempts.count(),
+                    draws.count(),
                 );
                 workspace_dirs.push(workspace_path.clone());
                 runs.push(RunRecord {
@@ -1254,8 +1257,15 @@ fn build_runs(
     (runs, workspace_dirs)
 }
 
-fn build_summaries(scenarios: &[ScenarioKind], eval_count: usize, attempts: AttemptCount) -> SummariesSection {
-    let total_per_scenario = attempts.runs_for(eval_count);
+/// Counts the draws each case actually takes rather than multiplying one count by the case
+/// count, because a case can pin its own: a uniform multiplication would have the summary
+/// claim a run total the report does not contain.
+fn build_summaries(scenarios: &[ScenarioKind], suite: &EvalSuite, attempts: Option<AttemptCount>) -> SummariesSection {
+    let total_per_scenario: usize = suite
+        .evals
+        .iter()
+        .map(|case| effective_attempts(case, attempts).count() as usize)
+        .sum();
     SummariesSection {
         by_scenario: scenarios
             .iter()
@@ -1398,7 +1408,7 @@ mod tests {
             &scenarios,
             "ci-default",
             1,
-            AttemptCount::parse(3).unwrap(),
+            Some(AttemptCount::parse(3).unwrap()),
             &slugs,
             SkillStaging::Symlink,
         );
@@ -1431,7 +1441,7 @@ mod tests {
             &[ScenarioKind::WithSkill],
             "ci-default",
             1,
-            AttemptCount::parse(1).unwrap(),
+            Some(AttemptCount::parse(1).unwrap()),
             &slugs,
             SkillStaging::Symlink,
         );
@@ -1471,7 +1481,7 @@ mod tests {
             &[ScenarioKind::WithSkill],
             "ci-default",
             1,
-            AttemptCount::single(),
+            Some(AttemptCount::single()),
             &slugs,
             SkillStaging::Symlink,
         );
@@ -1489,7 +1499,7 @@ mod tests {
             &scenarios,
             "ci-default",
             2,
-            AttemptCount::single(),
+            Some(AttemptCount::single()),
             &slugs,
             SkillStaging::Symlink,
         );
@@ -1525,12 +1535,85 @@ mod tests {
     /// Every run is scaffolded as skipped, so more draws of a cell means more skipped
     /// runs. A summary that still counted cells would undercount the pass it describes,
     /// and a pass with no runner never rebuilds it, so the undercount is what ships.
+    fn suite_where_one_case_draws_more_than_the_other() -> EvalSuite {
+        serde_json::from_value(serde_json::json!({
+            "skill_name": "demo-skill",
+            "evals": [
+                { "id": "steady", "prompt": "prompt a", "expected_output": "output a", "attempts": 1 },
+                { "id": "flaky", "prompt": "prompt b", "expected_output": "output b", "attempts": 5 }
+            ]
+        }))
+        .unwrap()
+    }
+
+    /// The summary is read as the denominator of the pass, so a total multiplied out of one
+    /// count would claim runs the report does not contain the moment a case pins its own.
+    #[test]
+    fn a_summary_totals_the_draws_each_case_actually_takes() {
+        let summaries = build_summaries(
+            &[ScenarioKind::WithSkill],
+            &suite_where_one_case_draws_more_than_the_other(),
+            None,
+        );
+
+        assert_eq!(
+            summaries.by_scenario[0].total_runs, 6,
+            "one draw of the case pinned to one plus five of the case pinned to five"
+        );
+    }
+
+    /// `mirror_path` tells a reader where a run's outputs live, so it has to be cut from the
+    /// count that run's own cell took: cut from the pass-wide maximum, a case drawn once
+    /// would be filed under `attempt-1` and a reader following the unsuffixed path finds
+    /// nothing.
+    #[test]
+    fn a_mirror_path_is_suffixed_only_for_the_cases_that_were_drawn_more_than_once() {
+        let suite = suite_where_one_case_draws_more_than_the_other();
+        let slugs = suite
+            .evals
+            .iter()
+            .map(|case| (case.id.to_string(), super::super::layout::eval_slug(case.id.as_str())))
+            .collect();
+
+        let (runs, _) = build_runs(
+            &suite,
+            &[ScenarioKind::WithSkill],
+            "ci-default",
+            1,
+            None,
+            &slugs,
+            SkillStaging::Symlink,
+        );
+
+        let mirror_of = |case: &str| {
+            runs.iter()
+                .filter(|run| run.eval_case_id == case)
+                .map(|run| run.mirror_path.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let steady = mirror_of("steady");
+        assert_eq!(steady.len(), 1, "the case pinned to one draw is drawn once");
+        assert!(
+            !steady[0].contains("attempt-"),
+            "one draw has nothing to be told apart from: {}",
+            steady[0]
+        );
+
+        let flaky = mirror_of("flaky");
+        assert_eq!(flaky.len(), 5, "the case pinned to five draws is drawn five times");
+        assert!(
+            flaky.iter().all(|path| path.contains("attempt-")),
+            "five draws need telling apart: {flaky:?}"
+        );
+    }
+
     #[test]
     fn build_summaries_counts_every_drawn_run_as_skipped() {
         let summaries = build_summaries(
             &[ScenarioKind::WithSkill],
-            2,
-            AttemptCount::parse(3).expect("three attempts"),
+            &sample_suite(),
+            Some(AttemptCount::parse(3).expect("three attempts")),
         );
 
         let scenario = &summaries.by_scenario[0];
@@ -1545,8 +1628,8 @@ mod tests {
     fn build_summaries_counts_skipped_runs_per_scenario() {
         let summaries = build_summaries(
             &[ScenarioKind::WithSkill, ScenarioKind::OldSkill],
-            2,
-            AttemptCount::single(),
+            &sample_suite(),
+            Some(AttemptCount::single()),
         );
 
         assert_eq!(summaries.by_scenario.len(), 2);
@@ -1587,7 +1670,7 @@ mod tests {
             &[ScenarioKind::OldSkill],
             "ci-default",
             1,
-            AttemptCount::single(),
+            Some(AttemptCount::single()),
             &eval_slugs,
             SkillStaging::Symlink,
         );

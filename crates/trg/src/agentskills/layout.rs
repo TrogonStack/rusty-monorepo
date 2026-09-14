@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::evals::{EvalCase, EvalError, EvalSuite, Result};
-use super::report::{ReportBundle, RunRecord};
+use super::report::{ReportBundle, RunRecord, ScenarioKind};
 
 /// Maps docs-layout eval slugs to canonical run directories under the report bundle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,7 +219,34 @@ fn iteration_exists_error(iteration_dir: &Path, iteration: u32) -> Result<()> {
     )))
 }
 
-pub fn build_alias_index(bundle: &ReportBundle, slugs: &HashMap<String, String>, attempts: u32) -> AliasIndex {
+/// How many draws each (case, scenario) cell of a report actually took.
+///
+/// Read back from the runs rather than taken from the operator's `--attempts`, because a
+/// case can pin its own count. Keyed on the cell and not on the pass, so a case drawn once
+/// still lands in an unsuffixed scenario directory even when another case in the same pass
+/// was drawn five times.
+pub struct DrawsPerCell(HashMap<(String, ScenarioKind), u32>);
+
+impl DrawsPerCell {
+    pub fn of(runs: &[RunRecord]) -> Self {
+        let mut draws: HashMap<(String, ScenarioKind), u32> = HashMap::new();
+        for run in runs {
+            let cell = (run.eval_case_id.clone(), run.scenario_id);
+            let highest = draws.entry(cell).or_insert(run.attempt);
+            *highest = (*highest).max(run.attempt);
+        }
+        Self(draws)
+    }
+
+    pub fn of_run(&self, run: &RunRecord) -> u32 {
+        self.0
+            .get(&(run.eval_case_id.clone(), run.scenario_id))
+            .copied()
+            .unwrap_or(1)
+    }
+}
+
+pub fn build_alias_index(bundle: &ReportBundle, slugs: &HashMap<String, String>, draws: &DrawsPerCell) -> AliasIndex {
     let mut evals: HashMap<String, EvalAliasEntry> = HashMap::new();
 
     for run in &bundle.document.runs {
@@ -235,7 +262,7 @@ pub fn build_alias_index(bundle: &ReportBundle, slugs: &HashMap<String, String>,
             scenarios: HashMap::new(),
         });
 
-        if attempts <= 1 {
+        if draws.of_run(run) <= 1 {
             entry.scenarios.insert(scenario_key, ScenarioAlias::Single(run_dir));
         } else {
             let attempt_key = format!("attempt-{}", run.attempt);
@@ -282,9 +309,9 @@ pub fn write_docs_mirror_layout(
         std::fs::write(&benchmark_path, "{}\n")?;
     }
 
-    let attempts = bundle.document.runs.iter().map(|run| run.attempt).max().unwrap_or(1);
+    let draws = DrawsPerCell::of(&bundle.document.runs);
 
-    let alias_index = build_alias_index(bundle, slugs, attempts);
+    let alias_index = build_alias_index(bundle, slugs, &draws);
     write_alias_index(report_dir, iteration, &alias_index)?;
 
     for run in &bundle.document.runs {
@@ -292,7 +319,7 @@ pub fn write_docs_mirror_layout(
             .get(&run.eval_case_id)
             .cloned()
             .unwrap_or_else(|| eval_slug(&run.eval_case_id));
-        write_scenario_mirror(report_dir, &iteration_dir, run, &slug, attempts)?;
+        write_scenario_mirror(report_dir, &iteration_dir, run, &slug, draws.of_run(run))?;
     }
 
     Ok(())
@@ -303,14 +330,14 @@ fn write_scenario_mirror(
     iteration_dir: &Path,
     run: &RunRecord,
     slug: &str,
-    attempts: u32,
+    draws: u32,
 ) -> Result<()> {
     let mirror_rel = run.mirror_path.trim_end_matches('/');
     let scenario_dir = if mirror_rel.starts_with("iteration-") {
         report_dir.join(mirror_rel)
     } else {
         let mut path = iteration_dir.join(eval_dir_name(slug)).join(run.scenario_id.as_str());
-        if attempts > 1 {
+        if draws > 1 {
             path = path.join(format!("attempt-{}", run.attempt));
         }
         path
@@ -561,6 +588,35 @@ mod tests {
         }
     }
 
+    /// Taken as the highest attempt number anywhere in the pass, a case drawn once would be
+    /// filed under `attempt-1` because some other case was drawn five times, and a reader
+    /// following the unsuffixed path it was promised finds nothing.
+    #[test]
+    fn a_cell_drawn_once_is_not_suffixed_because_another_cell_was_drawn_more() {
+        let run = |case: &str, attempt: u32| -> RunRecord {
+            serde_json::from_value(serde_json::json!({
+                "id": format!("run-{case}-{attempt}"),
+                "eval_case_id": case,
+                "eval_slug": case,
+                "scenario_id": "with_skill",
+                "iteration": 1,
+                "model_config_id": "ci-default",
+                "skill_revision_id": "current",
+                "attempt": attempt,
+                "status": "completed",
+                "paths": { "workspace": "w", "outputs": "o" },
+                "mirror_path": "",
+                "artifacts": [],
+                "metrics": {}
+            }))
+            .unwrap()
+        };
+        let draws = DrawsPerCell::of(&[run("steady", 1), run("flaky", 1), run("flaky", 2), run("flaky", 3)]);
+
+        assert_eq!(draws.of_run(&run("steady", 1)), 1);
+        assert_eq!(draws.of_run(&run("flaky", 1)), 3);
+    }
+
     #[test]
     fn mirror_layout_disambiguates_multiple_attempts() {
         use crate::agentskills::report::{BuildReportOptions, ScenarioKind};
@@ -593,7 +649,7 @@ mod tests {
             BuildReportOptions {
                 report_id: Some("attempts-report".to_string()),
                 iteration: Some(1),
-                attempts: AttemptCount::parse(2).unwrap(),
+                attempts: Some(AttemptCount::parse(2).unwrap()),
                 ..BuildReportOptions::default()
             },
         )
