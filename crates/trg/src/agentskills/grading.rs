@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use super::compare::{parse_winner, shuffle_swap, BlindLabel, ComparisonWinner};
 use super::evals::{EvalCase, EvalError, EvalSuite, Result};
 use super::graders::{
-    self, BaselineReference, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, TargetContent,
+    self, BaselineReference, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, GraderWeight, TargetContent,
     TargetDeclaration,
 };
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
@@ -68,7 +68,7 @@ pub struct GraderInfo {
     pub command: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AssertionGradeResult {
     #[serde(alias = "text")]
     #[schemars(length(min = 1))]
@@ -101,6 +101,12 @@ pub struct AssertionGradeResult {
     /// A single opinion has no split to report, and `passed` already carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub votes: Option<JudgeVoteTally>,
+    /// How much this result counts toward its case's score, relative to the
+    /// rest of the case. Absent whenever the declaring grader left it
+    /// unweighted, so an undeclared weight cannot be told apart in the
+    /// serialized form from a build that predates weighting at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<GraderWeight>,
 }
 
 /// Which single bucket a result belongs to.
@@ -150,6 +156,10 @@ impl AssertionGradeResult {
 
     pub fn is_scored(&self) -> bool {
         self.outcome() == AssertionOutcome::Scored
+    }
+
+    pub fn effective_weight(&self) -> GraderWeight {
+        self.weight.unwrap_or_default()
     }
 }
 
@@ -246,6 +256,35 @@ impl GradingCounts {
             pass_rate: self.pass_rate(),
         }
     }
+}
+
+/// A case's own score: the fraction of scored weight it passed, `None` under
+/// the same condition `GradingCounts::pass_rate` reports `None` under, since
+/// weighting which scored assertions count for more cannot manufacture a
+/// score out of a case that scored nothing.
+///
+/// A case where every grader left its weight undeclared takes the same code
+/// path `GradingCounts::pass_rate` always has, so a suite that never opts
+/// into weighting reports byte-identical scores to before weighting existed.
+pub fn case_score(results: &[AssertionGradeResult]) -> Option<f64> {
+    if results.iter().all(|r| r.weight.is_none()) {
+        return GradingCounts::tally(results).pass_rate();
+    }
+
+    let total_weight: f64 = results
+        .iter()
+        .filter(|r| r.is_scored())
+        .map(|r| r.effective_weight().value())
+        .sum();
+    if total_weight == 0.0 {
+        return None;
+    }
+    let passed_weight: f64 = results
+        .iter()
+        .filter(|r| r.is_scored() && r.passed)
+        .map(|r| r.effective_weight().value())
+        .sum();
+    Some(passed_weight / total_weight)
 }
 
 pub fn pass_rate_matches(reported: Option<f64>, expected: Option<f64>) -> bool {
@@ -522,7 +561,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             }
         };
 
-        if stopped_by_cost_ceiling(run) {
+        if !run.started() {
             report.run_statuses.record(&run.status);
             continue;
         }
@@ -539,6 +578,13 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             assertion_results.push(grade_assertion(assertion.as_str(), case, &declarative, &ctx, &session)?);
         }
 
+        // A read-only fixture that was modified during the run is a failure of the run
+        // itself, not a property left for an assertion or grader to notice, so it is added
+        // here rather than left to whichever declared checks the case happens to have.
+        for path in &run.read_only_fixture_violations {
+            assertion_results.push(read_only_fixture_violation_result(path));
+        }
+
         restore_when_nothing_would_be_scored(&mut assertion_results);
 
         report.assertions_graded += assertion_results.len();
@@ -551,6 +597,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         report.unsupported += counts.unsupported;
         report.excluded += counts.excluded;
         report.ungraded += counts.ungraded;
+        run_mut.case_score = case_score(&assertion_results);
 
         let grading = build_grading_file(assertion_results)?;
         validate_grading_document(&grading, options.strict)?;
@@ -646,6 +693,7 @@ fn grade_assertion(
                     excluded: None,
                     ungraded: None,
                     votes: None,
+                    weight: None,
                 })
             } else if options.grader == GraderMode::None {
                 Ok(needs_llm_result(
@@ -724,6 +772,7 @@ fn grade_declaratively(
             excluded,
             ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Failed { evidence } => AssertionGradeResult {
             assertion,
@@ -736,6 +785,7 @@ fn grade_declaratively(
             excluded,
             ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Unsupported { reason } => AssertionGradeResult {
             assertion,
@@ -748,6 +798,7 @@ fn grade_declaratively(
             excluded,
             ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Deferred { criterion, target } => {
             let mut result = match options.grader {
@@ -757,6 +808,7 @@ fn grade_declaratively(
             };
             result.excluded = excluded;
             result.name = name;
+            result.weight = declared.weight;
             result
         }
         GraderOutcome::Comparison {
@@ -790,16 +842,6 @@ fn grade_declaratively(
     })
 }
 
-/// Whether the cost ceiling stopped this run before it started.
-///
-/// Such a run has no workspace and no transcript, so there is nothing for a grader
-/// to read. Grading it anyway would read the absence as a wrong answer and fail every
-/// assertion, turning a spending decision into a reported regression, and an LLM judge
-/// would bill the pass that has already run out of money to do it.
-fn stopped_by_cost_ceiling(run: &RunRecord) -> bool {
-    run.failure_kind.as_deref() == Some(crate::agentskills::budget::FAILURE_KIND_BUDGET)
-}
-
 /// A case whose every check is arm-scoped would otherwise measure nothing at
 /// all, which is never what the author meant by writing it, so the exclusions
 /// are lifted and the case is scored as declared. But lifting them only helps
@@ -822,6 +864,26 @@ fn restore_when_nothing_would_be_scored(results: &mut [AssertionGradeResult]) {
     }
 }
 
+fn read_only_fixture_violation_result(path: &str) -> AssertionGradeResult {
+    AssertionGradeResult {
+        name: None,
+        assertion: format!("read-only fixture '{path}' is unchanged"),
+        passed: false,
+        evidence: format!("fixture '{path}' did not match its source after the run"),
+        grader: GraderInfo {
+            kind: GraderKind::Mechanical,
+            model: None,
+            command: None,
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: None,
+        votes: None,
+        weight: None,
+    }
+}
+
 fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
     AssertionGradeResult {
         name: None,
@@ -838,6 +900,7 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
         excluded: None,
         ungraded: Some(evidence.to_string()),
         votes: None,
+        weight: None,
     }
 }
 
@@ -901,6 +964,7 @@ fn script_crashed_result(assertion: &str, command: &str, output: &std::process::
         excluded: None,
         ungraded: Some(evidence),
         votes: None,
+        weight: None,
     }
 }
 
@@ -990,6 +1054,7 @@ fn grade_with_script(
         excluded: None,
         ungraded: None,
         votes: None,
+        weight: None,
     })
 }
 
@@ -1026,6 +1091,7 @@ fn grade_with_llm(
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             });
         }
     }
@@ -1066,6 +1132,7 @@ fn grade_with_llm(
         excluded: None,
         ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
+        weight: None,
     })
 }
 
@@ -1238,6 +1305,7 @@ fn grade_against_baseline(
         excluded: None,
         ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
+        weight: None,
     })
 }
 
@@ -1257,6 +1325,7 @@ fn baseline_shortfall(assertion: &str, evidence: impl Into<String>) -> Assertion
         excluded: None,
         ungraded: None,
         votes: None,
+        weight: None,
     }
 }
 
@@ -2400,9 +2469,11 @@ mod tests {
     use super::*;
     use crate::agentskills::evals::RelativeSkillPath;
     use crate::agentskills::report::{
-        build_report_bundle, write_report_bundle, BuildReportOptions, RunMetrics, RunPaths, ScenarioKind,
-        WriteReportOptions,
+        build_report_bundle, write_report_bundle, BuildReportOptions, RunMetrics, RunNotStarted, RunPaths,
+        ScenarioKind, WriteReportOptions,
     };
+    use crate::agentskills::runner::capabilities::HarnessControl;
+    use crate::agentskills::runner::Runner;
     use crate::agentskills::transcript::write_normalized_transcript;
     use crate::fs::testutil::MemFS;
     use std::fs;
@@ -2424,7 +2495,26 @@ mod tests {
         ]
     }"#;
 
+    const ALL_UNSUPPORTED_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "skill_used", "arm": "both"}
+                ]
+            }
+        ]
+    }"#;
+
     fn unobservable_report_dir(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        unobservable_report_dir_with_suite(temp, UNOBSERVABLE_SUITE)
+    }
+
+    fn unobservable_report_dir_with_suite(temp: &tempfile::TempDir, suite_json: &str) -> (PathBuf, PathBuf) {
         let skill_dir = temp.path().join("demo-skill");
         fs::create_dir_all(skill_dir.join("evals")).unwrap();
         fs::write(
@@ -2432,7 +2522,7 @@ mod tests {
             "---\nname: demo-skill\ndescription: d\n---\n",
         )
         .unwrap();
-        fs::write(skill_dir.join("evals/evals.json"), UNOBSERVABLE_SUITE).unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), suite_json).unwrap();
 
         let mem = MemFS::new();
         let mem_skill = Path::new("demo-skill");
@@ -2645,6 +2735,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_case_scored_only_by_unsupported_checks_has_no_case_score() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _run_dir) = unobservable_report_dir_with_suite(&temp, ALL_UNSUPPORTED_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let run = &document.runs[0];
+        assert_eq!(
+            run.case_score, None,
+            "a case scored on nothing must not read as a score of zero"
+        );
+    }
+
+    #[test]
+    fn a_case_scored_and_failing_every_check_reports_a_score_of_zero_not_no_score() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, TRIGGERING_ONLY_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        for run in &document.runs {
+            let workspace = report_dir.join(&run.paths.workspace);
+            let run_dir = workspace.parent().unwrap();
+            let grading: GradingFile =
+                serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+            let expected = GradingCounts::tally(&grading.assertion_results).pass_rate();
+            assert_eq!(run.case_score, expected, "{:?}", run.scenario_id);
+        }
+
+        let with_skill = document
+            .runs
+            .iter()
+            .find(|r| r.scenario_id == ScenarioKind::WithSkill)
+            .unwrap();
+        let without_skill = document
+            .runs
+            .iter()
+            .find(|r| r.scenario_id == ScenarioKind::WithoutSkill)
+            .unwrap();
+        assert_eq!(with_skill.case_score, Some(1.0));
+        assert_eq!(
+            without_skill.case_score,
+            Some(0.0),
+            "a case that scored and failed everything is a zero, not a missing score"
+        );
+    }
+
+    #[test]
+    fn a_run_the_harness_never_started_is_withheld_from_grading() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, ARM_SCOPED_SUITE);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: ReportDocument = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document.runs[0].not_started(RunNotStarted::ControlUnsupported {
+            control: HarnessControl::ConversationSeeding,
+            runner: Runner::ClaudeCode,
+        });
+        let abandoned = report_dir.join(&document.runs[0].paths.workspace);
+        fs::remove_dir_all(&abandoned).unwrap();
+        document.runs[1].status = "completed".to_string();
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.runs_graded, 1,
+            "a run that never reached the harness has no workspace to grade"
+        );
+        assert_eq!(report.run_statuses.skipped, 1);
+        assert_eq!(report.run_statuses.completed, 1);
+        assert_eq!(
+            report.failed, 0,
+            "a run trg declined to start must not be reported as a regression"
+        );
+    }
+
     const NAMED_GRADER_SUITE: &str = r#"{
         "schema_version": 3,
         "skill_name": "demo-skill",
@@ -2774,6 +2967,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         };
 
         let json = serde_json::to_string(&result).unwrap();
@@ -2812,6 +3006,7 @@ mod tests {
                 excluded: Some("scoped to the with_skill arm".to_string()),
                 ungraded: None,
                 votes: Some(JudgeVoteTally { passed: 2, failed: 1 }),
+                weight: None,
             }],
             summary: GradingSummary {
                 passed: 1,
@@ -2851,6 +3046,65 @@ mod tests {
         assert_eq!(flattened["rationale"], "both judges agreed");
         assert_eq!(flattened["votes"]["passed"], 2);
         assert_eq!(flattened["votes"]["failed"], 1);
+    }
+
+    fn weighted_result(passed: bool, unsupported: bool, weight: Option<GraderWeight>) -> AssertionGradeResult {
+        AssertionGradeResult {
+            name: None,
+            assertion: "the output includes a summary".to_string(),
+            passed,
+            evidence: "found the summary section".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Mechanical,
+                model: None,
+                command: None,
+            },
+            rationale: None,
+            unsupported: unsupported.then(|| "runner cannot observe this".to_string()),
+            excluded: None,
+            ungraded: None,
+            votes: None,
+            weight,
+        }
+    }
+
+    /// A grader that leaves weight undeclared inside an otherwise-weighted case
+    /// still has to count for exactly as much as it always did: one full vote,
+    /// same as a declared weight of 1.0 would.
+    #[test]
+    fn an_undeclared_weight_counts_as_one_full_vote_alongside_a_declared_weight() {
+        let results = vec![
+            weighted_result(true, false, Some(GraderWeight::parse(3.0).unwrap())),
+            weighted_result(false, false, None),
+        ];
+
+        assert_eq!(case_score(&results), Some(0.75));
+    }
+
+    /// A case where every grader left weight undeclared has to take the exact
+    /// pre-weighting code path, not merely a formula that happens to agree with
+    /// it, so a suite that never opts in cannot see its score move.
+    #[test]
+    fn case_score_falls_back_to_the_pre_weighting_pass_rate_when_nothing_declares_a_weight() {
+        let results = vec![
+            weighted_result(true, false, None),
+            weighted_result(true, false, None),
+            weighted_result(true, false, None),
+            weighted_result(false, false, None),
+            weighted_result(true, true, None),
+        ];
+
+        assert_eq!(case_score(&results), Some(0.75));
+        assert_eq!(case_score(&results), GradingCounts::tally(&results).pass_rate());
+    }
+
+    /// An undeclared weight must not be constructible from a build that never
+    /// wrote one, so the field cannot appear where nothing asked for it.
+    #[test]
+    fn an_unweighted_result_is_absent_from_the_serialized_json() {
+        let result = weighted_result(true, false, None);
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("\"weight\""));
     }
 
     fn suite_from(json: &str) -> EvalSuite {
@@ -3058,7 +3312,9 @@ mod tests {
             },
             cache: None,
             skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
+            case_score: None,
         }
     }
 
@@ -3622,6 +3878,7 @@ mod tests {
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             },
             AssertionGradeResult {
                 name: None,
@@ -3638,6 +3895,7 @@ mod tests {
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             },
         ]);
 
@@ -3666,6 +3924,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         }]);
 
         assert_eq!(counts.scored(), 0);
@@ -3717,6 +3976,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         }
     }
 
@@ -4261,6 +4521,7 @@ mod tests {
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             }],
             summary: GradingSummary {
                 passed: 1,
@@ -4593,6 +4854,7 @@ echo '{"passed": true, "evidence": "script verified"}'
             excluded: None,
             ungraded: None,
             votes,
+            weight: None,
         }
     }
 
@@ -4628,5 +4890,96 @@ echo '{"passed": true, "evidence": "script verified"}'
         }))
         .unwrap();
         assert!(parsed.votes.is_none());
+    }
+
+    const READ_ONLY_FIXTURE_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "contains", "text": "all done"}
+                ]
+            }
+        ]
+    }"#;
+
+    fn single_run_report_dir(temp: &tempfile::TempDir) -> PathBuf {
+        let skill_dir = temp.path().join("demo-skill");
+        fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        let skill_md = "---\nname: demo-skill\ndescription: d\n---\n";
+        fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), READ_ONLY_FIXTURE_SUITE).unwrap();
+
+        let mem = MemFS::new();
+        let mem_skill = Path::new("demo-skill");
+        mem.insert(mem_skill.join("SKILL.md"), skill_md);
+        mem.insert(mem_skill.join("evals/evals.json"), READ_ONLY_FIXTURE_SUITE);
+
+        let bundle = build_report_bundle(
+            &mem,
+            mem_skill,
+            &skill_dir,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                report_id: Some("report-read-only".to_string()),
+                generated_at: Some("2026-05-26T12:00:00Z".to_string()),
+                runner: Some("codex".to_string()),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        let report_dir = write_report_bundle(&temp.path().join("out"), &bundle, WriteReportOptions::default()).unwrap();
+        let workspace = report_dir.join(&bundle.document.runs[0].paths.workspace);
+        let run_dir = workspace.parent().unwrap().to_path_buf();
+        fs::write(workspace.join("outputs").join(FINAL_MD), "all done\n").unwrap();
+        let transcript_path = run_dir.join("transcript.jsonl");
+        fs::write(&transcript_path, "{\"type\":\"turn.completed\"}\n").unwrap();
+        write_normalized_transcript(&transcript_path, &NormalizedTranscript::unavailable("codex")).unwrap();
+
+        report_dir
+    }
+
+    /// The run-level outcome field is what the grading layer turns into a failed case: this
+    /// proves that path end to end, including that the case cannot pass on the strength of
+    /// its own grader once a read-only fixture it was handed came back changed.
+    #[test]
+    fn a_read_only_fixture_violation_fails_the_case_even_when_its_own_grader_passes() {
+        let temp = tempdir().unwrap();
+        let report_dir = single_run_report_dir(&temp);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: ReportDocument = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document.runs[0].read_only_fixture_violations = vec!["evals/files/input.csv".to_string()];
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.passed, 1, "the case's own grader still passes");
+        assert_eq!(
+            report.failed, 1,
+            "a mutated read-only fixture fails the case regardless of what its own checks found"
+        );
+
+        let (_, grading) = &grading_files_by_scenario(&report_dir)[0];
+        let violation = grading
+            .assertion_results
+            .iter()
+            .find(|result| result.evidence.contains("evals/files/input.csv"))
+            .expect("the operator sees the fixture path, not just a count");
+        assert!(!violation.passed);
     }
 }

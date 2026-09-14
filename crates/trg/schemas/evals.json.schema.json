@@ -308,9 +308,27 @@
               "type": "null"
             }
           ]
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraderWeight"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "type": "object"
+    },
+    "ConversationHistory": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RelativeSkillPath"
+        }
+      ],
+      "description": "A transcript a case would resume before its own prompt is sent.\n\nNo installed harness can adopt an arbitrary, case-authored transcript as history it\ndid not itself produce (see `HarnessControl::ConversationSeeding`), so this exists to\nlet a case say what it is asking for honestly rather than not at all: a run whose case\nsets this is skipped, naming the reason, instead of silently starting a fresh\nconversation and answering a different question than the one the case asked."
     },
     "EvalCase": {
       "additionalProperties": false,
@@ -321,6 +339,17 @@
             "$ref": "#/$defs/NonEmptyString"
           },
           "type": "array"
+        },
+        "conversation_history": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConversationHistory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A transcript this case would resume before its own prompt, for a case that is not\nasking about a first turn. See [`ConversationHistory`]."
         },
         "description": {
           "anyOf": [
@@ -347,7 +376,7 @@
         "files": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/RelativeSkillPath"
+            "$ref": "#/$defs/EvalFixture"
           },
           "type": "array"
         },
@@ -442,6 +471,35 @@
         }
       ]
     },
+    "EvalFixture": {
+      "description": "A `files` entry on an `EvalCase`.\n\nThe wire form stays a bare string for the common, writable case: a suite authored\nbefore read-only fixtures existed must keep parsing, and must keep round-tripping\nas a string rather than being rewritten into the object form the first time the\nsuite is saved back out. Only a fixture that opts into `read_only` pays for the\nobject form.",
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "writable",
+                "read_only"
+              ],
+              "type": "string"
+            },
+            "path": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "EvalPriority": {
       "enum": [
         "low",
@@ -520,6 +578,11 @@
     "GraderName": {
       "minLength": 1,
       "type": "string"
+    },
+    "GraderWeight": {
+      "description": "How much one grader's result counts toward its case's score, relative to\nevery other grader and free-text assertion in the same case.\n\nAlways positive. A grader worth nothing to the score belongs out of the\ncase entirely, scored with `arm: with_only` rather than weighted to zero,\nand a negative weight has no share of a score to subtract from, so\nneither reading is one this type can hold.",
+      "exclusiveMinimum": 0.0,
+      "type": "number"
     },
     "MatchCase": {
       "enum": [

@@ -3,6 +3,7 @@ mod ci_args;
 mod compare;
 mod feedback;
 mod grade;
+mod html_report;
 mod init;
 mod iteration_summary;
 mod next_iteration;
@@ -15,8 +16,8 @@ pub(crate) use output::print_report_dir;
 use std::path::Path;
 
 use crate::agentskills::ci::{
-    collect_failed_assertions, collect_missing_grading_workspaces, collect_report_metrics, emit_github_annotations,
-    print_human_summary, run_ci_checks, EvalCommandJsonOutput,
+    collect_case_scores, collect_failed_assertions, collect_missing_grading_workspaces, collect_report_metrics,
+    emit_github_annotations, print_human_summary, run_ci_checks, EvalCommandJsonOutput,
 };
 use crate::agentskills::evals::WorkspaceCheckReport;
 use crate::fs::FileSystem;
@@ -27,6 +28,7 @@ pub use benchmark::BenchmarkArgs;
 pub use compare::CompareArgs;
 pub use feedback::FeedbackArgs;
 pub use grade::GradeArgs;
+pub use html_report::HtmlReportArgs;
 pub use init::InitArgs;
 pub use iteration_summary::IterationSummaryArgs;
 pub use next_iteration::NextIterationArgs;
@@ -59,6 +61,8 @@ pub enum EvalCommands {
     Compare(CompareArgs),
     /// Build an improvement bundle from a prior iteration for skill revision
     NextIteration(NextIterationArgs),
+    /// Render a local-only, self-contained HTML report over a report bundle
+    HtmlReport(HtmlReportArgs),
 }
 
 impl EvalArgs {
@@ -73,6 +77,7 @@ impl EvalArgs {
             EvalCommands::Feedback(args) => args.handle(fs),
             EvalCommands::Compare(args) => args.handle(fs),
             EvalCommands::NextIteration(args) => args.handle(fs),
+            EvalCommands::HtmlReport(args) => args.handle(fs),
         }
     }
 }
@@ -98,7 +103,15 @@ pub(crate) fn eval_output(
 
     let failed_assertions = collect_failed_assertions(report_dir).unwrap_or_default();
     let missing_grading = collect_missing_grading_workspaces(report_dir).unwrap_or_default();
-    let check = run_ci_checks(&metrics, policy, thresholds, &failed_assertions, &missing_grading);
+    let case_scores = collect_case_scores(report_dir).unwrap_or_default();
+    let check = run_ci_checks(
+        &metrics,
+        policy,
+        thresholds,
+        &failed_assertions,
+        &missing_grading,
+        &case_scores,
+    );
 
     Ok(EvalCommandJsonOutput {
         report_dir: report_dir.display().to_string(),
@@ -230,6 +243,16 @@ mod help_tests {
     fn eval_feedback_validate_help_includes_examples() {
         let help = long_help::<FeedbackValidateArgs>("validate", "Validate feedback.json files");
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
+    }
+
+    #[test]
+    fn eval_html_report_help_includes_examples() {
+        let help = long_help::<HtmlReportArgs>(
+            "html-report",
+            "Render a local-only, self-contained HTML report over a report bundle",
+        );
+        assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
+        assert!(help.contains("--output-format"));
     }
 
     #[test]

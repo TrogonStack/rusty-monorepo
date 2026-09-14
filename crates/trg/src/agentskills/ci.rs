@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde::Deserialize;
 
 use super::evals::{check_workspace, EvalError, WorkspaceCheckOptions, WorkspaceCheckReport};
-use super::grading::describe_pass_rate;
+use super::grading::{case_score, describe_pass_rate, GradingFile};
 use super::report::RunRecord;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -34,6 +34,7 @@ impl CiPolicy {
 #[derive(Debug, Clone, Default)]
 pub struct ThresholdConfig {
     pub min_pass_rate: Option<f64>,
+    pub min_case_score: Option<f64>,
     pub max_tokens: Option<u64>,
     pub max_input_tokens: Option<u64>,
     pub max_output_tokens: Option<u64>,
@@ -71,6 +72,8 @@ pub enum CiViolationKind {
     PassRateBelowMinimum,
     NothingScored,
     Ungraded,
+    CaseScoreBelowMinimum,
+    CaseNothingScored,
     PassRateRegression,
     TokenBudgetExceeded,
     InputTokenBudgetExceeded,
@@ -192,6 +195,7 @@ pub fn run_ci_checks(
     thresholds: &ThresholdConfig,
     failed_assertions: &[FailedAssertionDetail],
     missing_grading_workspaces: &[String],
+    case_scores: &[CaseScoreRecord],
 ) -> CiCheckResult {
     let baseline_metrics = thresholds
         .baseline
@@ -281,6 +285,45 @@ pub fn run_ci_checks(
             file: None,
             line: None,
         });
+    }
+
+    // A suite's average can stay healthy while one case fails everything it was
+    // asked, so this gate is evaluated per case rather than against the metrics
+    // above: a single offender must trip it even when nothing else did. A case
+    // with no score is not a case that scored zero, so it is its own violation
+    // kind rather than being silently read as either a pass or a failure.
+    if let Some(minimum) = thresholds.min_case_score {
+        for record in case_scores {
+            match record.case_score {
+                Some(score) if score + f64::EPSILON < minimum => {
+                    violations.push(CiViolation {
+                        kind: CiViolationKind::CaseScoreBelowMinimum,
+                        message: format!(
+                            "case score {score:.4} in '{}' is below minimum {minimum:.4}",
+                            record.workspace
+                        ),
+                        run_id: record.run_id.clone(),
+                        workspace: Some(record.workspace.clone()),
+                        file: Some(record.file.clone()),
+                        line: None,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    violations.push(CiViolation {
+                        kind: CiViolationKind::CaseNothingScored,
+                        message: format!(
+                            "a minimum case score of {minimum:.4} was required for '{}', but nothing was scored there",
+                            record.workspace
+                        ),
+                        run_id: record.run_id.clone(),
+                        workspace: Some(record.workspace.clone()),
+                        file: Some(record.file.clone()),
+                        line: None,
+                    });
+                }
+            }
+        }
     }
 
     if let Some(maximum) = thresholds.max_tokens {
@@ -449,6 +492,63 @@ pub fn collect_failed_assertions_in_workspace(
                 text: result.assertion.clone(),
             });
         }
+    }
+
+    Ok(())
+}
+
+/// One case's own score, read back from the grading.json it was written to
+/// rather than from any cached field, for the same reason the rest of this
+/// module recomputes metrics from disk: a report.json that outlived the
+/// grading.json it once matched would otherwise report a gate result nothing
+/// on disk still backs.
+#[derive(Debug, Clone)]
+pub struct CaseScoreRecord {
+    pub run_id: Option<String>,
+    pub workspace: String,
+    pub file: String,
+    pub case_score: Option<f64>,
+}
+
+pub fn collect_case_scores(report_dir: &Path) -> Result<Vec<CaseScoreRecord>, EvalError> {
+    let runs = load_report_runs(report_dir)?;
+    let mut records = Vec::new();
+
+    for run in &runs {
+        let workspace = report_dir.join(&run.paths.workspace);
+        collect_case_scores_in_workspace(
+            &workspace,
+            Some(run.id.clone()),
+            workspace.display().to_string(),
+            &mut records,
+        )?;
+    }
+
+    Ok(records)
+}
+
+pub fn collect_case_scores_in_workspace(
+    workspace: &Path,
+    run_id: Option<String>,
+    workspace_label: String,
+    records: &mut Vec<CaseScoreRecord>,
+) -> Result<(), EvalError> {
+    if !workspace.is_dir() {
+        return Ok(());
+    }
+
+    let mut grading_files = Vec::new();
+    super::evals::collect_named_files(workspace, "grading.json", &mut grading_files)?;
+
+    for grading_path in grading_files {
+        let content = std::fs::read_to_string(&grading_path)?;
+        let grading: GradingFile = serde_json::from_str(&content)?;
+        records.push(CaseScoreRecord {
+            run_id: run_id.clone(),
+            workspace: workspace_label.clone(),
+            file: grading_path.display().to_string(),
+            case_score: case_score(&grading.assertion_results),
+        });
     }
 
     Ok(())
@@ -637,6 +737,7 @@ mod tests {
             },
             &[],
             &[],
+            &[],
         );
 
         assert!(!result.passed);
@@ -663,6 +764,99 @@ mod tests {
             &ThresholdConfig::default(),
             &[],
             &[],
+            &[],
+        );
+
+        assert!(result.passed, "{:?}", result.violations);
+    }
+
+    fn case_record(workspace: &str, case_score: Option<f64>) -> CaseScoreRecord {
+        CaseScoreRecord {
+            run_id: None,
+            workspace: workspace.to_string(),
+            file: format!("{workspace}/grading.json"),
+            case_score,
+        }
+    }
+
+    /// A suite's aggregate pass rate can stay healthy while one case failed
+    /// everything it was asked, so the gate has to look at every case rather
+    /// than trust the average nothing here is wrong.
+    #[test]
+    fn case_score_gate_trips_on_one_wholly_failing_case_despite_a_healthy_aggregate_pass_rate() {
+        let metrics = sample_metrics(0.95, 100, 100);
+        let case_scores = vec![
+            case_record("runs/run-001/workspace", Some(1.0)),
+            case_record("runs/run-002/workspace", Some(0.0)),
+        ];
+        let result = run_ci_checks(
+            &metrics,
+            CiPolicy::default(),
+            &ThresholdConfig {
+                min_case_score: Some(0.5),
+                ..Default::default()
+            },
+            &[],
+            &[],
+            &case_scores,
+        );
+
+        assert!(!result.passed);
+        let violation = result
+            .violations
+            .iter()
+            .find(|v| v.kind == CiViolationKind::CaseScoreBelowMinimum)
+            .expect("the wholly failing case must trip the gate on its own");
+        assert!(violation.workspace.as_deref() == Some("runs/run-002/workspace"));
+    }
+
+    /// A case scored on nothing is not a case that scored zero, so it cannot be
+    /// let through a minimum as if a zero had cleared it, and it cannot be read
+    /// as meeting even a minimum of zero.
+    #[test]
+    fn a_case_with_nothing_scored_does_not_pass_the_gate_and_is_not_read_as_zero() {
+        let metrics = sample_metrics(1.0, 100, 100);
+        let case_scores = vec![case_record("runs/run-001/workspace", None)];
+        let result = run_ci_checks(
+            &metrics,
+            CiPolicy::default(),
+            &ThresholdConfig {
+                min_case_score: Some(0.0),
+                ..Default::default()
+            },
+            &[],
+            &[],
+            &case_scores,
+        );
+
+        assert!(!result.passed, "a case with no score must not silently clear the gate");
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.kind == CiViolationKind::CaseScoreBelowMinimum));
+        let violation = result
+            .violations
+            .iter()
+            .find(|v| v.kind == CiViolationKind::CaseNothingScored)
+            .expect("nothing scored must be its own violation kind");
+        assert!(
+            violation.message.contains("nothing was scored"),
+            "{}",
+            violation.message
+        );
+    }
+
+    #[test]
+    fn case_scores_without_a_minimum_declared_produce_no_violation() {
+        let metrics = sample_metrics(1.0, 100, 100);
+        let case_scores = vec![case_record("runs/run-001/workspace", None)];
+        let result = run_ci_checks(
+            &metrics,
+            CiPolicy::default(),
+            &ThresholdConfig::default(),
+            &[],
+            &[],
+            &case_scores,
         );
 
         assert!(result.passed, "{:?}", result.violations);
@@ -680,6 +874,7 @@ mod tests {
             },
             &[],
             &[],
+            &[],
         );
         assert!(result.passed);
     }
@@ -694,6 +889,7 @@ mod tests {
                 min_pass_rate: Some(0.8),
                 ..Default::default()
             },
+            &[],
             &[],
             &[],
         );
@@ -716,6 +912,7 @@ mod tests {
             },
             &[],
             &[],
+            &[],
         );
         assert!(result.passed);
     }
@@ -730,6 +927,7 @@ mod tests {
                 max_tokens: Some(1000),
                 ..Default::default()
             },
+            &[],
             &[],
             &[],
         );
@@ -752,6 +950,7 @@ mod tests {
             },
             &[],
             &[],
+            &[],
         );
         assert!(!result.passed);
         assert!(result
@@ -764,7 +963,14 @@ mod tests {
     fn strict_policy_flags_runner_failure() {
         let mut metrics = sample_metrics(1.0, 100, 100);
         metrics.failed_runs = 1;
-        let result = run_ci_checks(&metrics, CiPolicy::strict_ci(), &ThresholdConfig::default(), &[], &[]);
+        let result = run_ci_checks(
+            &metrics,
+            CiPolicy::strict_ci(),
+            &ThresholdConfig::default(),
+            &[],
+            &[],
+            &[],
+        );
         assert!(!result.passed);
         assert!(result
             .violations
@@ -791,6 +997,7 @@ mod tests {
                 baseline: Some(baseline_dir),
                 ..Default::default()
             },
+            &[],
             &[],
             &[],
         );
@@ -879,7 +1086,14 @@ mod tests {
             ungraded_assertions: 1,
             ..sample_metrics(1.0, 10, 20)
         };
-        let result = run_ci_checks(&metrics, CiPolicy::default(), &ThresholdConfig::default(), &[], &[]);
+        let result = run_ci_checks(
+            &metrics,
+            CiPolicy::default(),
+            &ThresholdConfig::default(),
+            &[],
+            &[],
+            &[],
+        );
 
         assert!(!result.passed);
         assert!(result.violations.iter().any(|v| v.kind == CiViolationKind::Ungraded));
@@ -1039,7 +1253,9 @@ mod tests {
                 },
                 cache: None,
                 skill_integrity: None,
+                read_only_fixture_violations: Vec::new(),
                 warnings: Vec::new(),
+                case_score: None,
             }],
             assertion_results: Vec::new(),
             summaries: SummariesSection {

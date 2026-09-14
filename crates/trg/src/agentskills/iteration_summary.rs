@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::benchmark::{stddev, FailedRunsMode};
+use super::eval_suite_drift;
 use super::evals::{EvalError, Result};
 use super::layout;
 use super::report::ScenarioKind;
@@ -199,14 +200,14 @@ pub fn build_iteration_summary_document(
     let report = load_report(report_dir)?;
     let current = analyze_report(report_dir, &report, options.failed_runs);
 
-    let previous_report_dir = options
-        .previous_report_dir
-        .clone()
-        .or_else(|| detect_previous_report_dir(report_dir, report.report.iteration));
-
-    let cross_iteration = previous_report_dir
-        .as_ref()
-        .and_then(|previous_dir| build_cross_iteration_section(previous_dir, &current, options.failed_runs));
+    let cross_iteration = resolve_previous_report_for_summary(
+        report_dir,
+        report.report.iteration,
+        options.previous_report_dir.as_deref(),
+    )
+    .and_then(|(previous_dir, previous_report)| {
+        build_cross_iteration_section(&previous_dir, previous_report, &current, options.failed_runs)
+    });
 
     let (always_pass, always_fail) =
         apply_cross_iteration_deltas(&current.always_pass, &current.always_fail, cross_iteration.as_ref());
@@ -384,6 +385,11 @@ struct AnalysisResult {
     flaky_assertions: Vec<FlakyAssertionRecord>,
     timing_outliers: Vec<TimingOutlierRecord>,
     token_outliers: Vec<TokenOutlierRecord>,
+    /// Set when a completed run's grading artifact could not be loaded, whether because it
+    /// was never written or because it vanished before this read. Distinguishes "we could
+    /// not see this iteration's scoring" from "this iteration scored nothing", since only
+    /// the former should keep a caller from comparing against it.
+    grading_unavailable: bool,
 }
 
 fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRunsMode) -> AnalysisResult {
@@ -392,6 +398,7 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
     let mut flaky_groups: BTreeMap<(String, ScenarioKind, String), BTreeMap<u32, bool>> = BTreeMap::new();
     let mut duration_by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>> = HashMap::new();
     let mut tokens_by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>> = HashMap::new();
+    let mut grading_unavailable = false;
 
     for run in &report.runs {
         if !matches!(classify_run(run, mode), RunDisposition::Completed) {
@@ -400,35 +407,38 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
 
         let sample = load_run_sample(report_dir, &run.paths.workspace);
 
-        if let Some(grading) = &sample.grading {
-            for result in &grading.assertion_results {
-                let assertion_text = normalize_assertion_key(&result.assertion);
-                if assertion_text.is_empty() || !result.is_scored() {
-                    continue;
-                }
+        match &sample.grading {
+            Some(grading) => {
+                for result in &grading.assertion_results {
+                    let assertion_text = normalize_assertion_key(&result.assertion);
+                    if assertion_text.is_empty() || !result.is_scored() {
+                        continue;
+                    }
 
-                let key = AssertionObservationKey::new(&run.eval_case_id, &assertion_text);
-                let entry = assertion_outcomes.entry(key.clone()).or_insert((0, 0));
-                if result.passed {
-                    entry.0 += 1;
-                } else {
-                    entry.1 += 1;
-                }
+                    let key = AssertionObservationKey::new(&run.eval_case_id, &assertion_text);
+                    let entry = assertion_outcomes.entry(key.clone()).or_insert((0, 0));
+                    if result.passed {
+                        entry.0 += 1;
+                    } else {
+                        entry.1 += 1;
+                    }
 
-                let scenario_entry = scenario_assertion_rates
-                    .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text.clone()))
-                    .or_insert((0, 0));
-                if result.passed {
-                    scenario_entry.0 += 1;
-                } else {
-                    scenario_entry.1 += 1;
-                }
+                    let scenario_entry = scenario_assertion_rates
+                        .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text.clone()))
+                        .or_insert((0, 0));
+                    if result.passed {
+                        scenario_entry.0 += 1;
+                    } else {
+                        scenario_entry.1 += 1;
+                    }
 
-                flaky_groups
-                    .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text))
-                    .or_default()
-                    .insert(run.attempt, result.passed);
+                    flaky_groups
+                        .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text))
+                        .or_default()
+                        .insert(run.attempt, result.passed);
+                }
             }
+            None => grading_unavailable = true,
         }
 
         if let Some(timing) = &sample.timing {
@@ -530,6 +540,7 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
         flaky_assertions,
         timing_outliers: detect_timing_outliers(duration_by_scenario),
         token_outliers: detect_token_outliers(tokens_by_scenario),
+        grading_unavailable,
     }
 }
 
@@ -620,13 +631,38 @@ fn apply_cross_iteration_deltas(
     (always_pass, always_fail)
 }
 
+/// Resolve the previous report to compare against, either the caller's explicit override
+/// or a sibling detected next to `report_dir`. Either way this reads `report.json` exactly
+/// once: an override is read here for the first and only time, and a detected candidate
+/// arrives already parsed from the scan that found it.
+fn resolve_previous_report_for_summary(
+    report_dir: &Path,
+    current_iteration: u32,
+    previous_report_dir: Option<&Path>,
+) -> Option<(PathBuf, ReportForSummary)> {
+    if let Some(dir) = previous_report_dir {
+        let report = load_report(dir).ok()?;
+        return Some((dir.to_path_buf(), report));
+    }
+
+    let previous = detect_previous_report_dir(report_dir, current_iteration)?;
+    let report = previous.report_for_summary().ok()?;
+    Some((previous.dir().to_path_buf(), report))
+}
+
 fn build_cross_iteration_section(
     previous_dir: &Path,
+    previous_report: ReportForSummary,
     current: &AnalysisResult,
     mode: FailedRunsMode,
 ) -> Option<CrossIterationSection> {
-    let previous_report = load_report(previous_dir).ok()?;
     let previous = analyze_report(previous_dir, &previous_report, mode);
+
+    // A previous iteration whose grading artifacts could not be read is not the same
+    // thing as one that scored nothing: only the former must not be compared against.
+    if previous.grading_unavailable {
+        return None;
+    }
 
     let current_pass = stability_key_set(&current.always_pass);
     let previous_pass = stability_key_set(&previous.always_pass);
@@ -673,7 +709,28 @@ fn diff_records(
         .collect()
 }
 
-pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> Option<PathBuf> {
+/// A previous report a scan has already located and parsed, so a caller reads its
+/// `report.json` exactly once no matter how many projections of it are needed.
+pub struct PreviousReport {
+    dir: PathBuf,
+    document: serde_json::Value,
+}
+
+impl PreviousReport {
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn drift_snapshot(&self) -> Result<eval_suite_drift::ReportDriftSnapshot> {
+        eval_suite_drift::report_drift_snapshot_from_value(&self.document)
+    }
+
+    fn report_for_summary(&self) -> Result<ReportForSummary> {
+        serde_json::from_value(self.document.clone()).map_err(EvalError::from)
+    }
+}
+
+pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> Option<PreviousReport> {
     if current_iteration <= 1 {
         return None;
     }
@@ -690,10 +747,17 @@ pub fn detect_previous_report_dir(report_dir: &Path, current_iteration: u32) -> 
     candidates.sort();
 
     for candidate in candidates {
-        if let Ok(report) = load_report(&candidate) {
-            if report.report.iteration == target_iteration {
-                return Some(candidate);
-            }
+        let Ok(document) = eval_suite_drift::read_report_value(&candidate) else {
+            continue;
+        };
+        let Ok(report) = serde_json::from_value::<ReportForSummary>(document.clone()) else {
+            continue;
+        };
+        if report.report.iteration == target_iteration {
+            return Some(PreviousReport {
+                dir: candidate,
+                document,
+            });
         }
     }
 
@@ -888,8 +952,9 @@ mod tests {
     #[test]
     fn detects_always_pass_assertions() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 1, "completed"),
@@ -898,19 +963,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"stable pass","passed":true}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"stable pass","passed":true}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.always_pass.len(), 1);
         assert_eq!(summary.always_pass[0].eval_id, "case-a");
@@ -921,8 +986,9 @@ mod tests {
     #[test]
     fn detects_always_fail_assertions() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 2, "completed"),
@@ -931,19 +997,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"always broken","passed":false}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"always broken","passed":false}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.always_fail.len(), 1);
         assert_eq!(summary.always_fail[0].attempts_observed, 2);
@@ -952,8 +1018,9 @@ mod tests {
     #[test]
     fn detects_helped_by_skill_assertions() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 1, "completed"),
@@ -962,19 +1029,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"skill helps","passed":true}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"skill helps","passed":false}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.helped_by_skill.len(), 1);
         assert_eq!(summary.helped_by_skill[0].with_skill_pass_rate, 1.0);
@@ -985,8 +1052,9 @@ mod tests {
     #[test]
     fn detects_flaky_assertions_across_attempts() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "with_skill", 2, "completed"),
@@ -995,19 +1063,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"flaky check","passed":true}]}"#),
             None,
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"flaky check","passed":false}]}"#),
             None,
         );
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.flaky_assertions.len(), 1);
         assert_eq!(summary.flaky_assertions[0].attempts, 2);
@@ -1018,8 +1086,9 @@ mod tests {
     #[test]
     fn outlier_detection_requires_at_least_four_samples() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "with_skill", 2, "completed"),
@@ -1030,7 +1099,7 @@ mod tests {
         );
         for (run_id, duration_ms, tokens) in [("run-001", 1000, 100), ("run-002", 1100, 110), ("run-003", 9000, 900)] {
             write_run_artifacts(
-                temp.path(),
+                &report_dir,
                 run_id,
                 None,
                 Some(&format!(
@@ -1039,12 +1108,12 @@ mod tests {
             );
         }
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
         assert!(summary.timing_outliers.is_empty());
         assert!(summary.token_outliers.is_empty());
 
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "with_skill", 2, "completed"),
@@ -1069,7 +1138,7 @@ mod tests {
             ("run-008", 50000, 50000),
         ] {
             write_run_artifacts(
-                temp.path(),
+                &report_dir,
                 run_id,
                 None,
                 Some(&format!(
@@ -1078,7 +1147,7 @@ mod tests {
             );
         }
 
-        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
         assert_eq!(summary.timing_outliers.len(), 1);
         assert_eq!(summary.timing_outliers[0].attempt, 8);
         assert_eq!(summary.timing_outliers[0].duration_ms, 50000);
@@ -1142,10 +1211,197 @@ mod tests {
     }
 
     #[test]
+    fn cross_iteration_omitted_when_previous_grading_vanishes_after_detection() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous = skill_root.join("report-iter-1");
+        let current = skill_root.join("report-iter-2");
+
+        write_report(
+            &previous,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            1,
+            "report-iter-1",
+        );
+        write_run_artifacts(
+            &previous,
+            "run-001",
+            Some(r#"{"assertion_results":[{"assertion":"now stable","passed":false}]}"#),
+            None,
+        );
+
+        write_report(
+            &current,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            2,
+            "report-iter-2",
+        );
+        write_run_artifacts(
+            &current,
+            "run-001",
+            Some(r#"{"assertion_results":[{"assertion":"now stable","passed":true}]}"#),
+            None,
+        );
+
+        // Detection reads report.json while the previous iteration's directory still
+        // exists, exactly as `resolve_previous_report_for_summary` does.
+        let previous_report = load_report(&previous).unwrap();
+
+        // The previous iteration's directory is removed after detection but before the
+        // grading artifacts underneath it are read for analysis.
+        fs::remove_dir_all(&previous).unwrap();
+
+        let current_report = load_report(&current).unwrap();
+        let current_analysis = analyze_report(&current, &current_report, FailedRunsMode::default());
+
+        let cross_iteration =
+            build_cross_iteration_section(&previous, previous_report, &current_analysis, FailedRunsMode::default());
+
+        assert!(
+            cross_iteration.is_none(),
+            "a previous iteration whose grading could not be read must not be compared against"
+        );
+    }
+
+    #[test]
+    fn cross_iteration_present_when_previous_iteration_scored_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous = skill_root.join("report-iter-1");
+        let current = skill_root.join("report-iter-2");
+
+        write_report(
+            &previous,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            1,
+            "report-iter-1",
+        );
+        // The grading artifact is present and reads fine; it simply scored nothing.
+        write_run_artifacts(&previous, "run-001", Some(r#"{"assertion_results":[]}"#), None);
+
+        write_report(
+            &current,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            2,
+            "report-iter-2",
+        );
+        write_run_artifacts(
+            &current,
+            "run-001",
+            Some(r#"{"assertion_results":[{"assertion":"now stable","passed":true}]}"#),
+            None,
+        );
+
+        let summary = build_iteration_summary_document(
+            &current,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous),
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+
+        let cross = summary
+            .cross_iteration
+            .as_ref()
+            .expect("a readable but empty previous iteration must still be compared against");
+        assert_eq!(cross.newly_always_pass.len(), 1);
+    }
+
+    #[test]
+    fn detect_previous_report_dir_finds_matching_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        write_report(&previous_dir, serde_json::json!([]), 1, "report-iter-1");
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        let previous = detect_previous_report_dir(&current_dir, 2).expect("a matching sibling exists");
+
+        assert_eq!(previous.dir(), previous_dir.as_path());
+        let report = previous.report_for_summary().unwrap();
+        assert_eq!(report.report.id, "report-iter-1");
+        assert_eq!(report.report.iteration, 1);
+    }
+
+    #[test]
+    fn detect_previous_report_dir_skips_unparseable_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let broken_dir = skill_root.join("report-broken");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        std::fs::create_dir_all(&broken_dir).unwrap();
+        std::fs::write(broken_dir.join("report.json"), "not json").unwrap();
+
+        write_report(&previous_dir, serde_json::json!([]), 1, "report-iter-1");
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        let previous = detect_previous_report_dir(&current_dir, 2).expect("the valid sibling is still found");
+        assert_eq!(previous.dir(), previous_dir.as_path());
+    }
+
+    #[test]
+    fn detect_previous_report_dir_returns_none_when_no_sibling_matches() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let current_dir = skill_root.join("report-iter-2");
+
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        assert!(detect_previous_report_dir(&current_dir, 2).is_none());
+    }
+
+    #[test]
+    fn detect_previous_report_dir_returns_none_for_a_first_iteration() {
+        let root = tempfile::tempdir().unwrap();
+        let report_dir = root.path().join("report");
+        write_report(&report_dir, serde_json::json!([]), 1, "report-a");
+
+        assert!(detect_previous_report_dir(&report_dir, 1).is_none());
+    }
+
+    #[test]
+    fn previous_report_projection_survives_deletion_of_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        write_report(
+            &previous_dir,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            1,
+            "report-iter-1",
+        );
+        write_report(&current_dir, serde_json::json!([]), 2, "report-iter-2");
+
+        let previous = detect_previous_report_dir(&current_dir, 2).expect("a matching sibling exists");
+
+        std::fs::remove_dir_all(&previous_dir).unwrap();
+        assert!(!previous_dir.exists());
+
+        let report = previous
+            .report_for_summary()
+            .expect("the report was already read during detection");
+        assert_eq!(report.report.id, "report-iter-1");
+        assert_eq!(report.report.iteration, 1);
+
+        let snapshot = previous
+            .drift_snapshot()
+            .expect("the drift snapshot projects from the same in-memory document");
+        assert_eq!(snapshot.iteration, 1);
+    }
+
+    #[test]
     fn iteration_summary_json_matches_schema() {
         let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
         write_report(
-            temp.path(),
+            &report_dir,
             serde_json::json!([
                 sample_run("run-001", "case-a", "with_skill", 1, "completed"),
                 sample_run("run-002", "case-a", "without_skill", 1, "completed"),
@@ -1154,19 +1410,19 @@ mod tests {
             "report-a",
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-001",
             Some(r#"{"assertion_results":[{"assertion":"a","passed":true}]}"#),
             Some(r#"{ "duration_ms": 1000, "total_tokens": 100 }"#),
         );
         write_run_artifacts(
-            temp.path(),
+            &report_dir,
             "run-002",
             Some(r#"{"assertion_results":[{"assertion":"a","passed":false}]}"#),
             Some(r#"{ "duration_ms": 2000, "total_tokens": 200 }"#),
         );
 
-        let mut summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+        let mut summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
         summary.generated_at = "2026-05-26T12:00:00Z".to_string();
 
         let json = serde_json::to_value(&summary).unwrap();

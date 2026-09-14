@@ -241,6 +241,16 @@
             "null"
           ]
         },
+        "priority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvalPriority"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "prompt": {
           "type": "string"
         },
@@ -257,6 +267,15 @@
         "assertion_ids"
       ],
       "type": "object"
+    },
+    "EvalPriority": {
+      "enum": [
+        "low",
+        "normal",
+        "high",
+        "critical"
+      ],
+      "type": "string"
     },
     "FeedbackCategory": {
       "enum": [
@@ -797,6 +816,16 @@
             }
           ]
         },
+        "case_score": {
+          "description": "This run's own pass rate over its scored assertions, `None` until graded\nor when grading scored nothing. Distinct from any suite-wide pass rate:\na run with a low score here can be hidden inside a suite average that\nstill looks healthy.",
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "eval_case_id": {
           "type": "string"
         },
@@ -828,6 +857,13 @@
         },
         "paths": {
           "$ref": "#/$defs/RunPaths"
+        },
+        "read_only_fixture_violations": {
+          "description": "Read-only fixture paths whose staged copy did not match its source after the run.\n\nKept apart from `skill_integrity` because that field describes the skill directory,\nnot the fixtures staged alongside it, and because grading needs to fail a case over\nthis without also having to interpret a report meant as diagnostic-only.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "runner_invocations": {
           "default": 1,

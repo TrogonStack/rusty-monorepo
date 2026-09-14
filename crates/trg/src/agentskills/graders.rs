@@ -175,6 +175,63 @@ impl<'de> Deserialize<'de> for MatchCount {
     }
 }
 
+/// How much one grader's result counts toward its case's score, relative to
+/// every other grader and free-text assertion in the same case.
+///
+/// Always positive. A grader worth nothing to the score belongs out of the
+/// case entirely, scored with `arm: with_only` rather than weighted to zero,
+/// and a negative weight has no share of a score to subtract from, so
+/// neither reading is one this type can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, JsonSchema)]
+#[schemars(schema_with = "grader_weight_schema")]
+pub struct GraderWeight(f64);
+
+fn grader_weight_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "number",
+        "exclusiveMinimum": 0.0
+    })
+}
+
+impl GraderWeight {
+    pub const fn unweighted() -> Self {
+        Self(1.0)
+    }
+
+    pub fn parse(weight: f64) -> std::result::Result<Self, String> {
+        if !weight.is_finite() {
+            return Err("grader weight must be a finite number".to_string());
+        }
+        if weight <= 0.0 {
+            return Err(
+                "grader weight must be greater than zero: a grader worth nothing to the score belongs out of the case (declare 'arm': 'with_only' instead of weighting it to zero), and a negative weight has no share of a score to subtract from"
+                    .to_string(),
+            );
+        }
+        Ok(Self(weight))
+    }
+
+    pub fn value(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for GraderWeight {
+    fn default() -> Self {
+        Self::unweighted()
+    }
+}
+
+impl<'de> Deserialize<'de> for GraderWeight {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = f64::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchCase {
@@ -680,7 +737,7 @@ impl<'de> Deserialize<'de> for GraderName {
 
 /// A grader as a case declares it, together with the arm scope that decides
 /// whether its result counts toward the score.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CaseGrader {
     #[serde(flatten)]
     pub grader: Grader,
@@ -688,6 +745,8 @@ pub struct CaseGrader {
     pub arm: GraderArm,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<GraderName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<GraderWeight>,
 }
 
 fn is_not_negated(negate: &bool) -> bool {
@@ -712,11 +771,19 @@ impl CaseGrader {
             grader,
             arm: GraderArm::default(),
             name: None,
+            weight: None,
         }
     }
 
     pub fn counts_toward_score(&self) -> bool {
         self.exclusion_reason().is_none()
+    }
+
+    /// The weight to score this grader's result at, `unweighted` when the
+    /// case did not declare one, so undeclared weight always resolves to the
+    /// value that reproduces today's plain average.
+    pub fn effective_weight(&self) -> GraderWeight {
+        self.weight.unwrap_or_default()
     }
 
     /// Why this grader is reported but not scored, when that is the case.

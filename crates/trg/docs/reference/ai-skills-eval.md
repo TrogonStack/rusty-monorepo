@@ -20,6 +20,7 @@ trg ai skills eval <SUBCOMMAND>
 | `feedback` | Manage human review feedback artifacts |
 | `compare` | Blindly compare scenario outputs within a report directory |
 | `next-iteration` | Build an improvement bundle from a prior iteration |
+| `html-report` | Render a local-only, self-contained HTML report over a report bundle |
 
 ---
 
@@ -228,7 +229,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `description` | string | no | Non-empty. For humans reading a report |
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
-| `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
+| `files` | (string \| object)[] | no | Relative paths inside the skill directory, staged into the run workspace. A bare string is writable; an object names `path` and `mode` (`writable`, the default, or `read_only`). See [Read-only fixtures](#read-only-fixtures) |
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
 | `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
@@ -238,6 +239,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
 | `grader_hints` | object | no | Passed through to a script grader on stdin |
 | `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
+| `conversation_history` | string | no | Relative path to a transcript inside the skill directory, to resume before the case's prompt. No installed harness can adopt an arbitrary transcript as its own history, so a case that sets this is skipped rather than run. See [Seeding a conversation](#seeding-a-conversation) |
 
 A case must declare at least one `assertion` or one `grader`.
 
@@ -305,6 +307,16 @@ a pattern or a threshold would otherwise silently change the key a downstream
 comparison keys on; `name` gives it a stable one. Two graders in the same case
 declaring the same `name` are rejected. In the directory layout, a grader
 file's stem is its default name.
+
+Every grader also accepts `weight`, a number greater than zero. A case's score
+is the fraction of weight it passed rather than a plain count, so a grader
+worth three times as much as the rest of the case declares `"weight": 3`. A
+grader that leaves `weight` undeclared counts as one full vote, exactly what
+every grader counted as before weighting existed, so a case that never opts in
+scores exactly as it always has. Zero and negative weight are both rejected at
+parse time: a grader worth nothing to the score belongs out of the case
+entirely (`"arm": "with_only"`) rather than weighted to zero, and a negative
+weight has no share of a score to subtract from.
 
 `target` is `final_text` (default), `transcript`, `any_output`,
 `{"file": "<relative path>"}`, `{"files": "<glob>"}`, or `created_files`.
@@ -803,6 +815,8 @@ other field forward as declared there, including `name`, `excluded`,
 | `artifacts` | array | Artifact descriptors (transcript when runner completes) |
 | `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner) |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
+| `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
+| `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
 
 Run ordering: eval cases in manifest order, then scenarios in flag order.
 
@@ -821,7 +835,9 @@ out of the score in both arms. `ungraded` marks an assertion no mechanical
 pattern recognized and no LLM judge was consulted for; it is neither a pass nor
 a fail, because nothing ever attempted it, and it stays out of `pass_rate` for
 the same reason `unsupported` does. `votes` is present only when a panel of
-judges decided the result.
+judges decided the result. `weight` is present only when the declaring grader
+gave one; a case whose graders left every weight undeclared reports the same
+`pass_rate` it always has.
 
 ```json
 {
@@ -878,6 +894,7 @@ judges decided the result.
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |
 | `assertion_results[].ungraded` | string | Present when no mechanical pattern recognized the assertion and no LLM judge was consulted. Why nothing attempted it |
 | `assertion_results[].votes` | object | Present only under `--grader-votes N` with `N` above 1. `{passed, failed}` opinions behind this result. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
+| `assertion_results[].weight` | number | Present when the grader declared one. Must be greater than zero |
 | `summary.passed` | integer | Must equal the count of scored, passing results |
 | `summary.failed` | integer | Must equal the count of scored, failing results |
 | `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` and not `excluded` |
@@ -953,6 +970,41 @@ answered, because the same model name can be served by more than one endpoint:
 
 Outputs are presented to the judge blindly, as A and B, with the mapping back to
 scenarios recorded separately in the same record.
+
+---
+
+## Artifact: `report.html`
+
+**Status: available.** Written by `eval html-report` into the report directory,
+alongside `report.json`.
+
+```text
+trg ai skills eval html-report <REPORT_DIR>
+```
+
+`REPORT_DIR` is the directory containing `report.json`, the same directory
+every other `eval` subcommand reads and writes against.
+
+The page is a single self-contained HTML file: every style is inlined, there is
+no JavaScript, and nothing on the page references the network. No CDN script,
+remote stylesheet or font, analytics beacon, or external image is ever emitted,
+so the report opens correctly from a `file://` URL with no connectivity and
+carries nothing out of the machine it was generated on. Links to output
+artifacts stay inside the bundle and are never absolute URLs; they are
+percent-encoded, so an artifact an agent named with a `#`, a `?`, or a space
+still resolves to the file it names.
+
+Because every value it renders (final text, transcript excerpts, output
+artifacts, assertion evidence, judge rationales, skill names, file paths)
+originates from an LLM agent under evaluation and must be treated as untrusted,
+every interpolated string is HTML-escaped through a single chokepoint before it
+reaches the page. Nothing is written into the output outside that path.
+
+The page covers bundle identity and provenance (skill, harness, scenario,
+timestamps, attempt counts, and the skill integrity report), per-scenario
+summaries, and a case-by-case, arm-by-arm breakdown of every run: pass or fail,
+each assertion's evidence, and non-scoring outcomes (`unsupported`, `excluded`)
+shown distinctly from a scored result rather than folded into a pass or fail.
 
 ---
 
@@ -1098,14 +1150,28 @@ A case's scaffold is part of what identifies its runs, so editing the script
 re-executes rather than serving a cached run, under `--no-cache` and under
 `--reuse-completed` alike.
 
-### What is deliberately not here
+### Seeding a conversation
 
-Seeding a conversation, so a case can ask about a mid-conversation turn rather than
-a first one, is not supported. Resuming a transcript is a per-harness mechanism:
-the file format, the flag, and whether resumption is possible at all differ across
-`claude-code`, `codex` and `cursor-agent`. A field that worked on one and silently
-did nothing on the others would make a suite's results incomparable, which is the
-one thing trg exists to avoid.
+A case may declare `conversation_history`, a relative path to a transcript inside
+the skill directory, to ask about a mid-conversation turn rather than a first one.
+Resuming a transcript is a per-harness mechanism, and none of `claude-code`,
+`codex` or `cursor-agent` offers one that adopts an arbitrary, case-authored
+transcript as history it did not itself produce: each only resumes a session it
+already recorded itself, and claude's `--input-format stream-json` re-runs every
+scripted turn as a live model call rather than replaying it. See `conversation
+seeding` in the harness support table above.
+
+A case that declares `conversation_history` is skipped rather than run, naming
+the case and the reason, on every harness. It is skipped rather than run against
+a fresh conversation because a field that quietly answered turn one on every
+harness would misreport the case's own precondition, and a suite whose results
+depended on that silent substitution would be exactly the kind of result trg
+exists to keep from happening.
+
+Such a run is recorded with `status: skipped` and `failure_kind: unsupported`,
+and `grade` passes over it for the same reason it passes over a run the cost
+ceiling refused: nothing was asked of the runner, so there is no workspace or
+transcript to read and no pass rate to charge the case with.
 
 ---
 
@@ -1156,6 +1222,40 @@ separately into the workspace root, and they are the only part of `evals/` a
 run is meant to see. Only the top level is filtered, so a nested `evals/`
 deeper in the skill tree is treated as the skill's own content and staged
 normally.
+
+### Read-only fixtures
+
+A bare string in `files` names a fixture the agent is free to change, which is
+what a case about editing a file needs. A case about reading one needs the
+opposite: the fixture has to still be the thing the case's `expected_output`
+and graders describe after the run, not whatever the agent left behind.
+
+```json
+{ "files": ["evals/files/input.csv", { "path": "evals/files/reference.csv", "mode": "read_only" }] }
+```
+
+The object form names the same relative path as the bare string and adds
+`mode`, `writable` (the default, and what a bare string means) or
+`read_only`. Nothing about an existing suite's fixtures changes: every bare
+string still parses, still means writable, and a fixture authored as a bare
+string is written back as one, never rewritten into the object form.
+
+On Unix, a read-only fixture is staged with its write bits cleared, so an
+agent that tries to edit it in place is refused by the filesystem before it
+gets the chance. That is a courtesy, not the guarantee: an agent can still
+delete the file and write a fresh one in its place, which touches no
+permission bit. What actually holds a read-only fixture to its word is a
+content hash taken before the run and compared against the same fixture after
+it, the same comparison `skill_integrity` makes of the skill directory. A
+fixture's containing directory is left writable regardless of the fixture's
+own mode, because removing an entry needs write permission on the directory
+that holds it, not on the entry itself, and the workspace has to be
+removable between attempts.
+
+A run whose read-only fixture changed, however it changed, is reported as a
+failing assertion naming the fixture's path, so the operator sees which
+fixture and not just a count, and the case cannot be read as passing on the
+strength of assertions that never looked at the fixture at all.
 
 A top-level version control directory (`.git`, `.jj`, `.hg`, `.svn`) is
 withheld for the same reason. When the skill is its own checkout, its history
@@ -1313,17 +1413,35 @@ could then score differently on two machines.
 Every runner drives a different CLI, and no two of those CLIs expose the same
 controls. `no` in the table below is not a placeholder: it means the control is
 absent from that harness's own `--help`, so trg has nothing to drive it with.
-The table below is checked against the same declaration trg builds its
-invocations from, so a test fails if the two ever disagree.
+
+A cell without a qualifier names the mechanism trg's own invocation is built
+from. A cell marked `(harness only)` names a control the harness offers that
+trg does not exercise; it is recorded because it is a fact about the CLI worth
+keeping visible, not because trg does anything with it.
+
+The table is checked against the same declaration trg reads `support()` from,
+so a test fails if the two ever disagree. That guarantees the doc matches the
+declaration and nothing further.
+
+A driven cell carries a second check, and how much that check is worth depends
+on the mechanism. A driven flag is searched for in the argv the runner actually
+builds, so promoting a cell to driven without wiring the flag fails the suite.
+The two driven cells that are not flags, `run-scoped config home` and `cost
+reporting`, are held against the neighbouring declarations they have to agree
+with, `config_home()` and `pricing()`, because the variable is exported outside
+argv construction and cost reporting is a fact about parsing the harness's own
+output. Those two are consistency checks between declarations rather than
+evidence that the export or the parse happens.
 
 | Control | `claude-code` | `codex` | `cursor-agent` |
 | ------- | ------------- | ------- | -------------- |
-| tool allowlist | `--allowedTools` | no | no |
+| tool allowlist | `--allowedTools` (harness only) | no | no |
 | turn cap | no | no | no |
-| system prompt append | `--append-system-prompt` | no | no |
-| mcp servers | `--mcp-config` | no | no |
+| system prompt append | `--append-system-prompt` (harness only) | no | no |
+| mcp servers | `--mcp-config` (harness only) | no | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
-| conversation resume | `--resume` | `resume` subcommand | `--resume` |
+| conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) |
+| conversation seeding | no | no | no |
 | run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no |
 | cost reporting | reported | no | no |
 

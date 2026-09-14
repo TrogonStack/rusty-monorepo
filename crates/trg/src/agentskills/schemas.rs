@@ -258,6 +258,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         }])
         .unwrap();
 
@@ -281,6 +282,7 @@ mod tests {
                 final_text: String::new(),
                 exit_code: None,
                 failure_kind: None,
+                read_only_fixture_violations: Vec::new(),
             },
         )
         .unwrap();
