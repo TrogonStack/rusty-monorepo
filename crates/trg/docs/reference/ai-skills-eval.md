@@ -57,6 +57,8 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--allow-scaffold` | bool | `false` | Run the `scaffold` a case declares. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 | `--trust-skill` | bool | `false` | Run a skill directory from outside this working tree without being asked about it. See [Running a skill from outside your working tree](#running-a-skill-from-outside-your-working-tree) |
+| `--require-assertions` | bool | `false` | Fail when an eval case declares neither an assertion nor a grader |
+| `--lint-evals` | bool | `false` | Print the suite lint's warnings to stderr. Off by default, so a run that does not ask for them prints none, and they change no exit code either way |
 
 ### Runner values
 
@@ -614,7 +616,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
 | `files` | (string \| object)[] | no | Relative paths inside the skill directory, staged into the run workspace. A bare string is writable; an object names `path` and `mode` (`writable`, the default, or `read_only`). See [Read-only fixtures](#read-only-fixtures) |
-| `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
+| `assertions` | string[] | no | Natural-language checks, retained for compatibility. `graders` is the supported mechanism. Under `--grader auto` (the default) and `--grader none`, graded mechanically when a known pattern matches and recorded ungraded when none does; `--grader llm` sends it to the judge and `--grader script` to the script grader. See [Prose assertions](#prose-assertions) |
 | `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
 | `tags` | string[] | no | Free-form labels. `--tag` selects by them. See [Covering part of a suite](#covering-part-of-a-suite) |
@@ -630,6 +632,33 @@ Validated before `run` executes. Unknown fields are rejected.
 | `conversation_history` | string | no | Relative path to a transcript inside the skill directory, to resume before the case's prompt. No installed harness can adopt an arbitrary transcript as its own history, so a case that sets this is skipped rather than run. See [Seeding a conversation](#seeding-a-conversation) |
 
 A case must declare at least one `assertion` or one `grader`.
+
+### Prose assertions
+
+`graders` is the supported way to state what a case checks. `assertions` is the
+older surface and is kept only so that suites written before typed graders
+existed keep running unchanged; it is still parsed, still graded, and still
+scored exactly as it always was, because removing a field that published suites
+already carry would be a breaking change and `trg` does not make one before v1.
+
+The reason to move is what the two mechanisms do with a check they cannot
+parse. A typed grader is either understood or rejected outright, at load time,
+by name. A prose assertion is matched against a fixed set of phrasings, and one
+that matches none of them is not an error: under the default `--grader auto` it
+is recorded `ungraded`, which is neither a pass nor a failure. It measures
+nothing about the skill, it is left out of `pass_rate`, and it still turns the
+pass red, so a mistyped assertion reads as a broken harness rather than as a
+finding about the skill it was meant to check. Only `--grader llm` sends an
+unrecognized assertion to the judge.
+
+A case declaring `assertions` is warned by the suite lint, which names `graders`
+as the replacement. `eval verify` lints every time; `eval run` lints only when
+`--lint-evals` is passed, so a run that does not ask for the lint prints no
+warning. The warning changes no exit code either way.
+
+An existing suite does not have to be rewritten to keep working. The reference
+for what the prose forms are and how each is matched is unchanged; see
+[Graders](#graders) for the typed equivalents.
 
 ### Eval case directories (`evals/<case-id>/`)
 

@@ -783,7 +783,17 @@ pub struct EvalCase {
     pub expected_output: NonEmptyString,
     #[serde(default)]
     pub files: Vec<EvalFixture>,
+    /// Natural-language checks, retained for suites written before `graders` existed.
+    ///
+    /// Superseded by the typed `graders` below, because a prose assertion is only ever as
+    /// good as the sniffer's guess at what it meant: one that matches no mechanical
+    /// pattern is recorded ungraded under the default `--grader auto` rather than
+    /// answered, so it measures nothing about the skill and still fails the pass. The
+    /// field stays parsed and scored exactly as it always was, since dropping it would
+    /// break every suite that already carries one, which this crate does not do before
+    /// v1.
     #[serde(default)]
+    #[schemars(extend("deprecated" = true))]
     pub assertions: Vec<NonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
@@ -1109,6 +1119,20 @@ pub fn lint_eval_suite(suite: &EvalSuite, options: EvalLintOptions) -> Vec<EvalL
                 message: format!(
                     "the case checks whether the run reaches for the skill, but the prompt names the skill and its directory; set \"skill_disclosure\": \"{}\" to leave the routing decision to the run",
                     SkillDisclosure::Unannounced.as_str()
+                ),
+            });
+        }
+
+        // A case that also declares graders is warned in the same words as one that does
+        // not: the exposure is per assertion rather than per case, so its prose checks
+        // measure no more for having typed siblings, and telling the mixed case apart
+        // would only give the author two texts to read for one migration.
+        if !eval.assertions.is_empty() {
+            warnings.push(EvalLintWarning {
+                eval_id: eval_id.clone(),
+                message: format!(
+                    "{} prose assertion(s) are declared; they are kept only so suites written before typed graders keep running, and \"graders\" is the supported way to state a check. A prose assertion the mechanical patterns do not recognize is not handed to a judge under the default --grader auto: it is recorded ungraded, which measures nothing about the skill, is left out of the pass rate, and fails the pass as though the harness were broken. A typed grader is either understood or rejected outright",
+                    eval.assertions.len()
                 ),
             });
         }
@@ -2297,6 +2321,98 @@ mod tests {
         let suite = sample_suite_with_eval(eval);
 
         assert!(lint_eval_suite(&suite, EvalLintOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn a_case_declaring_prose_assertions_is_told_to_use_typed_graders() {
+        let suite = sample_suite_with_eval(sample_eval_case(
+            "one",
+            "A sufficiently long prompt here",
+            "A detailed analysis output",
+        ));
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        let message = warnings
+            .iter()
+            .find(|warning| warning.message.contains("prose assertion(s) are declared"))
+            .map(|warning| warning.message.as_str())
+            .expect("a case with prose assertions is warned about them");
+        assert!(message.contains("\"graders\" is the supported way"));
+        assert!(message.contains("recorded ungraded"));
+    }
+
+    #[test]
+    fn a_case_declaring_only_typed_graders_is_not_told_anything_about_prose_assertions() {
+        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
+        eval.assertions = vec![];
+        eval.graders = vec![serde_json::from_value(serde_json::json!({
+            "type": "file_exists",
+            "path": "summary.md"
+        }))
+        .unwrap()];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.message.contains("prose assertion(s) are declared")));
+    }
+
+    /// A case that declares both is still carrying prose checks, so it hears the same
+    /// thing: the typed graders beside them do not make them any more measurable.
+    #[test]
+    fn a_case_declaring_both_prose_assertions_and_typed_graders_is_still_told_to_migrate() {
+        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
+        eval.graders = vec![serde_json::from_value(serde_json::json!({
+            "type": "file_exists",
+            "path": "summary.md"
+        }))
+        .unwrap()];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("1 prose assertion(s) are declared")));
+    }
+
+    /// The count is what tells an author how much of the case is still on prose, so a
+    /// case carrying several must not report as though it carried one.
+    #[test]
+    fn the_warning_counts_the_prose_assertions_the_case_actually_declares() {
+        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
+        eval.assertions = vec![
+            NonEmptyString("the summary names May".to_string()),
+            NonEmptyString("the summary names June".to_string()),
+        ];
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("2 prose assertion(s) are declared")));
+    }
+
+    /// `allow_empty_assertions` says a case may declare no checks at all, which is a
+    /// different question from which mechanism a case that does declare them used.
+    #[test]
+    fn allowing_empty_assertions_does_not_silence_the_prose_assertion_warning() {
+        let suite = sample_suite_with_eval(sample_eval_case(
+            "one",
+            "A sufficiently long prompt here",
+            "A detailed analysis output",
+        ));
+
+        let warnings = lint_eval_suite(
+            &suite,
+            EvalLintOptions {
+                allow_empty_assertions: true,
+                ..EvalLintOptions::default()
+            },
+        );
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("prose assertion(s) are declared")));
     }
 
     #[test]

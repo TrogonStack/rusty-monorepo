@@ -373,6 +373,8 @@
         },
         "assertions": {
           "default": [],
+          "deprecated": true,
+          "description": "Natural-language checks, retained for suites written before `graders` existed.\n\nSuperseded by the typed `graders` below, because a prose assertion is only ever as\ngood as the sniffer's guess at what it meant: one that matches no mechanical\npattern is recorded ungraded under the default `--grader auto` rather than\nanswered, so it measures nothing about the skill and still fails the pass. The\nfield stays parsed and scored exactly as it always was, since dropping it would\nbreak every suite that already carries one, which this crate does not do before\nv1.",
           "items": {
             "$ref": "#/$defs/NonEmptyString"
           },
