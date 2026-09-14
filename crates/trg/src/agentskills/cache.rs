@@ -352,6 +352,7 @@ pub fn apply_cache_hit(
         skill_integrity,
         read_only_fixture_violations,
         warnings,
+        case_score: _case_score,
     } = source_run;
 
     run.status = status;
@@ -653,6 +654,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
+            case_score: None,
         };
 
         customize(&mut run);
@@ -781,6 +783,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
+            case_score: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -842,6 +845,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
+            case_score: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();

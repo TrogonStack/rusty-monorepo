@@ -440,6 +440,13 @@ pub struct RunRecord {
     pub read_only_fixture_violations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// This run's own pass rate over its scored assertions, `None` until graded
+    /// or when grading scored nothing. Distinct from any suite-wide pass rate:
+    /// a run with a low score here can be hidden inside a suite average that
+    /// still looks healthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub case_score: Option<f64>,
 }
 
 fn default_runner_invocations() -> u32 {
@@ -888,6 +895,7 @@ fn build_runs(
                     skill_integrity: None,
                     read_only_fixture_violations: Vec::new(),
                     warnings: Vec::new(),
+                    case_score: None,
                 });
                 run_number += 1;
             }

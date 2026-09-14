@@ -816,6 +816,16 @@
             }
           ]
         },
+        "case_score": {
+          "description": "This run's own pass rate over its scored assertions, `None` until graded\nor when grading scored nothing. Distinct from any suite-wide pass rate:\na run with a low score here can be hidden inside a suite average that\nstill looks healthy.",
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "eval_case_id": {
           "type": "string"
         },
