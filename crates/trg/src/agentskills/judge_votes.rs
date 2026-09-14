@@ -24,10 +24,15 @@ use serde::{Deserialize, Serialize};
 #[schemars(schema_with = "judge_votes_schema")]
 pub struct JudgeVotes(u32);
 
+/// Written by hand rather than derived, and kept as strict as `Deserialize`, because a
+/// schema looser than its own parser lets `eval verify --mode strict` call a report
+/// conformant that `grade`, `benchmark` and `compare` then refuse to read.
 fn judge_votes_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({
         "type": "integer",
-        "minimum": 1
+        "minimum": 1,
+        "maximum": 4294967295u32,
+        "not": { "multipleOf": 2 }
     })
 }
 
@@ -153,6 +158,50 @@ pub fn tally_opinions<T>(opinions: impl IntoIterator<Item = (bool, T)>) -> Optio
         .map(|(_, opinion)| opinion)?;
 
     Some(JudgePanelVerdict { opinion, tally })
+}
+
+#[cfg(test)]
+mod schema_agrees_with_the_parser {
+    use super::*;
+
+    fn validator() -> jsonschema::Validator {
+        let schema = serde_json::to_value(schemars::schema_for!(JudgeVotes)).unwrap();
+        jsonschema::validator_for(&schema).unwrap()
+    }
+
+    /// The schema and `Deserialize` have to refuse the same documents. When the schema is
+    /// the looser of the two, `eval verify --mode strict` calls a report conformant and
+    /// the next command to read those same bytes fails on them.
+    #[test]
+    fn the_schema_refuses_every_value_deserialize_refuses() {
+        let validator = validator();
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(2),
+            serde_json::json!(4),
+            serde_json::json!(4_294_967_296u64),
+            serde_json::json!(4_294_967_297u64),
+        ] {
+            assert!(
+                serde_json::from_value::<JudgeVotes>(value.clone()).is_err(),
+                "expected Deserialize to refuse {value}"
+            );
+            assert!(!validator.is_valid(&value), "schema admitted {value}");
+        }
+    }
+
+    #[test]
+    fn the_schema_admits_every_panel_size_deserialize_admits() {
+        let validator = validator();
+        for value in [
+            serde_json::json!(1),
+            serde_json::json!(3),
+            serde_json::json!(4_294_967_295u32),
+        ] {
+            assert!(serde_json::from_value::<JudgeVotes>(value.clone()).is_ok());
+            assert!(validator.is_valid(&value), "schema refused {value}");
+        }
+    }
 }
 
 #[cfg(test)]
