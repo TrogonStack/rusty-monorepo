@@ -370,7 +370,36 @@ pub struct DimensionsSection {
     /// different judge included, and each distinct strategy is recorded once here. This
     /// is not the graders an eval case declares in its suite; those show up in
     /// `assertions` by way of each case's `assertion_ids`.
+    ///
+    /// Defaulted because this field replaced an untyped `graders` list, so every bundle
+    /// written before it exists names neither. Reading those as "no strategy recorded" is
+    /// the honest answer, since the old shape carried arbitrary JSON that cannot be
+    /// recovered as a typed strategy, and it keeps `grade`, `benchmark` and `compare`
+    /// able to open an eval history rather than failing on its first file.
+    #[serde(default)]
     pub grading_strategies: Vec<GradingStrategy>,
+}
+
+#[cfg(test)]
+mod dimensions_back_compatibility {
+    use super::*;
+
+    /// This field replaced an untyped `graders` list, so a bundle written before it exists
+    /// names neither. Without the default, opening any prior eval history fails on its
+    /// first file rather than reading it as having recorded no strategy.
+    #[test]
+    fn a_dimensions_section_written_before_grading_strategies_existed_still_reads() {
+        let before = serde_json::json!({
+            "eval_cases": [],
+            "assertions": [],
+            "skill_revisions": [],
+            "model_configs": [],
+            "scenarios": [],
+            "graders": [{ "mode": "whatever the old untyped shape held" }]
+        });
+        let section: DimensionsSection = serde_json::from_value(before).unwrap();
+        assert!(section.grading_strategies.is_empty());
+    }
 }
 
 /// One grading strategy that was used to produce the results in this report.

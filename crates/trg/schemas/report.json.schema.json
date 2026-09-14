@@ -201,7 +201,8 @@
           "type": "array"
         },
         "grading_strategies": {
-          "description": "The distinct grading strategies actually applied to this report.\n\n`eval grade` can run more than once over the same bundle, a rerun under a\ndifferent judge included, and each distinct strategy is recorded once here. This\nis not the graders an eval case declares in its suite; those show up in\n`assertions` by way of each case's `assertion_ids`.",
+          "default": [],
+          "description": "The distinct grading strategies actually applied to this report.\n\n`eval grade` can run more than once over the same bundle, a rerun under a\ndifferent judge included, and each distinct strategy is recorded once here. This\nis not the graders an eval case declares in its suite; those show up in\n`assertions` by way of each case's `assertion_ids`.\n\nDefaulted because this field replaced an untyped `graders` list, so every bundle\nwritten before it exists names neither. Reading those as \"no strategy recorded\" is\nthe honest answer, since the old shape carried arbitrary JSON that cannot be\nrecovered as a typed strategy, and it keeps `grade`, `benchmark` and `compare`\nable to open an eval history rather than failing on its first file.",
           "items": {
             "$ref": "#/$defs/GradingStrategy"
           },
@@ -231,8 +232,7 @@
         "assertions",
         "skill_revisions",
         "model_configs",
-        "scenarios",
-        "grading_strategies"
+        "scenarios"
       ],
       "type": "object"
     },
