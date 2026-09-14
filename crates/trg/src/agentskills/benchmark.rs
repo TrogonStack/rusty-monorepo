@@ -1795,6 +1795,70 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_and_iteration_summary_agree_on_the_same_pass() {
+        use crate::agentskills::iteration_summary::{build_iteration_summary_document, IterationSummaryOptions};
+
+        let temp = tempfile::tempdir().unwrap();
+        let ids = ["run-001", "run-002", "run-003", "run-004", "run-005"];
+        let durations = [1000_u64, 1020, 980, 1010, 9000];
+        let tokens = [100_u64, 102, 98, 101, 900];
+        let passed = [true, true, true, true, false];
+
+        let runs: Vec<serde_json::Value> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let mut run = sample_run(id, "with_skill", "completed", None);
+                run["attempt"] = serde_json::json!(index as u32 + 1);
+                run
+            })
+            .collect();
+        write_report(temp.path(), serde_json::json!(runs), Some(serde_json::json!(1)));
+        for (index, id) in ids.iter().enumerate() {
+            write_run_artifacts(
+                temp.path(),
+                id,
+                Some(&format!(
+                    r#"{{ "assertion_results": [{{ "assertion": "finishes without error", "passed": {} }}] }}"#,
+                    passed[index]
+                )),
+                Some(&format!(
+                    r#"{{ "duration_ms": {}, "total_tokens": {} }}"#,
+                    durations[index], tokens[index]
+                )),
+            );
+        }
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let summary = build_iteration_summary_document(temp.path(), IterationSummaryOptions::default()).unwrap();
+
+        assert!(!summary.flaky_assertions.is_empty());
+        assert_eq!(benchmark.iteration_summary.flaky_assertions, summary.flaky_assertions);
+
+        let benchmark_timing = &benchmark.iteration_summary.timing_outliers;
+        let summary_timing = &summary.timing_outliers;
+        assert_eq!(benchmark_timing.len(), 1);
+        assert_eq!(summary_timing.len(), 1);
+        assert_eq!(benchmark_timing[0].eval_case_id, summary_timing[0].eval_case_id);
+        assert_eq!(benchmark_timing[0].scenario_id, summary_timing[0].scenario_id);
+        assert_eq!(benchmark_timing[0].attempt, summary_timing[0].attempt);
+        assert_eq!(benchmark_timing[0].value, summary_timing[0].duration_ms);
+        assert_eq!(benchmark_timing[0].median, summary_timing[0].median_ms);
+        assert_eq!(benchmark_timing[0].mad, summary_timing[0].mad_ms);
+
+        let benchmark_tokens = &benchmark.iteration_summary.token_outliers;
+        let summary_tokens = &summary.token_outliers;
+        assert_eq!(benchmark_tokens.len(), 1);
+        assert_eq!(summary_tokens.len(), 1);
+        assert_eq!(benchmark_tokens[0].eval_case_id, summary_tokens[0].eval_case_id);
+        assert_eq!(benchmark_tokens[0].scenario_id, summary_tokens[0].scenario_id);
+        assert_eq!(benchmark_tokens[0].attempt, summary_tokens[0].attempt);
+        assert_eq!(benchmark_tokens[0].value, summary_tokens[0].total_tokens);
+        assert_eq!(benchmark_tokens[0].median, summary_tokens[0].median_tokens);
+        assert_eq!(benchmark_tokens[0].mad, summary_tokens[0].mad_tokens);
+    }
+
+    #[test]
     fn benchmark_json_snapshot_matches_fixture_layout() {
         let temp = tempfile::tempdir().unwrap();
         write_report(
