@@ -1490,8 +1490,8 @@ Location: `runs/<run-id>/timing.json` (sibling of `workspace/`).
 
 `cached_tokens` itself is absent when the harness reports no cache activity at
 all, which is a different claim from a harness that checked and cached
-nothing. `codex` and `cursor-agent` report only cache reads today, so their
-`cached_tokens` (when present) never carries a `write_tokens` side.
+nothing. Either side may be absent on its own: a harness that names one and not
+the other is recorded as having measured only the side it named.
 
 Token counts and duration are also copied into `report.json` run metrics after
 the runner completes.

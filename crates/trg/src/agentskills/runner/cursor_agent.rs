@@ -164,11 +164,12 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
     let input_tokens = usage.and_then(|u| u.get("inputTokens")).and_then(|v| v.as_u64());
     let output_tokens = usage.and_then(|u| u.get("outputTokens")).and_then(|v| v.as_u64());
     let total_tokens = total_tokens_from(input_tokens, output_tokens);
-    // cursor-agent names only the read side of caching; it has no field for tokens spent
-    // writing a fresh entry into the cache, so `write_tokens` stays `None` rather than 0.
     let cache_read = usage.and_then(|u| u.get("cacheReadTokens")).and_then(|v| v.as_u64());
-    let cached_tokens =
-        cache_read.map(|read| CacheTokens::parse(Some(read), None).expect("read is Some by construction"));
+    let cache_write = usage.and_then(|u| u.get("cacheWriteTokens")).and_then(|v| v.as_u64());
+    let cached_tokens = match (cache_read, cache_write) {
+        (None, None) => None,
+        (read, write) => Some(CacheTokens::parse(read, write).expect("read or write is Some by the match arm")),
+    };
 
     completed_outcome(
         duration_ms,
@@ -209,6 +210,27 @@ mod tests {
         let outcome = parse_outcome(stdout, 9999, true, Some(0));
         assert_eq!(outcome.total_tokens, Some(150));
         assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(15), None).unwrap()));
+    }
+
+    #[test]
+    fn a_cache_write_is_recorded_on_its_own_side_and_never_folded_into_the_total() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":15,"cacheWriteTokens":40}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(outcome.total_tokens, Some(150));
+        assert_eq!(
+            outcome.cached_tokens,
+            Some(CacheTokens::parse(Some(15), Some(40)).unwrap()),
+            "cache writes are billed at a premium, so dropping them understates what the run cost"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_only_wrote_to_the_cache_still_reports_cache_activity() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheWriteTokens":40}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(None, Some(40)).unwrap()));
     }
 
     #[test]

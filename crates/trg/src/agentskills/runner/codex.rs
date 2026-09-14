@@ -175,11 +175,14 @@ fn parse_outcome(
     let cached_input = usage
         .and_then(|u| u.get("cached_input_tokens"))
         .and_then(|v| v.as_u64());
+    let cache_write = usage
+        .and_then(|u| u.get("cache_write_input_tokens"))
+        .and_then(|v| v.as_u64());
     let total_tokens = total_tokens_from(input_tokens, output_tokens);
-    // Codex names only the read side of caching; it has no field for tokens spent writing
-    // a fresh entry into the cache, so `write_tokens` stays `None` rather than 0.
-    let cached_tokens =
-        cached_input.map(|read| CacheTokens::parse(Some(read), None).expect("read is Some by construction"));
+    let cached_tokens = match (cached_input, cache_write) {
+        (None, None) => None,
+        (read, write) => Some(CacheTokens::parse(read, write).expect("read or write is Some by the match arm")),
+    };
 
     completed_outcome(
         wall_ms,
@@ -214,6 +217,28 @@ mod tests {
         assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(10), None).unwrap()));
         assert_eq!(outcome.final_text, "final");
         assert_eq!(outcome.exit_code, Some(0));
+    }
+
+    #[test]
+    fn a_cache_write_is_recorded_on_its_own_side_and_never_folded_into_the_total() {
+        let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40,"cached_input_tokens":10,"cache_write_input_tokens":55}}
+"#;
+        let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
+        assert_eq!(outcome.total_tokens, Some(160));
+        assert_eq!(
+            outcome.cached_tokens,
+            Some(CacheTokens::parse(Some(10), Some(55)).unwrap()),
+            "cache writes are billed at a premium, so dropping them understates what the run cost"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_only_wrote_to_the_cache_still_reports_cache_activity() {
+        let stdout =
+            br#"{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40,"cache_write_input_tokens":55}}
+"#;
+        let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
+        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(None, Some(55)).unwrap()));
     }
 
     #[test]
