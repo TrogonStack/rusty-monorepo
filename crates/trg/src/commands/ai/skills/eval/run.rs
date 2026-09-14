@@ -11,13 +11,15 @@ use crate::agentskills::cache::{
 use crate::agentskills::case_selection::CaseSelection;
 use crate::agentskills::concurrency::RunConcurrency;
 use crate::agentskills::evals::{
-    effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalDirName, EvalSuite,
+    effective_model, effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalDirName,
+    EvalSuite,
 };
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::mocks::{
     materialize_mock_set, resolve_mock_set, MockCallLogEntry, MockServerBinary, MockSet, MOCK_CALLS_LOG_NAME,
 };
+use crate::agentskills::model_name::ModelName;
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::permission_outcome::PermissionOutcome;
 use crate::agentskills::report::{
@@ -114,9 +116,9 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "MODEL",
-        help = "Optional model identifier forwarded to the runner CLI (--model/-m). When unset, the runner CLI picks its own default; CLI-specific string."
+        help = "Optional model identifier forwarded to the runner CLI (--model/-m). A case that names its own model overrides this. When neither is set, the runner CLI picks its own default; CLI-specific string."
     )]
-    pub runner_model: Option<String>,
+    pub runner_model: Option<ModelName>,
 
     #[arg(
         long,
@@ -461,7 +463,7 @@ impl RunArgs {
             };
             match execute_runs(
                 runner,
-                self.runner_model.as_deref(),
+                self.runner_model.as_ref(),
                 self.timeout_secs,
                 self.retries,
                 &self.skill_dir,
@@ -555,7 +557,7 @@ impl<'a> BenchmarkJsonOutput<'a> {
 #[allow(clippy::too_many_arguments)]
 fn execute_runs(
     runner: Runner,
-    runner_model: Option<&str>,
+    runner_model: Option<&ModelName>,
     timeout_secs: Option<u64>,
     retries: u32,
     skill_path: &Path,
@@ -682,7 +684,7 @@ enum IntegrityWindow {
 /// Shared by reference across lanes, so nothing here may be specific to a single run.
 struct RunExecution<'a> {
     runner: Runner,
-    runner_model: Option<&'a str>,
+    runner_model: Option<&'a ModelName>,
     timeout_secs: Option<u64>,
     retries: u32,
     skill_path: &'a Path,
@@ -956,6 +958,9 @@ impl RunExecution<'_> {
             },
         };
 
+        let resolved_model = effective_model(case, self.runner_model);
+        run.runner_model = resolved_model.cloned();
+
         let tool_grant = self.resolved_tool_grant(case);
         // `ToolGrant` never deserializes empty, and an empty grant always gets refused
         // in `refuse_to_start` below anyway, so the report says why through its warning
@@ -973,7 +978,7 @@ impl RunExecution<'_> {
                 Some(mock_set.content_hash())
             },
             model_config: run.model_config_id.clone(),
-            runner_model: self.runner_model.map(str::to_string),
+            runner_model: resolved_model.map(|model| model.as_str().to_string()),
             runner_kind: self.runner_kind.clone(),
             runner_version: self.runner_version.clone(),
             scenario,
@@ -1025,7 +1030,7 @@ impl RunExecution<'_> {
             workspace_dir: &workspace_dir,
             transcript_path: &transcript_path,
             stderr_path: &stderr_path,
-            runner_model: self.runner_model,
+            runner_model: resolved_model.map(ModelName::as_str),
             timeout_secs: effective_timeout_secs(case, self.timeout_secs),
             skill_staging: self.skill_staging,
             environment: self.environment,
@@ -2168,6 +2173,145 @@ mod tests {
             .expect("duration_ms")
     }
 
+    fn write_skill_where_one_case_picks_its_own_model(root: &Path) -> PathBuf {
+        let skill_dir = root.join("mixed-model-skill");
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: mixed-model-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "mixed-model-skill",
+                "evals": [
+                    {
+                        "id": "takes-the-operators-model",
+                        "prompt": "first prompt",
+                        "expected_output": "first output",
+                        "assertions": ["checks first"]
+                    },
+                    {
+                        "id": "picks-its-own-model",
+                        "prompt": "second prompt",
+                        "expected_output": "second output",
+                        "assertions": ["checks second"],
+                        "model": "case-chosen-model"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
+    fn mixed_model_run_args(skill_dir: &Path, out_dir: &Path, operator_model: &str, cached: bool) -> RunArgs {
+        RunArgs {
+            skill_dir: skill_dir.to_path_buf(),
+            out_dir: out_dir.to_path_buf(),
+            eval_dir: None,
+            model_config: "ci-default".to_string(),
+            scenario: vec![ScenarioKind::WithSkill],
+            runner: Some(Runner::Codex),
+            runner_model: Some(ModelName::parse(operator_model).unwrap()),
+            timeout_secs: None,
+            retries: 0,
+            attempts: AttemptCount::single(),
+            concurrency: RunConcurrency::serial(),
+            force: true,
+            iteration: None,
+            old_skill_dir: None,
+            allow_skill_name_mismatch: false,
+            output_format: OutputFormat::Text,
+            grade: false,
+            benchmark: false,
+            require_assertions: false,
+            lint_evals: false,
+            no_cache: !cached,
+            reuse_completed: false,
+            skill_staging: SkillStaging::Symlink,
+            environment: EnvironmentPolicy::Scrubbed,
+            permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
+            allow_scaffold: false,
+            cases: Vec::new(),
+            tags: Vec::new(),
+            max_cost_usd: None,
+            ci: EvalCiArgs::default(),
+        }
+    }
+
+    /// `dimensions.model_configs` carries one label for the whole report, so a suite whose
+    /// cases pick their own models would otherwise read as though every run used the
+    /// operator's, which is a claim the report cannot support.
+    #[test]
+    fn a_report_says_which_model_each_run_actually_used() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_skill_where_one_case_picks_its_own_model(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report_dir = run_with_fake_runner(mixed_model_run_args(&skill_dir, &out_dir, "operator-model", false));
+
+        let report = read_report(&report_dir);
+        let model_of = |case: &str| {
+            report["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["eval_case_id"] == case)
+                .unwrap_or_else(|| panic!("no run for {case}"))["runner_model"]
+                .as_str()
+                .map(str::to_string)
+        };
+
+        assert_eq!(model_of("takes-the-operators-model").as_deref(), Some("operator-model"));
+        assert_eq!(model_of("picks-its-own-model").as_deref(), Some("case-chosen-model"));
+    }
+
+    /// The cache key has to be cut from the model a run executes under, not the one asked
+    /// for at the CLI: keyed on the CLI's, a case that pins its own model would miss on
+    /// every pass that changed `--runner-model` even though nothing about that run changed,
+    /// and a suite of pinned cases would never cache at all.
+    #[test]
+    fn changing_the_operators_model_leaves_a_case_that_pinned_its_own_on_cache() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_skill_where_one_case_picks_its_own_model(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        run_with_fake_runner(mixed_model_run_args(&skill_dir, &out_dir, "operator-model", true));
+        let second = run_with_fake_runner(mixed_model_run_args(
+            &skill_dir,
+            &out_dir,
+            "a-different-operator-model",
+            true,
+        ));
+
+        let report = read_report(&second);
+        let hit_for = |case: &str| {
+            report["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["eval_case_id"] == case)
+                .unwrap_or_else(|| panic!("no run for {case}"))["cache"]["hit"]
+                .as_bool()
+        };
+
+        assert_eq!(
+            hit_for("picks-its-own-model"),
+            Some(true),
+            "the pinned case executed under the same model both times"
+        );
+        assert_ne!(
+            hit_for("takes-the-operators-model"),
+            Some(true),
+            "the unpinned case executed under a different model the second time"
+        );
+    }
+
     #[test]
     fn consecutive_runs_with_identical_inputs_hit_cache() {
         super::fake_runner::reset();
@@ -2899,7 +3043,7 @@ mod tests {
             model_config: "other-model".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
-            runner_model: Some("gpt-test".to_string()),
+            runner_model: Some(ModelName::parse("gpt-test").unwrap()),
             timeout_secs: None,
             retries: 0,
             attempts: AttemptCount::single(),
@@ -2984,7 +3128,7 @@ mod tests {
             model_config: "other-model".to_string(),
             scenario: vec![ScenarioKind::WithoutSkill],
             runner: Some(Runner::Codex),
-            runner_model: Some("gpt-test".to_string()),
+            runner_model: Some(ModelName::parse("gpt-test").unwrap()),
             timeout_secs: None,
             retries: 0,
             attempts: AttemptCount::single(),

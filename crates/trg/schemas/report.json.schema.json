@@ -820,6 +820,12 @@
       ],
       "type": "object"
     },
+    "ModelName": {
+      "description": "A harness's own identifier for a model. Not padded with whitespace, and not blank.",
+      "minLength": 1,
+      "pattern": "^\\S(.*\\S)?$",
+      "type": "string"
+    },
     "PassSpend": {
       "description": "What a pass spent, or why nobody can say.\n\nA harness that publishes no price leaves a ledger holding zero, and a zero in a spend\nfield reads as a cheap pass rather than an unanswered question. Only a total someone\nactually priced is ever written as a number.",
       "oneOf": [
@@ -1155,6 +1161,17 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "runner_model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The model this run actually executed under, once the case's own choice and the\noperator's `--runner-model` are combined.\n\n`dimensions.model_configs` carries one label for the whole report, so without this a\nreader of a suite where cases pick their own models cannot tell which run used which,\nand would read every run as having used the operator's model."
         },
         "scenario_id": {
           "$ref": "#/$defs/ScenarioKind"

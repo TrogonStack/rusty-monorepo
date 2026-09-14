@@ -368,7 +368,7 @@ pub fn apply_cache_hit(
     // Named field by field, not `..source_run`, so a field added to `RunRecord` later
     // fails this match rather than silently keeping `run`'s own (usually empty) value.
     // Everything bound to an underscore-prefixed name belongs to the run doing the
-    // reusing, not the run being reused: its own id, case, scenario, iteration, model,
+    // reusing, not the run being reused: its own id, case, scenario, iteration,
     // attempt, invocation count, paths, mirror path and cache slot must stay as `run`
     // already has them.
     let RunRecord {
@@ -378,6 +378,7 @@ pub fn apply_cache_hit(
         scenario_id: _scenario_id,
         iteration: _iteration,
         model_config_id: _model_config_id,
+        runner_model,
         skill_revision_id: _skill_revision_id,
         attempt: _attempt,
         status,
@@ -397,6 +398,10 @@ pub fn apply_cache_hit(
     } = source_run;
 
     run.status = status;
+    // Taken from the source and not left as the request's own: `--reuse-completed` forgets
+    // the model on purpose, so the artifacts below can have been produced under a different
+    // one, and reporting the model that was asked for would name a model that never ran.
+    run.runner_model = runner_model;
     run.metrics = metrics;
     run.artifacts = artifacts
         .into_iter()
@@ -520,6 +525,7 @@ fn sha256_hex(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::model_name::ModelName;
     use crate::agentskills::report::{RunMetrics, RunPaths, ScenarioKind};
     use tempfile::tempdir;
 
@@ -662,6 +668,45 @@ mod tests {
         );
     }
 
+    fn sample_run_record(run_id: &str, eval_case_id: &str, scenario: ScenarioKind) -> RunRecord {
+        RunRecord {
+            runner_model: None,
+            id: run_id.to_string(),
+            eval_case_id: eval_case_id.to_string(),
+            eval_slug: eval_case_id.to_string(),
+            scenario_id: scenario,
+            iteration: 2,
+            model_config_id: "ci-default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt: 1,
+            failure_kind: None,
+            runner_invocations: 0,
+            status: "skipped".to_string(),
+            paths: RunPaths {
+                workspace: format!("runs/{run_id}/workspace"),
+                outputs: format!("runs/{run_id}/workspace/outputs"),
+            },
+            mirror_path: format!("iteration-2/eval-{eval_case_id}/{}/", scenario.as_str()),
+            tool_grant: None,
+            artifacts: Vec::new(),
+            metrics: RunMetrics {
+                duration_ms: None,
+                exit_code: None,
+                total_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                cost_usd: None,
+            },
+            cache: None,
+            skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
+            warnings: Vec::new(),
+            mock_violations: Vec::new(),
+            case_score: None,
+        }
+    }
+
     fn write_completed_run(report_dir: &Path, run_id: &str, eval_case_id: &str, scenario: ScenarioKind) {
         write_completed_run_with(report_dir, run_id, eval_case_id, scenario, |_| {});
     }
@@ -681,6 +726,7 @@ mod tests {
         fs::write(workspace.join("outputs/final.md"), "done").unwrap();
 
         let mut run = RunRecord {
+            runner_model: None,
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -767,6 +813,7 @@ mod tests {
         .unwrap();
 
         let run = RunRecord {
+            runner_model: None,
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -897,6 +944,7 @@ mod tests {
         let report_b = out_dir.join("demo/report-b");
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
+            runner_model: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
@@ -962,6 +1010,7 @@ mod tests {
         let report_b = out_dir.join("demo/report-b");
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
+            runner_model: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
@@ -1032,6 +1081,7 @@ mod tests {
         let report_b = out_dir.join("demo/report-b");
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
+            runner_model: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
@@ -1237,6 +1287,44 @@ mod tests {
 
         let pointer = lookup_reuse(&out_dir, &ReuseKeyInput::of(&other_config)).unwrap();
         assert_eq!(pointer.run_id, "run-001");
+    }
+
+    /// `--reuse-completed` forgets the model on purpose, so the run it serves can have been
+    /// produced under a different one. Leaving the requesting run's own model in place would
+    /// have the report name a model that never produced the artifacts underneath it, which
+    /// is the mislabel the field was added to prevent.
+    #[test]
+    fn a_reused_run_reports_the_model_that_produced_it_not_the_one_that_asked() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run_with(&report_a, "run-001", "one", ScenarioKind::WithSkill, |run| {
+            run.runner_model = Some(ModelName::parse("opus").unwrap());
+        });
+
+        let stored = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        record_completion(&out_dir, &CacheKey::from_input(&stored), &stored, &report_a, "run-001").unwrap();
+
+        let asked = CacheKeyInput {
+            runner_model: Some("sonnet".to_string()),
+            ..sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str())
+        };
+        let key = CacheKey::from_input(&asked);
+        let pointer = lookup_reuse(&out_dir, &ReuseKeyInput::of(&asked)).unwrap();
+
+        let report_b = out_dir.join("demo/report-b");
+        fs::create_dir_all(report_b.join("runs/run-002/workspace/outputs")).unwrap();
+        let mut run = sample_run_record("run-002", "one", ScenarioKind::WithSkill);
+        run.runner_model = Some(ModelName::parse("sonnet").unwrap());
+
+        apply_cache_hit(&mut run, &key, &pointer, &report_b).unwrap();
+
+        assert_eq!(
+            run.runner_model.as_ref().map(ModelName::as_str),
+            Some("opus"),
+            "a reused run answers for the model it ran under, not the one the request named"
+        );
     }
 
     /// A second attempt is a second sample of the same cell, which is the whole reason
