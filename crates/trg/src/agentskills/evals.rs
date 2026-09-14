@@ -1,6 +1,7 @@
 use super::exit_code::ExitCode;
 use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
+use super::model_name::ModelName;
 use super::outputs::guess_mime_type;
 use super::runner::TimingFile;
 use super::tool_grant::ToolGrant;
@@ -787,6 +788,14 @@ pub struct EvalCase {
     pub priority: Option<EvalPriority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u32>,
+    /// The model this case wants, for a case whose question is about one model in
+    /// particular.
+    ///
+    /// Overrides `--runner-model` rather than narrowing it: unlike a tool grant, a model is
+    /// not an authority the operator is capping, so there is nothing for a case to exceed.
+    /// Absent means the case takes whatever the operator asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_output_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -838,6 +847,12 @@ pub fn parse_eval_suite(content: &str) -> Result<EvalSuite> {
 
 pub fn effective_timeout_secs(case: &EvalCase, global_timeout_secs: Option<u64>) -> Option<u64> {
     case.timeout_secs.map(u64::from).or(global_timeout_secs)
+}
+
+/// The model a run of this case executes under, once the case's own choice and the
+/// operator's `--runner-model` are combined.
+pub fn effective_model<'a>(case: &'a EvalCase, global_model: Option<&'a ModelName>) -> Option<&'a ModelName> {
+    case.model.as_ref().or(global_model)
 }
 
 fn deserialize_evals<'de, D>(deserializer: D) -> std::result::Result<Vec<EvalCase>, D::Error>
@@ -2066,6 +2081,7 @@ mod tests {
 
     fn sample_eval_case(id: &str, prompt: &str, expected_output: &str) -> EvalCase {
         EvalCase {
+            model: None,
             id: EvalCaseId(id.to_string()),
             name: None,
             description: None,
@@ -2474,6 +2490,60 @@ mod tests {
 }"#;
         let suite = parse_eval_suite(far_beyond_any_release).expect("schema_version 99 must no longer be rejected");
         assert_eq!(suite.schema_version, 99);
+    }
+
+    /// A case that asks about one model in particular has to get that model even when the
+    /// operator named another at the CLI, or the case is silently answering a different
+    /// question than the one it states.
+    #[test]
+    fn a_case_that_names_a_model_gets_it_over_the_one_the_operator_asked_for() {
+        let mut eval = sample_eval_case("one", "prompt long enough here", "output long");
+        let operator = ModelName::parse("operator-model").unwrap();
+
+        eval.model = Some(ModelName::parse("case-model").unwrap());
+        assert_eq!(effective_model(&eval, Some(&operator)).unwrap().as_str(), "case-model");
+
+        eval.model = None;
+        assert_eq!(
+            effective_model(&eval, Some(&operator)).unwrap().as_str(),
+            "operator-model"
+        );
+        assert_eq!(effective_model(&eval, None), None);
+    }
+
+    /// The manifest is `deny_unknown_fields`, so a suite naming a model only runs if the
+    /// field is spelled the way a suite author would spell it.
+    #[test]
+    fn a_suite_can_name_a_models_per_case() {
+        let suite: EvalSuite = serde_json::from_value(serde_json::json!({
+            "skill_name": "demo",
+            "evals": [{
+                "id": "one",
+                "prompt": "a prompt long enough to pass",
+                "expected_output": "an output long enough",
+                "model": "claude-opus-5"
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(suite.evals[0].model.as_ref().unwrap().as_str(), "claude-opus-5");
+    }
+
+    /// A blank model is not a weaker request, it is one a harness would answer with its own
+    /// default while the suite reads as having pinned something.
+    #[test]
+    fn a_suite_cannot_name_a_blank_model() {
+        let refused = serde_json::from_value::<EvalSuite>(serde_json::json!({
+            "skill_name": "demo",
+            "evals": [{
+                "id": "one",
+                "prompt": "a prompt long enough to pass",
+                "expected_output": "an output long enough",
+                "model": "   "
+            }]
+        }));
+
+        assert!(refused.is_err());
     }
 
     #[test]

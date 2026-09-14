@@ -3477,6 +3477,7 @@ mod tests {
 
     fn run_record_with_artifacts(artifacts: Vec<serde_json::Value>) -> RunRecord {
         RunRecord {
+            runner_model: None,
             id: "run-001".to_string(),
             eval_case_id: "case-a".to_string(),
             eval_slug: "case-a".to_string(),

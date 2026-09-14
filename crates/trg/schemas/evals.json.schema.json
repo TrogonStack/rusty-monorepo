@@ -407,6 +407,17 @@
         "id": {
           "$ref": "#/$defs/EvalCaseId"
         },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The model this case wants, for a case whose question is about one model in\nparticular.\n\nOverrides `--runner-model` rather than narrowing it: unlike a tool grant, a model is\nnot an authority the operator is capping, so there is nothing for a case to exceed.\nAbsent means the case takes whatever the operator asked for."
+        },
         "name": {
           "anyOf": [
             {
@@ -617,6 +628,12 @@
       "description": "An exact number of regex matches a `regex` grader must find.\n\nZero is refused: `negate` without a `count` already asks for the pattern\nto be absent, so `count: 0` would only be a second spelling of that same\ncheck, in either polarity of `negate`.",
       "minimum": 1,
       "type": "integer"
+    },
+    "ModelName": {
+      "description": "A harness's own identifier for a model. Not padded with whitespace, and not blank.",
+      "minLength": 1,
+      "pattern": "^\\S(.*\\S)?$",
+      "type": "string"
     },
     "NonEmptyString": {
       "minLength": 1,

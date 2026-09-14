@@ -378,6 +378,7 @@ pub fn apply_cache_hit(
         scenario_id: _scenario_id,
         iteration: _iteration,
         model_config_id: _model_config_id,
+        runner_model: _runner_model,
         skill_revision_id: _skill_revision_id,
         attempt: _attempt,
         status,
@@ -681,6 +682,7 @@ mod tests {
         fs::write(workspace.join("outputs/final.md"), "done").unwrap();
 
         let mut run = RunRecord {
+            runner_model: None,
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -767,6 +769,7 @@ mod tests {
         .unwrap();
 
         let run = RunRecord {
+            runner_model: None,
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -897,6 +900,7 @@ mod tests {
         let report_b = out_dir.join("demo/report-b");
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
+            runner_model: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
@@ -962,6 +966,7 @@ mod tests {
         let report_b = out_dir.join("demo/report-b");
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
+            runner_model: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
@@ -1032,6 +1037,7 @@ mod tests {
         let report_b = out_dir.join("demo/report-b");
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
+            runner_model: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),

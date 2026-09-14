@@ -1231,6 +1231,7 @@ mod tests {
                 grading_strategies: Vec::new(),
             },
             runs: vec![RunRecord {
+                runner_model: None,
                 id: "run-001".to_string(),
                 eval_case_id: "case-a".to_string(),
                 eval_slug: "case-a".to_string(),

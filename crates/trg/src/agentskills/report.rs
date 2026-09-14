@@ -21,6 +21,7 @@ use super::feedback::{
 use super::judge::JudgeProvider;
 use super::judge_votes::JudgeVotes;
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
+use super::model_name::ModelName;
 use super::outputs::OUTPUTS_DIR;
 use super::permission_outcome::PermissionOutcome;
 use super::runner::capabilities::HarnessControl;
@@ -538,6 +539,14 @@ pub struct RunRecord {
     pub failure_kind: Option<String>,
     pub paths: RunPaths,
     pub mirror_path: String,
+    /// The model this run actually executed under, once the case's own choice and the
+    /// operator's `--runner-model` are combined.
+    ///
+    /// `dimensions.model_configs` carries one label for the whole report, so without this a
+    /// reader of a suite where cases pick their own models cannot tell which run used which,
+    /// and would read every run as having used the operator's model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_model: Option<ModelName>,
     /// The tool grant this run was actually given, once the operator's ceiling and the
     /// case's own declaration are combined. `None` means unrestricted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1213,6 +1222,7 @@ fn build_runs(
                     scenario_id: *scenario,
                     iteration,
                     model_config_id: model_config_label.to_string(),
+                    runner_model: None,
                     skill_revision_id: match scenario {
                         ScenarioKind::OldSkill => "old".to_string(),
                         _ => "current".to_string(),
