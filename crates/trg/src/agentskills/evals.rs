@@ -1601,6 +1601,7 @@ mod tests {
     use super::*;
     use crate::agentskills::budget::RunCost;
     use crate::agentskills::report::CacheTokens;
+    use crate::agentskills::runner::usage::HarnessTokenUsage;
     use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus, Runner};
     use crate::fs::testutil::MemFS;
     use std::fs;
@@ -2049,10 +2050,11 @@ mod tests {
             failure_kind: None,
             duration_ms: 2500,
             exit_code: Some(0),
-            total_tokens: Some(1000),
-            input_tokens: Some(700),
-            output_tokens: Some(300),
-            cached_tokens: Some(CacheTokens::parse(Some(50), None).unwrap()),
+            tokens: HarnessTokenUsage::reported(
+                Some(700),
+                Some(300),
+                Some(CacheTokens::parse(Some(50), None).unwrap()),
+            ),
             cost: Some(RunCost::Priced { usd: 0.42 }),
             final_text: "done".to_string(),
             read_only_fixture_violations: Vec::new(),
@@ -2132,10 +2134,7 @@ mod tests {
             failure_kind: None,
             duration_ms: 2500,
             exit_code: Some(0),
-            total_tokens: Some(1000),
-            input_tokens: Some(700),
-            output_tokens: Some(300),
-            cached_tokens: None,
+            tokens: HarnessTokenUsage::reported(Some(700), Some(300), None),
             cost: Runner::ClaudeCode.pricing().price(Some(0.42)),
             final_text: "done".to_string(),
             read_only_fixture_violations: Vec::new(),

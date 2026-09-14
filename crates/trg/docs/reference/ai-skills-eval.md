@@ -1401,6 +1401,7 @@ other field forward as declared there, including `name`, `excluded`,
 | `metrics` | object | `duration_ms`, token counts, and `cost` (populated by runner). See [Artifact: `timing.json`](#artifact-timingjson) for what `total_tokens` and `cached_tokens` mean, and [What a run cost](#what-a-run-cost) for `cost` |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
 | `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
+| `warnings` | string[] | Run-level anomalies that do not fail the run on their own, such as a read-only fixture that changed, an expected output that was never written, a path reached outside the workspace, or a usage field the harness wrote in a shape that is not a token count. Also carries the reason a run that was never started was skipped |
 | `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
 | `mock_violations` | array | Every logged `expect` mismatch from `mock-calls.jsonl`, read back after the run finished. Empty when the case declares no mocks or violates nothing |
 
@@ -1532,6 +1533,16 @@ Location: `runs/<run-id>/timing.json` (sibling of `workspace/`).
 all, which is a different claim from a harness that checked and cached
 nothing. Either side may be absent on its own: a harness that names one and not
 the other is recorded as having measured only the side it named.
+
+Any count is absent when the harness reported nothing for it: no usage block at
+all, or a block that did not name the field. A field the harness did name but
+filled with something no reader can add up (a string, a fraction, a negative, an
+explicit `null`, an object) leaves its count absent here too, and the run reports
+it in `report.json` under `runs[].warnings`, naming the harness, the field, and
+the value found. `timing.json` gains no field for it: the count is genuinely
+absent, which is what every reader of this file already handles, while the fact
+that the harness contradicted its own record is a run-level anomaly and is read
+where a run's other anomalies are read.
 
 Token counts and duration are also copied into `report.json` run metrics after
 the runner completes.

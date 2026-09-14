@@ -4,19 +4,28 @@ use std::process::Command;
 
 use super::capabilities::HarnessControl;
 use super::environment::{ConfigHomeOrigin, RunEnvironment};
+use super::usage::{HarnessTokenUsage, UsageFieldNames};
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
-    runner_failure_outcome, timeout_duration, timeout_outcome, total_tokens_from, write_runner_invocation_metadata,
-    write_timing_file, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
+    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
+    EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::mocks::MaterializedMcpConfig;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, outputs_dir, path_within_base, FINAL_MD};
 use crate::agentskills::redact::redact_command_args;
-use crate::agentskills::report::{CacheTokens, PermissionGrant};
+use crate::agentskills::report::PermissionGrant;
 
 const PROGRAM: &str = "codex";
 const INSTALL_HINT: &str = "install Codex CLI and ensure `codex` is on PATH";
+
+/// How codex spells the counts in its `turn.completed` usage block.
+const USAGE_FIELDS: UsageFieldNames = UsageFieldNames {
+    input: "input_tokens",
+    output: "output_tokens",
+    cache_read: "cached_input_tokens",
+    cache_write: "cache_write_input_tokens",
+};
 
 pub fn check_available() -> Result<(), EvalError> {
     check_runner_version(PROGRAM, INSTALL_HINT)
@@ -216,28 +225,12 @@ fn parse_outcome(
         return runner_failure_outcome(Runner::Codex, wall_ms, exit_code, final_text);
     }
 
-    let usage = terminal.get("usage");
-    let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(|v| v.as_u64());
-    let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64());
-    let cached_input = usage
-        .and_then(|u| u.get("cached_input_tokens"))
-        .and_then(|v| v.as_u64());
-    let cache_write = usage
-        .and_then(|u| u.get("cache_write_input_tokens"))
-        .and_then(|v| v.as_u64());
-    let total_tokens = total_tokens_from(input_tokens, output_tokens);
-    let cached_tokens = match (cached_input, cache_write) {
-        (None, None) => None,
-        (read, write) => Some(CacheTokens::parse(read, write).expect("read or write is Some by the match arm")),
-    };
+    let tokens = HarnessTokenUsage::read(terminal.get("usage"), Runner::Codex, USAGE_FIELDS);
 
     completed_outcome(
         wall_ms,
         exit_code,
-        total_tokens,
-        input_tokens,
-        output_tokens,
-        cached_tokens,
+        tokens,
         Runner::Codex.pricing().price(None),
         final_text,
     )
@@ -247,7 +240,7 @@ fn parse_outcome(
 mod tests {
     use super::super::RunStatus;
     use super::*;
-    use crate::agentskills::report::EnvironmentPolicy;
+    use crate::agentskills::report::{CacheTokens, EnvironmentPolicy};
 
     #[test]
     fn parses_turn_completed_event() {
@@ -257,12 +250,15 @@ mod tests {
         let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
         assert!(matches!(outcome.status, RunStatus::Completed));
         assert_eq!(outcome.duration_ms, 5000);
-        assert_eq!(outcome.input_tokens, Some(120));
-        assert_eq!(outcome.output_tokens, Some(40));
+        assert_eq!(outcome.tokens.input_tokens(), Some(120));
+        assert_eq!(outcome.tokens.output_tokens(), Some(40));
         // input + output only: the same rule claude-code and cursor-agent use, so a cached
         // count is never folded into a total that is supposed to compare across harnesses.
-        assert_eq!(outcome.total_tokens, Some(160));
-        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(10), None).unwrap()));
+        assert_eq!(outcome.tokens.total_tokens(), Some(160));
+        assert_eq!(
+            outcome.tokens.cached_tokens(),
+            Some(CacheTokens::parse(Some(10), None).unwrap())
+        );
         assert_eq!(outcome.final_text, "final");
         assert_eq!(outcome.exit_code, Some(0));
     }
@@ -272,9 +268,9 @@ mod tests {
         let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40,"cached_input_tokens":10,"cache_write_input_tokens":55}}
 "#;
         let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
-        assert_eq!(outcome.total_tokens, Some(160));
+        assert_eq!(outcome.tokens.total_tokens(), Some(160));
         assert_eq!(
-            outcome.cached_tokens,
+            outcome.tokens.cached_tokens(),
             Some(CacheTokens::parse(Some(10), Some(55)).unwrap()),
             "cache writes are billed at a premium, so dropping them understates what the run cost"
         );
@@ -286,7 +282,10 @@ mod tests {
             br#"{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40,"cache_write_input_tokens":55}}
 "#;
         let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
-        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(None, Some(55)).unwrap()));
+        assert_eq!(
+            outcome.tokens.cached_tokens(),
+            Some(CacheTokens::parse(None, Some(55)).unwrap())
+        );
     }
 
     #[test]
@@ -295,8 +294,66 @@ mod tests {
 "#;
         let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
         assert_eq!(
-            outcome.cached_tokens, None,
+            outcome.tokens.cached_tokens(),
+            None,
             "a harness that never mentions cache tokens is not the same as one that measured zero"
+        );
+    }
+
+    #[test]
+    fn a_usage_block_the_harness_filled_in_leaves_nothing_unreadable() {
+        let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40}}
+"#;
+        let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
+        assert_eq!(outcome.tokens.input_tokens(), Some(120));
+        assert_eq!(outcome.tokens.output_tokens(), Some(40));
+        assert!(outcome.tokens.unreadable().is_empty());
+    }
+
+    #[test]
+    fn a_turn_carrying_no_usage_block_at_all_reports_no_tokens_and_nothing_to_warn_about() {
+        let stdout = br#"{"type":"turn.completed"}
+"#;
+        let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
+        assert_eq!(outcome.tokens.total_tokens(), None);
+        assert!(
+            outcome.tokens.unreadable().is_empty(),
+            "a harness that reported nothing contradicted nothing"
+        );
+    }
+
+    #[test]
+    fn a_usage_block_that_leaves_a_field_out_reports_no_count_for_it_and_nothing_to_warn_about() {
+        let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":120}}
+"#;
+        let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
+        assert_eq!(outcome.tokens.input_tokens(), Some(120));
+        assert_eq!(outcome.tokens.output_tokens(), None);
+        assert!(outcome.tokens.unreadable().is_empty());
+    }
+
+    #[test]
+    fn a_usage_field_the_harness_garbled_is_reported_as_unreadable_rather_than_as_a_count_nobody_sent() {
+        let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":null}}
+"#;
+        let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
+        assert_eq!(outcome.tokens.input_tokens(), Some(120));
+        assert_eq!(outcome.tokens.output_tokens(), None);
+        let warnings: Vec<String> = outcome
+            .tokens
+            .unreadable()
+            .iter()
+            .map(|field| field.warning())
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a harness that names a field and fills it with nothing knew the field existed"
+        );
+        assert!(
+            warnings[0].contains("codex") && warnings[0].contains("output_tokens"),
+            "unexpected warning: {}",
+            warnings[0]
         );
     }
 
