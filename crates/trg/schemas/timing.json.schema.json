@@ -44,6 +44,47 @@
       },
       "type": "object"
     },
+    "RunCost": {
+      "description": "What one run cost, or why nobody can say.\n\nA run whose harness prices nothing and a run whose harness prices everything but did\nnot price this one are two different facts, and a bare absent number carries neither.\nA reader totalling an absent price as zero reports a harness as cheap when what it\nactually did was decline to answer.",
+      "oneOf": [
+        {
+          "description": "The harness priced this run, and this is what it came to.",
+          "properties": {
+            "kind": {
+              "const": "priced",
+              "type": "string"
+            },
+            "usd": {
+              "format": "double",
+              "minimum": 0.0,
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "usd"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The harness prices no run at all, so this one has no cost to report and is not a\nrun that cost nothing. Named, so a report totalling a mixed history can say which\nharness it cannot total.",
+          "properties": {
+            "harness": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unpriced",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "harness"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "SchemaVersion": {
       "description": "Which shape of this artifact the document was written to. Absent means it predates stamping, which is shape 1.",
       "maximum": 4294967295,
@@ -54,6 +95,7 @@
   "$id": "https://trogonstack.dev/schemas/trg/timing.json.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
+  "description": "The shape a run's timing is written in, which is the shape every earlier release still\nreads. `cost_usd` was that release's whole vocabulary for cost, so a run that carries a\nprice keeps publishing one; a run nobody priced has no number to put there, which is\nwhat its absence has always meant.",
   "properties": {
     "cached_tokens": {
       "anyOf": [
@@ -65,7 +107,19 @@
         }
       ]
     },
+    "cost": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RunCost"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "What this run cost, or why nobody can say. Absent when the harness prices its runs\nand did not price this one, which is a different fact from a harness that prices\nnone of them."
+    },
     "cost_usd": {
+      "description": "The price alone, for readers written before `cost` could say why a run carries\nnone. Absent for exactly the runs that carry no price.",
       "format": "double",
       "type": [
         "number",

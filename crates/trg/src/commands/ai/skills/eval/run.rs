@@ -1075,7 +1075,7 @@ impl RunExecution<'_> {
             discard_mock_calls_from_earlier_attempts(&run_dir, &run.id);
             match invoke_runner(self.runner, &request) {
                 Ok(outcome) => {
-                    self.cost_ledger.record(outcome.cost_usd);
+                    self.cost_ledger.record(outcome.cost.as_ref());
                     if !outcome.is_transient_failure() || invocations >= max_attempts {
                         apply_outcome(
                             run,
@@ -1175,6 +1175,7 @@ mod fake_runner {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
 
+    use crate::agentskills::budget::RunCost;
     use crate::agentskills::runner::{EvalRunOutcome, EvalRunRequest, RunStatus};
 
     /// How long a lane waits for the lanes a test expects alongside it.
@@ -1343,7 +1344,11 @@ mod fake_runner {
 
         leave_lane(&state);
 
-        let cost_usd = *state.cost_usd.lock().expect("fake cost");
+        let cost = state
+            .cost_usd
+            .lock()
+            .expect("fake cost")
+            .map(|usd| RunCost::Priced { usd });
 
         let transient = state
             .transient_failures
@@ -1381,7 +1386,7 @@ mod fake_runner {
                 input_tokens: Some(count as u64),
                 output_tokens: Some(0),
                 cached_tokens: None,
-                cost_usd,
+                cost: cost.clone(),
                 final_text: format!("transient-{count}"),
                 read_only_fixture_violations: Vec::new(),
             };
@@ -1396,7 +1401,7 @@ mod fake_runner {
             input_tokens: Some(count as u64),
             output_tokens: Some(0),
             cached_tokens: None,
-            cost_usd,
+            cost,
             final_text: format!("run-{count}"),
             read_only_fixture_violations: Vec::new(),
         }
@@ -1459,7 +1464,7 @@ fn apply_outcome(
     run.metrics.input_tokens = outcome.input_tokens;
     run.metrics.output_tokens = outcome.output_tokens;
     run.metrics.cached_tokens = outcome.cached_tokens;
-    run.metrics.cost_usd = outcome.cost_usd;
+    run.metrics.cost = outcome.cost.clone();
 
     run.read_only_fixture_violations = outcome.read_only_fixture_violations.clone();
     for path in &outcome.read_only_fixture_violations {

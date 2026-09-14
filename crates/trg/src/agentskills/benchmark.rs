@@ -5,6 +5,7 @@ use chrono::{SecondsFormat, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::budget::RunCost;
 use super::dispersion::{self, AssertionKey, FlakinessLedger, FlakyAssertionRecord, MetricSample};
 use super::eval_suite_drift::{
     detect_eval_suite_drift_snapshots, load_report_drift_snapshot, maybe_emit_eval_suite_drift_warning,
@@ -152,16 +153,96 @@ pub struct DurationStats {
     pub mad: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Default, JsonSchema)]
+#[derive(Debug, Clone, Default)]
 pub struct TokenStats {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub input: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<u64>,
+    pub cost: Option<BucketCost>,
+}
+
+/// The shape a bucket's tokens are written in, which is the shape every earlier release
+/// still reads. `cost_usd` was that release's whole vocabulary for cost, and it was read
+/// as the bucket's cost, so it is published for exactly the buckets whose total is that:
+/// a partial total under that name is the reading this field was changed to stop.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "TokenStats")]
+struct SerializedTokenStats<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cost_usd: Option<f64>,
+    total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<&'a BucketCost>,
+    /// The bucket's cost alone, for readers written before `cost` could say what a total
+    /// covers. Published only for a bucket every run of which was priced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
+}
+
+impl<'a> From<&'a TokenStats> for SerializedTokenStats<'a> {
+    fn from(stats: &'a TokenStats) -> Self {
+        Self {
+            total: stats.total,
+            input: stats.input,
+            output: stats.output,
+            cost: stats.cost.as_ref(),
+            cost_usd: stats.cost.as_ref().and_then(BucketCost::whole_bucket_usd),
+        }
+    }
+}
+
+impl Serialize for TokenStats {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        SerializedTokenStats::from(self).serialize(serializer)
+    }
+}
+
+impl JsonSchema for TokenStats {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TokenStats".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        SerializedTokenStats::json_schema(generator)
+    }
+}
+
+/// What the runs behind one bucket cost, or why nobody can say.
+///
+/// A plain total said nothing about how much of its bucket it covered, so a bucket of ten
+/// runs where one carried a price published that one run's price as the bucket's cost.
+/// Saying which of the two a total is what makes it readable at all.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BucketCost {
+    /// Every run in this bucket carried a price, so this total is the bucket's cost.
+    Whole {
+        #[schemars(range(min = 0.0))]
+        usd: f64,
+    },
+    /// Only some of the bucket's runs carried a price. `runs` is how many, so nobody
+    /// reads the total as the whole bucket's.
+    Partial {
+        #[schemars(range(min = 0.0))]
+        usd: f64,
+        runs: usize,
+    },
+    /// At least one run here came from a harness that prices nothing, so this bucket has
+    /// no total at all rather than a total that quietly leaves those runs out.
+    Unpriced { harness: String },
+}
+
+impl BucketCost {
+    /// The bucket's own cost, which only a total covering every one of its runs is.
+    pub fn whole_bucket_usd(&self) -> Option<f64> {
+        match self {
+            Self::Whole { usd } => Some(*usd),
+            Self::Partial { .. } | Self::Unpriced { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default, JsonSchema)]
@@ -185,6 +266,8 @@ pub struct ScenarioDelta {
     pub duration_ms_mean: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_total: Option<i64>,
+    /// Published only when both arms priced every run behind them, because a difference
+    /// between two totals that cover different numbers of runs is not a cost difference.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     pub left: ArmObservations,
@@ -319,7 +402,20 @@ struct TimingFileInput {
     #[serde(default)]
     output_tokens: Option<u64>,
     #[serde(default)]
+    cost: Option<RunCost>,
+    /// Written by every release before a run's cost said which harness could not price
+    /// it. Read as a priced run, because only a harness that prices its runs ever wrote
+    /// a number here.
+    #[serde(default)]
     cost_usd: Option<f64>,
+}
+
+impl TimingFileInput {
+    fn cost(&self) -> Option<RunCost> {
+        self.cost
+            .clone()
+            .or_else(|| self.cost_usd.map(|usd| RunCost::Priced { usd }))
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -563,18 +659,20 @@ fn summarize_completed(samples: &[RunSample], zero_failed_count: usize) -> Compl
             push_if_some(&mut token_totals, timing.total_tokens);
             push_if_some(&mut token_inputs, timing.input_tokens);
             push_if_some(&mut token_outputs, timing.output_tokens);
-            push_if_some_f64(&mut costs, timing.cost_usd);
+            push_if_some(&mut costs, timing.cost());
         }
     }
 
     run_failed += zero_failed_count;
 
+    let run_count = samples.len() + zero_failed_count;
+
     CompletedBucket {
-        run_count: samples.len() + zero_failed_count,
+        run_count,
         assertions: pass_fail_summary(assertion_passed, assertion_failed),
         runs: pass_fail_summary(run_passed, run_failed),
         duration_ms: duration_stats(&durations),
-        tokens: token_stats(&token_totals, &token_inputs, &token_outputs, &costs),
+        tokens: token_stats(&token_totals, &token_inputs, &token_outputs, &costs, run_count),
         missing_grading,
         missing_timing,
     }
@@ -598,14 +696,14 @@ fn summarize_failed_bucket(samples: &[RunSample]) -> RunBucketSummary {
             push_if_some(&mut token_totals, timing.total_tokens);
             push_if_some(&mut token_inputs, timing.input_tokens);
             push_if_some(&mut token_outputs, timing.output_tokens);
-            push_if_some_f64(&mut costs, timing.cost_usd);
+            push_if_some(&mut costs, timing.cost());
         }
     }
 
     RunBucketSummary {
         run_count: samples.len(),
         duration_ms: duration_stats(&durations),
-        tokens: token_stats(&token_totals, &token_inputs, &token_outputs, &costs),
+        tokens: token_stats(&token_totals, &token_inputs, &token_outputs, &costs, samples.len()),
         missing_timing,
     }
 }
@@ -695,13 +793,43 @@ pub fn stddev(values: &[u64], mean: f64) -> f64 {
     variance.sqrt()
 }
 
-fn token_stats(totals: &[u64], inputs: &[u64], outputs: &[u64], costs: &[f64]) -> TokenStats {
+fn token_stats(totals: &[u64], inputs: &[u64], outputs: &[u64], costs: &[RunCost], run_count: usize) -> TokenStats {
     TokenStats {
         total: sum_optional(totals),
         input: sum_optional(inputs),
         output: sum_optional(outputs),
-        cost_usd: sum_optional_f64(costs),
+        cost: bucket_cost(costs, run_count),
     }
+}
+
+/// A bucket holding one run a harness refuses to price cannot be totalled at all: adding
+/// up the rest would publish the priced runs' total as the bucket's cost and read the
+/// unpriced ones as runs that were free.
+fn bucket_cost(costs: &[RunCost], run_count: usize) -> Option<BucketCost> {
+    if let Some(RunCost::Unpriced { harness }) = costs.iter().find(|cost| cost.is_unpriced()) {
+        return Some(BucketCost::Unpriced {
+            harness: harness.clone(),
+        });
+    }
+
+    let priced: Vec<f64> = costs.iter().filter_map(RunCost::usd).collect();
+    if priced.is_empty() {
+        return None;
+    }
+    let usd = priced.iter().sum();
+    match priced.len() == run_count {
+        true => Some(BucketCost::Whole { usd }),
+        false => Some(BucketCost::Partial {
+            usd,
+            runs: priced.len(),
+        }),
+    }
+}
+
+/// Only a difference between two totals that each cover their whole arm is a cost
+/// difference; anything else subtracts two different questions from each other.
+fn whole_arm_cost(bucket: &CompletedBucket) -> Option<f64> {
+    bucket.tokens.cost.as_ref()?.whole_bucket_usd()
 }
 
 fn sum_optional(values: &[u64]) -> Option<u64> {
@@ -712,21 +840,7 @@ fn sum_optional(values: &[u64]) -> Option<u64> {
     }
 }
 
-fn sum_optional_f64(values: &[f64]) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        Some(values.iter().sum())
-    }
-}
-
-fn push_if_some(values: &mut Vec<u64>, value: Option<u64>) {
-    if let Some(value) = value {
-        values.push(value);
-    }
-}
-
-fn push_if_some_f64(values: &mut Vec<f64>, value: Option<f64>) {
+fn push_if_some<T>(values: &mut Vec<T>, value: Option<T>) {
     if let Some(value) = value {
         values.push(value);
     }
@@ -764,7 +878,7 @@ fn delta_between(left: Option<&ScenarioBenchmark>, right: Option<&ScenarioBenchm
         run_pass_rate: left.completed.runs.pass_rate - right.completed.runs.pass_rate,
         duration_ms_mean: left.completed.duration_ms.mean - right.completed.duration_ms.mean,
         tokens_total: diff_optional(left.completed.tokens.total, right.completed.tokens.total),
-        cost_usd: diff_optional_f64(left.completed.tokens.cost_usd, right.completed.tokens.cost_usd),
+        cost_usd: diff_optional_f64(whole_arm_cost(&left.completed), whole_arm_cost(&right.completed)),
         left: arm_observations(left),
         right: arm_observations(right),
     })
@@ -1860,6 +1974,138 @@ mod tests {
         assert_eq!(benchmark_tokens[0].value, summary_tokens[0].total_tokens);
         assert_eq!(benchmark_tokens[0].median, summary_tokens[0].median_tokens);
         assert_eq!(benchmark_tokens[0].mad, summary_tokens[0].mad_tokens);
+    }
+
+    /// A bucket of ten runs where one carried a price used to publish that one price as
+    /// the bucket's cost, which reads as nine runs that were free.
+    #[test]
+    fn a_bucket_only_some_of_whose_runs_were_priced_says_what_the_total_covers() {
+        let costs = vec![RunCost::Priced { usd: 0.25 }];
+
+        assert_eq!(bucket_cost(&costs, 3), Some(BucketCost::Partial { usd: 0.25, runs: 1 }));
+    }
+
+    #[test]
+    fn a_bucket_every_run_of_which_was_priced_reports_the_bucket_cost() {
+        let costs = vec![RunCost::Priced { usd: 0.25 }, RunCost::Priced { usd: 0.75 }];
+
+        assert_eq!(bucket_cost(&costs, 2), Some(BucketCost::Whole { usd: 1.0 }));
+    }
+
+    /// Totalling the rest would read the run its harness refuses to price as a run that
+    /// was free, so there is no total to publish here at all.
+    #[test]
+    fn a_bucket_holding_a_run_no_harness_prices_has_no_total() {
+        let costs = vec![
+            RunCost::Priced { usd: 0.25 },
+            RunCost::Unpriced {
+                harness: "codex".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            bucket_cost(&costs, 2),
+            Some(BucketCost::Unpriced {
+                harness: "codex".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_bucket_no_run_of_which_reported_anything_carries_no_cost() {
+        assert_eq!(bucket_cost(&[], 3), None);
+    }
+
+    /// Only a bucket whose total is its own cost has a number to put under the name an
+    /// earlier release read as exactly that.
+    #[test]
+    fn only_a_whole_bucket_publishes_the_bare_number_earlier_releases_read() {
+        let whole = TokenStats {
+            cost: Some(BucketCost::Whole { usd: 0.25 }),
+            ..TokenStats::default()
+        };
+        let partial = TokenStats {
+            cost: Some(BucketCost::Partial { usd: 0.25, runs: 1 }),
+            ..TokenStats::default()
+        };
+
+        assert_eq!(serde_json::to_value(&whole).unwrap()["cost_usd"], 0.25);
+        assert!(serde_json::to_value(&partial).unwrap().get("cost_usd").is_none());
+    }
+
+    /// Subtracting a total that covers one arm from a total that covers part of another
+    /// answers no question anybody asked.
+    #[test]
+    fn a_cost_difference_is_withheld_unless_both_arms_priced_every_run() {
+        let temp = tempfile::tempdir().unwrap();
+        write_report(
+            temp.path(),
+            serde_json::json!([
+                sample_run("run-001", "with_skill", "completed", None),
+                sample_run("run-002", "with_skill", "completed", None),
+                sample_run("run-003", "without_skill", "completed", None),
+            ]),
+            None,
+        );
+        for (run_id, timing) in [
+            (
+                "run-001",
+                r#"{ "duration_ms": 1000, "cost": { "kind": "priced", "usd": 0.25 } }"#,
+            ),
+            ("run-002", r#"{ "duration_ms": 1000 }"#),
+            (
+                "run-003",
+                r#"{ "duration_ms": 1000, "cost": { "kind": "priced", "usd": 0.10 } }"#,
+            ),
+        ] {
+            write_run_artifacts(temp.path(), run_id, None, Some(timing));
+        }
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+
+        assert_eq!(
+            benchmark.scenarios["with_skill"].completed.tokens.cost,
+            Some(BucketCost::Partial { usd: 0.25, runs: 1 })
+        );
+        assert_eq!(
+            benchmark.scenarios["without_skill"].completed.tokens.cost,
+            Some(BucketCost::Whole { usd: 0.10 })
+        );
+        assert_eq!(
+            benchmark
+                .deltas
+                .with_skill_vs_without_skill
+                .expect("both arms ran")
+                .cost_usd,
+            None
+        );
+    }
+
+    /// A run of a harness that prices nothing is not a run that cost nothing, so its
+    /// bucket names the harness instead of publishing what the other runs came to.
+    #[test]
+    fn a_bucket_of_a_harness_that_prices_nothing_names_it_instead_of_totalling() {
+        let temp = tempfile::tempdir().unwrap();
+        write_report(
+            temp.path(),
+            serde_json::json!([sample_run("run-001", "with_skill", "completed", None)]),
+            None,
+        );
+        write_run_artifacts(
+            temp.path(),
+            "run-001",
+            None,
+            Some(r#"{ "duration_ms": 1000, "cost": { "kind": "unpriced", "harness": "codex" } }"#),
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+
+        assert_eq!(
+            benchmark.scenarios["with_skill"].completed.tokens.cost,
+            Some(BucketCost::Unpriced {
+                harness: "codex".to_string()
+            })
+        );
     }
 
     #[test]

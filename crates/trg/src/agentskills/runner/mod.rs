@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::budget::HarnessPricing;
+use super::budget::{HarnessPricing, RunCost};
 use super::case_directories::EVAL_CASE_PROMPT_FILE_NAME;
 use super::errors::SkillError;
 use super::evals::{EvalCase, EvalDirName, EvalError, EVAL_SUITE_MANIFEST_NAME};
@@ -190,7 +190,7 @@ pub struct EvalRunOutcome {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_tokens: Option<CacheTokens>,
-    pub cost_usd: Option<f64>,
+    pub cost: Option<RunCost>,
     pub final_text: String,
     /// Read-only fixture paths whose staged copy no longer matches its source.
     pub read_only_fixture_violations: Vec<String>,
@@ -319,7 +319,7 @@ pub fn runner_failure_outcome(duration_ms: u64, exit_code: Option<i32>, final_te
         input_tokens: None,
         output_tokens: None,
         cached_tokens: None,
-        cost_usd: None,
+        cost: None,
         final_text,
         read_only_fixture_violations: Vec::new(),
     }
@@ -335,7 +335,7 @@ pub fn timeout_outcome(timeout_ms: u64, exit_code: Option<i32>) -> EvalRunOutcom
         input_tokens: None,
         output_tokens: None,
         cached_tokens: None,
-        cost_usd: None,
+        cost: None,
         final_text: String::new(),
         read_only_fixture_violations: Vec::new(),
     }
@@ -411,7 +411,7 @@ pub fn completed_outcome(
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cached_tokens: Option<CacheTokens>,
-    cost_usd: Option<f64>,
+    cost: Option<RunCost>,
     final_text: String,
 ) -> EvalRunOutcome {
     EvalRunOutcome {
@@ -423,7 +423,7 @@ pub fn completed_outcome(
         input_tokens,
         output_tokens,
         cached_tokens,
-        cost_usd,
+        cost,
         final_text,
         read_only_fixture_violations: Vec::new(),
     }
@@ -889,24 +889,126 @@ pub fn write_runner_invocation_metadata(
     std::fs::write(run_dir.join("env.json"), serde_json::to_string_pretty(&env)?)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct TimingFile {
-    #[serde(default)]
     pub schema_version: SchemaVersion,
     pub duration_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<CacheTokens>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_usd: Option<f64>,
+    /// What this run cost, or why nobody can say. Absent when the harness prices its runs
+    /// and did not price this one, which is a different fact from a harness that prices
+    /// none of them.
+    pub cost: Option<RunCost>,
+}
+
+/// The shape a run's timing is written in, which is the shape every earlier release still
+/// reads. `cost_usd` was that release's whole vocabulary for cost, so a run that carries a
+/// price keeps publishing one; a run nobody priced has no number to put there, which is
+/// what its absence has always meant.
+#[derive(Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "TimingFile")]
+struct SerializedTimingFile<'a> {
+    #[serde(default)]
+    schema_version: SchemaVersion,
+    duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_tokens: Option<CacheTokens>,
+    /// What this run cost, or why nobody can say. Absent when the harness prices its runs
+    /// and did not price this one, which is a different fact from a harness that prices
+    /// none of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost: Option<&'a RunCost>,
+    /// The price alone, for readers written before `cost` could say why a run carries
+    /// none. Absent for exactly the runs that carry no price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
+}
+
+impl<'a> From<&'a TimingFile> for SerializedTimingFile<'a> {
+    fn from(timing: &'a TimingFile) -> Self {
+        Self {
+            schema_version: timing.schema_version,
+            duration_ms: timing.duration_ms,
+            exit_code: timing.exit_code,
+            total_tokens: timing.total_tokens,
+            input_tokens: timing.input_tokens,
+            output_tokens: timing.output_tokens,
+            cached_tokens: timing.cached_tokens,
+            cost: timing.cost.as_ref(),
+            cost_usd: timing.cost.as_ref().and_then(RunCost::usd),
+        }
+    }
+}
+
+impl Serialize for TimingFile {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        SerializedTimingFile::from(self).serialize(serializer)
+    }
+}
+
+impl JsonSchema for TimingFile {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "TimingFile".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        SerializedTimingFile::json_schema(generator)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclaredTimingFile {
+    #[serde(default)]
+    schema_version: SchemaVersion,
+    duration_ms: u64,
+    #[serde(default)]
+    exit_code: Option<i32>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    cached_tokens: Option<CacheTokens>,
+    #[serde(default)]
+    cost: Option<RunCost>,
+    /// Written by every release before a run's cost said which harness could not price
+    /// it. Read as a priced run, because only a harness that prices its runs ever wrote
+    /// a number here.
+    #[serde(default)]
+    cost_usd: Option<f64>,
+}
+
+impl<'de> Deserialize<'de> for TimingFile {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let declared = DeclaredTimingFile::deserialize(deserializer)?;
+        Ok(Self {
+            schema_version: declared.schema_version,
+            duration_ms: declared.duration_ms,
+            exit_code: declared.exit_code,
+            total_tokens: declared.total_tokens,
+            input_tokens: declared.input_tokens,
+            output_tokens: declared.output_tokens,
+            cached_tokens: declared.cached_tokens,
+            cost: declared
+                .cost
+                .or_else(|| declared.cost_usd.map(|usd| RunCost::Priced { usd })),
+        })
+    }
 }
 
 pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::io::Result<()> {
@@ -921,7 +1023,7 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
         input_tokens: outcome.input_tokens,
         output_tokens: outcome.output_tokens,
         cached_tokens: outcome.cached_tokens,
-        cost_usd: outcome.cost_usd,
+        cost: outcome.cost.clone(),
     };
     std::fs::write(timing_path, serde_json::to_string_pretty(&body).unwrap())
 }

@@ -187,7 +187,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
         input_tokens,
         output_tokens,
         cached_tokens,
-        None,
+        Runner::CursorAgent.pricing().price(None),
         final_text,
     )
 }

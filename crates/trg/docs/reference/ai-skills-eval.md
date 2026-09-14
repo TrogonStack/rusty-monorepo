@@ -1372,7 +1372,7 @@ other field forward as declared there, including `name`, `excluded`,
 | `status` | string | `skipped`, `completed`, or `failed` |
 | `paths.workspace` | string | Relative path to the run workspace |
 | `artifacts` | array | Artifact descriptors (transcript when runner completes, `mock_calls` when the case declares mcp mocks) |
-| `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner). See [Artifact: `timing.json`](#artifact-timingjson) for what `total_tokens` and `cached_tokens` mean |
+| `metrics` | object | `duration_ms`, token counts, and `cost` (populated by runner). See [Artifact: `timing.json`](#artifact-timingjson) for what `total_tokens` and `cached_tokens` mean, and [What a run cost](#what-a-run-cost) for `cost` |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
 | `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
 | `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
@@ -1487,7 +1487,9 @@ Location: `runs/<run-id>/timing.json` (sibling of `workspace/`).
   "total_tokens": 150,
   "input_tokens": 100,
   "output_tokens": 50,
-  "cached_tokens": { "read_tokens": 10 }
+  "cached_tokens": { "read_tokens": 10 },
+  "cost": { "kind": "priced", "usd": 0.0123 },
+  "cost_usd": 0.0123
 }
 ```
 
@@ -1497,6 +1499,8 @@ Location: `runs/<run-id>/timing.json` (sibling of `workspace/`).
 | `total_tokens` | integer | no | When present, must be > 0. Always `input_tokens + output_tokens`, the one definition every runner agrees on, so a claude-code run and a cursor-agent run are comparable without knowing which harness produced either. Never includes `cached_tokens`, because runners disagree on whether a cached token is billed on top of `input_tokens` or already counted inside it |
 | `cached_tokens.read_tokens` | integer | no | Tokens served from a cached entry, billed at a discount. Absent when this runner's harness never reports cache reads, not when it reported reading zero |
 | `cached_tokens.write_tokens` | integer | no | Tokens spent writing a fresh entry into the cache, billed at a premium. Absent when this runner's harness never reports cache writes, not when it reported writing zero |
+| `cost` | object | no | What the run cost, or why nobody can say. See [What a run cost](#what-a-run-cost) |
+| `cost_usd` | float | no | The price alone, for readers written before `cost` existed. Present for exactly the runs `cost` reports as `priced` |
 
 `cached_tokens` itself is absent when the harness reports no cache activity at
 all, which is a different claim from a harness that checked and cached
@@ -1506,6 +1510,27 @@ the other is recorded as having measured only the side it named.
 Token counts and duration are also copied into `report.json` run metrics after
 the runner completes.
 
+### What a run cost
+
+Only `claude-code` prices a run. A run of a harness that prices nothing is not a
+run that cost nothing, and an absent number could not tell the two apart, so a
+reader totalling a mixed history added the silent harness in as a zero and
+reported it as the cheap one.
+
+`cost` says which of the two happened:
+
+| Shape | Means |
+| ----- | ----- |
+| `{ "kind": "priced", "usd": 0.0123 }` | The harness priced this run, and this is what it came to |
+| `{ "kind": "unpriced", "harness": "codex" }` | This harness prices no run at all, so there is nothing to total and nothing that was free |
+| absent | The harness prices its runs and did not price this one |
+
+`cost_usd` keeps carrying the bare number for readers written before `cost`
+existed, and is present for exactly the runs `cost` reports as `priced`. The
+same pair appears in `report.json` under `runs[].metrics`; a run recorded before
+`cost` existed carries only `cost_usd`, and is read back as a priced run,
+because only a harness that prices its runs ever wrote a number there.
+
 ---
 
 ## Artifact: `benchmark.json`
@@ -1513,6 +1538,22 @@ the runner completes.
 **Status: available.** Written by `eval benchmark` (and by `eval run
 --benchmark`), aggregating the grading and timing artifacts of a report bundle
 into per-scenario duration, token, and cost summaries.
+
+A bucket's `tokens.cost` says what its total covers, because a total over some
+of a bucket's runs is not the bucket's cost:
+
+| Shape | Means |
+| ----- | ----- |
+| `{ "kind": "whole", "usd": 1.0 }` | Every run in the bucket carried a price, so this is the bucket's cost |
+| `{ "kind": "partial", "usd": 0.25, "runs": 1 }` | Only `runs` of the bucket's runs carried a price, and this is their total |
+| `{ "kind": "unpriced", "harness": "codex" }` | At least one run came from a harness that prices nothing, so the bucket has no total |
+| absent | No run in the bucket reported anything about cost |
+
+`tokens.cost_usd` is published only for a `whole` bucket, which is the only
+total an earlier release's readers would have been right to read as the
+bucket's cost. For the same reason a scenario delta reports `cost_usd` only when
+both arms priced every run behind them: a difference between two totals covering
+different numbers of runs is not a cost difference.
 
 ---
 

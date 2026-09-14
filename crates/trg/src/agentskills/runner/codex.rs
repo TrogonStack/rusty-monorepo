@@ -191,7 +191,7 @@ fn parse_outcome(
         input_tokens,
         output_tokens,
         cached_tokens,
-        None,
+        Runner::Codex.pricing().price(None),
         final_text,
     )
 }

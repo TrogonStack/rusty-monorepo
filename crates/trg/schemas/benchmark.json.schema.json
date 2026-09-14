@@ -57,6 +57,72 @@
       ],
       "type": "object"
     },
+    "BucketCost": {
+      "description": "What the runs behind one bucket cost, or why nobody can say.\n\nA plain total said nothing about how much of its bucket it covered, so a bucket of ten\nruns where one carried a price published that one run's price as the bucket's cost.\nSaying which of the two a total is what makes it readable at all.",
+      "oneOf": [
+        {
+          "description": "Every run in this bucket carried a price, so this total is the bucket's cost.",
+          "properties": {
+            "kind": {
+              "const": "whole",
+              "type": "string"
+            },
+            "usd": {
+              "format": "double",
+              "minimum": 0.0,
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "usd"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Only some of the bucket's runs carried a price. `runs` is how many, so nobody\nreads the total as the whole bucket's.",
+          "properties": {
+            "kind": {
+              "const": "partial",
+              "type": "string"
+            },
+            "runs": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "usd": {
+              "format": "double",
+              "minimum": 0.0,
+              "type": "number"
+            }
+          },
+          "required": [
+            "kind",
+            "usd",
+            "runs"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "At least one run here came from a harness that prices nothing, so this bucket has\nno total at all rather than a total that quietly leaves those runs out.",
+          "properties": {
+            "harness": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unpriced",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "harness"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CompletedBucket": {
       "properties": {
         "assertions": {
@@ -458,6 +524,7 @@
           "type": "number"
         },
         "cost_usd": {
+          "description": "Published only when both arms priced every run behind them, because a difference\nbetween two totals that cover different numbers of runs is not a cost difference.",
           "format": "double",
           "type": [
             "number",
@@ -540,8 +607,20 @@
       "type": "object"
     },
     "TokenStats": {
+      "description": "The shape a bucket's tokens are written in, which is the shape every earlier release\nstill reads. `cost_usd` was that release's whole vocabulary for cost, and it was read\nas the bucket's cost, so it is published for exactly the buckets whose total is that:\na partial total under that name is the reading this field was changed to stop.",
       "properties": {
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BucketCost"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cost_usd": {
+          "description": "The bucket's cost alone, for readers written before `cost` could say what a total\ncovers. Published only for a bucket every run of which was priced.",
           "format": "double",
           "type": [
             "number",

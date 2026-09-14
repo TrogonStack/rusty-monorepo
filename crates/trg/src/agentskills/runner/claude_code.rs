@@ -212,7 +212,9 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
         (None, None) => None,
         (read, write) => Some(CacheTokens::parse(read, write).expect("read or write is Some by the match arm")),
     };
-    let cost_usd = result.get("total_cost_usd").and_then(|v| v.as_f64());
+    let cost = Runner::ClaudeCode
+        .pricing()
+        .price(result.get("total_cost_usd").and_then(|v| v.as_f64()));
 
     completed_outcome(
         duration_ms,
@@ -221,7 +223,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
         input_tokens,
         output_tokens,
         cached_tokens,
-        cost_usd,
+        cost,
         final_text,
     )
 }
@@ -229,6 +231,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::budget::RunCost;
 
     #[test]
     fn parses_result_with_cost_and_cache_tokens() {
@@ -247,7 +250,7 @@ mod tests {
             outcome.cached_tokens,
             Some(CacheTokens::parse(Some(5), Some(0)).unwrap())
         );
-        assert_eq!(outcome.cost_usd, Some(0.0123));
+        assert_eq!(outcome.cost, Some(RunCost::Priced { usd: 0.0123 }));
         assert_eq!(outcome.final_text, "final text");
     }
 

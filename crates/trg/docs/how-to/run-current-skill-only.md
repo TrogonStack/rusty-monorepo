@@ -77,6 +77,7 @@ $ jq '.runs[0] | {status, metrics, skill_integrity}' \
     "total_tokens": 3840,
     "input_tokens": 2100,
     "output_tokens": 1740,
+    "cost": { "kind": "unpriced", "harness": "cursor-agent" },
     "cost_usd": null
   },
   "skill_integrity": {
