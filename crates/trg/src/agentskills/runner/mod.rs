@@ -34,6 +34,7 @@ use super::report::{CacheTokens, EnvironmentPolicy, PermissionGrant, ScenarioKin
 use super::tool_grant::ToolGrant;
 use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
+use crate::agentskills::schema_version::SchemaVersion;
 use environment::{RecordedEnvironment, RunEnvironment};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -886,6 +887,8 @@ pub fn write_runner_invocation_metadata(
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TimingFile {
+    #[serde(default)]
+    pub schema_version: SchemaVersion,
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
@@ -906,6 +909,7 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
         std::fs::create_dir_all(parent)?;
     }
     let body = TimingFile {
+        schema_version: SchemaVersion::current(),
         duration_ms: outcome.duration_ms,
         exit_code: outcome.exit_code,
         total_tokens: outcome.total_tokens,
@@ -2181,6 +2185,7 @@ mod workspace_tests {
             &run_dir,
             redact_command_args("codex", &["exec", "--api-key", github, "--model", "gpt-4"]),
             RecordedEnvironment {
+                schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
                 vars: redact_env(),
                 config_home: None,
             },
