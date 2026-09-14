@@ -9,6 +9,8 @@ pub mod ci;
 pub mod compare;
 pub mod concurrency;
 pub mod dispersion;
+#[cfg(test)]
+mod doc_examples;
 pub mod errors;
 pub mod eval_suite_drift;
 pub mod evals;

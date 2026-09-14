@@ -95,13 +95,13 @@ Assertion IDs follow the pattern `<eval-case-id>:a<index>` (zero-based).
 
 **Weak** (too vague, hard to grade consistently):
 
-```json
+```json trg-example=skip
 "assertions": ["The output is good"]
 ```
 
 **Strong** (checks concrete artifacts):
 
-```json
+```json trg-example=skip
 "assertions": [
   "A CSV or markdown file in the workspace contains a row or line for May with revenue 10000",
   "No error messages appear in any file the agent created"
