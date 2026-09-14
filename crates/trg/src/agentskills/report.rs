@@ -13,7 +13,7 @@ use super::budget::{PassSpend, FAILURE_KIND_BUDGET};
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
-use super::evals::{EvalError, EvalPriority, EvalSuite, Result};
+use super::evals::{EvalDirName, EvalError, EvalPriority, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
@@ -224,6 +224,8 @@ pub struct BuildReportOptions {
     pub permission: PermissionGrant,
     /// Which of the suite's cases this run covers.
     pub cases: CaseSelection,
+    /// Directory, relative to the skill root, the suite is resolved from.
+    pub eval_dir: EvalDirName,
 }
 
 impl Default for BuildReportOptions {
@@ -242,6 +244,7 @@ impl Default for BuildReportOptions {
             environment: EnvironmentPolicy::default(),
             permission: PermissionGrant::default(),
             cases: CaseSelection::default(),
+            eval_dir: EvalDirName::default(),
         }
     }
 }
@@ -345,6 +348,12 @@ pub struct SuiteSection {
     pub skill_hash: String,
     pub evals_path: String,
     pub evals_hash: String,
+    /// The directory the suite was actually resolved from. Recorded so a later reader
+    /// (grading, next-iteration) can find the same suite this run did without a flag of
+    /// its own; absent on a report written before this field existed, in which case it
+    /// means the default.
+    #[serde(default)]
+    pub eval_dir: EvalDirName,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_skill_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -843,7 +852,7 @@ pub fn build_report_bundle(
         None => (None, None),
     };
 
-    let compiled_suite = resolve_eval_suite(fs, skill_path)?;
+    let compiled_suite = resolve_eval_suite(fs, skill_path, &options.eval_dir)?;
     let evals_hash = compiled_suite.hash;
     let mut suite: EvalSuite = compiled_suite.suite;
     let declared_case_ids: Vec<String> = suite.evals.iter().map(|case| case.id.to_string()).collect();
@@ -854,9 +863,10 @@ pub fn build_report_bundle(
     let attempts = options.attempts;
 
     let user_skill_path_str = path_to_string(user_skill_path);
+    let eval_dir_str = options.eval_dir.as_str();
     let evals_path_str = match compiled_suite.source {
-        EvalSource::Manifest { .. } => format!("{user_skill_path_str}/evals/evals.json"),
-        EvalSource::CaseDirectories { .. } => format!("{user_skill_path_str}/evals"),
+        EvalSource::Manifest { .. } => format!("{user_skill_path_str}/{eval_dir_str}/evals.json"),
+        EvalSource::CaseDirectories { .. } => format!("{user_skill_path_str}/{eval_dir_str}"),
     };
 
     let dimensions = build_dimensions(
@@ -905,6 +915,7 @@ pub fn build_report_bundle(
             skill_hash: skill_hash.clone(),
             evals_path: evals_path_str,
             evals_hash,
+            eval_dir: options.eval_dir.clone(),
             old_skill_path: old_skill_path_str,
             old_skill_hash,
             case_selection,
@@ -1768,6 +1779,7 @@ mod tests {
                     skill_hash: "sha256:deadbeef".to_string(),
                     evals_path: "demo-skill/evals/evals.json".to_string(),
                     evals_hash: "sha256:feedface".to_string(),
+                    eval_dir: EvalDirName::default(),
                     old_skill_path: None,
                     old_skill_hash: None,
                     case_selection: None,

@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::evals::EVAL_SUITE_DIR_NAME;
+use super::evals::EvalDirName;
 use super::graders::RegexPattern;
 use super::hex_encode;
 
@@ -372,9 +372,9 @@ impl MockSet {
 /// The spec this shipped from named the per-case path `evals/cases/<id>/mocks/...`, but no
 /// `cases/` segment exists anywhere fixtures are resolved from (see `compute_fixture_hash`),
 /// so the per-case path here matches how `EvalCase` files are actually resolved instead.
-pub fn resolve_mock_set(skill_path: &Path, eval_id: &str) -> Result<MockSet, MocksError> {
-    let suite_dir = skill_path.join(EVAL_SUITE_DIR_NAME).join(MOCKS_DIR_NAME);
-    let case_dir = skill_path.join(EVAL_SUITE_DIR_NAME).join(eval_id).join(MOCKS_DIR_NAME);
+pub fn resolve_mock_set(skill_path: &Path, eval_dir: &EvalDirName, eval_id: &str) -> Result<MockSet, MocksError> {
+    let suite_dir = skill_path.join(eval_dir.as_str()).join(MOCKS_DIR_NAME);
+    let case_dir = skill_path.join(eval_dir.as_str()).join(eval_id).join(MOCKS_DIR_NAME);
 
     let mut set = MockSet::default();
     merge_mock_dir(&suite_dir, &mut set)?;
@@ -806,7 +806,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let skill = temp.path().join("skill");
         fs::create_dir_all(skill.join("evals/one")).unwrap();
-        let set = resolve_mock_set(&skill, "one").unwrap();
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         assert!(set.is_empty());
     }
 
@@ -823,7 +823,7 @@ mod tests {
         );
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
-        let set = resolve_mock_set(&skill, "one").unwrap();
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let server = ServerName::from("github");
         let tool = ToolName::from("create_issue");
         let declaration = set.tools_for(&server).unwrap().get(&tool).unwrap();
@@ -851,7 +851,7 @@ mod tests {
         write_mock(&suite_mocks, "github", "create_issue", "---\ntype: agent\n---\nbody");
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
-        let err = resolve_mock_set(&skill, "one").unwrap_err();
+        let err = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("agent"),
@@ -883,7 +883,7 @@ mod tests {
             "---\ntype: fixed\n---\ncase body",
         );
 
-        let set = resolve_mock_set(&skill, "one").unwrap();
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let server = ServerName::from("github");
         let tools = set.tools_for(&server).unwrap();
         assert_eq!(tools.get(&ToolName::from("create_issue")).unwrap().body, "case body");
@@ -904,7 +904,7 @@ mod tests {
         fs::write(suite_mocks.join("github/payload.json"), "{\"ok\":true}").unwrap();
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
-        let set = resolve_mock_set(&skill, "one").unwrap();
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let declaration = set
             .tools_for(&ServerName::from("github"))
             .unwrap()
@@ -932,7 +932,7 @@ mod tests {
         }
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
-        let set = resolve_mock_set(&skill, "one").unwrap();
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
 
         for (server, body) in [("github", "from github"), ("issues", "from issues")] {
             let declaration = set
@@ -960,7 +960,7 @@ mod tests {
         fs::write(suite_mocks.join("shared.json"), "shared body").unwrap();
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
-        let set = resolve_mock_set(&skill, "one").unwrap();
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let declaration = set
             .tools_for(&ServerName::from("github"))
             .unwrap()
@@ -982,7 +982,7 @@ mod tests {
         );
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
-        let err = resolve_mock_set(&skill, "one").unwrap_err();
+        let err = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap_err();
         assert!(matches!(err, MocksError::FileReferenceNotFound { .. }));
     }
 
@@ -997,7 +997,9 @@ mod tests {
             "---\ntype: fixed\n---\nfirst",
         );
         fs::create_dir_all(skill.join("evals/one")).unwrap();
-        let first = resolve_mock_set(&skill, "one").unwrap().content_hash();
+        let first = resolve_mock_set(&skill, &EvalDirName::default(), "one")
+            .unwrap()
+            .content_hash();
 
         write_mock(
             &skill.join("evals/mocks"),
@@ -1005,7 +1007,9 @@ mod tests {
             "create_issue",
             "---\ntype: fixed\n---\nsecond",
         );
-        let second = resolve_mock_set(&skill, "one").unwrap().content_hash();
+        let second = resolve_mock_set(&skill, &EvalDirName::default(), "one")
+            .unwrap()
+            .content_hash();
 
         assert_ne!(first, second);
     }
@@ -1025,9 +1029,13 @@ mod tests {
         fs::write(&payload, "one").unwrap();
         fs::create_dir_all(skill.join("evals/one")).unwrap();
 
-        let first = resolve_mock_set(&skill, "one").unwrap().content_hash();
+        let first = resolve_mock_set(&skill, &EvalDirName::default(), "one")
+            .unwrap()
+            .content_hash();
         fs::write(&payload, "two").unwrap();
-        let second = resolve_mock_set(&skill, "one").unwrap().content_hash();
+        let second = resolve_mock_set(&skill, &EvalDirName::default(), "one")
+            .unwrap()
+            .content_hash();
 
         assert_ne!(
             first, second,
@@ -1263,7 +1271,7 @@ mod tests {
             "create_issue",
             "---\ntype: fixed\n---\ncreated",
         );
-        let mock_set = resolve_mock_set(&skill, "one").unwrap();
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let run_dir = relative_to_current_dir(&temp.path().join("run-dir"));
         assert!(
             run_dir.is_relative(),
@@ -1336,7 +1344,8 @@ mod tests {
             "---\ntype: fixed\nexpect:\n  repo: \"/acme(/\"\n---\n{}",
         );
 
-        let error = resolve_mock_set(&skill, "one").expect_err("an uncompilable expect regex must not load");
+        let error = resolve_mock_set(&skill, &EvalDirName::default(), "one")
+            .expect_err("an uncompilable expect regex must not load");
 
         assert!(
             matches!(
@@ -1371,7 +1380,7 @@ mod tests {
             "create_issue",
             "---\ntype: fixed\n---\ncreated",
         );
-        let mock_set = resolve_mock_set(&skill, "one").unwrap();
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let run_dir = temp.path().join("run-dir");
         let trg_binary = MockServerBinary::at("/usr/local/bin/trg").unwrap();
 
@@ -1422,7 +1431,7 @@ mod tests {
             "create_issue",
             "---\ntype: fixed\n---\ncreated",
         );
-        let mock_set = resolve_mock_set(&skill, "one").unwrap();
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let run_dir = temp.path().join("run-dir");
 
         materialize_mock_set(
@@ -1445,7 +1454,7 @@ mod tests {
             "create_issue",
             "---\ntype: fixed\nexpect:\n  repo: /^acme\\//\n  title: string\n  priority: [low, high]\n---\n{\"id\": 1}",
         );
-        let mock_set = resolve_mock_set(&skill, "one").unwrap();
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
         let run_dir = temp.path().join("run-dir");
 
         materialize_mock_set(

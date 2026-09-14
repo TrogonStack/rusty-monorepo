@@ -315,6 +315,12 @@
       ],
       "type": "object"
     },
+    "EvalDirName": {
+      "description": "A single path segment naming the directory, under a skill root, that holds a\nsuite's eval manifest or case directories.\n\nA skill directory is author-supplied, and every reader that wants a suite joins this\nonto one it did not choose. `PathBuf::join` silently discards the base and returns\nthe joined value outright when handed an absolute path, so an unvalidated name here\nwould let a skill's own manifest point `trg` at an arbitrary path on the operator's\nmachine; a name of `..` or containing a separator reaches just as far with smaller\nwords. Restricting this to one plain segment closes all three at the type rather than\nasking every join site to remember why.",
+      "minLength": 1,
+      "pattern": "^[^/\\\\]+$",
+      "type": "string"
+    },
     "EvalPriority": {
       "enum": [
         "low",
@@ -1282,6 +1288,15 @@
             }
           ],
           "description": "Absent when the run covered every case the suite declares.\n\n`evals_hash` covers the whole file either way, so without this a narrowed run and a\nfull one are indistinguishable to a reader comparing two reports."
+        },
+        "eval_dir": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/EvalDirName"
+            }
+          ],
+          "default": "evals",
+          "description": "The directory the suite was actually resolved from. Recorded so a later reader\n(grading, next-iteration) can find the same suite this run did without a flag of\nits own; absent on a report written before this field existed, in which case it\nmeans the default."
         },
         "evals_hash": {
           "type": "string"

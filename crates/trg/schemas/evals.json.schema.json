@@ -471,6 +471,12 @@
         }
       ]
     },
+    "EvalDirName": {
+      "description": "A single path segment naming the directory, under a skill root, that holds a\nsuite's eval manifest or case directories.\n\nA skill directory is author-supplied, and every reader that wants a suite joins this\nonto one it did not choose. `PathBuf::join` silently discards the base and returns\nthe joined value outright when handed an absolute path, so an unvalidated name here\nwould let a skill's own manifest point `trg` at an arbitrary path on the operator's\nmachine; a name of `..` or containing a separator reaches just as far with smaller\nwords. Restricting this to one plain segment closes all three at the type rather than\nasking every join site to remember why.",
+      "minLength": 1,
+      "pattern": "^[^/\\\\]+$",
+      "type": "string"
+    },
     "EvalFixture": {
       "description": "A `files` entry on an `EvalCase`.\n\nThe wire form stays a bare string for the common, writable case: a suite authored\nbefore read-only fixtures existed must keep parsing, and must keep round-tripping\nas a string rather than being rewritten into the object form the first time the\nsuite is saved back out. Only a fixture that opts into `read_only` pays for the\nobject form.",
       "oneOf": [
@@ -672,6 +678,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "eval_dir": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvalDirName"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The suite author's own claim about which directory this manifest was found in.\n\nOptional, and checked rather than trusted: a suite is located by the eval\ndirectory `trg` was already told to use (`--eval-dir`, or the default), never by\nthis field, so it exists to catch the manifest and the caller disagreeing about\nwhere the suite lives rather than to redirect discovery. See\n`case_directories::resolve_eval_suite`."
+    },
     "evals": {
       "items": {
         "$ref": "#/$defs/EvalCase"

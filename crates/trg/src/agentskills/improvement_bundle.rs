@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::eval_suite_drift::{detect_eval_suite_drift_vs_skill, maybe_emit_eval_suite_drift_warning};
-use super::evals::{EvalError, Result, EVAL_SUITE_DIR_NAME, EVAL_SUITE_MANIFEST_NAME};
+use super::evals::{EvalDirName, EvalError, Result, EVAL_SUITE_MANIFEST_NAME};
 use super::feedback::{load_run_feedback_entries, FeedbackNote};
 use super::grading::{GradingCounts, GradingFile};
 use super::report::{ReportDocument, RunRecord, ScenarioKind};
@@ -25,6 +25,14 @@ pub const DEFAULT_EXCERPT_LINES: usize = 200;
 pub struct NextIterationOptions {
     pub allow_eval_suite_drift: bool,
     pub skill_dir: Option<PathBuf>,
+    /// Directory the current skill's suite is resolved from, for drift detection against
+    /// the prior iteration's `evals_hash`.
+    ///
+    /// `None` reads it back from `report.suite.eval_dir`, for the same reason `skill_dir`
+    /// falls back to `report.suite.skill_path`: a caller who names neither is asking about
+    /// the suite the prior iteration actually ran, and defaulting to `evals` instead would
+    /// drift-check a run against a directory it never used.
+    pub eval_dir: Option<EvalDirName>,
     pub excerpt_lines: usize,
 }
 
@@ -33,6 +41,7 @@ impl Default for NextIterationOptions {
         Self {
             allow_eval_suite_drift: false,
             skill_dir: None,
+            eval_dir: None,
             excerpt_lines: DEFAULT_EXCERPT_LINES,
         }
     }
@@ -144,6 +153,15 @@ pub struct ImprovementBundleOutput {
     pub document: ImprovementBundleDocument,
 }
 
+/// Which suite directory the current skill is read from when checking drift.
+///
+/// Falls back to the prior report for the same reason `skill_dir` does: a caller who names
+/// neither is asking about the suite that iteration actually ran, and `evals` is only that
+/// suite by coincidence once a skill can hold more than one.
+fn eval_dir_for_drift_check(named: Option<&EvalDirName>, report: &ReportDocument) -> EvalDirName {
+    named.cloned().unwrap_or_else(|| report.suite.eval_dir.clone())
+}
+
 pub fn next_iteration_output_dir(from_report_dir: &Path) -> PathBuf {
     from_report_dir
         .parent()
@@ -175,9 +193,10 @@ pub fn build_improvement_bundle(
         .as_deref()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&report.suite.skill_path));
-    let drift_report = detect_eval_suite_drift_vs_skill(&report, &skill_path)?;
+    let eval_dir = eval_dir_for_drift_check(options.eval_dir.as_ref(), &report);
+    let drift_report = detect_eval_suite_drift_vs_skill(&report, &skill_path, &eval_dir)?;
     maybe_emit_eval_suite_drift_warning(drift_report.as_ref(), options.allow_eval_suite_drift);
-    let eval_suite_drift = eval_suite_drift_from_report(&report, &skill_path, drift_report)?;
+    let eval_suite_drift = eval_suite_drift_from_report(&report, &skill_path, &eval_dir, drift_report)?;
 
     let failed_assertions = collect_failed_assertion_groups(from_report_dir, &report)?;
     let (feedback_by_run, human_feedback_summary) = index_run_feedback(from_report_dir)?;
@@ -228,14 +247,15 @@ pub fn write_improvement_bundle(
 fn eval_suite_drift_from_report(
     report: &ReportDocument,
     skill_path: &Path,
+    eval_dir: &EvalDirName,
     drift_report: Option<super::eval_suite_drift::EvalSuiteDriftReport>,
 ) -> Result<EvalSuiteDrift> {
-    let evals_path = match resolve_eval_suite(&crate::fs::RealFS, skill_path) {
+    let evals_path = match resolve_eval_suite(&crate::fs::RealFS, skill_path, eval_dir) {
         Ok(compiled) => match compiled.source {
             EvalSource::Manifest { path } => path,
             EvalSource::CaseDirectories { root } => root,
         },
-        Err(_) => skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME),
+        Err(_) => skill_path.join(eval_dir.as_str()).join(EVAL_SUITE_MANIFEST_NAME),
     };
     let previous_hash = report.suite.evals_hash.clone();
     let detected = drift_report.is_some();
@@ -942,8 +962,43 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::testutil::{sample_prior_iteration_fixture, write_empty_feedback};
+
     use super::*;
     use crate::agentskills::report::ScenarioKind;
+
+    fn prior_report(temp: &tempfile::TempDir) -> ReportDocument {
+        let skill_root = temp.path().join("current-skill");
+        let report_dir = sample_prior_iteration_fixture(temp, &skill_root);
+        let content = std::fs::read_to_string(report_dir.join("report.json")).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    /// `--skill-dir` falls back to the path the prior report recorded, and the suite
+    /// directory has to fall back the same way. A run made under a custom suite directory
+    /// would otherwise be drift-checked against `evals`, which is a different suite or no
+    /// suite at all, so the check reports drift that is not there or misses drift that is.
+    #[test]
+    fn an_unnamed_eval_dir_is_read_back_from_the_iteration_being_improved_on() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut report = prior_report(&temp);
+        report.suite.eval_dir = EvalDirName::parse("evals-nightly").unwrap();
+
+        assert_eq!(
+            eval_dir_for_drift_check(None, &report).as_str(),
+            "evals-nightly",
+            "the suite the prior iteration ran is the one to check against"
+        );
+    }
+
+    #[test]
+    fn a_named_eval_dir_wins_over_the_one_the_prior_iteration_used() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut report = prior_report(&temp);
+        report.suite.eval_dir = EvalDirName::parse("evals-nightly").unwrap();
+        let named = EvalDirName::parse("evals-fast").unwrap();
+
+        assert_eq!(eval_dir_for_drift_check(Some(&named), &report).as_str(), "evals-fast");
+    }
 
     #[test]
     fn bundle_includes_sections_counts_and_transcript_truncation() {

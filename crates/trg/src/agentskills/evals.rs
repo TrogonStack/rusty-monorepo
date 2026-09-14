@@ -22,6 +22,91 @@ use thiserror::Error;
 pub const EVAL_SUITE_DIR_NAME: &str = "evals";
 pub const EVAL_SUITE_MANIFEST_NAME: &str = "evals.json";
 
+/// A single path segment naming the directory, under a skill root, that holds a
+/// suite's eval manifest or case directories.
+///
+/// A skill directory is author-supplied, and every reader that wants a suite joins this
+/// onto one it did not choose. `PathBuf::join` silently discards the base and returns
+/// the joined value outright when handed an absolute path, so an unvalidated name here
+/// would let a skill's own manifest point `trg` at an arbitrary path on the operator's
+/// machine; a name of `..` or containing a separator reaches just as far with smaller
+/// words. Restricting this to one plain segment closes all three at the type rather than
+/// asking every join site to remember why.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+#[schemars(schema_with = "eval_dir_name_schema")]
+pub struct EvalDirName(String);
+
+fn eval_dir_name_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^/\\\\]+$"
+    })
+}
+
+impl EvalDirName {
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(
+                "eval directory name must not be empty: an empty segment names the skill directory itself, not a directory under it"
+                    .to_string(),
+            );
+        }
+        if let Some(separator) = value.chars().find(|c| matches!(c, '/' | '\\')) {
+            return Err(format!(
+                "eval directory name '{value}' must be a single path segment: '{separator}' names a path, not the one directory this joins onto the skill root"
+            ));
+        }
+        if value == "." || value == ".." {
+            return Err(format!(
+                "eval directory name '{value}' names no directory of its own: it resolves to the skill directory or its parent instead"
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Default for EvalDirName {
+    fn default() -> Self {
+        Self(EVAL_SUITE_DIR_NAME.to_string())
+    }
+}
+
+impl fmt::Display for EvalDirName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<Path> for EvalDirName {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl std::str::FromStr for EvalDirName {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for EvalDirName {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
 pub const DEFAULT_MAX_FIXTURE_BYTES: u64 = 5 * 1024 * 1024;
 const FIXTURE_BINARY_SAMPLE_BYTES: usize = 8 * 1024;
 
@@ -668,6 +753,15 @@ pub struct EvalSuite {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub skill_name: NonEmptyString,
+    /// The suite author's own claim about which directory this manifest was found in.
+    ///
+    /// Optional, and checked rather than trusted: a suite is located by the eval
+    /// directory `trg` was already told to use (`--eval-dir`, or the default), never by
+    /// this field, so it exists to catch the manifest and the caller disagreeing about
+    /// where the suite lives rather than to redirect discovery. See
+    /// `case_directories::resolve_eval_suite`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_dir: Option<EvalDirName>,
     #[serde(deserialize_with = "deserialize_evals")]
     pub evals: Vec<EvalCase>,
 }
@@ -834,8 +928,8 @@ pub struct WorkspaceCheckReport {
     pub pass_rate: Option<f64>,
 }
 
-pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<EvalSuite> {
-    super::case_directories::resolve_eval_suite(fs, skill_path).map(|compiled| compiled.suite)
+pub fn load_eval_suite(fs: &impl FileSystem, skill_path: &Path, eval_dir: &EvalDirName) -> Result<EvalSuite> {
+    super::case_directories::resolve_eval_suite(fs, skill_path, eval_dir).map(|compiled| compiled.suite)
 }
 
 pub fn eval_manifest_scaffold_json(skill_name: &str) -> String {
@@ -884,15 +978,25 @@ pub fn scaffold_eval_suite(skill_name: &str) -> EvalSuite {
     parse_eval_suite(&eval_manifest_scaffold_json(skill_name)).expect("scaffold manifest must parse")
 }
 
-pub fn write_eval_suite(fs: &impl FileSystem, skill_path: &Path, suite: &EvalSuite) -> Result<()> {
-    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
+pub fn write_eval_suite(
+    fs: &impl FileSystem,
+    skill_path: &Path,
+    eval_dir: &EvalDirName,
+    suite: &EvalSuite,
+) -> Result<()> {
+    let suite_path = skill_path.join(eval_dir.as_str()).join(EVAL_SUITE_MANIFEST_NAME);
     let json = serde_json::to_string_pretty(suite)?;
     fs.write(&suite_path, &json)?;
     Ok(())
 }
 
-pub fn write_eval_manifest_scaffold(fs: &impl FileSystem, skill_path: &Path, skill_name: &str) -> Result<()> {
-    let suite_path = skill_path.join(EVAL_SUITE_DIR_NAME).join(EVAL_SUITE_MANIFEST_NAME);
+pub fn write_eval_manifest_scaffold(
+    fs: &impl FileSystem,
+    skill_path: &Path,
+    eval_dir: &EvalDirName,
+    skill_name: &str,
+) -> Result<()> {
+    let suite_path = skill_path.join(eval_dir.as_str()).join(EVAL_SUITE_MANIFEST_NAME);
     fs.write(&suite_path, &eval_manifest_scaffold_json(skill_name))?;
     Ok(())
 }
@@ -1065,10 +1169,11 @@ pub fn print_eval_lint_warnings(warnings: &[EvalLintWarning]) {
 pub fn check_eval_suite(
     fs: &impl FileSystem,
     skill_path: &Path,
+    eval_dir: &EvalDirName,
     expected_skill_name: &str,
     options: EvalCheckOptions,
 ) -> Result<EvalCheckReport> {
-    let suite = super::case_directories::resolve_eval_suite(fs, skill_path)?.suite;
+    let suite = super::case_directories::resolve_eval_suite(fs, skill_path, eval_dir)?.suite;
 
     let mut errors = ValidationErrors::new();
     let mut file_count = 0;
@@ -1480,6 +1585,7 @@ mod tests {
         let report = check_eval_suite(
             &fs,
             Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
                 require_assertions: true,
@@ -1532,6 +1638,7 @@ mod tests {
         let report = check_eval_suite(
             &fs,
             Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
                 require_assertions: true,
@@ -1544,7 +1651,7 @@ mod tests {
         assert_eq!(report.file_count, 1);
         assert_eq!(report.assertion_count, 0);
 
-        let suite = load_eval_suite(&fs, Path::new("/csv-analyzer")).unwrap();
+        let suite = load_eval_suite(&fs, Path::new("/csv-analyzer"), &EvalDirName::default()).unwrap();
         assert_eq!(suite.evals[0].graders.len(), 5);
     }
 
@@ -1580,6 +1687,7 @@ mod tests {
         let report = check_eval_suite(
             &fs,
             Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
                 require_assertions: true,
@@ -1591,7 +1699,7 @@ mod tests {
         assert_eq!(report.eval_count, 1);
         assert_eq!(report.file_count, 2);
 
-        let suite = load_eval_suite(&fs, Path::new("/csv-analyzer")).unwrap();
+        let suite = load_eval_suite(&fs, Path::new("/csv-analyzer"), &EvalDirName::default()).unwrap();
         assert_eq!(suite.evals[0].graders.len(), 2);
     }
 
@@ -1620,6 +1728,7 @@ mod tests {
         let err = check_eval_suite(
             &fs,
             Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
                 max_fixture_bytes: Some(10),
@@ -1652,6 +1761,7 @@ mod tests {
         let err = check_eval_suite(
             &fs,
             Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions::default(),
         )
@@ -1681,6 +1791,7 @@ mod tests {
         let err = check_eval_suite(
             &fs,
             Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions::default(),
         )
@@ -1760,6 +1871,7 @@ mod tests {
         let err = check_eval_suite(
             &fs,
             Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
                 require_assertions: true,
@@ -1940,6 +2052,7 @@ mod tests {
         EvalSuite {
             schema_version: 1,
             skill_name: NonEmptyString("demo-skill".to_string()),
+            eval_dir: None,
             evals: vec![eval],
         }
     }
@@ -2153,11 +2266,18 @@ mod tests {
             Path::new("/demo-skill/SKILL.md"),
             "---\nname: demo-skill\ndescription: demo\n---\n",
         );
-        write_eval_suite(&fs, Path::new("/demo-skill"), &scaffold_eval_suite("demo-skill")).unwrap();
+        write_eval_suite(
+            &fs,
+            Path::new("/demo-skill"),
+            &EvalDirName::default(),
+            &scaffold_eval_suite("demo-skill"),
+        )
+        .unwrap();
 
         check_eval_suite(
             &fs,
             Path::new("/demo-skill"),
+            &EvalDirName::default(),
             "demo-skill",
             EvalCheckOptions {
                 require_assertions: true,

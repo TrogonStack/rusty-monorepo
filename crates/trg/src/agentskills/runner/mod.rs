@@ -24,9 +24,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::budget::HarnessPricing;
+use super::case_directories::EVAL_CASE_PROMPT_FILE_NAME;
 use super::errors::SkillError;
-use super::evals::EVAL_SUITE_DIR_NAME;
-use super::evals::{EvalCase, EvalError};
+use super::evals::{EvalCase, EvalDirName, EvalError, EVAL_SUITE_MANIFEST_NAME};
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
@@ -108,6 +108,7 @@ pub struct EvalRunRequest<'a> {
     pub scenario: ScenarioKind,
     pub skill_md: &'a str,
     pub skill_path: &'a Path,
+    pub eval_dir: EvalDirName,
     pub old_skill_md: Option<&'a str>,
     pub old_skill_path: Option<&'a Path>,
     pub workspace_dir: &'a Path,
@@ -442,6 +443,7 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
             request.workspace_dir,
             staged_dir.as_str(),
             request.skill_staging,
+            &request.eval_dir,
         )?;
     }
 
@@ -562,19 +564,52 @@ fn missing_old_skill_input(field: &str) -> RunnerError {
 ///
 /// Only the top level is filtered. A nested `evals/` deeper in the tree is the skill's own
 /// content, not this suite, so it stages like anything else.
-fn is_withheld_from_staging(entry_name: &std::ffi::OsStr) -> bool {
-    WITHHELD_FROM_STAGING
+///
+/// Every sibling suite is withheld too, not only the one being run. Once a skill can hold
+/// more than one suite, the directory this pass did not run is still an answer key, and its
+/// cases routinely overlap the ones that did. Withholding only the resolved directory would
+/// hand a run the very file it is being scored against under a different name.
+fn is_withheld_from_staging(skill_path: &Path, entry_name: &std::ffi::OsStr, eval_dir: &EvalDirName) -> bool {
+    if VCS_DIRS_WITHHELD_FROM_STAGING
         .iter()
         .any(|withheld| entry_name == std::ffi::OsStr::new(withheld))
+    {
+        return true;
+    }
+    if entry_name == std::ffi::OsStr::new(eval_dir.as_str()) {
+        return true;
+    }
+    holds_an_eval_suite(&skill_path.join(entry_name))
 }
 
-const WITHHELD_FROM_STAGING: &[&str] = &[EVAL_SUITE_DIR_NAME, ".git", ".jj", ".hg", ".svn"];
+/// Whether a directory is some suite, which is what makes it an answer key.
+///
+/// A manifest names it outright. The case-directory form has no manifest, so it is read as
+/// a suite when its children are case directories carrying a prompt, which is the shape
+/// `resolve_eval_suite` accepts.
+fn holds_an_eval_suite(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    if path.join(EVAL_SUITE_MANIFEST_NAME).is_file() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_dir() && entry.path().join(EVAL_CASE_PROMPT_FILE_NAME).is_file())
+}
+
+const VCS_DIRS_WITHHELD_FROM_STAGING: &[&str] = &[".git", ".jj", ".hg", ".svn"];
 
 fn stage_skill_into_workspace(
     skill_path: &Path,
     workspace_dir: &Path,
     link_name: &str,
     staging: SkillStaging,
+    eval_dir: &EvalDirName,
 ) -> std::io::Result<()> {
     let dest = workspace_dir.join(link_name.trim_end_matches('/'));
     if dest.exists() || dest.symlink_metadata().is_ok() {
@@ -582,8 +617,8 @@ fn stage_skill_into_workspace(
     }
 
     match staging {
-        SkillStaging::Symlink => symlink_skill_into_workspace(skill_path, workspace_dir, link_name),
-        SkillStaging::Copy => copy_skill_into_workspace(skill_path, &dest),
+        SkillStaging::Symlink => symlink_skill_into_workspace(skill_path, workspace_dir, link_name, eval_dir),
+        SkillStaging::Copy => copy_skill_into_workspace(skill_path, &dest, eval_dir),
     }
 }
 
@@ -599,13 +634,18 @@ fn remove_staged_skill(path: &Path) -> std::io::Result<()> {
 /// Dot-prefixed so the skill is hidden from default `ls`/glob and won't collide with
 /// staged fixture paths or with a `skill/` directory the agent might create itself.
 /// The workspace is the agent's task space; the skill is sidecar reference material.
-fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_name: &str) -> std::io::Result<()> {
+fn symlink_skill_into_workspace(
+    skill_path: &Path,
+    workspace_dir: &Path,
+    link_name: &str,
+    eval_dir: &EvalDirName,
+) -> std::io::Result<()> {
     let dest = workspace_dir.join(link_name.trim_end_matches('/'));
     let absolute = std::fs::canonicalize(skill_path)?;
     std::fs::create_dir_all(&dest)?;
     for entry in std::fs::read_dir(&absolute)? {
         let entry = entry?;
-        if is_withheld_from_staging(&entry.file_name()) {
+        if is_withheld_from_staging(skill_path, &entry.file_name(), eval_dir) {
             continue;
         }
         std::os::unix::fs::symlink(entry.path(), dest.join(entry.file_name()))?;
@@ -613,12 +653,12 @@ fn symlink_skill_into_workspace(skill_path: &Path, workspace_dir: &Path, link_na
     Ok(())
 }
 
-fn copy_skill_into_workspace(skill_path: &Path, dest: &Path) -> std::io::Result<()> {
-    let skill = CopyableSkill::rooted_at(skill_path)?;
+fn copy_skill_into_workspace(skill_path: &Path, dest: &Path, eval_dir: &EvalDirName) -> std::io::Result<()> {
+    let skill = CopyableSkill::rooted_at(skill_path, eval_dir)?;
     std::fs::create_dir_all(dest)?;
     for entry in std::fs::read_dir(skill_path)? {
         let entry = entry?;
-        if is_withheld_from_staging(&entry.file_name()) {
+        if is_withheld_from_staging(skill_path, &entry.file_name(), eval_dir) {
             continue;
         }
         copy_skill_tree(&skill, &entry.path(), &dest.join(entry.file_name()))?;
@@ -639,13 +679,24 @@ struct CopyableSkill {
 }
 
 impl CopyableSkill {
-    fn rooted_at(skill_path: &Path) -> std::io::Result<Self> {
+    fn rooted_at(skill_path: &Path, eval_dir: &EvalDirName) -> std::io::Result<Self> {
         let root = std::fs::canonicalize(skill_path)?;
-        let withheld = WITHHELD_FROM_STAGING
+        let mut withheld: Vec<PathBuf> = VCS_DIRS_WITHHELD_FROM_STAGING
             .iter()
+            .copied()
+            .chain(std::iter::once(eval_dir.as_str()))
             .map(|name| root.join(name))
             .filter_map(|path| std::fs::canonicalize(path).ok())
             .collect();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                if holds_an_eval_suite(&entry.path()) {
+                    if let Ok(resolved) = std::fs::canonicalize(entry.path()) {
+                        withheld.push(resolved);
+                    }
+                }
+            }
+        }
         Ok(Self { root, withheld })
     }
 
@@ -933,6 +984,7 @@ mod workspace_tests {
             scenario,
             skill_md,
             skill_path,
+            eval_dir: EvalDirName::default(),
             old_skill_md,
             old_skill_path,
             workspace_dir: workspace,
@@ -1643,6 +1695,83 @@ mod workspace_tests {
         assert!(
             !workspace.join(".skill/notes").exists(),
             "copying dereferences links, so a link naming the suite would deliver the answer key"
+        );
+    }
+
+    /// A skill that holds a fast suite and a full one is the reason `--eval-dir` exists.
+    /// Withholding only the directory this pass named would hand the run the other suite,
+    /// whose cases routinely overlap, so it could be scored on text it read.
+    #[test]
+    fn staging_withholds_a_sibling_suite_the_pass_did_not_name() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::create_dir_all(skill_path.join("evals-full")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("evals/evals.json"), "{}").unwrap();
+        std::fs::write(skill_path.join("evals-full/evals.json"), "expected_output").unwrap();
+
+        let workspace = temp.path().join("ws");
+        stage_by_copy(&skill_path, &workspace);
+
+        assert!(
+            !workspace.join(".skill/evals-full").exists(),
+            "a suite the pass did not run is still an answer key"
+        );
+    }
+
+    /// The case-directory form carries no manifest, so it is recognised by the shape
+    /// `resolve_eval_suite` accepts rather than by a file name.
+    #[test]
+    fn staging_withholds_a_sibling_suite_written_as_case_directories() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::create_dir_all(skill_path.join("evals-full/first-case")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("evals/evals.json"), "{}").unwrap();
+        std::fs::write(skill_path.join("evals-full/first-case/prompt.md"), "expected_output").unwrap();
+
+        let workspace = temp.path().join("ws");
+        stage_by_copy(&skill_path, &workspace);
+
+        assert!(
+            !workspace.join(".skill/evals-full").exists(),
+            "a suite without a manifest is still a suite"
+        );
+    }
+
+    /// Copying dereferences links, so the sibling suite has to be unreachable by name as
+    /// well as unreachable as a directory entry.
+    #[test]
+    fn copy_staging_does_not_follow_a_link_to_a_sibling_suite() {
+        let temp = tempdir().unwrap();
+        let skill_path = temp.path().join("skill");
+        std::fs::create_dir_all(skill_path.join("evals")).unwrap();
+        std::fs::create_dir_all(skill_path.join("evals-full")).unwrap();
+        std::fs::write(
+            skill_path.join("SKILL.md"),
+            "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n",
+        )
+        .unwrap();
+        std::fs::write(skill_path.join("evals/evals.json"), "{}").unwrap();
+        std::fs::write(skill_path.join("evals-full/evals.json"), "expected_output").unwrap();
+        std::os::unix::fs::symlink(Path::new("evals-full"), skill_path.join("notes")).unwrap();
+
+        let workspace = temp.path().join("ws");
+        stage_by_copy(&skill_path, &workspace);
+
+        assert!(
+            !workspace.join(".skill/notes").exists(),
+            "a link naming the sibling suite would deliver it under another name"
         );
     }
 

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use super::evals::{EvalError, Result};
+use super::evals::{EvalDirName, EvalError, Result};
 use super::report::ReportDocument;
 use crate::fs::FileSystem;
 use schemars::JsonSchema;
@@ -196,8 +196,9 @@ pub fn detect_eval_suite_drift_snapshots(
 pub fn detect_eval_suite_drift_vs_skill(
     report: &ReportDocument,
     skill_dir: &Path,
+    eval_dir: &EvalDirName,
 ) -> Result<Option<EvalSuiteDriftReport>> {
-    detect_eval_suite_drift_vs_skill_with_fs(report, skill_dir, &crate::fs::RealFS)
+    detect_eval_suite_drift_vs_skill_with_fs(report, skill_dir, eval_dir, &crate::fs::RealFS)
 }
 
 /// Same as [`detect_eval_suite_drift_vs_skill`], but takes the filesystem to resolve the
@@ -206,9 +207,10 @@ pub fn detect_eval_suite_drift_vs_skill(
 pub fn detect_eval_suite_drift_vs_skill_with_fs(
     report: &ReportDocument,
     skill_dir: &Path,
+    eval_dir: &EvalDirName,
     fs: &impl FileSystem,
 ) -> Result<Option<EvalSuiteDriftReport>> {
-    let compiled = match super::case_directories::resolve_eval_suite(fs, skill_dir) {
+    let compiled = match super::case_directories::resolve_eval_suite(fs, skill_dir, eval_dir) {
         Ok(compiled) => compiled,
         // A missing suite is not drift; anything else the drift check cannot read is not
         // "unchanged", it is unknown, and must not be reported as a clean bill of health.
@@ -431,7 +433,7 @@ mod tests {
         )
         .unwrap();
 
-        let drift = detect_eval_suite_drift_vs_skill(&report, &skill_dir)
+        let drift = detect_eval_suite_drift_vs_skill(&report, &skill_dir, &EvalDirName::default())
             .unwrap()
             .expect("the manifest changed");
         assert_eq!(drift.added_eval_ids, Vec::<String>::new());
@@ -526,7 +528,8 @@ mod tests {
         // manifest, no case directories. That is the "no suite here" case, not a read
         // failure, and it must report no drift.
         let absent_skill_path = Path::new("no-such-skill");
-        let drift = detect_eval_suite_drift_vs_skill_with_fs(&report, absent_skill_path, &fs).unwrap();
+        let drift =
+            detect_eval_suite_drift_vs_skill_with_fs(&report, absent_skill_path, &EvalDirName::default(), &fs).unwrap();
 
         assert!(drift.is_none());
     }
@@ -548,7 +551,9 @@ mod tests {
         let unreadable_fs = UnreadableEvalsDirFS {
             evals_dir: skill_path.join("evals"),
         };
-        let error = detect_eval_suite_drift_vs_skill_with_fs(&report, &skill_path, &unreadable_fs).unwrap_err();
+        let error =
+            detect_eval_suite_drift_vs_skill_with_fs(&report, &skill_path, &EvalDirName::default(), &unreadable_fs)
+                .unwrap_err();
 
         assert!(matches!(error, EvalError::Io(io_error) if io_error.kind() == std::io::ErrorKind::PermissionDenied));
     }

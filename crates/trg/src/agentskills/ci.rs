@@ -684,6 +684,7 @@ impl AssertionForAnnotations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::EvalDirName;
     use crate::agentskills::report::{
         ProducerSection, ReportDocument, ReportSection, RunMetrics, RunPaths, RunRecord, ScenarioKind, SuiteSection,
         SummariesSection,
@@ -1214,6 +1215,7 @@ mod tests {
                 skill_hash: "sha256:abc".to_string(),
                 evals_path: "demo/evals/evals.json".to_string(),
                 evals_hash: "sha256:def".to_string(),
+                eval_dir: EvalDirName::default(),
                 old_skill_path: None,
                 old_skill_hash: None,
                 case_selection: None,

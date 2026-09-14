@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::evals::EVAL_SUITE_DIR_NAME;
+use super::evals::EvalDirName;
 use super::mocks::MOCK_CALLS_LOG_NAME;
 use super::report::{EnvironmentPolicy, PermissionGrant, RunRecord, ScenarioKind, SkillStaging};
 use super::runner::Runner;
@@ -188,8 +188,8 @@ pub struct CacheOptions {
     pub reuse_completed: bool,
 }
 
-pub fn compute_fixture_hash(skill_path: &Path, eval_id: &str) -> io::Result<FixtureHash> {
-    let fixtures_dir = skill_path.join(EVAL_SUITE_DIR_NAME).join(eval_id).join("fixtures");
+pub fn compute_fixture_hash(skill_path: &Path, eval_dir: &EvalDirName, eval_id: &str) -> io::Result<FixtureHash> {
+    let fixtures_dir = skill_path.join(eval_dir.as_str()).join(eval_id).join("fixtures");
     if !fixtures_dir.is_dir() {
         return Ok(FixtureHash::empty());
     }
@@ -850,11 +850,11 @@ mod tests {
         let fixtures = skill.join("evals/one/fixtures");
         fs::create_dir_all(&fixtures).unwrap();
 
-        let first = compute_fixture_hash(&skill, "one").unwrap();
+        let first = compute_fixture_hash(&skill, &EvalDirName::default(), "one").unwrap();
         fs::write(fixtures.join("input.txt"), "alpha").unwrap();
-        let second = compute_fixture_hash(&skill, "one").unwrap();
+        let second = compute_fixture_hash(&skill, &EvalDirName::default(), "one").unwrap();
         fs::write(fixtures.join("input.txt"), "beta").unwrap();
-        let third = compute_fixture_hash(&skill, "one").unwrap();
+        let third = compute_fixture_hash(&skill, &EvalDirName::default(), "one").unwrap();
 
         assert_eq!(first, FixtureHash::empty());
         assert_ne!(first, second);

@@ -6,7 +6,7 @@ use crate::agentskills::ci::{
 };
 use crate::agentskills::evals::{
     check_eval_suite, check_workspace, lint_eval_suite_fixtures, print_eval_lint_warnings, EvalCheckOptions,
-    EvalLintOptions, WorkspaceCheckOptions,
+    EvalDirName, EvalLintOptions, WorkspaceCheckOptions,
 };
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::schemas::{validate_report_bundle_schemas, SchemaValidation};
@@ -80,6 +80,13 @@ pub struct VerifyArgs {
         help = "Path to a skill directory containing evals/evals.json"
     )]
     pub skill_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Directory under --skill-dir the eval suite is resolved from (default: evals)"
+    )]
+    pub eval_dir: Option<EvalDirName>,
 
     #[arg(long, value_enum, default_value_t = VerifyMode::Lenient)]
     pub mode: VerifyMode,
@@ -245,9 +252,11 @@ impl VerifyArgs {
         };
 
         let require_assertions = self.require_assertions || self.mode.requires_assertions();
+        let eval_dir = self.eval_dir.clone().unwrap_or_default();
         if let Err(error) = check_eval_suite(
             fs,
             skill_dir,
+            &eval_dir,
             &props.name,
             EvalCheckOptions {
                 require_assertions,
@@ -258,7 +267,7 @@ impl VerifyArgs {
             return Some(ExitCode::GateFailed);
         }
 
-        let suite = match crate::agentskills::evals::load_eval_suite(fs, skill_dir) {
+        let suite = match crate::agentskills::evals::load_eval_suite(fs, skill_dir, &eval_dir) {
             Ok(suite) => suite,
             Err(error) => {
                 eprintln!("Failed to load eval manifest: {error}");

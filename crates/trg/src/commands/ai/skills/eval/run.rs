@@ -11,7 +11,7 @@ use crate::agentskills::cache::{
 use crate::agentskills::case_selection::CaseSelection;
 use crate::agentskills::concurrency::RunConcurrency;
 use crate::agentskills::evals::{
-    effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalSuite,
+    effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalDirName, EvalSuite,
 };
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
@@ -60,6 +60,13 @@ Examples:
 pub struct RunArgs {
     #[arg(long, value_name = "DIR", help = "Path to a skill directory containing SKILL.md")]
     pub skill_dir: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Directory under the skill, holding the eval suite (default: evals). Wins over a conflicting eval_dir declared in the manifest itself, since the manifest cannot be found before this is settled"
+    )]
+    pub eval_dir: Option<EvalDirName>,
 
     #[arg(long, value_name = "DIR", help = "Root directory for the generated artifact bundle")]
     pub out_dir: PathBuf,
@@ -253,9 +260,12 @@ impl RunArgs {
             }
         };
 
+        let eval_dir = self.eval_dir.clone().unwrap_or_default();
+
         if let Err(e) = crate::agentskills::evals::check_eval_suite(
             fs,
             &self.skill_dir,
+            &eval_dir,
             &props.name,
             EvalCheckOptions {
                 require_assertions: self.require_assertions,
@@ -267,7 +277,7 @@ impl RunArgs {
         }
 
         if self.lint_evals {
-            match crate::agentskills::evals::load_eval_suite(fs, &self.skill_dir) {
+            match crate::agentskills::evals::load_eval_suite(fs, &self.skill_dir, &eval_dir) {
                 Ok(suite) => {
                     crate::agentskills::evals::print_eval_lint_warnings(
                         &crate::agentskills::evals::lint_eval_suite_fixtures(
@@ -379,6 +389,7 @@ impl RunArgs {
             environment: self.environment,
             permission: self.permission,
             cases,
+            eval_dir,
             ..BuildReportOptions::default()
         };
 
@@ -550,8 +561,9 @@ fn execute_runs(
         None
     };
 
+    let eval_dir = bundle.document.suite.eval_dir.clone();
     let suite: EvalSuite =
-        match crate::agentskills::case_directories::resolve_eval_suite(&crate::fs::RealFS, skill_path) {
+        match crate::agentskills::case_directories::resolve_eval_suite(&crate::fs::RealFS, skill_path, &eval_dir) {
             Ok(compiled) => compiled.suite,
             Err(err) => {
                 eprintln!("Failed to load eval suite: {}", err);
@@ -585,6 +597,7 @@ fn execute_runs(
         skill_hash: bundle.document.suite.skill_hash.clone(),
         old_skill_hash: bundle.document.suite.old_skill_hash.clone(),
         evals_hash: bundle.document.suite.evals_hash.clone(),
+        eval_dir,
         cost_ledger,
     };
     execution.execute_all(&mut bundle.document.runs, concurrency);
@@ -657,6 +670,7 @@ struct RunExecution<'a> {
     skill_hash: String,
     old_skill_hash: Option<String>,
     evals_hash: String,
+    eval_dir: EvalDirName,
     cost_ledger: &'a CostLedger,
 }
 
@@ -841,7 +855,7 @@ impl RunExecution<'_> {
         let transcript_path = run_dir.join("transcript.jsonl");
         let stderr_path = run_dir.join("stderr.log");
 
-        let mock_set = match resolve_mock_set(self.skill_path, &run.eval_case_id) {
+        let mock_set = match resolve_mock_set(self.skill_path, &self.eval_dir, &run.eval_case_id) {
             Ok(set) => set,
             Err(e) => {
                 eprintln!("Run {}: failed to resolve mcp mocks: {}", run.id, e);
@@ -858,7 +872,7 @@ impl RunExecution<'_> {
             return;
         }
 
-        let fixture_hash = match compute_fixture_hash(self.skill_path, &run.eval_case_id) {
+        let fixture_hash = match compute_fixture_hash(self.skill_path, &self.eval_dir, &run.eval_case_id) {
             Ok(hash) => hash.as_str().to_string(),
             Err(e) => {
                 eprintln!("Run {}: failed to hash fixtures: {}", run.id, e);
@@ -956,6 +970,7 @@ impl RunExecution<'_> {
             environment: self.environment,
             permission: self.permission,
             scaffold_permission: self.scaffold_permission,
+            eval_dir: self.eval_dir.clone(),
             mcp_config_path,
         };
 
@@ -1630,6 +1645,7 @@ mod tests {
         let status = RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
             runner: None,
@@ -1738,6 +1754,7 @@ mod tests {
         let status = RunArgs {
             skill_dir,
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario,
             runner: None,
@@ -1865,6 +1882,7 @@ mod tests {
         let status = RunArgs {
             skill_dir,
             out_dir,
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::OldSkill],
             runner: None,
@@ -1910,6 +1928,7 @@ mod tests {
         let status = RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::OldSkill],
             runner: None,
@@ -1971,6 +1990,7 @@ mod tests {
         let status = RunArgs {
             skill_dir,
             out_dir,
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::OldSkill],
             runner: None,
@@ -2091,6 +2111,7 @@ mod tests {
         let base = || RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2144,6 +2165,7 @@ mod tests {
         let base = || RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2197,6 +2219,7 @@ mod tests {
         let base = || RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2242,6 +2265,7 @@ mod tests {
         let base = |no_cache: bool| RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2289,6 +2313,7 @@ mod tests {
         let base = || RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2353,6 +2378,7 @@ mod tests {
         let report = read_report(&run_with_fake_runner(RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2516,6 +2542,7 @@ mod tests {
         RunArgs {
             skill_dir: skill_dir.to_path_buf(),
             out_dir: out_dir.to_path_buf(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::ClaudeCode),
@@ -2686,6 +2713,7 @@ mod tests {
         run_with_fake_runner(RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2718,6 +2746,7 @@ mod tests {
         let second_report = run_with_fake_runner(RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "other-model".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2767,6 +2796,7 @@ mod tests {
         run_with_fake_runner(RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2799,6 +2829,7 @@ mod tests {
         let second_report = run_with_fake_runner(RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "other-model".to_string(),
             scenario: vec![ScenarioKind::WithoutSkill],
             runner: Some(Runner::Codex),
@@ -2845,6 +2876,7 @@ mod tests {
         let status = RunArgs {
             skill_dir,
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
             runner: None,
@@ -2921,6 +2953,7 @@ mod tests {
         run_with_fake_runner(RunArgs {
             skill_dir,
             out_dir,
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -2991,6 +3024,7 @@ mod tests {
         let report_dir = run_with_fake_runner(RunArgs {
             skill_dir,
             out_dir,
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -3127,6 +3161,7 @@ mod tests {
         let report_dir = run_with_fake_runner(RunArgs {
             skill_dir,
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -3171,6 +3206,7 @@ mod tests {
             let status = RunArgs {
                 skill_dir: skill_dir.clone(),
                 out_dir: out_dir.clone(),
+                eval_dir: None,
                 model_config: "ci-default".to_string(),
                 scenario: vec![ScenarioKind::WithSkill],
                 runner: None,
@@ -3241,6 +3277,7 @@ mod tests {
         let status = RunArgs {
             skill_dir,
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: None,
@@ -3290,6 +3327,7 @@ mod tests {
         let report_dir = run_with_fake_runner(RunArgs {
             skill_dir,
             out_dir,
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::Codex),
@@ -3741,6 +3779,7 @@ mod tests {
         let base = || RunArgs {
             skill_dir: skill_dir.clone(),
             out_dir: out_dir.clone(),
+            eval_dir: None,
             model_config: "ci-default".to_string(),
             scenario: vec![ScenarioKind::WithSkill],
             runner: Some(Runner::ClaudeCode),
