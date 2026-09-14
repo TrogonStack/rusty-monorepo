@@ -282,6 +282,12 @@
       ],
       "type": "string"
     },
+    "SchemaVersion": {
+      "description": "Which shape of this artifact the document was written to. Absent means it predates stamping, which is shape 1.",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "type": "integer"
+    },
     "TranscriptExcerpt": {
       "properties": {
         "eval_case_id": {
@@ -360,6 +366,14 @@
     },
     "output_dir": {
       "type": "string"
+    },
+    "schema_version": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/SchemaVersion"
+        }
+      ],
+      "default": 1
     },
     "source_report_dir": {
       "type": "string"

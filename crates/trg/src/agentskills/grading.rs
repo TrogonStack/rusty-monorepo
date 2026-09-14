@@ -36,6 +36,7 @@ use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest}
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
 use super::report::{GraderChoice, GradingStrategy, JudgeSettings, ReportDocument, RunRecord};
+use super::schema_version::SchemaVersion;
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
@@ -304,6 +305,8 @@ pub fn describe_pass_rate(rate: Option<f64>) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct GradingFile {
+    #[serde(default)]
+    pub schema_version: SchemaVersion,
     pub assertion_results: Vec<AssertionGradeResult>,
     pub summary: GradingSummary,
 }
@@ -2250,6 +2253,7 @@ pub fn build_grading_file(assertion_results: Vec<AssertionGradeResult>) -> Resul
     let summary = GradingCounts::tally(&assertion_results).summary();
 
     Ok(GradingFile {
+        schema_version: SchemaVersion::current(),
         assertion_results,
         summary,
     })
@@ -3105,6 +3109,7 @@ mod tests {
         let run_dir = report_dir.join(&run.paths.workspace).parent().unwrap().to_path_buf();
 
         let crafted = GradingFile {
+            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             assertion_results: vec![AssertionGradeResult {
                 name: Some("wraps-up".to_string()),
                 assertion: "the summary reads well".to_string(),
@@ -4773,6 +4778,7 @@ mod tests {
     #[test]
     fn validate_grading_rejects_trivial_pass_evidence() {
         let grading = GradingFile {
+            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             assertion_results: vec![AssertionGradeResult {
                 name: None,
                 assertion: "file out.json exists".to_string(),

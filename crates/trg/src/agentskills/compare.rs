@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use super::evals::EvalError;
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::report::ScenarioKind;
+use super::schema_version::SchemaVersion;
 
 pub const RUBRIC_ITEMS: &[&str] = &[
     "organization",
@@ -127,6 +128,8 @@ pub struct ComparisonJudgeMetadata {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ComparisonRecord {
+    #[serde(default)]
+    pub schema_version: SchemaVersion,
     pub eval_case_id: String,
     pub pair: ScenarioPairRecord,
     pub mapping: BlindLabelMapping,
@@ -284,6 +287,7 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
             };
 
             let record = ComparisonRecord {
+                schema_version: SchemaVersion::current(),
                 eval_case_id: eval_case.id.clone(),
                 pair: ScenarioPairRecord { a: pair.a, b: pair.b },
                 mapping,

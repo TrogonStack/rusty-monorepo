@@ -14,6 +14,7 @@ use super::evals::{EvalDirName, EvalError, Result, EVAL_SUITE_MANIFEST_NAME};
 use super::feedback::{load_run_feedback_entries, FeedbackNote};
 use super::grading::{GradingCounts, GradingFile};
 use super::report::{ReportDocument, RunRecord, ScenarioKind};
+use super::schema_version::SchemaVersion;
 
 pub const BUNDLE_MD_NAME: &str = "improvement-bundle.md";
 pub const BUNDLE_JSON_NAME: &str = "improvement-bundle.json";
@@ -133,6 +134,8 @@ pub struct TranscriptExcerpt {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 pub struct ImprovementBundleDocument {
+    #[serde(default)]
+    pub schema_version: SchemaVersion,
     pub generated_at: String,
     pub source_report_dir: String,
     pub output_dir: String,
@@ -209,6 +212,7 @@ pub fn build_improvement_bundle(
     let summary = build_summary(&report, from_report_dir)?;
 
     Ok(ImprovementBundleDocument {
+        schema_version: SchemaVersion::current(),
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         source_report_dir: from_report_dir.display().to_string(),
         output_dir: output_dir.display().to_string(),
@@ -796,6 +800,7 @@ pub(crate) mod testutil {
     fn write_grading(run_dir: &Path, assertion: &str, passed: bool, evidence: &str) {
         std::fs::create_dir_all(run_dir).unwrap();
         let grading = GradingFile {
+            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             assertion_results: vec![AssertionGradeResult {
                 name: None,
                 assertion: assertion.to_string(),
@@ -832,6 +837,7 @@ pub(crate) mod testutil {
 
     pub fn write_feedback(run_dir: &Path, text: &str) {
         let document = FeedbackDocument {
+            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             reviewer: "reviewer@example.com".to_string(),
             reviewed_at: "2026-05-26T12:00:00Z".to_string(),
             notes: vec![FeedbackNote {
@@ -849,6 +855,7 @@ pub(crate) mod testutil {
 
     pub fn write_empty_feedback(run_dir: &Path) {
         let document = FeedbackDocument {
+            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             reviewer: "reviewer@example.com".to_string(),
             reviewed_at: "2026-05-26T12:00:00Z".to_string(),
             notes: Vec::new(),

@@ -26,6 +26,7 @@ use super::permission_outcome::PermissionOutcome;
 use super::runner::capabilities::HarnessControl;
 use super::runner::{Runner, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
+use super::schema_version::SchemaVersion;
 use super::tool_grant::ToolGrant;
 use super::validation::ValidationError;
 
@@ -267,6 +268,8 @@ pub struct ReportBundle {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReportDocument {
+    #[serde(default)]
+    pub schema_version: SchemaVersion,
     pub report: ReportSection,
     pub suite: SuiteSection,
     pub dimensions: DimensionsSection,
@@ -927,6 +930,7 @@ pub fn build_report_bundle(
         .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
 
     let document = ReportDocument {
+        schema_version: SchemaVersion::current(),
         report: ReportSection {
             id: report_id.clone(),
             generated_at,
@@ -1793,6 +1797,7 @@ mod tests {
             report_id: "report-123".to_string(),
             skill_name: "demo-skill".to_string(),
             document: ReportDocument {
+                schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
                 report: ReportSection {
                     id: "report-123".to_string(),
                     generated_at: "2026-05-25T22:00:00Z".to_string(),

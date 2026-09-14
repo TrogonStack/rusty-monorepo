@@ -13,6 +13,7 @@ use super::eval_suite_drift::{
 use super::evals::{EvalError, Result};
 use super::iteration_summary::detect_previous_report_dir;
 use super::report::ScenarioKind;
+use super::schema_version::SchemaVersion;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +34,8 @@ pub struct BenchmarkOptions {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(title = "trg skills eval benchmark")]
 pub struct BenchmarkDocument {
+    #[serde(default)]
+    pub schema_version: SchemaVersion,
     pub report_id: String,
     pub generated_at: String,
     pub failed_runs_mode: FailedRunsMode,
@@ -382,6 +385,7 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
     )?;
 
     Ok(BenchmarkDocument {
+        schema_version: SchemaVersion::current(),
         report_id: report.report.id,
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         failed_runs_mode: failed_runs,

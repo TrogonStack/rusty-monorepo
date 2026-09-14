@@ -32,6 +32,7 @@ pub mod report;
 pub mod runner;
 pub mod sampling;
 pub mod scenario_selection;
+pub mod schema_version;
 pub mod schemas;
 pub mod tool_grant;
 pub mod transcript;

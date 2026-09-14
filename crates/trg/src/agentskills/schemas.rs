@@ -298,6 +298,7 @@ mod tests {
     #[test]
     fn feedback_json_round_trip_validates() {
         let document = FeedbackDocument {
+            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             reviewer: "reviewer@example.com".to_string(),
             reviewed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
             notes: vec![FeedbackNote {
