@@ -23,6 +23,11 @@ Optional eval-level metadata in evals/evals.json:
   grader_hints          Opaque JSON passed through to script graders
 
 Timeout precedence: per-eval timeout_secs > --timeout-secs > runner default (no limit).
+
+The scaffold is a shape, not a measurement: a case that passes with and without the
+skill measures nothing. To turn it into a suite that discriminates, follow
+docs/how-to/author-an-eval-suite.md, or hand an agent the skill at
+skills/trg-eval-authoring.
 ")]
 pub struct InitArgs {
     #[arg(long, value_name = "DIR", help = "Path to a skill directory containing SKILL.md")]

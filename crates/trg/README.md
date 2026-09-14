@@ -22,6 +22,7 @@
 - [Compare with a skill vs a baseline](docs/how-to/compare-with-skill-vs-baseline.md)
 - [Compare with a skill vs an older skill](docs/how-to/compare-with-skill-vs-old-skill.md)
 - [Run the grade benchmark pipeline](docs/how-to/run-grade-benchmark-pipeline.md)
+- [Author an eval suite](docs/how-to/author-an-eval-suite.md)
 - [Write assertions](docs/how-to/write-assertions.md)
 - [Write mechanical grader scripts](docs/how-to/write-mechanical-grader-scripts.md)
 - [Troubleshooting](docs/how-to/troubleshooting.md)
