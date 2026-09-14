@@ -589,7 +589,7 @@ pub struct RunPaths {
 /// (codex's `cached_input_tokens`, cursor-agent's `cacheReadTokens`) leaves the other side
 /// `None` rather than folding it in at 0, which would claim a write count the harness never
 /// gave.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct CacheTokens {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     read_tokens: Option<u64>,
@@ -641,6 +641,45 @@ impl<'de> Deserialize<'de> for CacheTokens {
     {
         let raw = RawCacheTokens::deserialize(deserializer)?;
         Self::parse(raw.read_tokens, raw.write_tokens).map_err(de::Error::custom)
+    }
+}
+
+/// Written by hand rather than derived because the derived shape admits `{}` and a pair of
+/// explicit nulls, which `Deserialize` then refuses. A schema looser than its own parser is
+/// worse here than elsewhere: `eval verify --mode strict` would call such an artifact
+/// conformant and the next command to read it would fail on the same bytes.
+impl JsonSchema for CacheTokens {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CacheTokens".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "description": "How many of a run's tokens its harness billed twice over. Absent entirely when the harness never reports cache activity, which is a different claim from a harness that checked and cached nothing. At least one side must be named: a value naming neither carries no information the field being absent does not already carry.",
+            "properties": {
+                "read_tokens": {
+                    "type": ["integer", "null"],
+                    "format": "uint64",
+                    "minimum": 0
+                },
+                "write_tokens": {
+                    "type": ["integer", "null"],
+                    "format": "uint64",
+                    "minimum": 0
+                }
+            },
+            "anyOf": [
+                {
+                    "required": ["read_tokens"],
+                    "properties": { "read_tokens": { "type": "integer" } }
+                },
+                {
+                    "required": ["write_tokens"],
+                    "properties": { "write_tokens": { "type": "integer" } }
+                }
+            ]
+        })
     }
 }
 
@@ -1694,6 +1733,45 @@ mod tests {
 
     mod cache_tokens {
         use super::*;
+
+        fn validator() -> jsonschema::Validator {
+            let schema = serde_json::to_value(schemars::schema_for!(CacheTokens)).unwrap();
+            jsonschema::validator_for(&schema).unwrap()
+        }
+
+        /// The schema and `Deserialize` have to refuse the same documents. When the schema is
+        /// the looser of the two, `verify --mode strict` calls a bundle conformant and the
+        /// next command to read those same bytes fails on them.
+        #[test]
+        fn the_schema_refuses_every_document_deserialize_refuses() {
+            let validator = validator();
+            for document in [
+                serde_json::json!({}),
+                serde_json::json!({ "read_tokens": null, "write_tokens": null }),
+            ] {
+                assert!(
+                    !validator.is_valid(&document),
+                    "schema admitted a document Deserialize refuses: {document}"
+                );
+                assert!(serde_json::from_value::<CacheTokens>(document).is_err());
+            }
+        }
+
+        #[test]
+        fn the_schema_admits_a_value_that_names_one_side() {
+            let validator = validator();
+            for document in [
+                serde_json::json!({ "read_tokens": 10 }),
+                serde_json::json!({ "write_tokens": 10 }),
+                serde_json::json!({ "read_tokens": 10, "write_tokens": 4 }),
+            ] {
+                assert!(
+                    validator.is_valid(&document),
+                    "schema refused a readable value: {document}"
+                );
+                assert!(serde_json::from_value::<CacheTokens>(document).is_ok());
+            }
+        }
 
         #[test]
         fn naming_neither_side_is_refused() {
