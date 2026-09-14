@@ -5,13 +5,11 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::evals::{
-    parse_eval_suite, EvalCase, EvalError, EvalSuite, Result, EVAL_SUITE_DIR_NAME, EVAL_SUITE_MANIFEST_NAME,
-};
+use super::evals::{parse_eval_suite, EvalCase, EvalDirName, EvalError, EvalSuite, Result, EVAL_SUITE_MANIFEST_NAME};
 use super::validation::ValidationError;
 use crate::fs::FileSystem;
 
-const PROMPT_FILE_NAME: &str = "prompt.md";
+pub const EVAL_CASE_PROMPT_FILE_NAME: &str = "prompt.md";
 const CASE_JSON_NAME: &str = "case.json";
 const GRADERS_DIR_NAME: &str = "graders";
 const DIRECTORY_HASH_REGIME_TAG: &str = "trg-eval-case-directories-v1";
@@ -36,8 +34,14 @@ pub struct CompiledSuite {
 /// other reader (grading, running, reporting, drift detection) must call this instead
 /// of joining `evals/evals.json` itself, or a directory-authored suite could run under
 /// one definition and be verified under another.
-pub fn resolve_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<CompiledSuite> {
-    let evals_dir = skill_path.join(EVAL_SUITE_DIR_NAME);
+///
+/// `eval_dir` is the caller's own answer to where the suite lives (a `--eval-dir` flag,
+/// or the default), and it is what locates the suite: a manifest's own `eval_dir` key,
+/// once found, is checked against it rather than used to redirect the search, because a
+/// key that could redirect discovery would make the directory the manifest is found in
+/// depend on bytes read from inside that same directory.
+pub fn resolve_eval_suite(fs: &impl FileSystem, skill_path: &Path, eval_dir: &EvalDirName) -> Result<CompiledSuite> {
+    let evals_dir = skill_path.join(eval_dir.as_str());
     let manifest_path = evals_dir.join(EVAL_SUITE_MANIFEST_NAME);
     let manifest_present = fs.is_file(&manifest_path);
     let case_ids = discover_case_directories(fs, &evals_dir)?;
@@ -58,6 +62,11 @@ pub fn resolve_eval_suite(fs: &impl FileSystem, skill_path: &Path) -> Result<Com
 
     let content = fs.read_to_string(&manifest_path)?;
     let suite = parse_eval_suite(&content)?;
+    if let Some(declared) = &suite.eval_dir {
+        if declared != eval_dir {
+            return Err(mismatched_eval_dir_error(&manifest_path, declared, eval_dir));
+        }
+    }
     let hash = format!("sha256:{}", super::hex_encode(Sha256::digest(content.as_bytes())));
     Ok(CompiledSuite {
         suite,
@@ -80,6 +89,23 @@ fn mixing_regimes_error(manifest_path: &Path, case_ids: &[String]) -> EvalError 
     )
 }
 
+fn mismatched_eval_dir_error(manifest_path: &Path, declared: &EvalDirName, resolved: &EvalDirName) -> EvalError {
+    EvalError::Validation(
+        ValidationError::for_field(
+            "eval_dir",
+            format!(
+                "manifest at '{}' declares eval_dir '{}', but it was found by looking in '{}'; \
+                 pass --eval-dir {} or correct the manifest so the two agree",
+                manifest_path.display(),
+                declared,
+                resolved,
+                declared
+            ),
+        )
+        .into(),
+    )
+}
+
 fn discover_case_directories(fs: &impl FileSystem, evals_dir: &Path) -> Result<Vec<String>> {
     if !fs.is_dir(evals_dir) {
         return Ok(Vec::new());
@@ -90,7 +116,7 @@ fn discover_case_directories(fs: &impl FileSystem, evals_dir: &Path) -> Result<V
         if !fs.is_dir(&entry) {
             continue;
         }
-        let looks_like_a_case = fs.is_file(&entry.join(PROMPT_FILE_NAME))
+        let looks_like_a_case = fs.is_file(&entry.join(EVAL_CASE_PROMPT_FILE_NAME))
             || fs.is_file(&entry.join(CASE_JSON_NAME))
             || fs.is_dir(&entry.join(GRADERS_DIR_NAME));
         if !looks_like_a_case {
@@ -154,7 +180,7 @@ fn read_skill_name(fs: &impl FileSystem, skill_path: &Path) -> Result<String> {
 }
 
 fn compile_case_from_directory(fs: &impl FileSystem, case_dir: &Path, case_id: &str) -> Result<EvalCase> {
-    let prompt_path = case_dir.join(PROMPT_FILE_NAME);
+    let prompt_path = case_dir.join(EVAL_CASE_PROMPT_FILE_NAME);
     if !fs.is_file(&prompt_path) {
         return Err(EvalError::Validation(
             ValidationError::for_field(
@@ -336,7 +362,7 @@ mod tests {
             r#"{"expected_output": "The thing is done."}"#,
         );
 
-        let compiled = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         assert_eq!(compiled.suite.evals.len(), 1);
         assert_eq!(compiled.suite.evals[0].id.as_str(), "one");
@@ -354,7 +380,7 @@ mod tests {
             r#"{"expected_output": "The thing is done."}"#,
         );
 
-        let error = resolve_eval_suite(&fs, Path::new("/skill")).unwrap_err();
+        let error = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap_err();
 
         assert!(error.to_string().contains("evals/one"));
         assert!(error.to_string().contains("prompt.md"));
@@ -370,9 +396,55 @@ mod tests {
             r#"{"id": "not-one", "expected_output": "done"}"#,
         );
 
-        let error = resolve_eval_suite(&fs, Path::new("/skill")).unwrap_err();
+        let error = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap_err();
 
         assert!(error.to_string().contains("'id'"));
+    }
+
+    #[test]
+    fn a_manifest_at_a_custom_eval_dir_resolves_with_it() {
+        let fs = MemFS::new();
+        skill_md(&fs, "/skill", "demo-skill");
+        fs.insert(
+            Path::new("/skill/cases/evals.json"),
+            r#"{"skill_name": "demo-skill", "evals": [{"id": "one", "prompt": "p", "expected_output": "e"}]}"#,
+        );
+
+        let custom = EvalDirName::parse("cases").unwrap();
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill"), &custom).unwrap();
+
+        assert_eq!(compiled.suite.evals[0].id.as_str(), "one");
+    }
+
+    #[test]
+    fn a_manifest_declaring_a_different_eval_dir_than_it_was_found_in_is_refused() {
+        let fs = MemFS::new();
+        skill_md(&fs, "/skill", "demo-skill");
+        fs.insert(
+            Path::new("/skill/cases/evals.json"),
+            r#"{"skill_name": "demo-skill", "eval_dir": "evals", "evals": [{"id": "one", "prompt": "p", "expected_output": "e"}]}"#,
+        );
+
+        let custom = EvalDirName::parse("cases").unwrap();
+        let error = resolve_eval_suite(&fs, Path::new("/skill"), &custom).unwrap_err();
+
+        assert!(error.to_string().contains("declares eval_dir 'evals'"));
+        assert!(error.to_string().contains("found by looking in 'cases'"));
+    }
+
+    #[test]
+    fn a_manifest_declaring_the_eval_dir_it_was_actually_found_in_is_accepted() {
+        let fs = MemFS::new();
+        skill_md(&fs, "/skill", "demo-skill");
+        fs.insert(
+            Path::new("/skill/cases/evals.json"),
+            r#"{"skill_name": "demo-skill", "eval_dir": "cases", "evals": [{"id": "one", "prompt": "p", "expected_output": "e"}]}"#,
+        );
+
+        let custom = EvalDirName::parse("cases").unwrap();
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill"), &custom).unwrap();
+
+        assert_eq!(compiled.suite.evals[0].id.as_str(), "one");
     }
 
     #[test]
@@ -389,7 +461,7 @@ mod tests {
             r#"{"type": "contains", "text": "total"}"#,
         );
 
-        let compiled = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         let grader = &compiled.suite.evals[0].graders[0];
         assert_eq!(grader.name.as_ref().map(|n| n.as_str()), Some("mentions-total"));
@@ -409,7 +481,7 @@ mod tests {
             r#"{"expected_output": "done"}"#,
         );
 
-        let error = resolve_eval_suite(&fs, Path::new("/skill")).unwrap_err();
+        let error = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap_err();
 
         assert!(error.to_string().contains("evals.json"));
         assert!(error.to_string().contains("one"));
@@ -425,7 +497,7 @@ mod tests {
         );
         fs.insert(Path::new("/skill/evals/files/sales.csv"), "a,b\n1,2\n");
 
-        let compiled = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         assert!(matches!(compiled.source, EvalSource::Manifest { .. }));
         assert_eq!(compiled.suite.evals[0].id.as_str(), "manifest-case");
@@ -449,7 +521,7 @@ mod tests {
             "---\ntype: fixed\n---\n{}\n",
         );
 
-        let compiled = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         assert!(matches!(compiled.source, EvalSource::Manifest { .. }));
         assert_eq!(compiled.suite.evals.len(), 1);
@@ -464,7 +536,7 @@ mod tests {
             r#"{"skill_name": "demo-skill", "evals": [{"id": "one", "prompt": "p", "expected_output": "e"}]}"#;
         fs.insert(Path::new("/skill/evals/evals.json"), manifest);
 
-        let compiled = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let compiled = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         let mut hasher = Sha256::new();
         hasher.update(manifest.as_bytes());
@@ -489,8 +561,9 @@ mod tests {
             r#"{"expected_output": "The thing is done."}"#,
         );
 
-        let manifest_compiled = resolve_eval_suite(&manifest_fs, Path::new("/skill")).unwrap();
-        let directory_compiled = resolve_eval_suite(&directory_fs, Path::new("/skill")).unwrap();
+        let manifest_compiled = resolve_eval_suite(&manifest_fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
+        let directory_compiled =
+            resolve_eval_suite(&directory_fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         assert_ne!(manifest_compiled.hash, directory_compiled.hash);
     }
@@ -505,8 +578,8 @@ mod tests {
             r#"{"expected_output": "done"}"#,
         );
 
-        let first = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
-        let second = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let first = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
+        let second = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         assert_eq!(first.hash, second.hash);
     }
@@ -524,13 +597,13 @@ mod tests {
             Path::new("/skill/evals/one/graders/mentions-total.json"),
             r#"{"type": "contains", "text": "total"}"#,
         );
-        let before = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let before = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         fs.insert(
             Path::new("/skill/evals/one/graders/mentions-total.json"),
             r#"{"type": "contains", "text": "grand total"}"#,
         );
-        let after = resolve_eval_suite(&fs, Path::new("/skill")).unwrap();
+        let after = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap();
 
         assert_ne!(before.hash, after.hash);
     }
@@ -540,7 +613,7 @@ mod tests {
         let fs = MemFS::new();
         skill_md(&fs, "/skill", "demo-skill");
 
-        let error = resolve_eval_suite(&fs, Path::new("/skill")).unwrap_err();
+        let error = resolve_eval_suite(&fs, Path::new("/skill"), &EvalDirName::default()).unwrap_err();
 
         assert!(matches!(error, EvalError::Io(_)));
     }
@@ -575,7 +648,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = resolve_eval_suite(&crate::fs::RealFS, &skill_dir).unwrap_err();
+        let error = resolve_eval_suite(&crate::fs::RealFS, &skill_dir, &EvalDirName::default()).unwrap_err();
 
         match error {
             EvalError::Validation(errors) => {

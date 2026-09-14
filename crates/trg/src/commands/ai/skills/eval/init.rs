@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::agentskills::evals::{check_eval_suite, write_eval_manifest_scaffold, EvalCheckOptions};
+use crate::agentskills::evals::{check_eval_suite, write_eval_manifest_scaffold, EvalCheckOptions, EvalDirName};
 use crate::agentskills::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
@@ -28,6 +28,13 @@ pub struct InitArgs {
     #[arg(long, value_name = "DIR", help = "Path to a skill directory containing SKILL.md")]
     pub skill_dir: PathBuf,
 
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Directory under the skill to scaffold the eval suite into (default: evals)"
+    )]
+    pub eval_dir: Option<EvalDirName>,
+
     #[arg(long, help = "Overwrite an existing evals/evals.json")]
     pub force: bool,
 
@@ -50,7 +57,8 @@ impl InitArgs {
             }
         };
 
-        let evals_path = self.skill_dir.join("evals").join("evals.json");
+        let eval_dir = self.eval_dir.unwrap_or_default();
+        let evals_path = self.skill_dir.join(eval_dir.as_str()).join("evals.json");
         if fs.exists(&evals_path) && !self.force {
             eprintln!(
                 "Refusing to overwrite existing eval manifest at {}",
@@ -59,12 +67,12 @@ impl InitArgs {
             return ExitCode::InfrastructureFailure;
         }
 
-        if let Err(error) = std::fs::create_dir_all(self.skill_dir.join("evals")) {
+        if let Err(error) = std::fs::create_dir_all(self.skill_dir.join(eval_dir.as_str())) {
             eprintln!("Failed to create evals directory: {error}");
             return ExitCode::InfrastructureFailure;
         }
 
-        if let Err(error) = write_eval_manifest_scaffold(fs, &self.skill_dir, &props.name) {
+        if let Err(error) = write_eval_manifest_scaffold(fs, &self.skill_dir, &eval_dir, &props.name) {
             eprintln!("Failed to write eval manifest: {error}");
             return ExitCode::InfrastructureFailure;
         }
@@ -72,6 +80,7 @@ impl InitArgs {
         if let Err(error) = check_eval_suite(
             fs,
             &self.skill_dir,
+            &eval_dir,
             &props.name,
             EvalCheckOptions {
                 require_assertions: true,
@@ -121,13 +130,14 @@ mod tests {
 
         let status = InitArgs {
             skill_dir: skill_dir.clone(),
+            eval_dir: None,
             force: false,
             output_format: crate::output::OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
         assert_eq!(status, ExitCode::Success);
 
-        let suite = load_eval_suite(&crate::fs::RealFS, &skill_dir).unwrap();
+        let suite = load_eval_suite(&crate::fs::RealFS, &skill_dir, &EvalDirName::default()).unwrap();
         assert_eq!(suite.skill_name.as_str(), "demo-skill");
         assert_eq!(suite.evals.len(), 2);
         assert_eq!(suite.evals[0].id.as_str(), "produces-a-summary");
@@ -145,6 +155,7 @@ mod tests {
 
         let status = InitArgs {
             skill_dir,
+            eval_dir: None,
             force: false,
             output_format: crate::output::OutputFormat::Text,
         }
@@ -159,6 +170,7 @@ mod tests {
 
         let init_status = InitArgs {
             skill_dir: skill_dir.clone(),
+            eval_dir: None,
             force: false,
             output_format: crate::output::OutputFormat::Text,
         }
@@ -168,6 +180,7 @@ mod tests {
         let verify_status = VerifyArgs {
             workspace: None,
             skill_dir: Some(skill_dir),
+            eval_dir: None,
             mode: VerifyMode::Strict,
             require_assertions: false,
             output_format: crate::output::OutputFormat::Text,

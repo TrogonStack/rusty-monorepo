@@ -524,7 +524,8 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     let mut document: ReportDocument = serde_json::from_str(&report_content)?;
 
     let skill_path = PathBuf::from(&document.suite.skill_path);
-    let suite: EvalSuite = super::case_directories::resolve_eval_suite(&crate::fs::RealFS, &skill_path)?.suite;
+    let suite: EvalSuite =
+        super::case_directories::resolve_eval_suite(&crate::fs::RealFS, &skill_path, &document.suite.eval_dir)?.suite;
 
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
 

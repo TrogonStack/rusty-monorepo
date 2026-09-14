@@ -37,6 +37,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--skill-dir` | path | *(required)* | Skill directory containing `SKILL.md` and `evals/evals.json` |
+| `--eval-dir` | name | `evals` | Directory under the skill holding the eval suite. Wins over a conflicting `eval_dir` declared in the manifest itself, since the manifest cannot be found before this is settled. Recorded in `report.json` so `grade` and `next-iteration` resolve the same suite without needing the flag themselves |
 | `--out-dir` | path | *(required)* | Root directory for generated artifact bundles |
 | `--model-config` | string | `ci-default` | Opaque model-configuration label recorded in `report.json` |
 | `--scenario` | enum | `with_skill` + `without_skill` | Scenario kind to include. Repeatable; values: `with_skill`, `without_skill`, `old_skill`. See [Choosing which scenarios run](#choosing-which-scenarios-run) |
@@ -189,6 +190,7 @@ the grading for that run.
 | `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: hold every artifact against its schema, require at least one `grading.json`, and fail on failed assertions. Refused outright on a build compiled without the `schema-validation` feature. See [What strict mode needs from the build](#what-strict-mode-needs-from-the-build) |
 | `--require-assertions` | bool | `false` | Fail when an eval case declares neither an assertion nor a grader |
 | `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
+| `--eval-dir` | name | `evals` | Directory under `--skill-dir` the eval suite is resolved from |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
 
 `verify` also accepts the threshold and regression flags (`--min-pass-rate`,
@@ -273,6 +275,7 @@ trg ai skills eval init --skill-dir <DIR> [OPTIONS]
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--skill-dir` | path | *(required)* | Path to a skill directory containing `SKILL.md` |
+| `--eval-dir` | name | `evals` | Directory under the skill to scaffold the eval suite into |
 | `--force` | bool | `false` | Overwrite an existing `evals/evals.json` |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
 
@@ -524,6 +527,7 @@ trg ai skills eval next-iteration [REPORT_DIR] [OPTIONS]
 | ---- | ---- | ------- | ----------- |
 | `--from` | path | *(unset)* | Previous iteration report directory, as an alternative to the positional `REPORT_DIR` |
 | `--skill-dir` | path | *(defaults to `skill_path` from `report.json`)* | Skill directory used to detect eval suite drift |
+| `--eval-dir` | name | `evals` | Directory under `--skill-dir` the current suite is resolved from, for drift detection |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the current `evals/evals.json` hash differs from the prior iteration |
 | `--output-format` | enum | `text` | `text` prints the bundle paths; `json` prints a machine-readable document |
 
@@ -596,6 +600,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | ----- | ---- | -------- | ----- |
 | `schema_version` | integer | no | Accepted for backward compatibility; has no effect on parsing |
 | `skill_name` | string | yes | Must match the `name` in `SKILL.md` frontmatter |
+| `eval_dir` | string | no | A single path segment, no `/`, `\`, `.`, or `..`. Not a way to relocate the suite: the directory it is found in (`--eval-dir` or its default) already had to be settled to find this manifest at all. Declaring it here is checked only for agreement with that value, and a mismatch is rejected rather than silently overridden, so a manifest cannot claim to live somewhere other than where it was found |
 | `evals` | array | yes | At least one eval case; IDs must be unique |
 
 ### Eval case fields
@@ -1345,7 +1350,8 @@ other field forward as declared there, including `name`, `excluded`,
 | `skill_name` | string | From skill frontmatter |
 | `skill_path` | string | User-supplied `--skill-dir` path |
 | `skill_hash` | string | `sha256:` digest of `SKILL.md` |
-| `evals_path` | string | `<skill_path>/evals/evals.json` for a manifest suite, `<skill_path>/evals` for a suite authored as case directories |
+| `eval_dir` | string | Directory, relative to `skill_path`, the suite was resolved from (`--eval-dir` or its default `evals`). Absent in reports written before this field existed, which is equivalent to `evals`. Read back by `grade` and `next-iteration` so they resolve the same suite without a flag of their own |
+| `evals_path` | string | `<skill_path>/<eval_dir>/evals.json` for a manifest suite, `<skill_path>/<eval_dir>` for a suite authored as case directories |
 | `evals_hash` | string | `sha256:` digest of `evals.json` for a manifest suite, or of a canonical walk of every case's files for a suite authored as case directories, under a distinct regime tag so the two can never collide |
 | `case_selection` | object | Present only when the run covered part of the suite. See [Covering part of a suite](#covering-part-of-a-suite) |
 
@@ -1769,8 +1775,9 @@ Running both arms by default doubles the runs of a pass that also leaves
 
 ### The eval suite is withheld from the workspace
 
-The staged directory holds the skill under test minus its top-level `evals/`
-directory. The suite is the answer key: it carries each case's
+The staged directory holds the skill under test minus its top-level eval suite
+directory (`evals/` by default, or whatever `--eval-dir` resolved to). The
+suite is the answer key: it carries each case's
 `expected_output`, its natural-language assertions, and its graders' literal
 `contains` text and `regex` patterns. A run that could read it could be scored
 on text it copied rather than work it did, and the with-skill prompt points the

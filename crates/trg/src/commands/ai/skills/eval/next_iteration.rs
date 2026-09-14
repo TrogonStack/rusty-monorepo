@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::agentskills::evals::EvalDirName;
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::improvement_bundle::{write_improvement_bundle, NextIterationOptions};
 use crate::fs::FileSystem;
@@ -42,6 +43,13 @@ pub struct NextIterationArgs {
 
     #[arg(
         long,
+        value_name = "NAME",
+        help = "Directory under --skill-dir the current suite is resolved from, for drift detection (default: evals)"
+    )]
+    pub eval_dir: Option<EvalDirName>,
+
+    #[arg(
+        long,
         help = "Suppress the warning when the current evals/evals.json hash differs from the prior iteration"
     )]
     pub allow_eval_suite_drift: bool,
@@ -68,6 +76,7 @@ impl NextIterationArgs {
         let options = NextIterationOptions {
             allow_eval_suite_drift: self.allow_eval_suite_drift,
             skill_dir: self.skill_dir,
+            eval_dir: self.eval_dir,
             ..NextIterationOptions::default()
         };
 
@@ -111,6 +120,7 @@ mod tests {
             report_dir: Some(report_dir.clone()),
             from: None,
             skill_dir: Some(skill_root),
+            eval_dir: None,
             allow_eval_suite_drift: false,
             output_format: OutputFormat::Text,
         }

@@ -767,6 +767,7 @@ ul.artifacts { padding-left: 1.2rem; }\n\
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::EvalDirName;
     use crate::agentskills::grading::{GraderInfo, GraderKind};
     use crate::agentskills::report::{
         CiSection, DimensionsSection, ProducerSection, ReportSection, RunMetrics, RunPaths, SuiteSection,
@@ -800,6 +801,7 @@ mod tests {
                 skill_hash: "sha256:abc".to_string(),
                 evals_path: "demo-skill/evals/evals.json".to_string(),
                 evals_hash: "sha256:def".to_string(),
+                eval_dir: EvalDirName::default(),
                 old_skill_path: None,
                 old_skill_hash: None,
                 case_selection: None,

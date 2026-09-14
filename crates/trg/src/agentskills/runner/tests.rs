@@ -4,7 +4,7 @@ use tempfile::tempdir;
 
 use super::fake::{invoke_with_retries, run_bash};
 use super::{EvalRunRequest, RunStatus, FAILURE_KIND_RUNNER};
-use crate::agentskills::evals::EvalCase;
+use crate::agentskills::evals::{EvalCase, EvalDirName};
 use crate::agentskills::report::ScenarioKind;
 use crate::agentskills::transcript::{
     normalized_transcript_path, read_normalized_transcript, SkillEngagement, StagedSkill,
@@ -33,6 +33,7 @@ fn bash_request<'a>(
         scenario: ScenarioKind::WithoutSkill,
         skill_md: "",
         skill_path: workspace,
+        eval_dir: EvalDirName::default(),
         old_skill_md: None,
         old_skill_path: None,
         workspace_dir: workspace,
