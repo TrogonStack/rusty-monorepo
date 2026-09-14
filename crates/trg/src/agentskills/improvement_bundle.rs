@@ -791,6 +791,7 @@ pub(crate) mod testutil {
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             }],
             summary: GradingSummary {
                 passed: usize::from(passed),

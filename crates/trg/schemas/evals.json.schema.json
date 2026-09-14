@@ -308,6 +308,16 @@
               "type": "null"
             }
           ]
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraderWeight"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "type": "object"
@@ -555,6 +565,11 @@
     "GraderName": {
       "minLength": 1,
       "type": "string"
+    },
+    "GraderWeight": {
+      "description": "How much one grader's result counts toward its case's score, relative to\nevery other grader and free-text assertion in the same case.\n\nAlways positive. A grader worth nothing to the score belongs out of the\ncase entirely, scored with `arm: with_only` rather than weighted to zero,\nand a negative weight has no share of a score to subtract from, so\nneither reading is one this type can hold.",
+      "exclusiveMinimum": 0.0,
+      "type": "number"
     },
     "MatchCase": {
       "enum": [

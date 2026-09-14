@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::agentskills::ci::{
-    collect_failed_assertions_in_workspace, collect_workspace_metrics, emit_github_annotations, find_report_dir,
-    print_human_summary, run_ci_checks, EvalCommandJsonOutput,
+    collect_case_scores_in_workspace, collect_failed_assertions_in_workspace, collect_workspace_metrics,
+    emit_github_annotations, find_report_dir, print_human_summary, run_ci_checks, EvalCommandJsonOutput,
 };
 use crate::agentskills::evals::{
     check_eval_suite, check_workspace, lint_eval_suite_fixtures, print_eval_lint_warnings, EvalCheckOptions,
@@ -161,6 +161,14 @@ impl VerifyArgs {
             return 1;
         }
 
+        let mut case_scores = Vec::new();
+        if let Err(error) =
+            collect_case_scores_in_workspace(&workspace, None, workspace.display().to_string(), &mut case_scores)
+        {
+            eprintln!("Failed to collect case scores: {error}");
+            return 1;
+        }
+
         let mut policy = self.ci.policy();
         if matches!(self.mode, VerifyMode::Strict) {
             policy.fail_on_failed_assertions = true;
@@ -179,6 +187,7 @@ impl VerifyArgs {
             &self.ci.thresholds(),
             &failed_assertions,
             &missing_grading,
+            &case_scores,
         );
         emit_github_annotations(&check.violations);
 

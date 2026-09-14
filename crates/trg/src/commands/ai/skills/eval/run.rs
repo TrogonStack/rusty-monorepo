@@ -1550,6 +1550,7 @@ mod tests {
                 fail_on_token_regression: false,
                 fail_on_duration_regression: false,
                 min_pass_rate: None,
+                min_case_score: None,
                 max_tokens: None,
                 max_input_tokens: None,
                 max_output_tokens: None,

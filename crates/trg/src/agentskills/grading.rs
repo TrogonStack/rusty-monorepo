@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use super::compare::{parse_winner, shuffle_swap, BlindLabel, ComparisonWinner};
 use super::evals::{EvalCase, EvalError, EvalSuite, Result};
 use super::graders::{
-    self, BaselineReference, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, TargetContent,
+    self, BaselineReference, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, GraderWeight, TargetContent,
     TargetDeclaration,
 };
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
@@ -68,7 +68,7 @@ pub struct GraderInfo {
     pub command: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AssertionGradeResult {
     #[serde(alias = "text")]
     #[schemars(length(min = 1))]
@@ -101,6 +101,12 @@ pub struct AssertionGradeResult {
     /// A single opinion has no split to report, and `passed` already carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub votes: Option<JudgeVoteTally>,
+    /// How much this result counts toward its case's score, relative to the
+    /// rest of the case. Absent whenever the declaring grader left it
+    /// unweighted, so an undeclared weight cannot be told apart in the
+    /// serialized form from a build that predates weighting at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<GraderWeight>,
 }
 
 /// Which single bucket a result belongs to.
@@ -150,6 +156,10 @@ impl AssertionGradeResult {
 
     pub fn is_scored(&self) -> bool {
         self.outcome() == AssertionOutcome::Scored
+    }
+
+    pub fn effective_weight(&self) -> GraderWeight {
+        self.weight.unwrap_or_default()
     }
 }
 
@@ -246,6 +256,35 @@ impl GradingCounts {
             pass_rate: self.pass_rate(),
         }
     }
+}
+
+/// A case's own score: the fraction of scored weight it passed, `None` under
+/// the same condition `GradingCounts::pass_rate` reports `None` under, since
+/// weighting which scored assertions count for more cannot manufacture a
+/// score out of a case that scored nothing.
+///
+/// A case where every grader left its weight undeclared takes the same code
+/// path `GradingCounts::pass_rate` always has, so a suite that never opts
+/// into weighting reports byte-identical scores to before weighting existed.
+pub fn case_score(results: &[AssertionGradeResult]) -> Option<f64> {
+    if results.iter().all(|r| r.weight.is_none()) {
+        return GradingCounts::tally(results).pass_rate();
+    }
+
+    let total_weight: f64 = results
+        .iter()
+        .filter(|r| r.is_scored())
+        .map(|r| r.effective_weight().value())
+        .sum();
+    if total_weight == 0.0 {
+        return None;
+    }
+    let passed_weight: f64 = results
+        .iter()
+        .filter(|r| r.is_scored() && r.passed)
+        .map(|r| r.effective_weight().value())
+        .sum();
+    Some(passed_weight / total_weight)
 }
 
 pub fn pass_rate_matches(reported: Option<f64>, expected: Option<f64>) -> bool {
@@ -558,7 +597,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         report.unsupported += counts.unsupported;
         report.excluded += counts.excluded;
         report.ungraded += counts.ungraded;
-        run_mut.case_score = counts.pass_rate();
+        run_mut.case_score = case_score(&assertion_results);
 
         let grading = build_grading_file(assertion_results)?;
         validate_grading_document(&grading, options.strict)?;
@@ -654,6 +693,7 @@ fn grade_assertion(
                     excluded: None,
                     ungraded: None,
                     votes: None,
+                    weight: None,
                 })
             } else if options.grader == GraderMode::None {
                 Ok(needs_llm_result(
@@ -732,6 +772,7 @@ fn grade_declaratively(
             excluded,
             ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Failed { evidence } => AssertionGradeResult {
             assertion,
@@ -744,6 +785,7 @@ fn grade_declaratively(
             excluded,
             ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Unsupported { reason } => AssertionGradeResult {
             assertion,
@@ -756,6 +798,7 @@ fn grade_declaratively(
             excluded,
             ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Deferred { criterion, target } => {
             let mut result = match options.grader {
@@ -765,6 +808,7 @@ fn grade_declaratively(
             };
             result.excluded = excluded;
             result.name = name;
+            result.weight = declared.weight;
             result
         }
         GraderOutcome::Comparison {
@@ -836,6 +880,7 @@ fn read_only_fixture_violation_result(path: &str) -> AssertionGradeResult {
         excluded: None,
         ungraded: None,
         votes: None,
+        weight: None,
     }
 }
 
@@ -855,6 +900,7 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
         excluded: None,
         ungraded: Some(evidence.to_string()),
         votes: None,
+        weight: None,
     }
 }
 
@@ -918,6 +964,7 @@ fn script_crashed_result(assertion: &str, command: &str, output: &std::process::
         excluded: None,
         ungraded: Some(evidence),
         votes: None,
+        weight: None,
     }
 }
 
@@ -1007,6 +1054,7 @@ fn grade_with_script(
         excluded: None,
         ungraded: None,
         votes: None,
+        weight: None,
     })
 }
 
@@ -1043,6 +1091,7 @@ fn grade_with_llm(
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             });
         }
     }
@@ -1083,6 +1132,7 @@ fn grade_with_llm(
         excluded: None,
         ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
+        weight: None,
     })
 }
 
@@ -1255,6 +1305,7 @@ fn grade_against_baseline(
         excluded: None,
         ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
+        weight: None,
     })
 }
 
@@ -1274,6 +1325,7 @@ fn baseline_shortfall(assertion: &str, evidence: impl Into<String>) -> Assertion
         excluded: None,
         ungraded: None,
         votes: None,
+        weight: None,
     }
 }
 
@@ -2915,6 +2967,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         };
 
         let json = serde_json::to_string(&result).unwrap();
@@ -2953,6 +3006,7 @@ mod tests {
                 excluded: Some("scoped to the with_skill arm".to_string()),
                 ungraded: None,
                 votes: Some(JudgeVoteTally { passed: 2, failed: 1 }),
+                weight: None,
             }],
             summary: GradingSummary {
                 passed: 1,
@@ -2992,6 +3046,65 @@ mod tests {
         assert_eq!(flattened["rationale"], "both judges agreed");
         assert_eq!(flattened["votes"]["passed"], 2);
         assert_eq!(flattened["votes"]["failed"], 1);
+    }
+
+    fn weighted_result(passed: bool, unsupported: bool, weight: Option<GraderWeight>) -> AssertionGradeResult {
+        AssertionGradeResult {
+            name: None,
+            assertion: "the output includes a summary".to_string(),
+            passed,
+            evidence: "found the summary section".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Mechanical,
+                model: None,
+                command: None,
+            },
+            rationale: None,
+            unsupported: unsupported.then(|| "runner cannot observe this".to_string()),
+            excluded: None,
+            ungraded: None,
+            votes: None,
+            weight,
+        }
+    }
+
+    /// A grader that leaves weight undeclared inside an otherwise-weighted case
+    /// still has to count for exactly as much as it always did: one full vote,
+    /// same as a declared weight of 1.0 would.
+    #[test]
+    fn an_undeclared_weight_counts_as_one_full_vote_alongside_a_declared_weight() {
+        let results = vec![
+            weighted_result(true, false, Some(GraderWeight::parse(3.0).unwrap())),
+            weighted_result(false, false, None),
+        ];
+
+        assert_eq!(case_score(&results), Some(0.75));
+    }
+
+    /// A case where every grader left weight undeclared has to take the exact
+    /// pre-weighting code path, not merely a formula that happens to agree with
+    /// it, so a suite that never opts in cannot see its score move.
+    #[test]
+    fn case_score_falls_back_to_the_pre_weighting_pass_rate_when_nothing_declares_a_weight() {
+        let results = vec![
+            weighted_result(true, false, None),
+            weighted_result(true, false, None),
+            weighted_result(true, false, None),
+            weighted_result(false, false, None),
+            weighted_result(true, true, None),
+        ];
+
+        assert_eq!(case_score(&results), Some(0.75));
+        assert_eq!(case_score(&results), GradingCounts::tally(&results).pass_rate());
+    }
+
+    /// An undeclared weight must not be constructible from a build that never
+    /// wrote one, so the field cannot appear where nothing asked for it.
+    #[test]
+    fn an_unweighted_result_is_absent_from_the_serialized_json() {
+        let result = weighted_result(true, false, None);
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("\"weight\""));
     }
 
     fn suite_from(json: &str) -> EvalSuite {
@@ -3765,6 +3878,7 @@ mod tests {
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             },
             AssertionGradeResult {
                 name: None,
@@ -3781,6 +3895,7 @@ mod tests {
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             },
         ]);
 
@@ -3809,6 +3924,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         }]);
 
         assert_eq!(counts.scored(), 0);
@@ -3860,6 +3976,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         }
     }
 
@@ -4404,6 +4521,7 @@ mod tests {
                 excluded: None,
                 ungraded: None,
                 votes: None,
+                weight: None,
             }],
             summary: GradingSummary {
                 passed: 1,
@@ -4736,6 +4854,7 @@ echo '{"passed": true, "evidence": "script verified"}'
             excluded: None,
             ungraded: None,
             votes,
+            weight: None,
         }
     }
 

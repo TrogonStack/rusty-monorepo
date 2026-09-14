@@ -258,6 +258,7 @@ mod tests {
             excluded: None,
             ungraded: None,
             votes: None,
+            weight: None,
         }])
         .unwrap();
 
