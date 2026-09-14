@@ -20,12 +20,12 @@ use crate::agentskills::mocks::{
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::report::{
     build_report_bundle, write_report_bundle, BudgetReport, BuildReportOptions, EnvironmentPolicy, PermissionGrant,
-    ReportBundle, RunRecord, ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
+    ReportBundle, RunNotStarted, RunRecord, ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
 };
-use crate::agentskills::runner::capabilities::HarnessControl;
+use crate::agentskills::runner::capabilities::{ControlSupport, HarnessControl};
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
-    SkillDigest, FAILURE_KIND_MCP_UNSUPPORTED,
+    SkillDigest,
 };
 use crate::agentskills::sampling::AttemptCount;
 use crate::agentskills::scenario_selection::ScenarioSelection;
@@ -794,6 +794,32 @@ impl RunExecution<'_> {
         }
     }
 
+    /// Every reason the harness is not invoked for a run, answered in one place.
+    ///
+    /// A caller that stops a run early here can only do so by naming a `RunNotStarted`,
+    /// which is the same value the report reads back to decide the run is unscoreable.
+    /// Deciding it inline instead is how a run refused for an unsupported control ended
+    /// up graded against a workspace that was never created.
+    fn refuse_to_start(&self, case: &EvalCase) -> Option<RunNotStarted> {
+        if let Admission::Exhausted { spent_usd, ceiling_usd } = self.cost_ledger.admit() {
+            return Some(RunNotStarted::CostCeilingExhausted { spent_usd, ceiling_usd });
+        }
+
+        if case.conversation_history.is_some()
+            && !matches!(
+                self.runner.support(HarnessControl::ConversationSeeding),
+                ControlSupport::Driven(_)
+            )
+        {
+            return Some(RunNotStarted::ControlUnsupported {
+                control: HarnessControl::ConversationSeeding,
+                runner: self.runner,
+            });
+        }
+
+        None
+    }
+
     fn execute(&self, run: &mut RunRecord, integrity: IntegrityWindow) {
         let case = match self.case_index.get(&run.eval_case_id) {
             Some(case) => *case,
@@ -843,13 +869,10 @@ impl RunExecution<'_> {
         };
 
         if !mock_set.is_empty() && !self.runner.support(HarnessControl::McpServers).is_offered() {
-            run.status = "skipped".to_string();
-            run.failure_kind = Some(FAILURE_KIND_MCP_UNSUPPORTED.to_string());
-            run.warnings.push(format!(
-                "{} declares mcp mocks but the {} harness offers no mcp servers control, so it was not started",
-                run.eval_case_id,
-                self.runner.display_name()
-            ));
+            run.not_started(RunNotStarted::ControlUnsupported {
+                control: HarnessControl::McpServers,
+                runner: self.runner,
+            });
             return;
         }
 
@@ -917,12 +940,8 @@ impl RunExecution<'_> {
             }
         }
 
-        if let Admission::Exhausted { spent_usd, ceiling_usd } = self.cost_ledger.admit() {
-            run.status = "skipped".to_string();
-            run.failure_kind = Some(FAILURE_KIND_BUDGET.to_string());
-            run.warnings.push(format!(
-                "the pass has spent ${spent_usd:.2} against a ${ceiling_usd:.2} cost ceiling, so this run was not started"
-            ));
+        if let Some(reason) = self.refuse_to_start(case) {
+            run.not_started(reason);
             return;
         }
 
@@ -1187,6 +1206,10 @@ mod fake_runner {
         *state().last_timeout_secs.lock().expect("fake timeout")
     }
 
+    pub fn invocations() -> usize {
+        state().invocations.load(Ordering::SeqCst)
+    }
+
     pub fn enabled() -> bool {
         STATE.with(|cell| {
             cell.borrow()
@@ -1281,6 +1304,7 @@ mod fake_runner {
                 output_tokens: Some(0),
                 cost_usd,
                 final_text: format!("transient-{count}"),
+                read_only_fixture_violations: Vec::new(),
             };
         }
 
@@ -1294,6 +1318,7 @@ mod fake_runner {
             output_tokens: Some(0),
             cost_usd,
             final_text: format!("run-{count}"),
+            read_only_fixture_violations: Vec::new(),
         }
     }
 
@@ -1354,6 +1379,12 @@ fn apply_outcome(
     run.metrics.input_tokens = outcome.input_tokens;
     run.metrics.output_tokens = outcome.output_tokens;
     run.metrics.cost_usd = outcome.cost_usd;
+
+    run.read_only_fixture_violations = outcome.read_only_fixture_violations.clone();
+    for path in &outcome.read_only_fixture_violations {
+        run.warnings
+            .push(format!("read-only fixture '{path}' was modified during the run"));
+    }
 
     run.artifacts.retain(|artifact| {
         artifact
@@ -1651,6 +1682,7 @@ mod tests {
                 fail_on_token_regression: false,
                 fail_on_duration_regression: false,
                 min_pass_rate: None,
+                min_case_score: None,
                 max_tokens: None,
                 max_input_tokens: None,
                 max_output_tokens: None,
@@ -2625,6 +2657,40 @@ mod tests {
         skill_dir
     }
 
+    fn write_conversation_seeding_skill(root: &Path) -> PathBuf {
+        let skill_dir = root.join("resuming-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: resuming-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "resuming-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "first prompt",
+                        "expected_output": "first output",
+                        "assertions": ["checks first"]
+                    },
+                    {
+                        "id": "resumes",
+                        "prompt": "second prompt",
+                        "expected_output": "second output",
+                        "assertions": ["checks second"],
+                        "conversation_history": "history/prior-turn.json"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
     #[test]
     fn reuse_completed_serves_the_same_arm_produced_under_another_model_config() {
         super::fake_runner::reset();
@@ -3343,6 +3409,44 @@ mod tests {
         assert_eq!(report["budget"]["runs_skipped"], 1);
     }
 
+    /// A case that names a conversation history is asking a harness to resume a
+    /// transcript it did not itself produce. No installed harness offers that, so the
+    /// run must be skipped before the runner is ever started, not silently answered as
+    /// a fresh conversation that never saw the history the case authored.
+    #[test]
+    fn a_case_seeding_a_conversation_history_is_skipped_before_the_runner_starts() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_conversation_seeding_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report_dir = run_with_fake_runner(RunArgs {
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][0]["status"], "completed");
+
+        assert_eq!(report["runs"][1]["status"], "skipped");
+        assert_eq!(report["runs"][1]["failure_kind"], "unsupported");
+        assert_eq!(
+            super::fake_runner::invocations(),
+            1,
+            "the only invocation must be the case with no conversation history to seed"
+        );
+        assert!(
+            report["runs"][1]["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("offers no conversation seeding")),
+            "the report has to say why the run did not start"
+        );
+    }
+
     /// `--permission` defaults to the narrowest grant, matching every other harness flag
     /// this command exposes.
     #[test]
@@ -3892,7 +3996,17 @@ mod tests {
         }));
 
         assert_eq!(report["runs"][0]["status"], "skipped");
-        assert_eq!(report["runs"][0]["failure_kind"], "mcp_unsupported");
+        assert_eq!(
+            report["runs"][0]["failure_kind"],
+            crate::agentskills::runner::FAILURE_KIND_UNSUPPORTED
+        );
+        assert!(
+            report["runs"][0]["warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("offers no mcp servers"),
+            "a skipped run must say which control the harness lacks, not only that it was skipped"
+        );
         assert_eq!(
             report["runs"][0]["metrics"]["duration_ms"],
             serde_json::Value::Null,

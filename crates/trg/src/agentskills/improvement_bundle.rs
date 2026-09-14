@@ -789,7 +789,9 @@ pub(crate) mod testutil {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                ungraded: None,
                 votes: None,
+                weight: None,
             }],
             summary: GradingSummary {
                 passed: usize::from(passed),
@@ -797,6 +799,7 @@ pub(crate) mod testutil {
                 total: 1,
                 unsupported: 0,
                 excluded: 0,
+                ungraded: 0,
                 pass_rate: Some(if passed { 1.0 } else { 0.0 }),
             },
         };

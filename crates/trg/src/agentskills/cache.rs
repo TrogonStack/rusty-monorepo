@@ -350,39 +350,43 @@ pub fn apply_cache_hit(
 
     // Named field by field, not `..source_run`, so a field added to `RunRecord` later
     // fails this match rather than silently keeping `run`'s own (usually empty) value.
-    // Everything bound to `_` belongs to the run doing the reusing, not the run being
-    // reused: its own id, case, scenario, iteration, model, attempt, invocation count,
-    // paths, mirror path and cache slot must stay as `run` already has them.
+    // Everything bound to an underscore-prefixed name belongs to the run doing the
+    // reusing, not the run being reused: its own id, case, scenario, iteration, model,
+    // attempt, invocation count, paths, mirror path and cache slot must stay as `run`
+    // already has them.
     let RunRecord {
-        id: _,
-        eval_case_id: _,
-        eval_slug: _,
-        scenario_id: _,
-        iteration: _,
-        model_config_id: _,
-        skill_revision_id: _,
-        attempt: _,
+        id: _id,
+        eval_case_id: _eval_case_id,
+        eval_slug: _eval_slug,
+        scenario_id: _scenario_id,
+        iteration: _iteration,
+        model_config_id: _model_config_id,
+        skill_revision_id: _skill_revision_id,
+        attempt: _attempt,
         status,
-        runner_invocations: _,
+        runner_invocations: _runner_invocations,
         failure_kind,
-        paths: _,
-        mirror_path: _,
+        paths: _paths,
+        mirror_path: _mirror_path,
         artifacts,
         metrics,
-        cache: _,
+        cache: _cache,
         skill_integrity,
+        read_only_fixture_violations,
         warnings,
         mock_violations,
+        case_score: _case_score,
     } = source_run;
 
     run.status = status;
-    run.failure_kind = failure_kind;
+    run.metrics = metrics;
     run.artifacts = artifacts
         .into_iter()
         .map(|artifact| rewrite_artifact_run_id(artifact, &pointer.run_id, &run.id))
         .collect();
-    run.metrics = metrics;
     run.skill_integrity = skill_integrity;
+    run.failure_kind = failure_kind;
+    run.read_only_fixture_violations = read_only_fixture_violations;
     run.warnings = warnings;
     run.mock_violations = mock_violations;
     run.cache = Some(RunCacheInfo {
@@ -640,6 +644,16 @@ mod tests {
     }
 
     fn write_completed_run(report_dir: &Path, run_id: &str, eval_case_id: &str, scenario: ScenarioKind) {
+        write_completed_run_with(report_dir, run_id, eval_case_id, scenario, |_| {});
+    }
+
+    fn write_completed_run_with(
+        report_dir: &Path,
+        run_id: &str,
+        eval_case_id: &str,
+        scenario: ScenarioKind,
+        customize: impl FnOnce(&mut RunRecord),
+    ) {
         let run_dir = report_dir.join("runs").join(run_id);
         let workspace = run_dir.join("workspace");
         fs::create_dir_all(workspace.join("outputs")).unwrap();
@@ -647,7 +661,7 @@ mod tests {
         fs::write(run_dir.join("timing.json"), r#"{"duration_ms":42}"#).unwrap();
         fs::write(workspace.join("outputs/final.md"), "done").unwrap();
 
-        let run = RunRecord {
+        let mut run = RunRecord {
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -675,9 +689,13 @@ mod tests {
             },
             cache: None,
             skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
             mock_violations: Vec::new(),
+            case_score: None,
         };
+
+        customize(&mut run);
 
         let document = serde_json::json!({
             "report": {"id":"r1","generated_at":"2026-01-01T00:00:00Z","iteration":1,"producer":{"name":"trg","version":"0.0.0"}},
@@ -756,7 +774,9 @@ mod tests {
             cache: None,
             skill_integrity: None,
             warnings: Vec::new(),
+            read_only_fixture_violations: Vec::new(),
             mock_violations: vec![violation],
+            case_score: None,
         };
 
         let document = serde_json::json!({
@@ -881,8 +901,10 @@ mod tests {
             },
             cache: None,
             skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
             mock_violations: Vec::new(),
+            case_score: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -942,8 +964,10 @@ mod tests {
             },
             cache: None,
             skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
             mock_violations: Vec::new(),
+            case_score: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -960,6 +984,72 @@ mod tests {
              and must be copied alongside it",
         );
         assert!(copied_calls.contains("\"repo\""));
+    }
+
+    #[test]
+    fn cache_hit_carries_read_only_fixture_violations() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run_with(&report_a, "run-001", "one", ScenarioKind::WithSkill, |run| {
+            run.read_only_fixture_violations = vec!["evals/one/fixtures/input.txt".to_string()];
+            run.failure_kind = Some("read_only_fixture_violation".to_string());
+            run.warnings = vec!["fixture evals/one/fixtures/input.txt was modified".to_string()];
+        });
+
+        let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        let key = CacheKey::from_input(&input);
+        record_completion(&out_dir, &key, &input, &report_a, "run-001").unwrap();
+
+        let report_b = out_dir.join("demo/report-b");
+        fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
+        let mut run = RunRecord {
+            id: "run-001".to_string(),
+            eval_case_id: "one".to_string(),
+            eval_slug: "one".to_string(),
+            scenario_id: ScenarioKind::WithSkill,
+            iteration: 2,
+            model_config_id: "ci-default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt: 1,
+            failure_kind: None,
+            runner_invocations: 0,
+            status: "skipped".to_string(),
+            paths: RunPaths {
+                workspace: "runs/run-001/workspace".to_string(),
+                outputs: "runs/run-001/workspace/outputs".to_string(),
+            },
+            mirror_path: "iteration-2/eval-one/with_skill/".to_string(),
+            artifacts: Vec::new(),
+            metrics: RunMetrics {
+                duration_ms: None,
+                exit_code: None,
+                total_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cost_usd: None,
+            },
+            cache: None,
+            skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
+            warnings: Vec::new(),
+            mock_violations: Vec::new(),
+            case_score: None,
+        };
+
+        let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
+        apply_cache_hit(&mut run, &key, &pointer, &report_b).unwrap();
+
+        assert_eq!(
+            run.read_only_fixture_violations,
+            vec!["evals/one/fixtures/input.txt".to_string()]
+        );
+        assert_eq!(run.failure_kind.as_deref(), Some("read_only_fixture_violation"));
+        assert_eq!(
+            run.warnings,
+            vec!["fixture evals/one/fixtures/input.txt was modified".to_string()]
+        );
     }
 
     #[test]

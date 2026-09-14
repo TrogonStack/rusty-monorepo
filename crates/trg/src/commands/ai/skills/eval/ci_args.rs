@@ -32,6 +32,13 @@ pub struct EvalCiArgs {
     #[arg(long, value_name = "RATE", help = "Minimum required pass rate between 0.0 and 1.0")]
     pub min_pass_rate: Option<f64>,
 
+    #[arg(
+        long,
+        value_name = "SCORE",
+        help = "Minimum required score for any individual case, between 0.0 and 1.0"
+    )]
+    pub min_case_score: Option<f64>,
+
     #[arg(long, value_name = "N", help = "Maximum allowed total tokens across all runs")]
     pub max_tokens: Option<u64>,
 
@@ -75,6 +82,7 @@ impl EvalCiArgs {
     pub fn thresholds(&self) -> ThresholdConfig {
         ThresholdConfig {
             min_pass_rate: self.min_pass_rate,
+            min_case_score: self.min_case_score,
             max_tokens: self.max_tokens,
             max_input_tokens: self.max_input_tokens,
             max_output_tokens: self.max_output_tokens,

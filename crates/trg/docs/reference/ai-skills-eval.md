@@ -20,6 +20,7 @@ trg ai skills eval <SUBCOMMAND>
 | `feedback` | Manage human review feedback artifacts |
 | `compare` | Blindly compare scenario outputs within a report directory |
 | `next-iteration` | Build an improvement bundle from a prior iteration |
+| `html-report` | Render a local-only, self-contained HTML report over a report bundle |
 
 ---
 
@@ -228,7 +229,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `description` | string | no | Non-empty. For humans reading a report |
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
-| `files` | string[] | no | Relative paths inside the skill directory; staged into the run workspace |
+| `files` | (string \| object)[] | no | Relative paths inside the skill directory, staged into the run workspace. A bare string is writable; an object names `path` and `mode` (`writable`, the default, or `read_only`). See [Read-only fixtures](#read-only-fixtures) |
 | `assertions` | string[] | no | Natural-language checks. Graded mechanically when a known pattern matches, otherwise handed to the LLM judge |
 | `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
@@ -238,6 +239,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
 | `grader_hints` | object | no | Passed through to a script grader on stdin |
 | `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
+| `conversation_history` | string | no | Relative path to a transcript inside the skill directory, to resume before the case's prompt. No installed harness can adopt an arbitrary transcript as its own history, so a case that sets this is skipped rather than run. See [Seeding a conversation](#seeding-a-conversation) |
 
 A case must declare at least one `assertion` or one `grader`.
 
@@ -391,13 +393,16 @@ every reader and to every runner.
 
 | `type` | Fields | Checks |
 | ------ | ------ | ------ |
-| `regex` | `pattern`, `target`, `negate` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
+| `regex` | `pattern`, `target`, `negate`, `flags`, `count` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
 | `contains` | `text`, `target`, `case`, `negate` | The target contains the text. `case` is `insensitive` (default) or `sensitive` |
-| `file_exists` | `path` | The run produced the file |
+| `file_exists` | `path`, `exists` | The run produced a file at `path`, which may be a glob. `exists` defaults to `true`; set it to `false` to assert that nothing matches |
 | `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
-| `tool_order` | `tools` | The observed tool sequence contains the listed tools in order, as a subsequence |
+| `tool_order` | `tools`, or `before`/`after` | The observed tool sequence contains the listed tools in order, as a subsequence; or, with `before`/`after`, some call to `before` precedes some later call to `after` |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
-| `llm` | `criterion` | Handed to the LLM judge, which is the only grader that costs a request |
+| `llm` | `criterion`, `target` | Handed to the LLM judge, which is the only grader that costs a request |
+| `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
+| `schema_validation` | `schema`, `target` | The target parses as JSON and validates against the named JSON Schema document. `schema` is a relative path inside the skill directory, resolved the same way `files` and `scaffold` are |
+| `baseline` | `reference`, `criterion`, `target` | The target is at least as good as a reference output already in the suite, judged on `criterion`. Costs judge requests. See [Holding a run to a reference output](#holding-a-run-to-a-reference-output) |
 
 Every grader also accepts `arm`, which decides whether its result counts toward
 the score. See [Arm-scoped graders](#arm-scoped-graders).
@@ -409,14 +414,55 @@ comparison keys on; `name` gives it a stable one. Two graders in the same case
 declaring the same `name` are rejected. In the directory layout, a grader
 file's stem is its default name.
 
-`target` is `final_text` (default), `transcript`, `any_output`, or
-`{"file": "<relative path>"}`.
+Every grader also accepts `weight`, a number greater than zero. A case's score
+is the fraction of weight it passed rather than a plain count, so a grader
+worth three times as much as the rest of the case declares `"weight": 3`. A
+grader that leaves `weight` undeclared counts as one full vote, exactly what
+every grader counted as before weighting existed, so a case that never opts in
+scores exactly as it always has. Zero and negative weight are both rejected at
+parse time: a grader worth nothing to the score belongs out of the case
+entirely (`"arm": "with_only"`) rather than weighted to zero, and a negative
+weight has no share of a score to subtract from.
+
+`target` is `final_text` (default), `transcript`, `any_output`,
+`{"file": "<relative path>"}`, `{"files": "<glob>"}`, or `created_files`.
+`created_files` is the set of paths the run wrote under `outputs/`, read from
+the same index the report itself is built from, so checking that the agent
+created a file named `X` never re-walks the output directory.
+
+`{"files": "<glob>"}` is `any_output` narrowed to the files a pattern names,
+using the same wildcard dialect `file_exists` accepts. The matching files are
+read in path order and each is labelled with the path it came from, so the same
+run grades the same way twice and a verdict about one file is attributable to
+it. A file that cannot be read as UTF-8 text is labelled and named by size
+rather than skipped, since a label with nothing under it would read as a file
+the agent left empty.
+
+A leading `outputs/` is dropped before matching, the same way `file_exists`
+drops it, so `{"files": "outputs/**/*.md"}` and `{"files": "**/*.md"}` name the
+same set.
+
+Unlike `file_exists`, a `files` target searches only `outputs/`, never the
+workspace around it. Narrowing `any_output` must not read more than
+`any_output` does, and the workspace holds the agent's scratch files and the
+copy of the skill the harness staged. A pattern that matches nothing is a
+target that is **missing**, not one that is empty, so it fails where it is read
+instead of reaching a judge with nothing to look at.
 
 A relative path resolves against the workspace `outputs/` directory first, then
 the workspace itself, then the run directory. Declared outputs therefore win
 over an incidental file of the same name, and a plain `summary.md` still
 resolves when the agent wrote it straight into its working directory. A path
 that matches nowhere reports against the workspace candidate.
+
+An `llm` grader whose criterion text also happens to parse as a known
+mechanical pattern (see the `assertions` row above) is graded mechanically
+under `--grader auto` and `--grader llm` alike, as a shortcut that skips the
+judge request. Declaring `target` on that grader turns the shortcut off, even
+when the declared value is `final_text`, the same value the field would have
+defaulted to: writing `target` at all is the author saying what to look at,
+which the shortcut cannot promise to honor since it grades from the criterion
+text rather than the declared target.
 
 ### Asserting which command ran, not just that a tool was used
 
@@ -438,6 +484,77 @@ would quietly match nothing under another. See
 
 An unusable pattern is rejected when the manifest is parsed, not when the
 grader runs.
+
+### Matching a file by name, or asserting one is absent
+
+`file_exists`'s `path` accepts the same wildcards a shell glob does, searched
+under `outputs/` first and then the workspace:
+
+| Wildcard | Matches |
+| -------- | ------- |
+| `*` | Any run of characters other than `/`, within one path segment |
+| `**/` | Zero or more whole path segments |
+| `**` | Any run of characters, including `/`, when it is not followed by `/` |
+| `?` | Any single character other than `/` |
+
+```json
+{ "type": "file_exists", "path": "outputs/**/*.md" }
+```
+
+A literal `path` is resolved against the usual `outputs/`, workspace,
+run-directory order, but a glob searches neither the run directory nor the
+directory the skill was staged in. A literal path names one file, and an author
+who writes `transcript.jsonl` means it; a glob is a description of what the run
+should have produced, and `timing.json` at the run root or the staged `SKILL.md`
+would answer it with a file the agent never wrote. A leading `./` is dropped
+before matching, so `./*.md` and `*.md` are the same pattern.
+
+A leading `outputs/` is dropped before the output tree is searched, and kept for
+the workspace. `outputs/` names that tree rather than a directory that is always
+there to walk into: a run may leave it beside the workspace or inside it, and in
+the first layout no workspace-relative path begins with `outputs/` at all. A
+pattern naming it therefore answers the same way under either layout, which is
+how a literal `outputs/...` path already behaves. The prefix is dropped only for
+the output tree, so `outputs/*.md` is still not answered by a stray `notes.md`
+the agent left in its working directory.
+
+Character classes (`[...]`), brace expansion (`{...}`), and escaping (`\`) are
+not part of this dialect; a pattern containing `[`, `]`, `{`, `}`, or `\` is
+rejected when the manifest is parsed; use `*` and `?` for wildcards. A `path`
+with none of `*` or `?` is a literal path, matched the same way it always was.
+
+`exists` defaults to `true`. Setting it to `false` turns the same grader into
+its own negation, for asserting that a run did *not* produce a matching file,
+without reaching for a `negate` field that `file_exists` has never had:
+
+```json
+{ "type": "file_exists", "path": "outputs/*.tmp", "exists": false }
+```
+
+### Regex flags and exact match counts
+
+`regex` accepts `flags`, a string combining any of `i` (case-insensitive), `m`
+(`^`/`$` match at line boundaries, not only at the start and end of the whole
+target), and `s` (`.` also matches newlines). These are the modes the `regex`
+crate itself exposes; any other letter is rejected when the manifest is
+parsed.
+
+```json
+{ "type": "regex", "pattern": "^error:", "target": "transcript", "flags": "im" }
+```
+
+`count` asks for an exact number of non-overlapping matches instead of "at
+least one":
+
+```json
+{ "type": "regex", "pattern": "TODO", "count": 3 }
+```
+
+Combined with `negate`, `count` asks for anything other than that number.
+Without `count`, `regex` keeps checking for presence, as it always has.
+`count` must be at least 1: "the pattern never appears" is already what
+`negate` without a `count` means, so `count: 0` would only be a second way to
+write the same check and is rejected when the manifest is parsed.
 
 ### Stating that a tool or the skill must not be reached for
 
@@ -464,6 +581,33 @@ legitimately reach for a shell and still must not reach for this.
 Tool names belong to one harness's vocabulary, so the portable form of "the
 skill must not be reached for" is `skill_used` with `negate`, which answers on
 every runner. See [Arm-scoped graders](#arm-scoped-graders).
+
+### Ordering two specific calls, not a whole sequence
+
+`tools` asks for a subsequence, which is the right shape when a case cares
+about several steps happening in order. When it only cares that one call
+happened before another, `before`/`after` says that directly instead of
+padding `tools` out to two entries:
+
+```json
+{ "type": "tool_order", "before": "Read", "after": "Write" }
+```
+
+Either side accepts the qualified form `tool_used` does, to ask about a
+specific call rather than any call to that tool:
+
+```json
+{
+  "type": "tool_order",
+  "before": { "tool": "Read", "input_match": "config\\.json$" },
+  "after": { "tool": "Bash", "input_match": "npm test" }
+}
+```
+
+The check holds when some call matching `before` is followed, later in the
+transcript, by some call matching `after`; neither needs to be the only call
+to its tool. `tools` and `before`/`after` are mutually exclusive, and
+`before`/`after` must both be given together.
 
 ### Graders that depend on the transcript
 
@@ -555,6 +699,71 @@ are both ordinary. Under `--grader auto` a suite of typed graders needs no
 credential at all, and the endpoint is resolved once up front so a missing
 credential is reported before any run is graded.
 
+#### What the judge is shown
+
+A prose assertion, and an `llm` grader that does not declare `target`, get the
+default `final_text` payload, unchanged from before `target` existed:
+
+```json
+{ "assertion": "...", "final_text": "...", "outputs": { "<name>": "..." } }
+```
+
+`any_output` gets the same shape, and now the same scope: `outputs` walks
+every file under `outputs/`, nested directories included, matching what a
+mechanical grader aimed at `any_output` already looks at. `final_text` (declared
+or defaulted) keeps looking only at what sits directly in `outputs/`, so a
+suite written before `any_output` walked subdirectories still grades the same
+way. `transcript`, `{"file": ...}`, `{"files": ...}`, and `created_files`
+instead get a payload that names its own target, since the judge is no longer
+implicitly looking at the run's output:
+
+```json
+{ "assertion": "...", "target": "transcript", "content": "..." }
+```
+
+A target that resolves to nothing (a named file the run never wrote) reports
+why instead of sending an empty string:
+
+```json
+{ "assertion": "...", "target": "file 'out.md'", "missing_reason": "..." }
+```
+
+A `{"file": ...}` target that resolves to a `.png`, `.jpg`, `.jpeg`, `.gif`, or
+`.webp` file is attached to the judge as a picture instead of being read as
+text, since reading it as text would only ever fail:
+
+```json
+{ "assertion": "...", "target": "file 'chart.png'", "content": "image attached separately" }
+```
+
+`regex`, `contains`, `valid_json`, and `schema_validation` aimed at an image
+target cannot fall back to a judge request, so each reports why it failed
+rather than misreading the bytes as text:
+
+```json
+{ "passed": false, "evidence": "file 'chart.png' is an image; a pattern can only match text" }
+```
+
+One judge request carries at most 8,000 bytes of content in total, shared
+across every artifact placed into it rather than granted per artifact. Each
+artifact still to be placed claims an equal share of what remains, so an
+artifact that needs less than its share leaves the difference for the ones
+after it. An artifact too large for its share is truncated with a trailing
+`[truncated after N bytes]` marker; an artifact that arrives after the budget
+is already spent is left out of the payload entirely, and its omission is
+reported via an `artifacts_omitted` field rather than passing silently. A
+transcript keeps its tail and drops its head, since the run's outcome and its
+most recent tool calls sit at the end; every other target keeps its head and
+drops its tail.
+
+A transcript's cut falls between messages, not through one: it is line-delimited,
+one message per line, so an oversized transcript keeps whole messages from the
+end backward until the budget runs out, keeps the first message too when room
+remains, and names what it dropped (`N message(s) omitted from the middle of
+the transcript`) instead of silently shaving whatever byte the cap happened to
+land on. Only a single message too large to fit the budget on its own falls
+back to a plain byte cut of that message.
+
 ### Asking the judge more than once
 
 A model asked whether an assertion holds does not answer the same way every
@@ -574,6 +783,64 @@ side that lost.
 judge request per vote per LLM-graded assertion. Mechanical, declarative, and
 script graders are unaffected: they answer the same way every time, so there is
 nothing for a second opinion to settle.
+
+### Holding a run to a reference output
+
+A `baseline` grader asks a comparative question the other graders cannot: not
+whether the run cleared some property, but whether it is *at least as good as*
+an output already accepted. `reference` is a relative path inside the skill
+directory, resolved the way `schema_validation` resolves its schema, and
+`criterion` says on what footing the two are being compared.
+
+```json
+{ "type": "baseline", "reference": "evals/golden/summary.md", "criterion": "covers every column in the input" }
+```
+
+Three properties are worth knowing before writing one.
+
+**The judge is not told which output is the reference.** The two are shown as A
+and B, and which label the run gets is fixed by the case id and the criterion.
+A judge that knows which side is the incumbent answers a different question from
+the one the case wrote down, and the position the run is shown in is itself a
+bias, so the assignment varies between criteria and stays put across re-grades
+of the same case.
+
+**A tie passes.** "At least as good as" is the whole of what a baseline asks, so
+only a run the judge places behind the reference has failed it. This is what
+makes a baseline usable as a regression gate on the `old_skill` arm, where the
+expected outcome is that nothing got worse rather than that everything improved.
+
+**A reference that is missing or blank is a defect in the case.** It is reported
+as a failure to grade, the same way `schema_validation` reports a broken schema,
+rather than as a failed run. A blank reference in particular would be cleared by
+any output at all, which is the one answer a comparison must never give by
+accident.
+
+The same line holds from the other side: a run whose target is empty or missing
+falls short of its baseline without a judge being asked. Nothing is not at least
+as good as something, and a comparison between a reference and an empty string is
+one a judge can only answer by guessing.
+
+Both sides are held to the same share of the judge payload. A long run does not
+get to push the reference out of the request, because a comparison against a
+clipped reference is a comparison between two different things.
+
+A baseline costs judge requests, `--grader-votes` of them, exactly as an `llm`
+grader does. Under `--grader script` the reference is handed to the script in
+the payload as `baseline`, so the script can answer the comparison rather than
+grading the run on its own.
+
+### Schema validation
+
+A `schema_validation` grader, or the equivalent prose form (`"<target> validates
+against schema <name>"`), is answering a question about the target: whether it
+conforms to the named schema. A schema file that is missing, unreadable, or not
+itself a valid JSON Schema document is a defect in the case, not in the run
+being graded, so it is reported the same way any other malformed suite is: as a
+failure to grade at all, rather than as a failed assertion. The same rule holds
+for the prose form when it names no schema file; it does not fall back to
+checking that the target merely parses as JSON, since that would silently grade
+something other than what was written.
 
 ---
 
@@ -602,9 +869,10 @@ snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
 | `budget` | object | Present whenever the pass was given a runner, including one whose every run was served from cache and so spent nothing. Absent only when the pass had no runner at all. What the pass spent, and against what ceiling. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 
 `assertion_results` is populated by `eval grade`, which flattens every run's
-`grading.json` into it, carrying `unsupported` forward where present.
-`comparisons` is populated by `eval compare`. Both are empty until those
-subcommands run.
+`grading.json` into it, adding `run_id` and `eval_case_id` and carrying every
+other field forward as declared there, including `name`, `excluded`,
+`rationale` and `votes` where present. `comparisons` is populated by
+`eval compare`. Both are empty until those subcommands run.
 
 ### `budget` section
 
@@ -653,6 +921,8 @@ subcommands run.
 | `artifacts` | array | Artifact descriptors (transcript when runner completes, `mock_calls` when the case declares mcp mocks) |
 | `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner) |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
+| `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
+| `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
 | `mock_violations` | array | Every logged `expect` mismatch from `mock-calls.jsonl`, read back after the run finished. Empty when the case declares no mocks or violates nothing |
 
 Run ordering: eval cases in manifest order, then scenarios in flag order.
@@ -668,8 +938,13 @@ workspace tree.
 `unsupported` narrows `pass_rate` to scored results only. `pass_rate` is
 nullable, because a run where nothing could be scored has no pass rate and
 reporting `0.0` reads as a total failure. `excluded` takes an arm-scoped grader
-out of the score in both arms. `votes` is present only when a panel of judges
-decided the result.
+out of the score in both arms. `ungraded` marks an assertion no mechanical
+pattern recognized and no LLM judge was consulted for; it is neither a pass nor
+a fail, because nothing ever attempted it, and it stays out of `pass_rate` for
+the same reason `unsupported` does. `votes` is present only when a panel of
+judges decided the result. `weight` is present only when the declaring grader
+gave one; a case whose graders left every weight undeclared reports the same
+`pass_rate` it always has.
 
 ```json
 {
@@ -693,6 +968,13 @@ decided the result.
       "evidence": "the run read the staged skill directory",
       "grader": { "kind": "declarative" },
       "excluded": "'skill_used' is settled by whether the skill was staged rather than by the run, so it is reported in both arms and scored in neither; declare 'arm': 'both' to score it anyway"
+    },
+    {
+      "assertion": "the report reads as encouraging to a first-time user",
+      "passed": false,
+      "evidence": "no mechanical pattern recognized this assertion and no LLM judge was resolved for this run",
+      "grader": { "kind": "needs_llm" },
+      "ungraded": "no mechanical pattern recognized this assertion and no LLM judge was resolved for this run"
     }
   ],
   "summary": {
@@ -700,7 +982,8 @@ decided the result.
     "failed": 0,
     "unsupported": 1,
     "excluded": 1,
-    "total": 3,
+    "ungraded": 1,
+    "total": 4,
     "pass_rate": 1.0
   }
 }
@@ -709,20 +992,32 @@ decided the result.
 | Field | Type | Notes |
 | ----- | ---- | ----- |
 | `assertion_results[].assertion` | string | Non-empty. Accepts `text` as an alias. For a typed grader, its rendered description |
-| `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` is present. An indicator rather than a score when `excluded` is present |
+| `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` or `ungraded` is present. An indicator rather than a score when `excluded` is present |
 | `assertion_results[].evidence` | string | Non-empty. A passing result must not merely restate its assertion |
 | `assertion_results[].grader.kind` | enum | `mechanical`, `declarative`, `llm`, `script`, `needs_llm`, or `none` |
 | `assertion_results[].name` | string | Present when the grader declared a `name` |
 | `assertion_results[].rationale` | string | Optional judge reasoning |
 | `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |
+| `assertion_results[].ungraded` | string | Present when no mechanical pattern recognized the assertion and no LLM judge was consulted. Why nothing attempted it |
 | `assertion_results[].votes` | object | Present only under `--grader-votes N` with `N` above 1. `{passed, failed}` opinions behind this result. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
+| `assertion_results[].weight` | number | Present when the grader declared one. Must be greater than zero |
 | `summary.passed` | integer | Must equal the count of scored, passing results |
 | `summary.failed` | integer | Must equal the count of scored, failing results |
 | `summary.unsupported` | integer | Must equal the count of results carrying `unsupported` and not `excluded` |
 | `summary.excluded` | integer | Must equal the count of results carrying `excluded` |
+| `summary.ungraded` | integer | Must equal the count of results carrying `ungraded` |
 | `summary.total` | integer | Must equal `assertion_results` length |
-| `summary.pass_rate` | float or null | Must equal `passed / (total - unsupported - excluded)`, or `null` when nothing was scored |
+| `summary.pass_rate` | float or null | Must equal `passed / (total - unsupported - excluded - ungraded)`, or `null` when nothing was scored |
+
+An ungraded assertion forces `eval grade` to exit non-zero, in every mode and
+regardless of `--strict`, because a suite that measured less than it declared
+is not a passing suite just because nothing it did measure failed. The exit
+lists how many assertions went ungraded and which ones, capped, so the count is
+never the only thing an operator has to act on. `eval verify` and `eval ci`
+carry the same refusal: a non-zero `ungraded` count is reported as a violation
+of its own, so a `--min-pass-rate` gate cannot read a partially-measured suite
+as a clean pass.
 
 ---
 
@@ -782,6 +1077,41 @@ answered, because the same model name can be served by more than one endpoint:
 
 Outputs are presented to the judge blindly, as A and B, with the mapping back to
 scenarios recorded separately in the same record.
+
+---
+
+## Artifact: `report.html`
+
+**Status: available.** Written by `eval html-report` into the report directory,
+alongside `report.json`.
+
+```text
+trg ai skills eval html-report <REPORT_DIR>
+```
+
+`REPORT_DIR` is the directory containing `report.json`, the same directory
+every other `eval` subcommand reads and writes against.
+
+The page is a single self-contained HTML file: every style is inlined, there is
+no JavaScript, and nothing on the page references the network. No CDN script,
+remote stylesheet or font, analytics beacon, or external image is ever emitted,
+so the report opens correctly from a `file://` URL with no connectivity and
+carries nothing out of the machine it was generated on. Links to output
+artifacts stay inside the bundle and are never absolute URLs; they are
+percent-encoded, so an artifact an agent named with a `#`, a `?`, or a space
+still resolves to the file it names.
+
+Because every value it renders (final text, transcript excerpts, output
+artifacts, assertion evidence, judge rationales, skill names, file paths)
+originates from an LLM agent under evaluation and must be treated as untrusted,
+every interpolated string is HTML-escaped through a single chokepoint before it
+reaches the page. Nothing is written into the output outside that path.
+
+The page covers bundle identity and provenance (skill, harness, scenario,
+timestamps, attempt counts, and the skill integrity report), per-scenario
+summaries, and a case-by-case, arm-by-arm breakdown of every run: pass or fail,
+each assertion's evidence, and non-scoring outcomes (`unsupported`, `excluded`)
+shown distinctly from a scored result rather than folded into a pass or fail.
 
 ---
 
@@ -927,14 +1257,28 @@ A case's scaffold is part of what identifies its runs, so editing the script
 re-executes rather than serving a cached run, under `--no-cache` and under
 `--reuse-completed` alike.
 
-### What is deliberately not here
+### Seeding a conversation
 
-Seeding a conversation, so a case can ask about a mid-conversation turn rather than
-a first one, is not supported. Resuming a transcript is a per-harness mechanism:
-the file format, the flag, and whether resumption is possible at all differ across
-`claude-code`, `codex` and `cursor-agent`. A field that worked on one and silently
-did nothing on the others would make a suite's results incomparable, which is the
-one thing trg exists to avoid.
+A case may declare `conversation_history`, a relative path to a transcript inside
+the skill directory, to ask about a mid-conversation turn rather than a first one.
+Resuming a transcript is a per-harness mechanism, and none of `claude-code`,
+`codex` or `cursor-agent` offers one that adopts an arbitrary, case-authored
+transcript as history it did not itself produce: each only resumes a session it
+already recorded itself, and claude's `--input-format stream-json` re-runs every
+scripted turn as a live model call rather than replaying it. See `conversation
+seeding` in the harness support table above.
+
+A case that declares `conversation_history` is skipped rather than run, naming
+the case and the reason, on every harness. It is skipped rather than run against
+a fresh conversation because a field that quietly answered turn one on every
+harness would misreport the case's own precondition, and a suite whose results
+depended on that silent substitution would be exactly the kind of result trg
+exists to keep from happening.
+
+Such a run is recorded with `status: skipped` and `failure_kind: unsupported`,
+and `grade` passes over it for the same reason it passes over a run the cost
+ceiling refused: nothing was asked of the runner, so there is no workspace or
+transcript to read and no pass rate to charge the case with.
 
 ---
 
@@ -985,6 +1329,40 @@ separately into the workspace root, and they are the only part of `evals/` a
 run is meant to see. Only the top level is filtered, so a nested `evals/`
 deeper in the skill tree is treated as the skill's own content and staged
 normally.
+
+### Read-only fixtures
+
+A bare string in `files` names a fixture the agent is free to change, which is
+what a case about editing a file needs. A case about reading one needs the
+opposite: the fixture has to still be the thing the case's `expected_output`
+and graders describe after the run, not whatever the agent left behind.
+
+```json
+{ "files": ["evals/files/input.csv", { "path": "evals/files/reference.csv", "mode": "read_only" }] }
+```
+
+The object form names the same relative path as the bare string and adds
+`mode`, `writable` (the default, and what a bare string means) or
+`read_only`. Nothing about an existing suite's fixtures changes: every bare
+string still parses, still means writable, and a fixture authored as a bare
+string is written back as one, never rewritten into the object form.
+
+On Unix, a read-only fixture is staged with its write bits cleared, so an
+agent that tries to edit it in place is refused by the filesystem before it
+gets the chance. That is a courtesy, not the guarantee: an agent can still
+delete the file and write a fresh one in its place, which touches no
+permission bit. What actually holds a read-only fixture to its word is a
+content hash taken before the run and compared against the same fixture after
+it, the same comparison `skill_integrity` makes of the skill directory. A
+fixture's containing directory is left writable regardless of the fixture's
+own mode, because removing an entry needs write permission on the directory
+that holds it, not on the entry itself, and the workspace has to be
+removable between attempts.
+
+A run whose read-only fixture changed, however it changed, is reported as a
+failing assertion naming the fixture's path, so the operator sees which
+fixture and not just a count, and the case cannot be read as passing on the
+strength of assertions that never looked at the fixture at all.
 
 A top-level version control directory (`.git`, `.jj`, `.hg`, `.svn`) is
 withheld for the same reason. When the skill is its own checkout, its history
@@ -1177,6 +1555,7 @@ together, never one without the other.
 | mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | no | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
 | conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) |
+| conversation seeding | no | no | no |
 | run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no |
 | cost reporting | reported | no | no |
 

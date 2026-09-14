@@ -8,17 +8,19 @@ use sha2::{Digest, Sha256};
 
 use crate::fs::FileSystem;
 
-use super::budget::PassSpend;
+use super::budget::{PassSpend, FAILURE_KIND_BUDGET};
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
-use super::evals::{EvalError, EvalSuite, Result};
+use super::evals::{EvalError, EvalPriority, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
 };
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
 use super::outputs::OUTPUTS_DIR;
+use super::runner::capabilities::HarnessControl;
+use super::runner::{Runner, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
 use super::validation::ValidationError;
 
@@ -370,6 +372,8 @@ pub struct EvalCaseDimension {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<EvalPriority>,
     pub prompt: String,
     pub expected_output: String,
     pub files: Vec<String>,
@@ -429,6 +433,13 @@ pub struct RunRecord {
     pub cache: Option<RunCacheInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_integrity: Option<SkillIntegrityReport>,
+    /// Read-only fixture paths whose staged copy did not match its source after the run.
+    ///
+    /// Kept apart from `skill_integrity` because that field describes the skill directory,
+    /// not the fixtures staged alongside it, and because grading needs to fail a case over
+    /// this without also having to interpret a report meant as diagnostic-only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_fixture_violations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// Every `expect` mismatch the mock server logged against a call this run made, read
@@ -440,10 +451,96 @@ pub struct RunRecord {
     /// this field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mock_violations: Vec<crate::agentskills::mocks::MockViolation>,
+    /// This run's own pass rate over its scored assertions, `None` until graded
+    /// or when grading scored nothing. Distinct from any suite-wide pass rate:
+    /// a run with a low score here can be hidden inside a suite average that
+    /// still looks healthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub case_score: Option<f64>,
 }
 
 fn default_runner_invocations() -> u32 {
     1
+}
+
+pub const RUN_STATUS_SKIPPED: &str = "skipped";
+
+/// Why a run never reached the harness.
+///
+/// A run stopped for one of these reasons has no workspace and no transcript, so every
+/// reader that must tell an executed run from an unexecuted one asks `RunRecord::started`
+/// rather than testing a failure kind of its own. Adding a reason here therefore teaches
+/// every such reader at once, which is what the cost ceiling and the unsupported control
+/// each failed to do for the other.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunNotStarted {
+    CostCeilingExhausted { spent_usd: f64, ceiling_usd: f64 },
+    ControlUnsupported { control: HarnessControl, runner: Runner },
+}
+
+/// The failure kinds a run carries when trg decided not to invoke the harness.
+///
+/// Every one of them is derived from a `RunNotStarted` variant, so the set a reader tests
+/// against and the set a writer can produce are the same set: a new reason to stop a run
+/// early cannot be reported without every reader recognizing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotStartedKind {
+    CostCeiling,
+    UnsupportedControl,
+}
+
+impl NotStartedKind {
+    const ALL: [Self; 2] = [Self::CostCeiling, Self::UnsupportedControl];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CostCeiling => FAILURE_KIND_BUDGET,
+            Self::UnsupportedControl => FAILURE_KIND_UNSUPPORTED,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+impl RunNotStarted {
+    fn kind(&self) -> NotStartedKind {
+        match self {
+            Self::CostCeilingExhausted { .. } => NotStartedKind::CostCeiling,
+            Self::ControlUnsupported { .. } => NotStartedKind::UnsupportedControl,
+        }
+    }
+
+    fn warning(&self) -> String {
+        match self {
+            Self::CostCeilingExhausted { spent_usd, ceiling_usd } => format!(
+                "the pass has spent ${spent_usd:.2} against a ${ceiling_usd:.2} cost ceiling, so this run was not started"
+            ),
+            Self::ControlUnsupported { control, runner } => {
+                format!("{}, so this run was not started", runner.unsupported_reason(*control))
+            }
+        }
+    }
+}
+
+impl RunRecord {
+    /// The one way a run is recorded as never having reached the harness.
+    pub fn not_started(&mut self, reason: RunNotStarted) {
+        self.status = RUN_STATUS_SKIPPED.to_string();
+        self.failure_kind = Some(reason.kind().as_str().to_string());
+        self.warnings.push(reason.warning());
+    }
+
+    /// Whether the harness was invoked for this run at all.
+    ///
+    /// A run that was not has no workspace and no transcript, so grading it would read
+    /// the absence as a wrong answer and fail every assertion, turning a decision trg
+    /// made into a reported regression.
+    pub fn started(&self) -> bool {
+        self.failure_kind.as_deref().and_then(NotStartedKind::parse).is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -788,6 +885,7 @@ fn build_dimensions(
                 .description
                 .as_ref()
                 .map(|description| description.as_str().to_string()),
+            priority: eval_case.priority,
             prompt: eval_case.prompt.as_str().to_string(),
             expected_output: eval_case.expected_output.as_str().to_string(),
             files: eval_case.files.iter().map(|file| file.as_str().to_string()).collect(),
@@ -885,8 +983,10 @@ fn build_runs(
                     metrics: RunMetrics::default(),
                     cache: None,
                     skill_integrity: None,
+                    read_only_fixture_violations: Vec::new(),
                     warnings: Vec::new(),
                     mock_violations: Vec::new(),
+                    case_score: None,
                 });
                 run_number += 1;
             }
@@ -972,6 +1072,7 @@ mod tests {
                         "id": "case-a",
                         "name": "Case A",
                         "description": "Covers case A.",
+                        "priority": "critical",
                         "prompt": "prompt a",
                         "expected_output": "output a",
                         "files": ["fixture.txt"],
@@ -1010,9 +1111,11 @@ mod tests {
         assert_eq!(dimensions.eval_cases[0].slug, "case-a");
         assert_eq!(dimensions.eval_cases[0].name.as_deref(), Some("Case A"));
         assert_eq!(dimensions.eval_cases[0].description.as_deref(), Some("Covers case A."));
+        assert_eq!(dimensions.eval_cases[0].priority, Some(EvalPriority::Critical));
         assert_eq!(dimensions.eval_cases[0].assertion_ids, vec!["case-a:a0", "case-a:g0"]);
         assert_eq!(dimensions.eval_cases[1].name, None);
         assert_eq!(dimensions.eval_cases[1].description, None);
+        assert_eq!(dimensions.eval_cases[1].priority, None);
         assert_eq!(dimensions.eval_cases[1].assertion_ids, vec!["case-b:a0", "case-b:a1"]);
         assert_eq!(dimensions.assertions.len(), 4);
         assert_eq!(dimensions.assertions[0].id, "case-a:a0");
@@ -1059,6 +1162,46 @@ mod tests {
                 format!("iteration-1/eval-{eval_case}/with_skill/attempt-3/")
             );
         }
+    }
+
+    #[test]
+    fn every_reason_a_run_is_not_started_records_the_same_unscoreable_status() {
+        let suite = sample_suite();
+        let slugs = crate::agentskills::layout::assign_eval_slugs(&suite.evals);
+        let (mut runs, _) = build_runs(
+            &suite,
+            &[ScenarioKind::WithSkill],
+            "ci-default",
+            1,
+            AttemptCount::parse(1).unwrap(),
+            &slugs,
+            SkillStaging::Symlink,
+        );
+
+        let reasons = [
+            RunNotStarted::CostCeilingExhausted {
+                spent_usd: 4.0,
+                ceiling_usd: 3.0,
+            },
+            RunNotStarted::ControlUnsupported {
+                control: HarnessControl::ConversationSeeding,
+                runner: Runner::ClaudeCode,
+            },
+        ];
+
+        let mut kinds = Vec::new();
+        for reason in reasons {
+            let run = &mut runs[0];
+            run.warnings.clear();
+            run.not_started(reason);
+
+            assert!(!run.started());
+            assert_eq!(run.warnings.len(), 1, "the reason is said once, in the run itself");
+            assert!(run.warnings[0].ends_with("so this run was not started"));
+            kinds.push(run.failure_kind.clone().expect("a run stopped early names its kind"));
+        }
+
+        assert_eq!(kinds, vec!["budget".to_string(), "unsupported".to_string()]);
     }
 
     #[test]

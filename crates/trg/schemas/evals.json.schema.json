@@ -5,6 +5,19 @@
       "oneOf": [
         {
           "properties": {
+            "count": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MatchCount"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "flags": {
+              "$ref": "#/$defs/RegexFlags"
+            },
             "negate": {
               "default": false,
               "type": "boolean"
@@ -69,8 +82,11 @@
         },
         {
           "properties": {
+            "exists": {
+              "type": "boolean"
+            },
             "path": {
-              "$ref": "#/$defs/RelativeSkillPath"
+              "$ref": "#/$defs/GlobPattern"
             },
             "type": {
               "const": "file_exists",
@@ -125,12 +141,35 @@
         },
         {
           "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ToolReference"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "tools": {
               "items": {
                 "$ref": "#/$defs/ToolName"
               },
               "minItems": 2,
-              "type": "array"
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "type": {
               "const": "tool_order",
@@ -138,8 +177,7 @@
             }
           },
           "required": [
-            "type",
-            "tools"
+            "type"
           ],
           "type": "object"
         },
@@ -164,6 +202,14 @@
             "criterion": {
               "$ref": "#/$defs/NonEmptyString"
             },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
             "type": {
               "const": "llm",
               "type": "string"
@@ -171,6 +217,79 @@
           },
           "required": [
             "type",
+            "criterion"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
+            "type": {
+              "const": "valid_json",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "schema": {
+              "$ref": "#/$defs/RelativeSkillPath"
+            },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
+            "type": {
+              "const": "schema_validation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "schema"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Is this run at least as good as a reference output the suite already accepts?",
+          "properties": {
+            "criterion": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "reference": {
+              "$ref": "#/$defs/RelativeSkillPath"
+            },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
+            "type": {
+              "const": "baseline",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "reference",
             "criterion"
           ],
           "type": "object"
@@ -189,9 +308,27 @@
               "type": "null"
             }
           ]
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraderWeight"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "type": "object"
+    },
+    "ConversationHistory": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RelativeSkillPath"
+        }
+      ],
+      "description": "A transcript a case would resume before its own prompt is sent.\n\nNo installed harness can adopt an arbitrary, case-authored transcript as history it\ndid not itself produce (see `HarnessControl::ConversationSeeding`), so this exists to\nlet a case say what it is asking for honestly rather than not at all: a run whose case\nsets this is skipped, naming the reason, instead of silently starting a fresh\nconversation and answering a different question than the one the case asked."
     },
     "EvalCase": {
       "additionalProperties": false,
@@ -202,6 +339,17 @@
             "$ref": "#/$defs/NonEmptyString"
           },
           "type": "array"
+        },
+        "conversation_history": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConversationHistory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A transcript this case would resume before its own prompt, for a case that is not\nasking about a first turn. See [`ConversationHistory`]."
         },
         "description": {
           "anyOf": [
@@ -228,7 +376,7 @@
         "files": {
           "default": [],
           "items": {
-            "$ref": "#/$defs/RelativeSkillPath"
+            "$ref": "#/$defs/EvalFixture"
           },
           "type": "array"
         },
@@ -323,6 +471,35 @@
         }
       ]
     },
+    "EvalFixture": {
+      "description": "A `files` entry on an `EvalCase`.\n\nThe wire form stays a bare string for the common, writable case: a suite authored\nbefore read-only fixtures existed must keep parsing, and must keep round-tripping\nas a string rather than being rewritten into the object form the first time the\nsuite is saved back out. Only a fixture that opts into `read_only` pays for the\nobject form.",
+      "oneOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "writable",
+                "read_only"
+              ],
+              "type": "string"
+            },
+            "path": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "EvalPriority": {
       "enum": [
         "low",
@@ -330,6 +507,10 @@
         "high",
         "critical"
       ],
+      "type": "string"
+    },
+    "GlobPattern": {
+      "description": "A path relative to the skill directory that may use glob wildcards.\n\nThe supported dialect is deliberately small: `*` matches within one path\nsegment, `**` matches across segments (including zero of them), and `?`\nmatches a single character other than `/`. Character classes and brace\nalternation (`[`, `]`, `{`, `}`) are rejected outright rather than given a\nmeaning the eval author did not ask for.",
       "type": "string"
     },
     "GradeTarget": {
@@ -351,6 +532,24 @@
           },
           "required": [
             "file"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "created_files",
+          "description": "The set of files the run created under `outputs/`, one per line. Backed by\nthe same index the report itself is built from, so \"the agent created a\nfile called X\" is checkable without walking the directory a second time.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The contents of every file under `outputs/` whose path matches a glob, in\npath order and each labelled with the path it came from.\n\nThis narrows `any_output`, it does not widen it: the same tree, restricted\nto the files the pattern names. A pattern that matches nothing is a target\nthat is missing rather than one that is empty.",
+          "properties": {
+            "files": {
+              "$ref": "#/$defs/GlobPattern"
+            }
+          },
+          "required": [
+            "files"
           ],
           "type": "object"
         }
@@ -380,6 +579,11 @@
       "minLength": 1,
       "type": "string"
     },
+    "GraderWeight": {
+      "description": "How much one grader's result counts toward its case's score, relative to\nevery other grader and free-text assertion in the same case.\n\nAlways positive. A grader worth nothing to the score belongs out of the\ncase entirely, scored with `arm: with_only` rather than weighted to zero,\nand a negative weight has no share of a score to subtract from, so\nneither reading is one this type can hold.",
+      "exclusiveMinimum": 0.0,
+      "type": "number"
+    },
     "MatchCase": {
       "enum": [
         "insensitive",
@@ -387,8 +591,18 @@
       ],
       "type": "string"
     },
+    "MatchCount": {
+      "description": "An exact number of regex matches a `regex` grader must find.\n\nZero is refused: `negate` without a `count` already asks for the pattern\nto be absent, so `count: 0` would only be a second spelling of that same\ncheck, in either polarity of `negate`.",
+      "minimum": 1,
+      "type": "integer"
+    },
     "NonEmptyString": {
       "minLength": 1,
+      "type": "string"
+    },
+    "RegexFlags": {
+      "description": "Regex flags, mapped one-to-one onto what the `regex` crate's builder\noffers: `i` for case-insensitive, `m` for multi-line (`^`/`$` match at\nline boundaries), and `s` for dot-matches-newline. Anything else is\nrejected rather than silently ignored.",
+      "pattern": "^[ims]*$",
       "type": "string"
     },
     "RegexPattern": {
@@ -416,6 +630,29 @@
     },
     "ToolName": {
       "type": "string"
+    },
+    "ToolReference": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolName"
+        },
+        {
+          "properties": {
+            "input_match": {
+              "$ref": "#/$defs/RegexPattern"
+            },
+            "tool": {
+              "$ref": "#/$defs/ToolName"
+            }
+          },
+          "required": [
+            "tool",
+            "input_match"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "A tool a `tool_order` pair names: either just its name, or its name\ntogether with a pattern the call's arguments must match.\n\nFolding the qualified shape into an object rather than adding a second\n`input_match` field to `ToolOrderCheck` is what lets `before` and `after`\neach carry their own pattern independently."
     },
     "WorkspaceScaffold": {
       "allOf": [

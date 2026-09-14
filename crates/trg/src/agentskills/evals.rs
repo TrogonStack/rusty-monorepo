@@ -5,6 +5,7 @@ use super::runner::TimingFile;
 use super::validation::{ValidationError, ValidationErrors};
 use super::workspace_scaffold::WorkspaceScaffold;
 use crate::fs::FileSystem;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -155,6 +156,26 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
+/// Rejects an absolute path or one that escapes the directory it is declared
+/// relative to, shared by every value object that names a path a case must
+/// not be able to point outside the skill it belongs to.
+pub(crate) fn validate_relative_path(noun: &str, value: &str) -> std::result::Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{noun} must not be empty"));
+    }
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return Err(format!("{noun} '{value}' must be relative to the skill directory"));
+    }
+    if !path
+        .components()
+        .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
+    {
+        return Err(format!("{noun} '{value}' must stay inside the skill directory"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct RelativeSkillPath(String);
 
@@ -165,6 +186,12 @@ impl RelativeSkillPath {
 
     pub fn as_path(&self) -> &Path {
         Path::new(&self.0)
+    }
+}
+
+impl AsRef<Path> for RelativeSkillPath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
     }
 }
 
@@ -180,26 +207,394 @@ impl<'de> Deserialize<'de> for RelativeSkillPath {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if value.trim().is_empty() {
-            return Err(de::Error::custom("path must not be empty"));
-        }
-        let path = Path::new(&value);
-        if path.is_absolute() {
-            return Err(de::Error::custom(format!(
-                "path '{}' must be relative to the skill directory",
-                value
-            )));
-        }
-        if !path
-            .components()
-            .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
-        {
-            return Err(de::Error::custom(format!(
-                "path '{}' must stay inside the skill directory",
-                value
-            )));
-        }
+        validate_relative_path("path", &value).map_err(de::Error::custom)?;
         Ok(RelativeSkillPath(value))
+    }
+}
+
+/// A path relative to the skill directory that may use glob wildcards.
+///
+/// The supported dialect is deliberately small: `*` matches within one path
+/// segment, `**` matches across segments (including zero of them), and `?`
+/// matches a single character other than `/`. Character classes and brace
+/// alternation (`[`, `]`, `{`, `}`) are rejected outright rather than given a
+/// meaning the eval author did not ask for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+pub struct GlobPattern(String);
+
+impl GlobPattern {
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, String> {
+        let value = value.into();
+        validate_relative_path("pattern", &value)?;
+        if let Some(c) = value.chars().find(|c| matches!(c, '[' | ']' | '{' | '}' | '\\')) {
+            return Err(format!(
+                "pattern '{value}' must not contain '{c}': only *, **, and ? are supported"
+            ));
+        }
+        let normalized = normalize_glob(&value);
+        if normalized.is_empty() {
+            return Err(format!("pattern '{value}' names no path"));
+        }
+        Ok(GlobPattern(normalized))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// True when the pattern names an exact path with no wildcard.
+    pub fn is_literal(&self) -> bool {
+        !self.0.contains(['*', '?'])
+    }
+
+    pub fn as_literal_path(&self) -> Option<&Path> {
+        self.is_literal().then(|| Path::new(self.0.as_str()))
+    }
+
+    /// The same pattern as it reads from inside the output directory.
+    ///
+    /// `outputs/` is a spelling of that directory, not a path segment that is
+    /// always there to walk into: grading resolves the output tree beside the
+    /// workspace in one run layout and inside it in another, so a pattern naming
+    /// `outputs/` matches nothing at all in the first. Dropping the prefix before
+    /// matching against the output tree makes the pattern answer the same way in
+    /// both, which is how a literal `outputs/...` path is already resolved.
+    pub fn within_outputs(&self) -> Self {
+        match self.0.strip_prefix("outputs/") {
+            Some(rest) if !rest.is_empty() => Self(rest.to_string()),
+            _ => self.clone(),
+        }
+    }
+
+    /// Compiles the glob into a regex anchored to a full match against a
+    /// `/`-separated relative path.
+    pub fn compile(&self) -> Regex {
+        Regex::new(&format!("^{}$", glob_to_regex_source(&self.0))).expect("glob was validated at construction")
+    }
+}
+
+/// Drops the `./` segments `validate_relative_path` allows, so a pattern has one
+/// spelling by the time it is compiled. The walk that a glob is matched against
+/// yields paths relative to a directory, which never carry a `./` prefix, and a
+/// dot compiled as the literal it is would quietly match nothing at all.
+fn normalize_glob(value: &str) -> String {
+    Path::new(value)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Translates the supported glob dialect (`*`, `**`, `?`) into a regex
+/// fragment. `*` stays within a path segment, `**/` consumes zero or more
+/// whole segments, a bare `**` matches anything (including `/`), and `?`
+/// matches one character other than `/`. Everything else is escaped literally.
+fn glob_to_regex_source(glob: &str) -> String {
+    let mut out = String::new();
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' if chars.peek() == Some(&'*') => {
+                chars.next();
+                if chars.peek() == Some(&'/') {
+                    chars.next();
+                    out.push_str("(?:.*/)?");
+                } else {
+                    out.push_str(".*");
+                }
+            }
+            '*' => out.push_str("[^/]*"),
+            '?' => out.push_str("[^/]"),
+            other => out.push_str(&regex::escape(&other.to_string())),
+        }
+    }
+    out
+}
+
+impl AsRef<Path> for GlobPattern {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl fmt::Display for GlobPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for GlobPattern {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
+/// Whether a fixture's copy in the workspace may be changed by a run.
+///
+/// A run that is handed a read-only fixture is being asked whether it can do its job
+/// without touching a file it has no business changing. Writable stays the default so
+/// every fixture declared before this existed keeps its original meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FixtureMutability {
+    #[default]
+    Writable,
+    ReadOnly,
+}
+
+impl FixtureMutability {
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
+    }
+}
+
+/// A `files` entry on an `EvalCase`.
+///
+/// The wire form stays a bare string for the common, writable case: a suite authored
+/// before read-only fixtures existed must keep parsing, and must keep round-tripping
+/// as a string rather than being rewritten into the object form the first time the
+/// suite is saved back out. Only a fixture that opts into `read_only` pays for the
+/// object form.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, JsonSchema)]
+#[schemars(schema_with = "eval_fixture_schema")]
+pub struct EvalFixture {
+    path: RelativeSkillPath,
+    mutability: FixtureMutability,
+}
+
+fn eval_fixture_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "description": "A fixture path, or an object naming its path and mutability",
+        "oneOf": [
+            { "type": "string", "minLength": 1 },
+            {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "minLength": 1 },
+                    "mode": { "type": "string", "enum": ["writable", "read_only"] }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+impl EvalFixture {
+    pub fn path(&self) -> &RelativeSkillPath {
+        &self.path
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.path.as_str()
+    }
+
+    pub fn as_path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.mutability.is_read_only()
+    }
+}
+
+impl fmt::Display for EvalFixture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.path, f)
+    }
+}
+
+impl<'de> Deserialize<'de> for EvalFixture {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EvalFixtureVisitor;
+
+        impl<'de> Visitor<'de> for EvalFixtureVisitor {
+            type Value = EvalFixture;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a relative path string, or an object with \"path\" and optional \"mode\"")
+            }
+
+            fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let path = RelativeSkillPath::deserialize(de::value::StrDeserializer::new(value))?;
+                Ok(EvalFixture {
+                    path,
+                    mutability: FixtureMutability::Writable,
+                })
+            }
+
+            fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_map<A>(self, map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "snake_case", deny_unknown_fields)]
+                struct EvalFixtureObject {
+                    path: RelativeSkillPath,
+                    #[serde(default)]
+                    mode: FixtureMutability,
+                }
+
+                let object = EvalFixtureObject::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(EvalFixture {
+                    path: object.path,
+                    mutability: object.mode,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(EvalFixtureVisitor)
+    }
+}
+
+impl Serialize for EvalFixture {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.mutability {
+            // A writable fixture must keep serializing as a bare string: rewriting it into
+            // object form the first time a suite round-trips through this type would change
+            // the file on disk for every suite that has never heard of read-only fixtures.
+            FixtureMutability::Writable => serializer.serialize_str(self.path.as_str()),
+            FixtureMutability::ReadOnly => {
+                use serde::ser::SerializeStruct;
+                let mut state = serializer.serialize_struct("EvalFixture", 2)?;
+                state.serialize_field("path", &self.path)?;
+                state.serialize_field("mode", &self.mutability)?;
+                state.end()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl EvalFixture {
+    pub fn writable(path: RelativeSkillPath) -> Self {
+        EvalFixture {
+            path,
+            mutability: FixtureMutability::Writable,
+        }
+    }
+
+    pub fn read_only(path: RelativeSkillPath) -> Self {
+        EvalFixture {
+            path,
+            mutability: FixtureMutability::ReadOnly,
+        }
+    }
+}
+
+#[cfg(test)]
+mod eval_fixture_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_string_parses_as_writable() {
+        let fixture: EvalFixture = serde_json::from_value(serde_json::json!("evals/files/input.csv")).unwrap();
+        assert!(!fixture.is_read_only());
+        assert_eq!(fixture.as_str(), "evals/files/input.csv");
+    }
+
+    #[test]
+    fn a_writable_fixture_round_trips_as_a_bare_string() {
+        let fixture = EvalFixture::writable(RelativeSkillPath("evals/files/input.csv".to_string()));
+        let value = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(value, serde_json::json!("evals/files/input.csv"));
+    }
+
+    #[test]
+    fn an_object_form_fixture_without_mode_is_writable() {
+        let fixture: EvalFixture =
+            serde_json::from_value(serde_json::json!({ "path": "evals/files/input.csv" })).unwrap();
+        assert!(!fixture.is_read_only());
+    }
+
+    #[test]
+    fn an_object_form_fixture_can_declare_read_only() {
+        let fixture: EvalFixture = serde_json::from_value(serde_json::json!({
+            "path": "evals/files/input.csv",
+            "mode": "read_only",
+        }))
+        .unwrap();
+        assert!(fixture.is_read_only());
+        assert_eq!(fixture.as_str(), "evals/files/input.csv");
+    }
+
+    #[test]
+    fn a_read_only_fixture_round_trips_as_an_object() {
+        let fixture = EvalFixture::read_only(RelativeSkillPath("evals/files/input.csv".to_string()));
+        let value = serde_json::to_value(&fixture).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "path": "evals/files/input.csv", "mode": "read_only" })
+        );
+    }
+
+    /// The object form must still refuse an escaping path: `RelativeSkillPath`'s own
+    /// validation is what a fixture path routes through no matter which wire shape it
+    /// arrived in, and this is the shape most likely to be built by hand and skip it.
+    #[test]
+    fn the_object_form_still_rejects_a_path_that_escapes_the_skill_directory() {
+        let error = serde_json::from_value::<EvalFixture>(serde_json::json!({
+            "path": "../outside.txt",
+            "mode": "read_only",
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("must stay inside the skill directory"));
+    }
+
+    #[test]
+    fn a_bare_string_still_rejects_an_absolute_path() {
+        let error = serde_json::from_value::<EvalFixture>(serde_json::json!("/etc/passwd")).unwrap_err();
+        assert!(error.to_string().contains("must be relative"));
+    }
+
+    #[test]
+    fn the_object_form_rejects_unknown_fields() {
+        let error = serde_json::from_value::<EvalFixture>(serde_json::json!({
+            "path": "evals/files/input.csv",
+            "mode": "read_only",
+            "unexpected": true,
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unexpected") || error.to_string().contains("unknown field"));
+    }
+}
+
+/// A transcript a case would resume before its own prompt is sent.
+///
+/// No installed harness can adopt an arbitrary, case-authored transcript as history it
+/// did not itself produce (see `HarnessControl::ConversationSeeding`), so this exists to
+/// let a case say what it is asking for honestly rather than not at all: a run whose case
+/// sets this is skipped, naming the reason, instead of silently starting a fresh
+/// conversation and answering a different question than the one the case asked.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct ConversationHistory(RelativeSkillPath);
+
+impl ConversationHistory {
+    pub fn transcript(&self) -> &RelativeSkillPath {
+        &self.0
     }
 }
 
@@ -272,7 +667,7 @@ pub struct EvalCase {
     pub prompt: NonEmptyString,
     pub expected_output: NonEmptyString,
     #[serde(default)]
-    pub files: Vec<RelativeSkillPath>,
+    pub files: Vec<EvalFixture>,
     #[serde(default)]
     pub assertions: Vec<NonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,6 +692,10 @@ pub struct EvalCase {
     /// directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaffold: Option<WorkspaceScaffold>,
+    /// A transcript this case would resume before its own prompt, for a case that is not
+    /// asking about a first turn. See [`ConversationHistory`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_history: Option<ConversationHistory>,
 }
 
 impl EvalCase {
@@ -412,6 +811,8 @@ pub struct WorkspaceCheckReport {
     pub unsupported_assertions: usize,
     #[serde(default)]
     pub excluded_assertions: usize,
+    #[serde(default)]
+    pub ungraded_assertions: usize,
     /// `null` when the workspace produced no scored assertion at all, so an
     /// unobservable runner is not reported as a total failure.
     pub pass_rate: Option<f64>,
@@ -568,7 +969,7 @@ fn lint_fixture_files(
     fs: &impl FileSystem,
     skill_path: &Path,
     eval_id: &str,
-    files: &[RelativeSkillPath],
+    files: &[EvalFixture],
     max_fixture_bytes: Option<u64>,
 ) -> Vec<EvalLintWarning> {
     let limit = effective_max_fixture_bytes(max_fixture_bytes);
@@ -758,6 +1159,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
     let mut failed_assertions = 0;
     let mut unsupported_assertions = 0;
     let mut excluded_assertions = 0;
+    let mut ungraded_assertions = 0;
 
     if options.require_grading && grading_files.is_empty() {
         errors.push(ValidationError::for_field(
@@ -776,6 +1178,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         failed_assertions += counts.failed;
         unsupported_assertions += counts.unsupported;
         excluded_assertions += counts.excluded;
+        ungraded_assertions += counts.ungraded;
     }
 
     for timing_path in &timing_files {
@@ -801,6 +1204,7 @@ pub fn check_workspace(workspace_path: &Path, options: WorkspaceCheckOptions) ->
         failed_assertions,
         unsupported_assertions,
         excluded_assertions,
+        ungraded_assertions,
         pass_rate,
     })
 }
@@ -955,6 +1359,16 @@ fn validate_grading_file(
             format!(
                 "{} does not match {} excluded assertion results",
                 grading.summary.excluded, counts.excluded
+            ),
+        ));
+    }
+
+    if grading.summary.ungraded != counts.ungraded {
+        errors.push(ValidationError::for_field(
+            format!("{} summary.ungraded", file_label),
+            format!(
+                "{} does not match {} ungraded assertion results",
+                grading.summary.ungraded, counts.ungraded
             ),
         ));
     }
@@ -1139,6 +1553,57 @@ mod tests {
     }
 
     #[test]
+    fn glob_pattern_accepts_the_supported_wildcards() {
+        let pattern: GlobPattern = serde_json::from_value(serde_json::json!("**/*.md")).unwrap();
+        assert_eq!(pattern.as_str(), "**/*.md");
+        assert!(!pattern.is_literal());
+    }
+
+    #[test]
+    fn glob_pattern_without_wildcards_is_literal() {
+        let pattern: GlobPattern = serde_json::from_value(serde_json::json!("report.md")).unwrap();
+        assert!(pattern.is_literal());
+        assert_eq!(pattern.as_literal_path(), Some(Path::new("report.md")));
+    }
+
+    #[test]
+    fn glob_pattern_rejects_character_classes() {
+        let err = GlobPattern::parse("file[0-9].md").unwrap_err();
+        assert!(err.contains("only *, **, and ? are supported"), "{err}");
+    }
+
+    #[test]
+    fn glob_pattern_rejects_a_path_that_escapes_the_skill_directory() {
+        let err = GlobPattern::parse("../outside.md").unwrap_err();
+        assert!(err.contains("must stay inside the skill directory"), "{err}");
+    }
+
+    #[test]
+    fn glob_pattern_compiles_a_star_to_stay_within_one_segment() {
+        let pattern = GlobPattern::parse("*.md").unwrap();
+        let regex = pattern.compile();
+        assert!(regex.is_match("report.md"));
+        assert!(!regex.is_match("nested/report.md"));
+    }
+
+    #[test]
+    fn glob_pattern_compiles_a_double_star_to_cross_segments() {
+        let pattern = GlobPattern::parse("**/*.md").unwrap();
+        let regex = pattern.compile();
+        assert!(regex.is_match("report.md"));
+        assert!(regex.is_match("nested/deeper/report.md"));
+        assert!(!regex.is_match("report.txt"));
+    }
+
+    #[test]
+    fn glob_pattern_compiles_a_question_mark_to_one_character() {
+        let pattern = GlobPattern::parse("log?.txt").unwrap();
+        let regex = pattern.compile();
+        assert!(regex.is_match("log1.txt"));
+        assert!(!regex.is_match("log12.txt"));
+    }
+
+    #[test]
     fn check_eval_suite_requires_assertions_when_requested() {
         let fs = MemFS::new();
         fs.insert(
@@ -1274,6 +1739,7 @@ mod tests {
             output_tokens: Some(300),
             cost_usd: Some(0.42),
             final_text: "done".to_string(),
+            read_only_fixture_violations: Vec::new(),
         };
 
         write_timing_file(&timing_path, &outcome).unwrap();
@@ -1356,6 +1822,7 @@ mod tests {
             graders: vec![],
             skill_disclosure: SkillDisclosure::default(),
             scaffold: None,
+            conversation_history: None,
         }
     }
 
@@ -1382,7 +1849,9 @@ mod tests {
             "Analyze the attached data without paths",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/input.csv".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/input.csv".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
@@ -1399,8 +1868,8 @@ mod tests {
             "A detailed analysis output",
         );
         eval.files = vec![
-            RelativeSkillPath("evals/files/input.csv".to_string()),
-            RelativeSkillPath("evals/files/input.csv".to_string()),
+            EvalFixture::writable(RelativeSkillPath("evals/files/input.csv".to_string())),
+            EvalFixture::writable(RelativeSkillPath("evals/files/input.csv".to_string())),
         ];
         let suite = sample_suite_with_eval(eval);
 
@@ -1763,7 +2232,9 @@ mod tests {
             "Analyze evals/files/large.csv carefully",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/large.csv".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/large.csv".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());
@@ -1783,7 +2254,9 @@ mod tests {
             "Analyze evals/files/small.csv carefully",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/small.csv".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/small.csv".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());
@@ -1803,7 +2276,9 @@ mod tests {
             "Analyze evals/files/binary.bin carefully",
             "A detailed analysis output",
         );
-        eval.files = vec![RelativeSkillPath("evals/files/binary.bin".to_string())];
+        eval.files = vec![EvalFixture::writable(RelativeSkillPath(
+            "evals/files/binary.bin".to_string(),
+        ))];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite_fixtures(&crate::fs::RealFS, &skill_path, &suite, EvalLintOptions::default());

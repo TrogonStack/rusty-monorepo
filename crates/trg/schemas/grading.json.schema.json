@@ -34,6 +34,13 @@
             "null"
           ]
         },
+        "ungraded": {
+          "description": "No grader could answer this assertion at all: the text matched no mechanical\npattern and no judge was consulted. Distinct from `unsupported`, which means a\ngrader existed and the harness could not answer it, and from `excluded`, which\nmeans the author scoped it to the other arm.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "unsupported": {
           "description": "Present when the property cannot be observed on the runner that produced\nthe run. Such a result is neither a pass nor a failure, so it is excluded\nfrom `summary.pass_rate`.",
           "type": [
@@ -51,6 +58,17 @@
             }
           ],
           "description": "How a panel of judges split, present only when more than one opinion was taken.\nA single opinion has no split to report, and `passed` already carries it."
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraderWeight"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How much this result counts toward its case's score, relative to the\nrest of the case. Absent whenever the declaring grader left it\nunweighted, so an undeclared weight cannot be told apart in the\nserialized form from a build that predates weighting at all."
         }
       },
       "required": [
@@ -95,6 +113,11 @@
       ],
       "type": "string"
     },
+    "GraderWeight": {
+      "description": "How much one grader's result counts toward its case's score, relative to\nevery other grader and free-text assertion in the same case.\n\nAlways positive. A grader worth nothing to the score belongs out of the\ncase entirely, scored with `arm: with_only` rather than weighted to zero,\nand a negative weight has no share of a score to subtract from, so\nneither reading is one this type can hold.",
+      "exclusiveMinimum": 0.0,
+      "type": "number"
+    },
     "GradingSummary": {
       "properties": {
         "excluded": {
@@ -124,6 +147,13 @@
           "type": "integer"
         },
         "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ungraded": {
+          "default": 0,
+          "description": "No grader could even attempt these, so they carry no signal either way.",
           "format": "uint",
           "minimum": 0,
           "type": "integer"

@@ -18,7 +18,7 @@
 //! | Row count | `row count is 10`, `data.csv has 10 rows`, `10 rows in data.csv` |
 //! | Schema validation | `validates against schema foo`, `schema validation for out.json` |
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -26,8 +26,12 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::compare::{parse_winner, shuffle_swap, BlindLabel, ComparisonWinner};
 use super::evals::{EvalCase, EvalError, EvalSuite, Result};
-use super::graders::{self, CaseGrader, GradeInput, Grader, GraderOutcome};
+use super::graders::{
+    self, BaselineReference, CaseGrader, GradeInput, GradeTarget, Grader, GraderOutcome, GraderWeight, TargetContent,
+    TargetDeclaration,
+};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
@@ -64,7 +68,7 @@ pub struct GraderInfo {
     pub command: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AssertionGradeResult {
     #[serde(alias = "text")]
     #[schemars(length(min = 1))]
@@ -87,10 +91,42 @@ pub struct AssertionGradeResult {
     /// work and not the premise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded: Option<String>,
+    /// No grader could answer this assertion at all: the text matched no mechanical
+    /// pattern and no judge was consulted. Distinct from `unsupported`, which means a
+    /// grader existed and the harness could not answer it, and from `excluded`, which
+    /// means the author scoped it to the other arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ungraded: Option<String>,
     /// How a panel of judges split, present only when more than one opinion was taken.
     /// A single opinion has no split to report, and `passed` already carries it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub votes: Option<JudgeVoteTally>,
+    /// How much this result counts toward its case's score, relative to the
+    /// rest of the case. Absent whenever the declaring grader left it
+    /// unweighted, so an undeclared weight cannot be told apart in the
+    /// serialized form from a build that predates weighting at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<GraderWeight>,
+}
+
+/// Which single bucket a result belongs to.
+///
+/// The three markers are independent options, so one result can carry several
+/// at once and anything counting over them has to decide which wins. Deciding
+/// that here, once, is what stops a printed list from naming assertions that
+/// the number printed beside it does not count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssertionOutcome {
+    /// Deliberately out of scope for this arm, which settles the result no
+    /// matter what else is true of it: a check nobody was going to score loses
+    /// nothing by also having been unanswerable.
+    Excluded,
+    /// The harness cannot answer this kind of question at all.
+    Unsupported,
+    /// In scope and answerable in principle, but nothing attempted it.
+    Ungraded,
+    /// Counted for or against the skill.
+    Scored,
 }
 
 impl AssertionGradeResult {
@@ -102,8 +138,28 @@ impl AssertionGradeResult {
         self.excluded.is_some()
     }
 
+    pub fn is_ungraded(&self) -> bool {
+        self.ungraded.is_some()
+    }
+
+    pub fn outcome(&self) -> AssertionOutcome {
+        if self.is_excluded() {
+            AssertionOutcome::Excluded
+        } else if self.is_unsupported() {
+            AssertionOutcome::Unsupported
+        } else if self.is_ungraded() {
+            AssertionOutcome::Ungraded
+        } else {
+            AssertionOutcome::Scored
+        }
+    }
+
     pub fn is_scored(&self) -> bool {
-        !self.is_unsupported() && !self.is_excluded()
+        self.outcome() == AssertionOutcome::Scored
+    }
+
+    pub fn effective_weight(&self) -> GraderWeight {
+        self.weight.unwrap_or_default()
     }
 }
 
@@ -116,12 +172,27 @@ pub struct GradingSummary {
     pub unsupported: usize,
     #[serde(default)]
     pub excluded: usize,
+    /// No grader could even attempt these, so they carry no signal either way.
+    #[serde(default)]
+    pub ungraded: usize,
     /// Over the scored assertions only, so an ungradable property cannot drag a
     /// skill's score down on a runner that simply cannot be observed. `null` when
     /// nothing was scored at all, because no assertion answered is not the same
     /// result as every assertion failed.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub pass_rate: Option<f64>,
+}
+
+/// The assertions the ungraded count counted.
+///
+/// The number and the list beneath it are two views of one set, so they are
+/// taken with one predicate rather than two that have to be kept in step.
+fn ungraded_assertion_texts(results: &[AssertionGradeResult]) -> Vec<String> {
+    results
+        .iter()
+        .filter(|result| result.outcome() == AssertionOutcome::Ungraded)
+        .map(|result| result.assertion.clone())
+        .collect()
 }
 
 /// The single place the grading arithmetic lives, so the writer and both
@@ -132,29 +203,38 @@ pub struct GradingCounts {
     pub failed: usize,
     pub unsupported: usize,
     pub excluded: usize,
+    pub ungraded: usize,
     pub total: usize,
 }
 
 impl GradingCounts {
     pub fn tally(results: &[AssertionGradeResult]) -> Self {
-        let excluded = results.iter().filter(|r| r.is_excluded()).count();
-        let unsupported = results
-            .iter()
-            .filter(|r| !r.is_excluded() && r.is_unsupported())
-            .count();
-        let passed = results.iter().filter(|r| r.is_scored() && r.passed).count();
+        let mut passed = 0;
+        let mut unsupported = 0;
+        let mut excluded = 0;
+        let mut ungraded = 0;
+        for result in results {
+            match result.outcome() {
+                AssertionOutcome::Excluded => excluded += 1,
+                AssertionOutcome::Unsupported => unsupported += 1,
+                AssertionOutcome::Ungraded => ungraded += 1,
+                AssertionOutcome::Scored if result.passed => passed += 1,
+                AssertionOutcome::Scored => {}
+            }
+        }
         let total = results.len();
         Self {
             passed,
-            failed: total - passed - unsupported - excluded,
+            failed: total - passed - unsupported - excluded - ungraded,
             unsupported,
             excluded,
+            ungraded,
             total,
         }
     }
 
     pub fn scored(self) -> usize {
-        self.total - self.unsupported - self.excluded
+        self.total - self.unsupported - self.excluded - self.ungraded
     }
 
     pub fn pass_rate(self) -> Option<f64> {
@@ -172,9 +252,39 @@ impl GradingCounts {
             total: self.total,
             unsupported: self.unsupported,
             excluded: self.excluded,
+            ungraded: self.ungraded,
             pass_rate: self.pass_rate(),
         }
     }
+}
+
+/// A case's own score: the fraction of scored weight it passed, `None` under
+/// the same condition `GradingCounts::pass_rate` reports `None` under, since
+/// weighting which scored assertions count for more cannot manufacture a
+/// score out of a case that scored nothing.
+///
+/// A case where every grader left its weight undeclared takes the same code
+/// path `GradingCounts::pass_rate` always has, so a suite that never opts
+/// into weighting reports byte-identical scores to before weighting existed.
+pub fn case_score(results: &[AssertionGradeResult]) -> Option<f64> {
+    if results.iter().all(|r| r.weight.is_none()) {
+        return GradingCounts::tally(results).pass_rate();
+    }
+
+    let total_weight: f64 = results
+        .iter()
+        .filter(|r| r.is_scored())
+        .map(|r| r.effective_weight().value())
+        .sum();
+    if total_weight == 0.0 {
+        return None;
+    }
+    let passed_weight: f64 = results
+        .iter()
+        .filter(|r| r.is_scored() && r.passed)
+        .map(|r| r.effective_weight().value())
+        .sum();
+    Some(passed_weight / total_weight)
 }
 
 pub fn pass_rate_matches(reported: Option<f64>, expected: Option<f64>) -> bool {
@@ -214,11 +324,16 @@ pub struct GradeReport {
     pub assertions_graded: usize,
     pub passed: usize,
     pub failed: usize,
-    pub needs_llm: usize,
+    /// Every assertion no grader could even attempt, mechanical or judge. Sourced
+    /// from the same tally as `unsupported` and `excluded` rather than a separate
+    /// count, so this can never disagree with what the grading files themselves say.
+    pub ungraded: usize,
     #[serde(default)]
     pub unsupported: usize,
     #[serde(default)]
     pub excluded: usize,
+    #[serde(default)]
+    pub ungraded_assertions: Vec<String>,
     #[serde(default)]
     pub run_statuses: GradedRunStatuses,
 }
@@ -278,6 +393,10 @@ struct RunContext {
     workspace_dir: PathBuf,
     outputs_dir: PathBuf,
     transcript_path: PathBuf,
+    skill_dir: PathBuf,
+    /// Outputs-relative paths the run created, read from the artifact index
+    /// already persisted onto the run record rather than walked again here.
+    created_files: Vec<String>,
 }
 
 /// The grading options plus the judge they resolve to, resolved once per
@@ -338,7 +457,7 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
         GraderMode::Auto => suite.evals.iter().any(|case| {
             case.graders
                 .iter()
-                .any(|declared| matches!(declared.grader, Grader::Llm { .. }))
+                .any(|declared| matches!(declared.grader, Grader::Llm { .. } | Grader::Baseline { .. }))
                 || case
                     .assertions
                     .iter()
@@ -349,17 +468,46 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
 
 #[derive(Debug, Clone)]
 pub(crate) enum MechanicalKind {
-    FileExists { path: String },
-    FileCount { count: usize, dir: Option<String> },
-    ValidJson { path: Option<String> },
-    ValidCsv { path: Option<String> },
-    ValidMarkdownHeadings { path: Option<String> },
-    ImageExists { path: String },
-    ImageDimensions { path: String, width: u32, height: u32 },
-    ContainsString { needle: String, path: Option<String> },
-    MatchesRegex { pattern: String, path: Option<String> },
-    RowCount { count: usize, path: Option<String> },
-    SchemaValidation { schema: String, path: Option<String> },
+    FileExists {
+        path: String,
+    },
+    FileCount {
+        count: usize,
+        dir: Option<String>,
+    },
+    ValidJson {
+        path: Option<String>,
+    },
+    ValidCsv {
+        path: Option<String>,
+    },
+    ValidMarkdownHeadings {
+        path: Option<String>,
+    },
+    ImageExists {
+        path: String,
+    },
+    ImageDimensions {
+        path: String,
+        width: u32,
+        height: u32,
+    },
+    ContainsString {
+        needle: String,
+        path: Option<String>,
+    },
+    MatchesRegex {
+        pattern: String,
+        path: Option<String>,
+    },
+    RowCount {
+        count: usize,
+        path: Option<String>,
+    },
+    SchemaValidation {
+        schema: Option<String>,
+        path: Option<String>,
+    },
 }
 
 pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport> {
@@ -391,9 +539,10 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         assertions_graded: 0,
         passed: 0,
         failed: 0,
-        needs_llm: 0,
+        ungraded: 0,
         unsupported: 0,
         excluded: 0,
+        ungraded_assertions: Vec::new(),
         run_statuses: GradedRunStatuses::default(),
     };
 
@@ -412,12 +561,12 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             }
         };
 
-        if stopped_by_cost_ceiling(run) || mcp_unsupported(run) {
+        if !run.started() {
             report.run_statuses.record(&run.status);
             continue;
         }
 
-        let ctx = run_context(report_dir, run);
+        let ctx = run_context(report_dir, run, &skill_path);
         let mut assertion_results =
             Vec::with_capacity(case.assertions.len() + case.graders.len() + run.mock_violations.len());
 
@@ -427,7 +576,14 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         }
 
         for assertion in &case.assertions {
-            assertion_results.push(grade_assertion(assertion.as_str(), case, &ctx, &session)?);
+            assertion_results.push(grade_assertion(assertion.as_str(), case, &declarative, &ctx, &session)?);
+        }
+
+        // A read-only fixture that was modified during the run is a failure of the run
+        // itself, not a property left for an assertion or grader to notice, so it is added
+        // here rather than left to whichever declared checks the case happens to have.
+        for path in &run.read_only_fixture_violations {
+            assertion_results.push(read_only_fixture_violation_result(path));
         }
 
         for violation in &run.mock_violations {
@@ -436,17 +592,17 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
 
         restore_when_nothing_would_be_scored(&mut assertion_results);
 
-        for result in &assertion_results {
-            if result.grader.kind == GraderKind::NeedsLlm {
-                report.needs_llm += 1;
-            }
-            report.assertions_graded += 1;
-        }
+        report.assertions_graded += assertion_results.len();
+        report
+            .ungraded_assertions
+            .extend(ungraded_assertion_texts(&assertion_results));
         let counts = GradingCounts::tally(&assertion_results);
         report.passed += counts.passed;
         report.failed += counts.failed;
         report.unsupported += counts.unsupported;
         report.excluded += counts.excluded;
+        report.ungraded += counts.ungraded;
+        run_mut.case_score = case_score(&assertion_results);
 
         let grading = build_grading_file(assertion_results)?;
         validate_grading_document(&grading, options.strict)?;
@@ -466,7 +622,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     Ok(report)
 }
 
-fn run_context(report_dir: &Path, run: &RunRecord) -> RunContext {
+fn run_context(report_dir: &Path, run: &RunRecord, skill_path: &Path) -> RunContext {
     let workspace_dir = report_dir.join(&run.paths.workspace);
     let run_dir = workspace_dir
         .parent()
@@ -478,13 +634,28 @@ fn run_context(report_dir: &Path, run: &RunRecord) -> RunContext {
         workspace_dir.join("outputs")
     };
     let transcript_path = run_dir.join("transcript.jsonl");
+    let created_files = created_files_from_artifacts(run);
 
     RunContext {
         run_dir,
         workspace_dir,
         outputs_dir,
         transcript_path,
+        skill_dir: skill_path.to_path_buf(),
+        created_files,
     }
+}
+
+/// Recovers outputs-relative filenames from the artifact index the run already
+/// recorded, so `GradeTarget::CreatedFiles` does not re-walk the output directory.
+fn created_files_from_artifacts(run: &RunRecord) -> Vec<String> {
+    let outputs_root = Path::new(&run.paths.outputs);
+    run.artifacts
+        .iter()
+        .filter(|artifact| artifact.get("kind").and_then(serde_json::Value::as_str) == Some("output"))
+        .filter_map(|artifact| artifact.get("path").and_then(serde_json::Value::as_str))
+        .map(|path| relative_slash_path(outputs_root, Path::new(path)))
+        .collect()
 }
 
 fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
@@ -501,13 +672,14 @@ fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
 fn grade_assertion(
     assertion: &str,
     eval_case: &EvalCase,
+    declarative: &DeclarativeContext,
     ctx: &RunContext,
     session: &GradeSession,
 ) -> Result<AssertionGradeResult> {
     let options = session.options;
     match options.grader {
-        GraderMode::Script => grade_with_script(assertion, eval_case, ctx, options),
-        GraderMode::Llm => grade_with_llm(assertion, ctx, session),
+        GraderMode::Script => grade_with_script(assertion, None, eval_case, ctx, options),
+        GraderMode::Llm => grade_with_llm(assertion, &TargetDeclaration::Default, declarative, ctx, session),
         GraderMode::None | GraderMode::Auto => {
             if let Some(kind) = parse_mechanical_kind(assertion) {
                 let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
@@ -524,7 +696,9 @@ fn grade_assertion(
                     rationale: None,
                     unsupported: None,
                     excluded: None,
+                    ungraded: None,
                     votes: None,
+                    weight: None,
                 })
             } else if options.grader == GraderMode::None {
                 Ok(needs_llm_result(
@@ -565,6 +739,8 @@ impl DeclarativeContext {
             outputs_dir: &ctx.outputs_dir,
             raw_transcript: &self.raw_transcript,
             transcript: self.transcript.as_ref(),
+            skill_dir: &ctx.skill_dir,
+            created_files: &ctx.created_files,
         }
     }
 }
@@ -599,7 +775,9 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Failed { evidence } => AssertionGradeResult {
             assertion,
@@ -610,7 +788,9 @@ fn grade_declaratively(
             rationale: None,
             unsupported: None,
             excluded,
+            ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
         GraderOutcome::Unsupported { reason } => AssertionGradeResult {
             assertion,
@@ -621,40 +801,50 @@ fn grade_declaratively(
             rationale: None,
             unsupported: Some(reason),
             excluded,
+            ungraded: None,
             votes: None,
+            weight: declared.weight,
         },
-        GraderOutcome::Deferred { criterion } => {
+        GraderOutcome::Deferred { criterion, target } => {
             let mut result = match options.grader {
-                GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, ctx, session)?,
-                GraderMode::Script => grade_with_script(&criterion, eval_case, ctx, options)?,
+                GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, &target, declarative, ctx, session)?,
+                GraderMode::Script => grade_with_script(&criterion, None, eval_case, ctx, options)?,
                 GraderMode::None => needs_llm_result(&criterion, "grader mode is none, so no judge was consulted"),
+            };
+            result.excluded = excluded;
+            result.name = name;
+            result.weight = declared.weight;
+            result
+        }
+        GraderOutcome::Comparison {
+            criterion,
+            target,
+            reference,
+        } => {
+            let mut result = match options.grader {
+                GraderMode::Llm | GraderMode::Auto => grade_against_baseline(
+                    &assertion,
+                    &criterion,
+                    &target,
+                    &reference,
+                    eval_case,
+                    declarative,
+                    ctx,
+                    session,
+                )?,
+                GraderMode::Script => grade_with_script(&criterion, Some(&reference), eval_case, ctx, options)?,
+                GraderMode::None => needs_llm_result(&assertion, "grader mode is none, so no judge was consulted"),
             };
             result.excluded = excluded;
             result.name = name;
             result
         }
+        GraderOutcome::AuthoringError { reason } => {
+            return Err(EvalError::Validation(
+                ValidationError::for_field(assertion, reason).into(),
+            ));
+        }
     })
-}
-
-/// A case whose every check is arm-scoped would otherwise measure nothing at
-/// all, which is never what the author meant by writing it, so the exclusions
-/// are lifted and the case is scored as declared.
-/// Whether the cost ceiling stopped this run before it started.
-///
-/// Such a run has no workspace and no transcript, so there is nothing for a grader
-/// to read. Grading it anyway would read the absence as a wrong answer and fail every
-/// assertion, turning a spending decision into a reported regression, and an LLM judge
-/// would bill the pass that has already run out of money to do it.
-fn stopped_by_cost_ceiling(run: &RunRecord) -> bool {
-    run.failure_kind.as_deref() == Some(crate::agentskills::budget::FAILURE_KIND_BUDGET)
-}
-
-/// The run never started because the harness offers no mcp servers control at all,
-/// not because anything the skill did was wrong. Grading it would read the missing
-/// transcript as a wrong answer and fail every assertion, turning "this harness can't
-/// run mocked cases yet" into a reported regression.
-fn mcp_unsupported(run: &RunRecord) -> bool {
-    run.failure_kind.as_deref() == Some(crate::agentskills::runner::FAILURE_KIND_MCP_UNSUPPORTED)
 }
 
 /// Turn one logged `expect` mismatch into an ordinary failing assertion.
@@ -685,17 +875,51 @@ fn mock_violation_result(violation: &super::mocks::MockViolation) -> AssertionGr
         rationale: None,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: None,
+        weight: None,
     }
 }
 
+/// A case whose every check is arm-scoped would otherwise measure nothing at
+/// all, which is never what the author meant by writing it, so the exclusions
+/// are lifted and the case is scored as declared. But lifting them only helps
+/// when doing so would actually produce something scorable; a case that is
+/// entirely ungraded, or whose only observable checks are also unsupported,
+/// gains nothing from the lift and must not have it applied.
 fn restore_when_nothing_would_be_scored(results: &mut [AssertionGradeResult]) {
     let scored = results.iter().filter(|result| result.is_scored()).count();
-    if scored > 0 || !results.iter().any(AssertionGradeResult::is_excluded) {
+    if scored > 0 {
+        return;
+    }
+    let lifting_would_score = results
+        .iter()
+        .any(|result| result.is_excluded() && !result.is_unsupported() && !result.is_ungraded());
+    if !lifting_would_score {
         return;
     }
     for result in results.iter_mut() {
         result.excluded = None;
+    }
+}
+
+fn read_only_fixture_violation_result(path: &str) -> AssertionGradeResult {
+    AssertionGradeResult {
+        name: None,
+        assertion: format!("read-only fixture '{path}' is unchanged"),
+        passed: false,
+        evidence: format!("fixture '{path}' did not match its source after the run"),
+        grader: GraderInfo {
+            kind: GraderKind::Mechanical,
+            model: None,
+            command: None,
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: None,
+        votes: None,
+        weight: None,
     }
 }
 
@@ -713,12 +937,83 @@ fn needs_llm_result(assertion: &str, evidence: &str) -> AssertionGradeResult {
         rationale: None,
         unsupported: None,
         excluded: None,
+        ungraded: Some(evidence.to_string()),
         votes: None,
+        weight: None,
     }
 }
 
+/// A grader script that did not exit cleanly graded nothing, whatever it printed.
+///
+/// Recording the crash as a failed assertion reads as evidence the skill did the wrong
+/// thing, which is the one thing it is not evidence of. Ungraded is the honest record, and
+/// the gate already refuses to pass a suite carrying anything ungraded, so a broken script
+/// still stops the build without discarding every other case in the run.
+/// The payload goes over on its own thread so that neither side can wedge the other.
+///
+/// A grader is free to print more than a pipe holds before it reads its input, and a parent that
+/// insists on finishing the write first would then wait on a buffer only the grader can drain
+/// while the grader waits on one only the parent can drain. Neither ever gives way.
+fn feed_payload(child: &mut std::process::Child, payload: Vec<u8>) -> Option<PayloadHandover> {
+    let mut stdin = child.stdin.take()?;
+    Some(std::thread::spawn(move || {
+        use std::io::Write;
+        stdin.write_all(&payload)
+    }))
+}
+
+type PayloadHandover = std::thread::JoinHandle<std::io::Result<()>>;
+
+/// A grader that stopped reading is answered by its exit status, not by the write that failed.
+///
+/// A script which exits before draining the payload closes the pipe under us, and reporting that
+/// as harness I/O aborts the entire run over one broken grader, discarding every case already
+/// paid for. Whatever it exited with is the honest account of what it did.
+fn payload_handed_over(handover: Option<PayloadHandover>) -> Result<()> {
+    let Some(handover) = handover else {
+        return Ok(());
+    };
+    match handover.join() {
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Ok(other) => other.map_err(EvalError::Io),
+        Err(_) => Err(EvalError::Io(std::io::Error::other(
+            "the thread handing the payload to the grader script panicked",
+        ))),
+    }
+}
+
+fn script_crashed_result(assertion: &str, command: &str, output: &std::process::Output) -> AssertionGradeResult {
+    let evidence = format!(
+        "script grader exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    AssertionGradeResult {
+        name: None,
+        assertion: assertion.to_string(),
+        passed: false,
+        evidence: evidence.clone(),
+        grader: GraderInfo {
+            kind: GraderKind::Script,
+            model: None,
+            command: Some(command.to_string()),
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: Some(evidence),
+        votes: None,
+        weight: None,
+    }
+}
+
+/// `baseline` is `Some` only for a `baseline` grader, and carrying it here is what
+/// keeps `--grader script` from quietly answering a different question: a script
+/// handed only the criterion would grade the run on its own, which is not what a
+/// comparison asked.
 fn grade_with_script(
     assertion: &str,
+    baseline: Option<&BaselineReference>,
     eval_case: &EvalCase,
     ctx: &RunContext,
     options: &GradeOptions,
@@ -733,6 +1028,12 @@ fn grade_with_script(
         "outputs": ctx.outputs_dir,
         "transcript": ctx.transcript_path,
     });
+    if let Some(baseline) = baseline {
+        input["baseline"] = serde_json::json!({
+            "reference": baseline.declared(),
+            "content": baseline.text(),
+        });
+    }
     if let Some(hints) = &eval_case.grader_hints {
         input["grader_hints"] =
             serde_json::Value::Object(hints.iter().map(|(key, value)| (key.clone(), value.clone())).collect());
@@ -746,14 +1047,10 @@ fn grade_with_script(
         .spawn()
         .map_err(|e| EvalError::Validation(ValidationError::for_field("--grader-command", e.to_string()).into()))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin
-            .write_all(serde_json::to_string(&input)?.as_bytes())
-            .map_err(EvalError::Io)?;
-    }
-
+    let handover = feed_payload(&mut child, serde_json::to_string(&input)?.into_bytes());
     let output = child.wait_with_output().map_err(EvalError::Io)?;
+    payload_handed_over(handover)?;
+
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     let artifact_path = ctx.run_dir.join("grader-script-result.json");
@@ -768,25 +1065,7 @@ fn grade_with_script(
     )?;
 
     if !output.status.success() {
-        return Ok(AssertionGradeResult {
-            name: None,
-            assertion: assertion.to_string(),
-            passed: false,
-            evidence: format!(
-                "script grader exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            grader: GraderInfo {
-                kind: GraderKind::Script,
-                model: None,
-                command: Some(command.to_string()),
-            },
-            rationale: None,
-            unsupported: None,
-            excluded: None,
-            votes: None,
-        });
+        return Ok(script_crashed_result(assertion, command, &output));
     }
 
     let parsed: ScriptGraderResponse = serde_json::from_str(&raw).map_err(|e| {
@@ -812,7 +1091,9 @@ fn grade_with_script(
         rationale: parsed.rationale,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: None,
+        weight: None,
     })
 }
 
@@ -824,28 +1105,42 @@ struct ScriptGraderResponse {
     rationale: Option<String>,
 }
 
-fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> Result<AssertionGradeResult> {
-    if let Some(kind) = parse_mechanical_kind(assertion) {
-        let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
-        return Ok(AssertionGradeResult {
-            name: None,
-            assertion: assertion.to_string(),
-            passed,
-            evidence,
-            grader: GraderInfo {
-                kind: GraderKind::Mechanical,
-                model: None,
-                command: None,
-            },
-            rationale: None,
-            unsupported: None,
-            excluded: None,
-            votes: None,
-        });
+fn grade_with_llm(
+    assertion: &str,
+    target: &TargetDeclaration,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    session: &GradeSession,
+) -> Result<AssertionGradeResult> {
+    if !target.is_explicit() {
+        if let Some(kind) = parse_mechanical_kind(assertion) {
+            let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
+            return Ok(AssertionGradeResult {
+                name: None,
+                assertion: assertion.to_string(),
+                passed,
+                evidence,
+                grader: GraderInfo {
+                    kind: GraderKind::Mechanical,
+                    model: None,
+                    command: None,
+                },
+                rationale: None,
+                unsupported: None,
+                excluded: None,
+                ungraded: None,
+                votes: None,
+                weight: None,
+            });
+        }
     }
 
     let endpoint = session.endpoint()?;
-    let request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, llm_grader_payload(assertion, ctx)?);
+    let payload = llm_grader_payload(assertion, &target.resolve(), declarative, ctx)?;
+    let mut request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, payload.text);
+    if let Some(image) = payload.image {
+        request = request.with_image(image);
+    }
 
     let votes = session.options.grader_votes;
     let mut opinions = Vec::with_capacity(votes.count() as usize);
@@ -874,8 +1169,203 @@ fn grade_with_llm(assertion: &str, ctx: &RunContext, session: &GradeSession) -> 
         rationale: verdict.opinion.rationale,
         unsupported: None,
         excluded: None,
+        ungraded: None,
         votes: (!votes.is_single()).then_some(verdict.tally),
+        weight: None,
     })
+}
+
+/// Which blind label the run's own output was given for one baseline comparison.
+///
+/// The judge is never told which side is the reference, because a judge that knows
+/// which output is the incumbent is answering a different question from the one the
+/// case wrote down. Which label the run gets is fixed by the case and the criterion,
+/// the same deterministic rule `compare` already uses to debias its pairs, so
+/// re-grading a report asks the judge the question it asked before rather than its
+/// mirror image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BaselinePairing {
+    run: BlindLabel,
+}
+
+impl BaselinePairing {
+    /// Each side is held to the same share of the payload rather than letting a
+    /// short output pass its unused share to the other, which is what
+    /// `PayloadBudget` does for a list of artifacts. Rolling the leftover across
+    /// would let the judge read one side whole and the other clipped, and "at least
+    /// as good as" answered against a clipped reference compares two different
+    /// things.
+    const SIDE_BYTES: usize = PayloadBudget::TOTAL_BYTES / 2;
+
+    fn for_criterion(eval_case_id: &str, criterion: &str) -> Self {
+        let run = if shuffle_swap(&format!("{eval_case_id}:{criterion}")) {
+            BlindLabel::B
+        } else {
+            BlindLabel::A
+        };
+        Self { run }
+    }
+
+    fn reference(self) -> BlindLabel {
+        match self.run {
+            BlindLabel::A => BlindLabel::B,
+            BlindLabel::B => BlindLabel::A,
+        }
+    }
+
+    fn outputs(self, run: &str, reference: &str, direction: TruncateDirection) -> BTreeMap<&'static str, String> {
+        BTreeMap::from([
+            (self.run.as_str(), Self::fit(run, direction)),
+            (self.reference().as_str(), Self::fit(reference, direction)),
+        ])
+    }
+
+    fn fit(text: &str, direction: TruncateDirection) -> String {
+        if text.len() <= Self::SIDE_BYTES {
+            return text.to_string();
+        }
+        truncate(text, Self::SIDE_BYTES, direction)
+    }
+
+    /// A tie passes. "At least as good as" is the whole of what a baseline asks, so
+    /// a run that matches the reference has met it; only a run the judge puts behind
+    /// the reference has not.
+    fn at_least_as_good(self, winner: ComparisonWinner) -> bool {
+        match winner {
+            ComparisonWinner::Tie => true,
+            ComparisonWinner::A => self.run == BlindLabel::A,
+            ComparisonWinner::B => self.run == BlindLabel::B,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BaselineJudgeResponse {
+    better: String,
+    evidence: String,
+    #[serde(default)]
+    rationale: Option<String>,
+}
+
+const BASELINE_GRADER_SYSTEM_PROMPT: &str = "You are comparing two anonymous outputs, labeled A and B, \
+     against one criterion. Say which one better satisfies the criterion, or answer tie when neither is \
+     better than the other. Respond with JSON: {\"better\":\"A|B|tie\",\"evidence\":\"...\",\"rationale\":\"...\"}. \
+     Quote both outputs in `evidence`. One of them is a reference and one is a new run; you are not told \
+     which, and you must not guess.";
+
+/// Grade a run against a reference output the suite already accepts.
+///
+/// A missing or unreadable target is settled here rather than sent to the judge:
+/// a run that produced nothing is not at least as good as a reference that exists,
+/// and there is nothing for a judge to read but the absence.
+#[allow(clippy::too_many_arguments)]
+fn grade_against_baseline(
+    assertion: &str,
+    criterion: &str,
+    target: &GradeTarget,
+    reference: &BaselineReference,
+    eval_case: &EvalCase,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    session: &GradeSession,
+) -> Result<AssertionGradeResult> {
+    let run_output = match declarative.input(ctx).target_content(target) {
+        TargetContent::Text(text) => text,
+        TargetContent::Missing(reason) => return Ok(baseline_shortfall(assertion, reason)),
+        TargetContent::Image { .. } => {
+            return Ok(baseline_shortfall(
+                assertion,
+                format!("{target} is an image, and a baseline reference is compared as text"),
+            ))
+        }
+    };
+
+    // A blank reference is refused where it is read, and a blank run has to fall at the
+    // same line. `final_text` reads a missing `final.md` as an empty string rather than
+    // as a missing target, so without this a run that produced nothing reaches the judge
+    // and passes on a tie against a reference it never answered.
+    if run_output.trim().is_empty() {
+        return Ok(baseline_shortfall(
+            assertion,
+            format!("{target} is empty, and nothing is not at least as good as a baseline"),
+        ));
+    }
+
+    let direction = match target {
+        GradeTarget::Transcript => TruncateDirection::Tail,
+        _ => TruncateDirection::Head,
+    };
+    let pairing = BaselinePairing::for_criterion(eval_case.id.as_str(), criterion);
+    let payload = serde_json::to_string(&serde_json::json!({
+        "criterion": criterion,
+        "outputs": pairing.outputs(&run_output, reference.text(), direction),
+    }))?;
+
+    let endpoint = session.endpoint()?;
+    let request = JudgeRequest::new(BASELINE_GRADER_SYSTEM_PROMPT, payload);
+
+    let votes = session.options.grader_votes;
+    let mut opinions = Vec::with_capacity(votes.count() as usize);
+    for _ in votes.ballots() {
+        let reply = judge::judge(endpoint, &request, "--grader-model")?;
+        let parsed: BaselineJudgeResponse = judge::parse_json_reply(&reply, "--grader-model")?;
+        let winner = parse_winner(&parsed.better)?;
+        opinions.push((pairing.at_least_as_good(winner), parsed));
+    }
+
+    let verdict = tally_opinions(opinions).ok_or_else(|| {
+        EvalError::Validation(
+            ValidationError::for_field("--grader-votes", "no judge opinion was taken for this comparison").into(),
+        )
+    })?;
+
+    let passed = verdict.tally.majority_passed();
+    let standing = if passed {
+        "is at least as good as"
+    } else {
+        "falls short of"
+    };
+    Ok(AssertionGradeResult {
+        name: None,
+        assertion: assertion.to_string(),
+        passed,
+        evidence: format!(
+            "the run {standing} baseline '{}': {}",
+            reference.declared(),
+            verdict.opinion.evidence
+        ),
+        grader: GraderInfo {
+            kind: GraderKind::Llm,
+            model: Some(endpoint.model.to_string()),
+            command: None,
+        },
+        rationale: verdict.opinion.rationale,
+        unsupported: None,
+        excluded: None,
+        ungraded: None,
+        votes: (!votes.is_single()).then_some(verdict.tally),
+        weight: None,
+    })
+}
+
+fn baseline_shortfall(assertion: &str, evidence: impl Into<String>) -> AssertionGradeResult {
+    AssertionGradeResult {
+        name: None,
+        assertion: assertion.to_string(),
+        passed: false,
+        evidence: evidence.into(),
+        grader: GraderInfo {
+            kind: GraderKind::Declarative,
+            model: None,
+            command: None,
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: None,
+        votes: None,
+        weight: None,
+    }
 }
 
 const LLM_GRADER_SYSTEM_PROMPT: &str = "You are grading one assertion about the output of a single agent run. \
@@ -883,47 +1373,344 @@ const LLM_GRADER_SYSTEM_PROMPT: &str = "You are grading one assertion about the 
      Quote the material in `evidence`; do not restate the assertion as its own evidence. \
      Respond with JSON: {\"passed\": true|false, \"evidence\": \"...\", \"rationale\": \"...\"}.";
 
-/// How much of one artifact the judge is shown.
+/// Total bytes of content one judge request may carry, across every artifact
+/// placed into it.
 ///
-/// Bounded so a run that wrote a large file does not turn one assertion into an
-/// unbounded request.
-const LLM_GRADER_EXCERPT_BYTES: usize = 8_000;
+/// Previously each artifact (the final text, and separately every output file)
+/// got its own 8,000-byte excerpt with no cap on how many artifacts a run could
+/// contribute, so a run with many output files could inflate one assertion into
+/// an unbounded request. The cap now applies once, to the request as a whole.
+#[derive(Debug, Clone, Copy)]
+struct PayloadBudget {
+    remaining_bytes: usize,
+    remaining_slots: usize,
+}
 
-fn llm_grader_payload(assertion: &str, ctx: &RunContext) -> Result<String> {
-    let final_text = std::fs::read_to_string(ctx.outputs_dir.join(FINAL_MD)).unwrap_or_default();
-    let mut outputs = serde_json::Map::new();
-    if let Ok(entries) = std::fs::read_dir(&ctx.outputs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name == FINAL_MD {
-                continue;
-            }
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                outputs.insert(name, serde_json::Value::String(excerpt(&text)));
-            }
+impl PayloadBudget {
+    const TOTAL_BYTES: usize = 8_000;
+
+    fn new(slots: usize) -> Self {
+        Self {
+            remaining_bytes: Self::TOTAL_BYTES,
+            remaining_slots: slots.max(1),
         }
     }
 
-    Ok(serde_json::to_string(&serde_json::json!({
-        "assertion": assertion,
-        "final_text": excerpt(&final_text),
-        "outputs": outputs,
-    }))?)
+    /// Each remaining artifact claims an equal share of what is left, so one
+    /// large early artifact does not starve every artifact placed after it,
+    /// and a share an artifact does not need rolls forward to the rest.
+    fn place(&mut self, text: &str, direction: TruncateDirection) -> Placement {
+        let share = self.remaining_bytes / self.remaining_slots.max(1);
+        self.remaining_slots = self.remaining_slots.saturating_sub(1);
+
+        if share == 0 {
+            return Placement::Omitted;
+        }
+        if text.len() <= share {
+            self.remaining_bytes -= text.len();
+            return Placement::Whole(text.to_string());
+        }
+        self.remaining_bytes -= share;
+        Placement::Truncated(truncate(text, share, direction))
+    }
 }
 
-fn excerpt(text: &str) -> String {
-    if text.len() <= LLM_GRADER_EXCERPT_BYTES {
-        return text.to_string();
+enum Placement {
+    Whole(String),
+    Truncated(String),
+    Omitted,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TruncateDirection {
+    Head,
+    Tail,
+}
+
+fn truncate(text: &str, cap: usize, direction: TruncateDirection) -> String {
+    match direction {
+        TruncateDirection::Head => {
+            let mut end = cap;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}\n[truncated after {end} bytes]", &text[..end])
+        }
+        // A transcript's interesting part is usually its end (the final tool
+        // calls and the answer the run converged on), not its start, so the
+        // judge keeps the tail rather than the head.
+        TruncateDirection::Tail => truncate_transcript_tail(text, cap),
     }
-    let mut end = LLM_GRADER_EXCERPT_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+}
+
+fn truncate_bytes_from_tail(text: &str, cap: usize) -> String {
+    let mut start = text.len().saturating_sub(cap);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
     }
-    format!("{}\n[truncated after {end} bytes]", &text[..end])
+    let shown = text.len() - start;
+    format!(
+        "[showing the last {shown} bytes; earlier content truncated]\n{}",
+        &text[start..]
+    )
+}
+
+/// A flat byte cut lands wherever the budget runs out, which can fall inside
+/// the one message a criterion is about and gives no sign that anything was
+/// removed. A transcript is line-delimited NDJSON, one message per line, so
+/// the cut can instead fall between messages: this keeps whole messages from
+/// the end backward until the budget is spent, keeps the first message too
+/// when room remains, and names what sat between them rather than
+/// discarding it silently.
+fn truncate_transcript_tail(text: &str, cap: usize) -> String {
+    let messages: Vec<&str> = text.split('\n').filter(|line| !line.is_empty()).collect();
+    if messages.len() < 2 {
+        return truncate_bytes_from_tail(text, cap);
+    }
+
+    let mut used = 0usize;
+    let mut first_kept = messages.len();
+    for (index, message) in messages.iter().enumerate().rev() {
+        // The join puts a newline *between* messages, so the last one kept carries
+        // none of its own. Charging it one spends a byte the output never writes,
+        // and a transcript over the cap by nothing more than that loses a whole
+        // message to pay for it.
+        let joined = match index == messages.len() - 1 {
+            true => message.len(),
+            false => message.len() + 1,
+        };
+        if used + joined > cap {
+            break;
+        }
+        used += joined;
+        first_kept = index;
+    }
+
+    if first_kept == messages.len() {
+        return truncate_bytes_from_tail(messages[messages.len() - 1], cap);
+    }
+    if first_kept == 0 {
+        return messages.join("\n");
+    }
+
+    let tail = messages[first_kept..].join("\n");
+    let first = messages[0];
+    let remaining = cap.saturating_sub(used);
+
+    // Strictly less: what is left has to cover the newline that joins the first
+    // message to what follows, not only the message itself.
+    if first.len() < remaining {
+        let hidden = first_kept - 1;
+        if hidden == 0 {
+            format!("{first}\n{tail}")
+        } else {
+            format!("{first}\n[{hidden} message(s) omitted from the middle of the transcript]\n{tail}")
+        }
+    } else {
+        format!("[{first_kept} message(s) omitted from the start of the transcript]\n{tail}")
+    }
+}
+
+/// What a judge request needs beyond a system prompt: the text payload, and,
+/// when a target resolves to a picture, the attachment that carries it.
+///
+/// A bare `String` cannot also carry an optional image without either
+/// smuggling it into the text (which is exactly the shape mismatch a vision
+/// content part exists to avoid) or falling back to a tuple that leaves the
+/// pairing anonymous at every call site.
+struct JudgePayload {
+    text: String,
+    image: Option<judge::ImageAttachment>,
+}
+
+impl JudgePayload {
+    fn text_only(text: String) -> Self {
+        Self { text, image: None }
+    }
+}
+
+fn llm_grader_payload(
+    assertion: &str,
+    target: &GradeTarget,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+) -> Result<JudgePayload> {
+    match target {
+        GradeTarget::FinalText => {
+            legacy_structured_payload(assertion, declarative, ctx, OutputScope::TopLevel).map(JudgePayload::text_only)
+        }
+        GradeTarget::AnyOutput => {
+            legacy_structured_payload(assertion, declarative, ctx, OutputScope::Nested).map(JudgePayload::text_only)
+        }
+        GradeTarget::Transcript | GradeTarget::File(_) | GradeTarget::CreatedFiles | GradeTarget::Files(_) => {
+            single_target_payload(assertion, target, declarative, ctx)
+        }
+    }
+}
+
+/// How far under `outputs/` a structured payload looks for files to hand the
+/// judge alongside the final text.
+///
+/// `final_text` (declared or defaulted) keeps the pre-target behavior of
+/// looking only at what sits directly in `outputs/`, unchanged so a suite
+/// written before targets existed still grades the same way. `any_output`
+/// means the same thing here that it means to the mechanical grader, which
+/// walks every file the run produced, nested directories included.
+enum OutputScope {
+    TopLevel,
+    Nested,
+}
+
+fn collect_output_files(outputs_dir: &Path, scope: OutputScope) -> Vec<(String, String)> {
+    let mut output_files = Vec::new();
+    match scope {
+        OutputScope::TopLevel => {
+            if let Ok(entries) = std::fs::read_dir(outputs_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name == FINAL_MD {
+                        continue;
+                    }
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        output_files.push((name, text));
+                    }
+                }
+            }
+        }
+        OutputScope::Nested => collect_output_files_nested(outputs_dir, outputs_dir, &mut output_files),
+    }
+    output_files
+}
+
+fn collect_output_files_nested(root: &Path, dir: &Path, output_files: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_output_files_nested(root, &path, output_files);
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let name = relative_slash_path(root, &path);
+        if name == FINAL_MD {
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            output_files.push((name, text));
+        }
+    }
+}
+
+/// A path relative to `root`, rendered with `/` separators regardless of
+/// platform, so a nested output's key in the judge payload matches what an
+/// author would write in an assertion.
+fn relative_slash_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The payload shape used before the judge could be aimed at anything but the
+/// final text plus the run's output files. Kept byte-for-byte for a suite that
+/// does not declare a `target`.
+fn legacy_structured_payload(
+    assertion: &str,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    scope: OutputScope,
+) -> Result<String> {
+    let mut output_files = collect_output_files(&ctx.outputs_dir, scope);
+    output_files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut budget = PayloadBudget::new(1 + output_files.len());
+    let mut omitted = 0usize;
+
+    let final_text = match budget.place(&declarative.final_text, TruncateDirection::Head) {
+        Placement::Whole(text) | Placement::Truncated(text) => text,
+        Placement::Omitted => {
+            omitted += 1;
+            String::new()
+        }
+    };
+
+    let mut outputs = serde_json::Map::new();
+    for (name, text) in output_files {
+        match budget.place(&text, TruncateDirection::Head) {
+            Placement::Whole(text) | Placement::Truncated(text) => {
+                outputs.insert(name, serde_json::Value::String(text));
+            }
+            Placement::Omitted => omitted += 1,
+        }
+    }
+
+    let mut payload = serde_json::json!({
+        "assertion": assertion,
+        "final_text": final_text,
+        "outputs": outputs,
+    });
+    if omitted > 0 {
+        payload["artifacts_omitted"] =
+            serde_json::Value::String(format!("{omitted} artifact(s) omitted: judge payload budget exhausted"));
+    }
+
+    Ok(serde_json::to_string(&payload)?)
+}
+
+/// The payload shape for a judge aimed at one specific target. Self-describing
+/// (it names the target) since, unlike the legacy shape, the judge is not
+/// implicitly looking at "the run's output" but at whatever was declared.
+fn single_target_payload(
+    assertion: &str,
+    target: &GradeTarget,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+) -> Result<JudgePayload> {
+    let content = declarative.input(ctx).target_content(target);
+    let direction = match target {
+        GradeTarget::Transcript => TruncateDirection::Tail,
+        _ => TruncateDirection::Head,
+    };
+
+    let mut payload = serde_json::json!({
+        "assertion": assertion,
+        "target": target.to_string(),
+    });
+    let mut image = None;
+
+    match content {
+        TargetContent::Text(text) => match PayloadBudget::new(1).place(&text, direction) {
+            Placement::Whole(text) | Placement::Truncated(text) => {
+                payload["content"] = serde_json::Value::String(text);
+            }
+            Placement::Omitted => {
+                payload["artifacts_omitted"] =
+                    serde_json::Value::String("1 artifact(s) omitted: judge payload budget exhausted".to_string());
+            }
+        },
+        TargetContent::Image { media_type, bytes } => {
+            payload["content"] = serde_json::Value::String("image attached separately".to_string());
+            image = Some(judge::ImageAttachment::new(media_type, &bytes));
+        }
+        TargetContent::Missing(reason) => {
+            payload["missing_reason"] = serde_json::Value::String(reason);
+        }
+    }
+
+    Ok(JudgePayload {
+        text: serde_json::to_string(&payload)?,
+        image,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -934,68 +1721,149 @@ struct LlmGraderResponse {
     rationale: Option<String>,
 }
 
-pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
-    let lower = assertion.trim().to_lowercase();
+/// The assertion as the author wrote it, beside an ASCII-lowercased copy used only to
+/// locate keywords.
+///
+/// Keyword matching has to ignore case; capture must not. Mapping each byte to itself or
+/// to exactly one other byte keeps the two copies index-aligned, so an offset found in
+/// `lower` names the same position in `original`, and every path, needle and pattern
+/// handed back is a slice of what was written. Nothing here can hand out lowercased text,
+/// which is the property that was missing when captures came off the lowercase copy.
+struct AssertionText {
+    original: String,
+    lower: String,
+}
 
-    if let Some(path) = extract_quoted_or_token_after(&lower, "file ", " exists") {
+impl AssertionText {
+    fn new(assertion: &str) -> Self {
+        let original = assertion.trim().to_string();
+        let lower = original.to_ascii_lowercase();
+        Self { original, lower }
+    }
+
+    fn contains(&self, needle: &str) -> bool {
+        self.lower.contains(needle)
+    }
+
+    fn starts_with(&self, prefix: &str) -> bool {
+        self.lower.starts_with(prefix)
+    }
+
+    fn ends_with(&self, suffix: &str) -> bool {
+        self.lower.ends_with(suffix)
+    }
+
+    fn after(&self, prefix: &str) -> Option<&str> {
+        let idx = self.lower.find(prefix)? + prefix.len();
+        Some(self.original[idx..].trim())
+    }
+
+    fn before(&self, suffix: &str) -> Option<&str> {
+        let idx = self.lower.find(suffix)?;
+        Some(self.original[..idx].trim())
+    }
+
+    fn between(&self, prefix: &str, suffix: &str) -> Option<&str> {
+        let start = self.lower.find(prefix)? + prefix.len();
+        let end = self.lower[start..].find(suffix)? + start;
+        Some(self.original[start..end].trim())
+    }
+
+    fn unquoted_after(&self, prefix: &str) -> Option<&str> {
+        non_empty(unquote(self.after(prefix)?))
+    }
+
+    fn unquoted_before(&self, suffix: &str) -> Option<&str> {
+        non_empty(unquote(self.before(suffix)?))
+    }
+
+    fn unquoted_between(&self, prefix: &str, suffix: &str) -> Option<&str> {
+        non_empty(unquote(self.between(prefix, suffix)?))
+    }
+}
+
+/// One matched pair of surrounding quotes, removed, and only a matched pair.
+///
+/// Authors quote a path that carries spaces, and each capture site used to decide for
+/// itself whether to strip them, so a site that forgot opened a file whose name included
+/// the quote characters. Trimming every quote at both ends is what the sites that
+/// remembered did, and that also eats an apostrophe the author meant to keep.
+fn unquote(value: &str) -> &str {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next_back()) {
+        (Some(open), Some(close)) if open == close && (open == '"' || open == '\'') => chars.as_str(),
+        _ => value,
+    }
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
+    let text = AssertionText::new(assertion);
+
+    if let Some(path) = extract_quoted_or_token_after(&text, "file ", " exists") {
         return Some(MechanicalKind::FileExists { path });
     }
-    if lower.ends_with(" exists") && !lower.contains("file count") && !lower.contains("image ") {
-        let path = lower.trim_end_matches(" exists").trim().to_string();
-        if !path.is_empty() && !path.contains(' ') {
-            return Some(MechanicalKind::FileExists { path });
+    if text.ends_with(" exists") && !text.contains("file count") && !text.contains("image ") {
+        if let Some(path) = extract_path_before(&text, " exists") {
+            if !path.contains(' ') {
+                return Some(MechanicalKind::FileExists { path });
+            }
         }
     }
 
-    if let Some(count) = extract_usize_after(&lower, "file count is ") {
+    if let Some(count) = extract_usize_after(&text, "file count is ") {
         return Some(MechanicalKind::FileCount { count, dir: None });
     }
-    if let Some(count) = extract_usize_before(&lower, " files") {
-        let dir = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(count) = extract_usize_before(&text, " files") {
+        let dir = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::FileCount { count, dir });
     }
-    if let Some(count) = extract_usize_after(&lower, "contains ") {
-        if lower.contains(" files") {
+    if let Some(count) = extract_usize_after(&text, "contains ") {
+        if text.contains(" files") {
             return Some(MechanicalKind::FileCount { count, dir: None });
         }
     }
 
-    if lower.contains("valid json") || lower.contains("is valid json") {
-        let path = extract_path_before(&lower, " is valid json").or_else(|| extract_path_before(&lower, "valid json"));
+    if text.contains("valid json") {
+        let path = extract_path_before(&text, " is valid json").or_else(|| extract_path_before(&text, "valid json"));
         return Some(MechanicalKind::ValidJson { path });
     }
 
-    if lower.contains("valid csv") || lower.contains("is valid csv") {
-        let path = extract_path_before(&lower, " is valid csv").or_else(|| extract_path_before(&lower, "valid csv"));
+    if text.contains("valid csv") {
+        let path = extract_path_before(&text, " is valid csv").or_else(|| extract_path_before(&text, "valid csv"));
         return Some(MechanicalKind::ValidCsv { path });
     }
 
-    if lower.contains("markdown headings") || lower.contains("valid markdown") {
-        let path = extract_path_before(&lower, " has valid markdown headings");
+    if text.contains("markdown headings") || text.contains("valid markdown") {
+        let path = extract_path_before(&text, " has valid markdown headings");
         return Some(MechanicalKind::ValidMarkdownHeadings { path });
     }
 
-    if let Some(path) = extract_after(&lower, "image exists at ") {
+    if let Some(path) = text.after("image exists at ") {
         return Some(MechanicalKind::ImageExists { path: path.to_string() });
     }
-    if lower.starts_with("image ") && lower.ends_with(" exists") {
-        let path = lower
-            .trim_start_matches("image ")
-            .trim_end_matches(" exists")
-            .trim()
-            .to_string();
-        return Some(MechanicalKind::ImageExists { path });
+    if text.starts_with("image ") && text.ends_with(" exists") {
+        if let Some(path) = text.between("image ", " exists") {
+            return Some(MechanicalKind::ImageExists { path: path.to_string() });
+        }
     }
 
-    if let Some(dims) = extract_dimensions(&lower) {
-        if let Some(path) = extract_path_before(&lower, " is ") {
+    if let Some(dims) = extract_dimensions(&text) {
+        if let Some(path) = extract_path_before(&text, " is ") {
             return Some(MechanicalKind::ImageDimensions {
-                path: path.to_string(),
+                path,
                 width: dims.0,
                 height: dims.1,
             });
         }
-        if lower.contains("image dimensions are ") {
+        if text.contains("image dimensions are ") {
             return Some(MechanicalKind::ImageDimensions {
                 path: "outputs".to_string(),
                 width: dims.0,
@@ -1004,42 +1872,46 @@ pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
         }
     }
 
-    if let Some(needle) = extract_quoted(assertion, "contains ") {
-        let path = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(needle) = extract_quoted(&text, "contains ") {
+        let path = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::ContainsString { needle, path });
     }
-    if let Some(needle) = extract_quoted(assertion, "includes ") {
-        let path = extract_after(&lower, " in ").map(str::to_string);
+    if let Some(needle) = extract_quoted(&text, "includes ") {
+        let path = text.after(" in ").map(str::to_string);
         return Some(MechanicalKind::ContainsString { needle, path });
     }
-    if lower.starts_with("output includes ") {
-        let needle = assertion.trim()[16..].trim().trim_matches('"').to_string();
-        return Some(MechanicalKind::ContainsString { needle, path: None });
+    if text.starts_with("output includes ") {
+        if let Some(rest) = text.unquoted_after("output includes ") {
+            return Some(MechanicalKind::ContainsString {
+                needle: rest.to_string(),
+                path: None,
+            });
+        }
     }
 
-    if let Some(pattern) = extract_regex_pattern(&lower) {
-        let path = extract_path_before(&lower, " matches");
+    if let Some(pattern) = extract_regex_pattern(&text) {
+        let path = extract_path_before(&text, " matches");
         return Some(MechanicalKind::MatchesRegex { pattern, path });
     }
 
-    if let Some(count) = extract_usize_after(&lower, "row count is ") {
-        let path = extract_before(&lower, " row count").map(str::to_string);
+    if let Some(count) = extract_usize_after(&text, "row count is ") {
+        let path = text.before(" row count").map(str::to_string);
         return Some(MechanicalKind::RowCount { count, path });
     }
-    if let Some(count) = extract_usize_before(&lower, " rows") {
-        let path = extract_before(&lower, " has ")
-            .or_else(|| extract_before(&lower, " in "))
-            .map(str::to_string);
+    if let Some(count) = extract_usize_before(&text, " rows") {
+        let path = text.before(" has ").or_else(|| text.before(" in ")).map(str::to_string);
         return Some(MechanicalKind::RowCount { count, path });
     }
 
-    if lower.contains("schema validation") || lower.contains("validates against schema ") {
-        let schema = extract_after(&lower, "validates against schema ")
-            .or_else(|| extract_after(&lower, "schema validation for "))
-            .unwrap_or("default")
-            .trim()
-            .to_string();
-        let path = extract_after(&lower, " for ").map(str::to_string);
+    if text.contains("schema validation") || text.contains("validates against schema ") {
+        let schema = text
+            .unquoted_between("validates against schema ", " for ")
+            .or_else(|| text.unquoted_after("validates against schema "))
+            .map(str::to_string);
+        let path = text
+            .unquoted_after(" for ")
+            .map(str::to_string)
+            .or_else(|| extract_path_before(&text, " validates against schema"));
         return Some(MechanicalKind::SchemaValidation { schema, path });
     }
 
@@ -1076,7 +1948,9 @@ fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool,
                 .as_ref()
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| ctx.outputs_dir.clone());
-            validate_json_file(&target)
+            Ok(graders::check_json_validity(&graders::TargetContent::from_path(
+                &target,
+            )))
         }
         MechanicalKind::ValidCsv { path } => {
             let target = path
@@ -1165,25 +2039,18 @@ fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool,
             Ok((rows == *count, format!("{} has {rows} data row(s)", target.display())))
         }
         MechanicalKind::SchemaValidation { schema, path } => {
+            let schema_name = schema.as_ref().ok_or_else(|| {
+                EvalError::Validation(
+                    ValidationError::for_field("schema validation", "does not name a schema to validate against")
+                        .into(),
+                )
+            })?;
             let target = path
                 .as_ref()
                 .map(|p| resolve_path(ctx, p))
                 .unwrap_or_else(|| ctx.outputs_dir.join("output.json"));
-            let valid = target.is_file()
-                && serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&target).unwrap_or_default())
-                    .is_ok();
-            Ok((
-                valid,
-                format!(
-                    "schema '{schema}' validation on {}: {}",
-                    target.display(),
-                    if valid {
-                        "valid JSON document"
-                    } else {
-                        "invalid or missing"
-                    }
-                ),
-            ))
+            let content = graders::TargetContent::from_path(&target);
+            graders::check_schema_validation(&ctx.skill_dir.join(schema_name), &content)
         }
     }
 }
@@ -1219,17 +2086,6 @@ fn count_files(dir: &Path) -> Result<usize> {
         }
     }
     Ok(count)
-}
-
-fn validate_json_file(path: &Path) -> Result<(bool, String)> {
-    if !path.is_file() {
-        return Ok((false, format!("JSON file not found at {}", path.display())));
-    }
-    let content = std::fs::read_to_string(path)?;
-    match serde_json::from_str::<serde_json::Value>(&content) {
-        Ok(_) => Ok((true, format!("{} is valid JSON", path.display()))),
-        Err(e) => Ok((false, format!("{} is invalid JSON: {e}", path.display()))),
-    }
 }
 
 fn validate_csv_file(path: &Path) -> Result<(bool, String)> {
@@ -1467,6 +2323,15 @@ pub fn validate_grading_document(grading: &GradingFile, strict: bool) -> Result<
             ),
         ));
     }
+    if grading.summary.ungraded != counts.ungraded {
+        errors.push(ValidationError::for_field(
+            "summary.ungraded",
+            format!(
+                "{} does not match {} ungraded results",
+                grading.summary.ungraded, counts.ungraded
+            ),
+        ));
+    }
     if grading.summary.total != grading.assertion_results.len() {
         errors.push(ValidationError::for_field(
             "summary.total",
@@ -1540,6 +2405,18 @@ fn store_grader_artifacts(
     Ok(())
 }
 
+/// A graded assertion as it appears in `report.json`: the result exactly as its own run wrote
+/// it, plus the two keys that only the run knows. Flattening rather than listing the fields by
+/// hand is what keeps a field added to `AssertionGradeResult` later from silently missing the
+/// published report the way `name`, `excluded`, `rationale` and `votes` once did.
+#[derive(Serialize)]
+struct PublishedAssertionResult<'a> {
+    run_id: &'a str,
+    eval_case_id: &'a str,
+    #[serde(flatten)]
+    result: &'a AssertionGradeResult,
+}
+
 fn update_report_after_grading(
     document: &mut ReportDocument,
     runs: &[RunRecord],
@@ -1563,29 +2440,21 @@ fn update_report_after_grading(
         }
         let grading: GradingFile = serde_json::from_str(&std::fs::read_to_string(&grading_path)?)?;
         for result in &grading.assertion_results {
-            let mut flattened = serde_json::json!({
-                "run_id": run.id,
-                "eval_case_id": run.eval_case_id,
-                "assertion": result.assertion,
-                "passed": result.passed,
-                "evidence": result.evidence,
-                "grader": result.grader,
-            });
-            if let Some(reason) = &result.unsupported {
-                flattened["unsupported"] = serde_json::Value::String(reason.clone());
-            }
-            document.assertion_results.push(flattened);
+            document
+                .assertion_results
+                .push(serde_json::to_value(PublishedAssertionResult {
+                    run_id: &run.id,
+                    eval_case_id: &run.eval_case_id,
+                    result,
+                })?);
         }
     }
 
     Ok(())
 }
 
-fn extract_quoted(source: &str, prefix: &str) -> Option<String> {
-    let lower = source.to_lowercase();
-    let idx = lower.find(&prefix.to_lowercase())?;
-    let rest = &source[idx + prefix.len()..];
-    let rest = rest.trim_start();
+fn extract_quoted(text: &AssertionText, prefix: &str) -> Option<String> {
+    let rest = text.after(prefix)?;
     if let Some(stripped) = rest.strip_prefix('"') {
         let end = stripped.find('"')?;
         return Some(stripped[..end].to_string());
@@ -1597,64 +2466,53 @@ fn extract_quoted(source: &str, prefix: &str) -> Option<String> {
     None
 }
 
-fn extract_quoted_or_token_after(lower: &str, prefix: &str, suffix: &str) -> Option<String> {
-    let start = lower.find(prefix)? + prefix.len();
-    let end = lower[start..].find(suffix)? + start;
-    let path = lower[start..end].trim().trim_matches('"').trim_matches('\'');
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.to_string())
-    }
+fn extract_quoted_or_token_after(text: &AssertionText, prefix: &str, suffix: &str) -> Option<String> {
+    text.unquoted_between(prefix, suffix).map(str::to_string)
 }
 
-fn extract_after<'a>(lower: &'a str, prefix: &str) -> Option<&'a str> {
-    let idx = lower.find(prefix)? + prefix.len();
-    Some(lower[idx..].trim())
+fn extract_path_before(text: &AssertionText, suffix: &str) -> Option<String> {
+    text.unquoted_before(suffix).map(str::to_string)
 }
 
-fn extract_before<'a>(lower: &'a str, suffix: &str) -> Option<&'a str> {
-    let idx = lower.find(suffix)?;
-    Some(lower[..idx].trim())
+fn extract_usize_after(text: &AssertionText, prefix: &str) -> Option<usize> {
+    text.after(prefix)?.split_whitespace().next()?.parse().ok()
 }
 
-fn extract_path_before(lower: &str, suffix: &str) -> Option<String> {
-    extract_before(lower, suffix)
-        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
-        .filter(|s| !s.is_empty())
+fn extract_usize_before(text: &AssertionText, suffix: &str) -> Option<usize> {
+    text.before(suffix)?.split_whitespace().last()?.parse().ok()
 }
 
-fn extract_usize_after(lower: &str, prefix: &str) -> Option<usize> {
-    let rest = extract_after(lower, prefix)?;
-    rest.split_whitespace().next()?.parse().ok()
-}
-
-fn extract_usize_before(lower: &str, suffix: &str) -> Option<usize> {
-    let before = extract_before(lower, suffix)?;
-    before.split_whitespace().last()?.parse().ok()
-}
-
-fn extract_dimensions(lower: &str) -> Option<(u32, u32)> {
+fn extract_dimensions(text: &AssertionText) -> Option<(u32, u32)> {
     let re = Regex::new(r"(\d+)\s*[x×]\s*(\d+)").ok()?;
-    let caps = re.captures(lower)?;
+    let caps = re.captures(&text.lower)?;
     Some((caps[1].parse().ok()?, caps[2].parse().ok()?))
 }
 
-fn extract_regex_pattern(lower: &str) -> Option<String> {
-    if let Some(start) = lower.find('/') {
-        if let Some(end) = lower[start + 1..].find('/') {
-            return Some(lower[start + 1..start + 1 + end].to_string());
-        }
-    }
-    None
+/// The pattern between the `/` delimiters of a `matches` assertion.
+///
+/// The delimiters are looked for after the keyword rather than from the start of the
+/// assertion, because a target path carries slashes of its own. Taking the first pair in
+/// the whole string swallowed the path and the keyword into the pattern, and made every
+/// later prose form unreachable for any assertion that named a path at all.
+fn extract_regex_pattern(text: &AssertionText) -> Option<String> {
+    const KEYWORD: &str = "matches";
+    let idx = text.lower.find(KEYWORD)? + KEYWORD.len();
+    let rest = &text.original[idx..];
+    let start = rest.find('/')?;
+    let end = rest[start + 1..].find('/')? + start + 1;
+    Some(rest[start + 1..end].to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::RelativeSkillPath;
     use crate::agentskills::report::{
-        build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
+        build_report_bundle, write_report_bundle, BuildReportOptions, RunMetrics, RunNotStarted, RunPaths,
+        ScenarioKind, WriteReportOptions,
     };
+    use crate::agentskills::runner::capabilities::HarnessControl;
+    use crate::agentskills::runner::Runner;
     use crate::agentskills::transcript::write_normalized_transcript;
     use crate::fs::testutil::MemFS;
     use std::fs;
@@ -1676,7 +2534,26 @@ mod tests {
         ]
     }"#;
 
+    const ALL_UNSUPPORTED_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "skill_used", "arm": "both"}
+                ]
+            }
+        ]
+    }"#;
+
     fn unobservable_report_dir(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        unobservable_report_dir_with_suite(temp, UNOBSERVABLE_SUITE)
+    }
+
+    fn unobservable_report_dir_with_suite(temp: &tempfile::TempDir, suite_json: &str) -> (PathBuf, PathBuf) {
         let skill_dir = temp.path().join("demo-skill");
         fs::create_dir_all(skill_dir.join("evals")).unwrap();
         fs::write(
@@ -1684,7 +2561,7 @@ mod tests {
             "---\nname: demo-skill\ndescription: d\n---\n",
         )
         .unwrap();
-        fs::write(skill_dir.join("evals/evals.json"), UNOBSERVABLE_SUITE).unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), suite_json).unwrap();
 
         let mem = MemFS::new();
         let mem_skill = Path::new("demo-skill");
@@ -1897,6 +2774,109 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_case_scored_only_by_unsupported_checks_has_no_case_score() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _run_dir) = unobservable_report_dir_with_suite(&temp, ALL_UNSUPPORTED_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let run = &document.runs[0];
+        assert_eq!(
+            run.case_score, None,
+            "a case scored on nothing must not read as a score of zero"
+        );
+    }
+
+    #[test]
+    fn a_case_scored_and_failing_every_check_reports_a_score_of_zero_not_no_score() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, TRIGGERING_ONLY_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        for run in &document.runs {
+            let workspace = report_dir.join(&run.paths.workspace);
+            let run_dir = workspace.parent().unwrap();
+            let grading: GradingFile =
+                serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+            let expected = GradingCounts::tally(&grading.assertion_results).pass_rate();
+            assert_eq!(run.case_score, expected, "{:?}", run.scenario_id);
+        }
+
+        let with_skill = document
+            .runs
+            .iter()
+            .find(|r| r.scenario_id == ScenarioKind::WithSkill)
+            .unwrap();
+        let without_skill = document
+            .runs
+            .iter()
+            .find(|r| r.scenario_id == ScenarioKind::WithoutSkill)
+            .unwrap();
+        assert_eq!(with_skill.case_score, Some(1.0));
+        assert_eq!(
+            without_skill.case_score,
+            Some(0.0),
+            "a case that scored and failed everything is a zero, not a missing score"
+        );
+    }
+
+    #[test]
+    fn a_run_the_harness_never_started_is_withheld_from_grading() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, ARM_SCOPED_SUITE);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: ReportDocument = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document.runs[0].not_started(RunNotStarted::ControlUnsupported {
+            control: HarnessControl::ConversationSeeding,
+            runner: Runner::ClaudeCode,
+        });
+        let abandoned = report_dir.join(&document.runs[0].paths.workspace);
+        fs::remove_dir_all(&abandoned).unwrap();
+        document.runs[1].status = "completed".to_string();
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.runs_graded, 1,
+            "a run that never reached the harness has no workspace to grade"
+        );
+        assert_eq!(report.run_statuses.skipped, 1);
+        assert_eq!(report.run_statuses.completed, 1);
+        assert_eq!(
+            report.failed, 0,
+            "a run trg declined to start must not be reported as a regression"
+        );
+    }
+
     const NAMED_GRADER_SUITE: &str = r#"{
         "schema_version": 3,
         "skill_name": "demo-skill",
@@ -1936,6 +2916,79 @@ mod tests {
         }
     }
 
+    const NAMED_AND_UNNAMED_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "contains", "text": "all done", "name": "wraps-up"}
+                ],
+                "assertions": ["the tone stays professional throughout"]
+            }
+        ]
+    }"#;
+
+    /// A grader the author never named must not pick one up along the way,
+    /// whether from a sibling grader in the same case or from its own
+    /// rendered description: an unnamed grader indistinguishable from a
+    /// named one defeats the point of naming one at all.
+    #[test]
+    fn an_unnamed_prose_assertion_stays_unnamed_next_to_a_named_grader() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, NAMED_AND_UNNAMED_SUITE);
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        for (scenario, grading) in grading_files_by_scenario(&report_dir) {
+            let prose_result = grading
+                .assertion_results
+                .iter()
+                .find(|result| result.assertion.contains("professional"))
+                .unwrap_or_else(|| panic!("{scenario:?} must still report the prose assertion"));
+            assert_eq!(
+                prose_result.name, None,
+                "{scenario:?} prose assertion must stay unnamed"
+            );
+        }
+
+        let published: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let flattened_prose = published["assertion_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| {
+                result["assertion"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("professional")
+            })
+            .expect("the prose result must survive the flatten");
+        assert!(
+            flattened_prose.get("name").is_none(),
+            "an unnamed grader must not gain a name key in the published report.json"
+        );
+
+        let flattened_named = published["assertion_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| result["assertion"].as_str().unwrap_or_default().contains("all done"))
+            .expect("the named result must survive the flatten");
+        assert_eq!(flattened_named["name"], "wraps-up");
+    }
+
     #[test]
     fn a_named_grader_result_is_absent_from_the_serialized_json_when_unnamed() {
         let result = AssertionGradeResult {
@@ -1951,11 +3004,146 @@ mod tests {
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes: None,
+            weight: None,
         };
 
         let json = serde_json::to_string(&result).unwrap();
         assert!(!json.contains("\"name\""));
+    }
+
+    /// The flatten in `update_report_after_grading` used to rebuild the object
+    /// field by field, which is exactly how `name`, `excluded`, `rationale`
+    /// and `votes` were previously lost between `grading.json` and the
+    /// published `report.json`. This pins every one of those fields against
+    /// the artifact a reader actually opens, not just the per-run file.
+    #[test]
+    fn a_named_excluded_multi_voted_result_survives_the_flatten_into_report_json() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, ARM_SCOPED_SUITE);
+
+        let mut document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let runs = document.runs.clone();
+        let run = runs.first().expect("both_arms_report_dir produced at least one run");
+        let run_dir = report_dir.join(&run.paths.workspace).parent().unwrap().to_path_buf();
+
+        let crafted = GradingFile {
+            assertion_results: vec![AssertionGradeResult {
+                name: Some("wraps-up".to_string()),
+                assertion: "the summary reads well".to_string(),
+                passed: true,
+                evidence: "the summary names every column".to_string(),
+                grader: GraderInfo {
+                    kind: GraderKind::Llm,
+                    model: Some("judge-model".to_string()),
+                    command: None,
+                },
+                rationale: Some("both judges agreed".to_string()),
+                unsupported: None,
+                excluded: Some("scoped to the with_skill arm".to_string()),
+                ungraded: None,
+                votes: Some(JudgeVoteTally { passed: 2, failed: 1 }),
+                weight: None,
+            }],
+            summary: GradingSummary {
+                passed: 1,
+                failed: 0,
+                total: 1,
+                unsupported: 0,
+                excluded: 1,
+                ungraded: 0,
+                pass_rate: Some(1.0),
+            },
+        };
+        fs::write(
+            run_dir.join("grading.json"),
+            serde_json::to_string_pretty(&crafted).unwrap(),
+        )
+        .unwrap();
+
+        let grader_config = build_grader_config(&GradeOptions::default());
+        update_report_after_grading(&mut document, &runs, &report_dir, &grader_config).unwrap();
+        std::fs::write(
+            report_dir.join("report.json"),
+            serde_json::to_string_pretty(&document).unwrap(),
+        )
+        .unwrap();
+
+        let published: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let flattened = published["assertion_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| result["assertion"] == "the summary reads well")
+            .expect("the crafted result must survive the flatten into the published report.json");
+
+        assert_eq!(flattened["name"], "wraps-up");
+        assert_eq!(flattened["excluded"], "scoped to the with_skill arm");
+        assert_eq!(flattened["rationale"], "both judges agreed");
+        assert_eq!(flattened["votes"]["passed"], 2);
+        assert_eq!(flattened["votes"]["failed"], 1);
+    }
+
+    fn weighted_result(passed: bool, unsupported: bool, weight: Option<GraderWeight>) -> AssertionGradeResult {
+        AssertionGradeResult {
+            name: None,
+            assertion: "the output includes a summary".to_string(),
+            passed,
+            evidence: "found the summary section".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Mechanical,
+                model: None,
+                command: None,
+            },
+            rationale: None,
+            unsupported: unsupported.then(|| "runner cannot observe this".to_string()),
+            excluded: None,
+            ungraded: None,
+            votes: None,
+            weight,
+        }
+    }
+
+    /// A grader that leaves weight undeclared inside an otherwise-weighted case
+    /// still has to count for exactly as much as it always did: one full vote,
+    /// same as a declared weight of 1.0 would.
+    #[test]
+    fn an_undeclared_weight_counts_as_one_full_vote_alongside_a_declared_weight() {
+        let results = vec![
+            weighted_result(true, false, Some(GraderWeight::parse(3.0).unwrap())),
+            weighted_result(false, false, None),
+        ];
+
+        assert_eq!(case_score(&results), Some(0.75));
+    }
+
+    /// A case where every grader left weight undeclared has to take the exact
+    /// pre-weighting code path, not merely a formula that happens to agree with
+    /// it, so a suite that never opts in cannot see its score move.
+    #[test]
+    fn case_score_falls_back_to_the_pre_weighting_pass_rate_when_nothing_declares_a_weight() {
+        let results = vec![
+            weighted_result(true, false, None),
+            weighted_result(true, false, None),
+            weighted_result(true, false, None),
+            weighted_result(false, false, None),
+            weighted_result(true, true, None),
+        ];
+
+        assert_eq!(case_score(&results), Some(0.75));
+        assert_eq!(case_score(&results), GradingCounts::tally(&results).pass_rate());
+    }
+
+    /// An undeclared weight must not be constructible from a build that never
+    /// wrote one, so the field cannot appear where nothing asked for it.
+    #[test]
+    fn an_unweighted_result_is_absent_from_the_serialized_json() {
+        let result = weighted_result(true, false, None);
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("\"weight\""));
     }
 
     fn suite_from(json: &str) -> EvalSuite {
@@ -2013,6 +3201,617 @@ mod tests {
     }
 
     #[test]
+    fn a_declared_baseline_grader_needs_a_judge_under_auto() {
+        let suite = suite_from(
+            r#"{
+                "schema_version": 3,
+                "skill_name": "demo-skill",
+                "evals": [
+                    {
+                        "id": "case-a",
+                        "prompt": "p",
+                        "expected_output": "o",
+                        "graders": [{"type": "baseline", "reference": "golden.md", "criterion": "is as complete"}]
+                    }
+                ]
+            }"#,
+        );
+        let options = GradeOptions {
+            grader: GraderMode::Auto,
+            ..GradeOptions::default()
+        };
+
+        assert!(
+            suite_needs_a_judge(&options, &suite),
+            "a comparison is a judgement call, so the credential is demanded before the first run is graded"
+        );
+        let err = GradeSession::open(&options, &suite).unwrap_err();
+        assert!(err.to_string().contains("--grader-model"), "{err}");
+    }
+
+    #[test]
+    fn a_baseline_comparison_is_put_to_the_judge_blind_and_the_same_way_every_time() {
+        let pairing = BaselinePairing::for_criterion("case-a", "is as complete");
+        let outputs = pairing.outputs("what the run wrote", "the reference", TruncateDirection::Head);
+
+        assert_eq!(outputs.len(), 2, "the judge is shown both sides and nothing else");
+        assert_eq!(
+            outputs.keys().copied().collect::<Vec<_>>(),
+            vec!["A", "B"],
+            "the labels carry no hint of which side is which"
+        );
+        assert_eq!(outputs[pairing.run.as_str()], "what the run wrote");
+        assert_eq!(outputs[pairing.reference().as_str()], "the reference");
+        assert_ne!(pairing.run, pairing.reference());
+
+        assert_eq!(
+            pairing,
+            BaselinePairing::for_criterion("case-a", "is as complete"),
+            "re-grading a report must ask the judge the question it asked before, not its mirror"
+        );
+    }
+
+    #[test]
+    fn which_side_a_baseline_puts_first_is_decided_by_the_case_and_the_criterion() {
+        let pairings: Vec<BlindLabel> = [
+            "is as complete",
+            "is as well organized",
+            "is as precise",
+            "reads as well",
+        ]
+        .into_iter()
+        .map(|criterion| BaselinePairing::for_criterion("case-a", criterion).run)
+        .collect();
+
+        assert!(
+            pairings.contains(&BlindLabel::A) && pairings.contains(&BlindLabel::B),
+            "a fixed position would leave every comparison carrying the judge's position bias, got {pairings:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_the_judge_cannot_separate_from_its_baseline_has_met_it() {
+        for run in [BlindLabel::A, BlindLabel::B] {
+            let pairing = BaselinePairing { run };
+            let reference = pairing.reference();
+
+            assert!(
+                pairing.at_least_as_good(ComparisonWinner::Tie),
+                "at least as good is met by a tie, or no baseline could ever be held"
+            );
+            assert!(pairing.at_least_as_good(winner_of(run)));
+            assert!(!pairing.at_least_as_good(winner_of(reference)));
+        }
+    }
+
+    fn winner_of(label: BlindLabel) -> ComparisonWinner {
+        match label {
+            BlindLabel::A => ComparisonWinner::A,
+            BlindLabel::B => ComparisonWinner::B,
+        }
+    }
+
+    #[test]
+    fn both_sides_of_a_baseline_comparison_are_clipped_to_the_same_size() {
+        let pairing = BaselinePairing::for_criterion("case-a", "is as complete");
+        let run = "r".repeat(BaselinePairing::SIDE_BYTES * 2);
+        let reference = "f".repeat(BaselinePairing::SIDE_BYTES * 4);
+
+        let outputs = pairing.outputs(&run, &reference, TruncateDirection::Head);
+
+        let shown = |label: BlindLabel| outputs[label.as_str()].len();
+        assert_eq!(
+            shown(pairing.run),
+            shown(pairing.reference()),
+            "reading one side whole and the other clipped compares two different things"
+        );
+        assert!(shown(pairing.run) < run.len());
+    }
+
+    #[test]
+    fn a_short_baseline_reference_is_never_clipped_to_make_room_for_a_long_run() {
+        let pairing = BaselinePairing::for_criterion("case-a", "is as complete");
+        let reference = "the whole reference answer";
+
+        let outputs = pairing.outputs(
+            &"r".repeat(BaselinePairing::SIDE_BYTES * 3),
+            reference,
+            TruncateDirection::Head,
+        );
+
+        assert_eq!(outputs[pairing.reference().as_str()], reference);
+    }
+
+    fn run_record_with_artifacts(artifacts: Vec<serde_json::Value>) -> RunRecord {
+        RunRecord {
+            id: "run-001".to_string(),
+            eval_case_id: "case-a".to_string(),
+            eval_slug: "case-a".to_string(),
+            scenario_id: ScenarioKind::WithSkill,
+            iteration: 1,
+            model_config_id: "ci-default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt: 1,
+            failure_kind: None,
+            runner_invocations: 1,
+            status: "completed".to_string(),
+            paths: RunPaths {
+                workspace: "runs/run-001/workspace".to_string(),
+                outputs: "runs/run-001/workspace/outputs".to_string(),
+            },
+            mirror_path: "iteration-1/eval-case-a/with-skill/".to_string(),
+            artifacts,
+            metrics: RunMetrics {
+                duration_ms: Some(1),
+                exit_code: Some(0),
+                total_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cost_usd: None,
+            },
+            cache: None,
+            skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
+            warnings: Vec::new(),
+            mock_violations: Vec::new(),
+            case_score: None,
+        }
+    }
+
+    #[test]
+    fn created_files_from_artifacts_strips_a_mismatched_outputs_prefix() {
+        let mut run = run_record_with_artifacts(vec![serde_json::json!({
+            "kind": "output",
+            "path": "runs/run-001/workspace/outputs/report.md",
+            "size_bytes": 4,
+            "sha256": "abc",
+        })]);
+        run.paths.outputs = "runs/run-001/workspace/outputs/".to_string();
+
+        let created = created_files_from_artifacts(&run);
+
+        assert_eq!(
+            created,
+            vec!["report.md".to_string()],
+            "a path-aware strip must not be defeated by a trailing separator on the outputs root"
+        );
+    }
+
+    #[test]
+    fn created_files_from_artifacts_strips_the_outputs_prefix_and_ignores_other_kinds() {
+        let run = run_record_with_artifacts(vec![
+            serde_json::json!({
+                "kind": "output",
+                "path": "runs/run-001/workspace/outputs/report.md",
+                "size_bytes": 4,
+                "sha256": "abc",
+            }),
+            serde_json::json!({
+                "kind": "output",
+                "path": "runs/run-001/workspace/outputs/sub/data.json",
+                "size_bytes": 2,
+                "sha256": "def",
+            }),
+            serde_json::json!({
+                "kind": "transcript",
+                "path": "runs/run-001/transcript.jsonl",
+            }),
+        ]);
+
+        let created = created_files_from_artifacts(&run);
+
+        assert_eq!(created, vec!["report.md".to_string(), "sub/data.json".to_string()]);
+    }
+
+    fn declarative_context(final_text: &str, raw_transcript: &str) -> DeclarativeContext {
+        DeclarativeContext {
+            final_text: final_text.to_string(),
+            raw_transcript: raw_transcript.to_string(),
+            transcript: None,
+        }
+    }
+
+    #[test]
+    fn the_default_target_reproduces_the_pre_target_payload_shape() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
+        let declarative = declarative_context("the final answer", "irrelevant to this target");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "final_text": "the final answer",
+                "outputs": {"out.txt": "an output file"},
+            })
+        );
+    }
+
+    #[test]
+    fn any_output_target_uses_the_same_structured_shape_as_the_default() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
+        let declarative = declarative_context("the final answer", "irrelevant to this target");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "final_text": "the final answer",
+                "outputs": {"out.txt": "an output file"},
+            })
+        );
+    }
+
+    #[test]
+    fn any_output_walks_nested_output_files_but_the_default_final_text_target_does_not() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("out.txt"), "top level").unwrap();
+        fs::create_dir_all(ctx.outputs_dir.join("sub")).unwrap();
+        fs::write(ctx.outputs_dir.join("sub").join("nested.txt"), "buried").unwrap();
+        let declarative = declarative_context("the final answer", "irrelevant to this target");
+
+        let any_output = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let any_output: serde_json::Value = serde_json::from_str(&any_output).unwrap();
+        assert_eq!(
+            any_output["outputs"],
+            serde_json::json!({"out.txt": "top level", "sub/nested.txt": "buried"}),
+            "any_output must see everything the mechanical grader's collect_text would see"
+        );
+
+        let final_text = llm_grader_payload("the assertion", &GradeTarget::FinalText, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let final_text: serde_json::Value = serde_json::from_str(&final_text).unwrap();
+        assert_eq!(
+            final_text["outputs"],
+            serde_json::json!({"out.txt": "top level"}),
+            "final_text keeps the pre-target, top-level-only scope"
+        );
+    }
+
+    #[test]
+    fn transcript_target_names_itself_and_carries_the_transcript() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let declarative = declarative_context("the final answer", "the agent read the config then wrote it back");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "target": "transcript",
+                "content": "the agent read the config then wrote it back",
+            })
+        );
+    }
+
+    #[test]
+    fn file_target_reports_missing_reason_when_the_file_does_not_exist() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let declarative = declarative_context("the final answer", "");
+
+        let path: RelativeSkillPath = serde_json::from_value(serde_json::json!("missing.json")).unwrap();
+        let target = GradeTarget::File(path);
+        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["assertion"], "the assertion");
+        assert_eq!(value["target"], "file 'missing.json'");
+        assert!(value.get("content").is_none());
+        assert!(value["missing_reason"].as_str().unwrap().contains("missing.json"));
+    }
+
+    #[test]
+    fn a_file_target_pointing_at_a_picture_attaches_it_instead_of_failing_to_read_it_as_text() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(
+            ctx.outputs_dir.join("screenshot.png"),
+            [0x89, 0x50, 0x4E, 0x47, 1, 2, 3],
+        )
+        .unwrap();
+        let declarative = declarative_context("the final answer", "");
+
+        let path: RelativeSkillPath = serde_json::from_value(serde_json::json!("screenshot.png")).unwrap();
+        let target = GradeTarget::File(path);
+        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx).unwrap();
+
+        assert!(
+            payload.image.is_some(),
+            "a picture target must carry an image attachment for the judge to see"
+        );
+        let value: serde_json::Value = serde_json::from_str(&payload.text).unwrap();
+        assert!(
+            value.get("missing_reason").is_none(),
+            "an image target must not be reported as unreadable: {value}"
+        );
+    }
+
+    #[test]
+    fn created_files_target_lists_what_the_run_produced() {
+        let tmp = tempdir().unwrap();
+        let mut ctx = ctx_with_outputs(tmp.path());
+        ctx.created_files = vec!["report.md".to_string(), "sub/data.json".to_string()];
+        let declarative = declarative_context("the final answer", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::CreatedFiles, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "assertion": "the assertion",
+                "target": "created files",
+                "content": "report.md\nsub/data.json",
+            })
+        );
+    }
+
+    #[test]
+    fn payload_budget_divides_across_every_artifact_and_flags_what_it_drops() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        // Far larger than the whole request budget, so this artifact alone
+        // must be truncated no matter how the remaining budget is split.
+        let oversized = "a".repeat(PayloadBudget::TOTAL_BYTES * 5);
+        fs::write(ctx.outputs_dir.join("a.txt"), &oversized).unwrap();
+        fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
+        let declarative = declarative_context("c", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        let a = value["outputs"]["a.txt"].as_str().unwrap();
+        assert!(
+            a.len() < oversized.len(),
+            "an oversized artifact must be truncated, got {} bytes back unchanged",
+            a.len()
+        );
+        assert!(a.contains("[truncated after"), "truncation must stay visible: {a}");
+        // What b.txt received is whatever a.txt's truncation left unused,
+        // rolled forward, so its exact size depends on that share; only its
+        // content need survive untouched, since one byte never needs truncating.
+        assert_eq!(value["outputs"]["b.txt"], "b");
+        assert_eq!(value["final_text"], "c");
+        assert!(value.get("artifacts_omitted").is_none());
+    }
+
+    #[test]
+    fn an_artifact_needing_less_than_its_share_leaves_the_rest_for_the_one_after_it() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        // With 3 artifacts, final_text's initial share is TOTAL_BYTES / 3, but
+        // final_text ("c") needs almost none of it. a.txt is bigger than that
+        // fixed share, so it is only placed whole if the unused share rolled
+        // forward into a.txt's own share instead of being wasted.
+        let fixed_share = PayloadBudget::TOTAL_BYTES / 3;
+        let a_len = fixed_share + 500;
+        fs::write(ctx.outputs_dir.join("a.txt"), "a".repeat(a_len)).unwrap();
+        fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
+        let declarative = declarative_context("c", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        let a = value["outputs"]["a.txt"].as_str().unwrap();
+        assert_eq!(
+            a.len(),
+            a_len,
+            "a.txt fits within the rolled-forward share and must not be truncated: {a}"
+        );
+        assert!(!a.contains("[truncated after"));
+    }
+
+    #[test]
+    fn payload_budget_answers_a_placement_it_was_never_told_to_expect() {
+        let mut budget = PayloadBudget::new(1);
+
+        assert!(matches!(
+            budget.place("first", TruncateDirection::Head),
+            Placement::Whole(_)
+        ));
+        assert!(matches!(
+            budget.place("second", TruncateDirection::Head),
+            Placement::Whole(_)
+        ));
+    }
+
+    #[test]
+    fn payload_budget_omits_rather_than_silently_dropping_when_slots_outnumber_bytes() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        for i in 0..(PayloadBudget::TOTAL_BYTES + 10) {
+            fs::write(ctx.outputs_dir.join(format!("file-{i}.txt")), "x").unwrap();
+        }
+        let declarative = declarative_context("final", "");
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        let note = value["artifacts_omitted"]
+            .as_str()
+            .expect("omissions must be reported, not silent");
+        assert!(note.contains("omitted"));
+        // The budget's per-slot share is a non-decreasing ratio, so every omission
+        // sits in a prefix of the placement order: final_text plus the first ten
+        // output files (the ones seen while remaining_slots still exceeds 8000)
+        // before the ratio recovers to one byte per slot for the rest. A count
+        // that drifts from 11 means an artifact was silently dropped somewhere
+        // in the loop without being tallied.
+        assert!(
+            note.contains("11 artifact"),
+            "expected exactly 11 omissions (final_text plus the first ten output files): {note}"
+        );
+    }
+
+    #[test]
+    fn transcript_truncation_keeps_the_tail_not_the_head() {
+        let head = "A".repeat(50);
+        let tail = "B".repeat(50);
+        let long_transcript = format!("{head}{tail}");
+
+        let truncated = truncate(&long_transcript, 50, TruncateDirection::Tail);
+
+        assert!(!truncated.contains('A'), "the head must be dropped: {truncated}");
+        assert!(truncated.contains(&tail));
+    }
+
+    #[test]
+    fn transcript_truncation_keeps_the_first_and_last_message_and_names_what_it_drops() {
+        let first = "FIRST_MESSAGE".to_string();
+        let middle = "MIDDLE_MESSAGE_".repeat(400);
+        let last = "LAST_MESSAGE".to_string();
+        let long_transcript = format!("{first}\n{middle}\n{last}");
+
+        let truncated = truncate(&long_transcript, 100, TruncateDirection::Tail);
+
+        assert!(
+            truncated.contains(&first),
+            "the first message must survive so the judge sees how the run began: {truncated}"
+        );
+        assert!(
+            truncated.contains(&last),
+            "the last message must survive so the judge sees how the run ended: {truncated}"
+        );
+        assert!(
+            !truncated.contains(&middle),
+            "the dropped middle message must not appear: {truncated}"
+        );
+        assert!(
+            truncated.contains("omitted"),
+            "the elision must be visible rather than silent: {truncated}"
+        );
+    }
+
+    /// A transcript is written a line at a time, so it ends with a newline that the
+    /// join never writes back. Counted against the budget anyway, a transcript that is
+    /// over the cap by that byte and nothing else pays for it with a whole message.
+    #[test]
+    fn a_transcript_over_the_cap_by_only_its_trailing_newline_keeps_every_message() {
+        let messages = ["FIRST_MESSAGE", "MIDDLE_MESSAGE", "LAST_MESSAGE"];
+        let joined = messages.join("\n");
+        let transcript = format!("{joined}\n");
+        let cap = joined.len();
+        assert!(transcript.len() > cap, "the transcript is over the cap by its newline");
+
+        let truncated = truncate(&transcript, cap, TruncateDirection::Tail);
+
+        assert_eq!(
+            truncated, joined,
+            "nothing was over budget, so nothing may be dropped or annotated"
+        );
+    }
+
+    /// What is left over is whatever the tail did not spend, so an overstated tail
+    /// understates it. A first message that fits the room actually left is dropped and
+    /// reported as omitted.
+    #[test]
+    fn a_first_message_that_fits_the_leftover_budget_exactly_is_kept() {
+        let first = "FIRST";
+        let last = "LAST";
+        let transcript = format!("{first}\n{}\n{last}", "M".repeat(100));
+        let cap = first.len() + 1 + last.len();
+
+        let truncated = truncate(&transcript, cap, TruncateDirection::Tail);
+
+        assert!(
+            truncated.contains(first),
+            "the first message fits the room left, so the judge must still see how the run began: {truncated}"
+        );
+        assert!(truncated.contains(last), "the tail must survive: {truncated}");
+        assert!(
+            !truncated.contains("from the start"),
+            "the first message was kept, so nothing was omitted from the start: {truncated}"
+        );
+    }
+
+    /// The other side of the same boundary: the newline the first message is joined by
+    /// is a real byte, so a first message that would fit only without it does not fit,
+    /// and keeping it would spend more of the judge's budget than the cap allows.
+    #[test]
+    fn a_first_message_one_byte_past_the_leftover_budget_is_not_kept() {
+        let first = "FIRSTX";
+        let last = "LAST";
+        let transcript = format!("{first}\n{}\n{last}", "M".repeat(100));
+        let cap = first.len() + last.len();
+
+        let truncated = truncate(&transcript, cap, TruncateDirection::Tail);
+
+        assert!(
+            !truncated.contains(first),
+            "the first message is one byte past what is left, so it cannot be kept: {truncated}"
+        );
+        assert!(
+            truncated.contains("from the start"),
+            "dropping the opening of the run must be said out loud: {truncated}"
+        );
+    }
+
+    #[test]
+    fn an_oversized_transcript_reaches_the_judge_tail_truncated_via_the_full_payload() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let head = "A".repeat(50);
+        let tail = "B".repeat(PayloadBudget::TOTAL_BYTES + 100);
+        let declarative = declarative_context("final", &format!("{head}{tail}"));
+
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx)
+            .unwrap()
+            .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let content = value["content"].as_str().unwrap();
+
+        assert!(
+            !content.contains('A'),
+            "the head must be dropped through the full payload path: {content}"
+        );
+    }
+
+    #[test]
+    fn final_text_truncation_keeps_the_head_not_the_tail() {
+        let head = "A".repeat(50);
+        let tail = "B".repeat(50);
+        let long_text = format!("{head}{tail}");
+
+        let truncated = truncate(&long_text, 50, TruncateDirection::Head);
+
+        assert!(!truncated.contains('B'), "the tail must be dropped: {truncated}");
+        assert!(truncated.contains(&head));
+    }
+
+    #[test]
     fn a_free_text_assertion_no_mechanical_pattern_recognizes_needs_a_judge_under_auto() {
         let suite = suite_from(
             r#"{
@@ -2062,6 +3861,46 @@ mod tests {
     }
 
     #[test]
+    fn an_explicit_target_suppresses_the_mechanical_shortcut_even_when_the_criterion_parses_as_mechanical() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let declarative = declarative_context("done", "the agent reported that report.md exists");
+        let options = GradeOptions::default();
+        let session = GradeSession {
+            options: &options,
+            judge: None,
+        };
+
+        let mechanical_sounding = "report.md exists";
+
+        let defaulted = grade_with_llm(
+            mechanical_sounding,
+            &TargetDeclaration::Default,
+            &declarative,
+            &ctx,
+            &session,
+        );
+        assert!(
+            defaulted.is_ok(),
+            "a defaulted target should still take the mechanical shortcut without a judge: {defaulted:?}"
+        );
+        assert_eq!(defaulted.unwrap().grader.kind, GraderKind::Mechanical);
+
+        let declared = grade_with_llm(
+            mechanical_sounding,
+            &TargetDeclaration::Named(GradeTarget::Transcript),
+            &declarative,
+            &ctx,
+            &session,
+        );
+        let err = declared.expect_err("an explicit target must reach the judge instead of the mechanical shortcut");
+        assert!(
+            err.to_string().contains("no LLM judge was resolved"),
+            "expected the judge lookup to fail, got: {err}"
+        );
+    }
+
+    #[test]
     fn pass_rate_ignores_unsupported_results_so_an_unobservable_runner_cannot_lower_it() {
         let counts = GradingCounts::tally(&[
             AssertionGradeResult {
@@ -2077,7 +3916,9 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                ungraded: None,
                 votes: None,
+                weight: None,
             },
             AssertionGradeResult {
                 name: None,
@@ -2092,7 +3933,9 @@ mod tests {
                 rationale: None,
                 unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
                 excluded: None,
+                ungraded: None,
                 votes: None,
+                weight: None,
             },
         ]);
 
@@ -2119,7 +3962,9 @@ mod tests {
             rationale: None,
             unsupported: Some("runner 'codex' does not expose tool calls".to_string()),
             excluded: None,
+            ungraded: None,
             votes: None,
+            weight: None,
         }]);
 
         assert_eq!(counts.scored(), 0);
@@ -2155,6 +4000,105 @@ mod tests {
         assert_eq!(clean.describe_not_completed(), None);
     }
 
+    fn result_for_test(assertion: &str, passed: bool) -> AssertionGradeResult {
+        AssertionGradeResult {
+            name: None,
+            assertion: assertion.to_string(),
+            passed,
+            evidence: "e".to_string(),
+            grader: GraderInfo {
+                kind: GraderKind::Mechanical,
+                model: None,
+                command: None,
+            },
+            rationale: None,
+            unsupported: None,
+            excluded: None,
+            ungraded: None,
+            votes: None,
+            weight: None,
+        }
+    }
+
+    #[test]
+    fn an_assertion_nothing_could_grade_is_not_counted_as_a_failure() {
+        let results = vec![
+            result_for_test("a", true),
+            needs_llm_result("b", "grader mode is none, so no judge was consulted"),
+        ];
+
+        let counts = GradingCounts::tally(&results);
+
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(
+            counts.failed, 0,
+            "an assertion no grader could attempt is not evidence the skill failed it"
+        );
+        assert_eq!(counts.passed, 1);
+        assert_eq!(counts.scored(), 1);
+
+        let summary = counts.summary();
+        assert_eq!(summary.ungraded, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(
+            summary.pass_rate,
+            Some(1.0),
+            "pass_rate is over the scored assertions, so an ungraded one cannot dilute it"
+        );
+    }
+
+    /// An arm-scoped check that nothing could attempt carries the excluded and the
+    /// ungraded marker at once, so every count taken over those markers has to agree
+    /// on which one wins. Excluded wins, because a check nobody was going to score
+    /// loses nothing by also having been unanswerable. The list and the number are
+    /// asserted together: letting them drift is how a report names assertions that
+    /// the figure printed beside them does not count.
+    #[test]
+    fn an_excluded_assertion_that_nothing_attempted_is_counted_and_listed_the_same_way() {
+        let mut unattempted_and_out_of_scope = needs_llm_result("b", "no judge was consulted");
+        unattempted_and_out_of_scope.excluded = Some("scored in the with-skill arm only".to_string());
+        let results = vec![
+            result_for_test("a", true),
+            unattempted_and_out_of_scope,
+            needs_llm_result("c", "no judge was consulted"),
+        ];
+
+        assert!(
+            results[1].is_ungraded(),
+            "the ungraded marker is still there for a second predicate to misread"
+        );
+        assert_eq!(results[1].outcome(), AssertionOutcome::Excluded);
+
+        let counts = GradingCounts::tally(&results);
+        assert_eq!(counts.excluded, 1);
+        assert_eq!(counts.ungraded, 1, "only the check that was in scope went unmeasured");
+        assert_eq!(counts.failed, 0);
+
+        let listed = ungraded_assertion_texts(&results);
+        assert_eq!(
+            listed.len(),
+            counts.ungraded,
+            "the assertions listed as ungraded must be the ones the count counted"
+        );
+        assert_eq!(listed, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn every_assertion_going_ungraded_leaves_no_pass_rate_at_all() {
+        let results = vec![needs_llm_result("a", "no judge was consulted")];
+
+        let counts = GradingCounts::tally(&results);
+
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.scored(), 0);
+        assert_eq!(
+            counts.pass_rate(),
+            None,
+            "nothing answered is not the same result as everything failed"
+        );
+    }
+
     #[test]
     fn a_run_with_no_mcp_servers_control_is_skipped_rather_than_graded() {
         let temp = tempdir().unwrap();
@@ -2163,8 +4107,7 @@ mod tests {
         let report_path = report_dir.join("report.json");
         let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
         document["runs"][0]["status"] = serde_json::json!("skipped");
-        document["runs"][0]["failure_kind"] =
-            serde_json::json!(crate::agentskills::runner::FAILURE_KIND_MCP_UNSUPPORTED);
+        document["runs"][0]["failure_kind"] = serde_json::json!(crate::agentskills::runner::FAILURE_KIND_UNSUPPORTED);
         fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
 
         let report = grade_report_bundle(
@@ -2253,7 +4196,7 @@ mod tests {
         assert_eq!(report.excluded, 0);
         assert_eq!(report.passed, 1);
         assert_eq!(report.failed, 0);
-        assert_eq!(report.needs_llm, 0);
+        assert_eq!(report.ungraded, 0);
         assert_eq!(report.run_statuses.skipped, 1);
         assert_eq!(report.run_statuses.completed, 0);
         assert_eq!(
@@ -2299,6 +4242,8 @@ mod tests {
             workspace_dir: workspace,
             outputs_dir: outputs,
             transcript_path: run_dir.join("transcript.jsonl"),
+            skill_dir: dir.join("skill"),
+            created_files: Vec::new(),
         }
     }
 
@@ -2432,6 +4377,148 @@ mod tests {
     }
 
     #[test]
+    fn parse_schema_validation_separates_the_schema_name_from_the_target_clause() {
+        let kind = parse_mechanical_kind("output.json validates against schema report for outputs/output.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "report" && path == "outputs/output.json"
+        ));
+    }
+
+    #[test]
+    fn parse_schema_validation_for_a_path_alone_names_no_schema() {
+        let kind = parse_mechanical_kind("schema validation for outputs/output.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation { schema: None, .. })
+        ));
+    }
+
+    #[test]
+    fn a_prose_schema_form_grades_the_target_it_names() {
+        let kind = parse_mechanical_kind("outputs/report.json validates against schema schemas/report.schema.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/report.schema.json" && path == "outputs/report.json"
+        ));
+    }
+
+    #[test]
+    fn a_quoted_prose_schema_name_is_read_without_its_quotes() {
+        let kind = parse_mechanical_kind("outputs/report.json validates against schema \"schemas/Report.schema.json\"");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/Report.schema.json" && path == "outputs/report.json"
+        ));
+    }
+
+    #[test]
+    fn a_quoted_prose_schema_target_is_read_without_its_quotes() {
+        let kind = parse_mechanical_kind("validates against schema report.schema.json for \"outputs/a report.json\"");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "report.schema.json" && path == "outputs/a report.json"
+        ));
+    }
+
+    /// An apostrophe inside a name is not a quote to strip, and a lone leading quote is not
+    /// a pair. Trimming every quote character at both ends got both of these wrong.
+    #[test]
+    fn unquoting_a_captured_name_leaves_an_unpaired_quote_alone() {
+        assert_eq!(unquote("\"schema.json\""), "schema.json");
+        assert_eq!(unquote("'schema.json'"), "schema.json");
+        assert_eq!(unquote("\"schema.json"), "\"schema.json");
+        assert_eq!(unquote("yordis's report.json"), "yordis's report.json");
+        assert_eq!(unquote("\""), "\"");
+    }
+
+    #[test]
+    fn a_prose_schema_name_and_target_keep_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind("outputs/Report.json validates against schema schemas/Report.schema.json");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::SchemaValidation {
+                schema: Some(ref schema),
+                path: Some(ref path),
+            }) if schema == "schemas/Report.schema.json" && path == "outputs/Report.json"
+        ));
+    }
+
+    #[test]
+    fn a_prose_target_keeps_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind(r#"contains "Hello World" in outputs/Report.md"#);
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::ContainsString {
+                ref needle,
+                path: Some(ref path),
+            }) if needle == "Hello World" && path == "outputs/Report.md"
+        ));
+    }
+
+    #[test]
+    fn a_prose_regex_keeps_the_case_the_author_wrote() {
+        let kind = parse_mechanical_kind("outputs/Report.md matches /Error [0-9]+/");
+        assert!(matches!(
+            kind,
+            Some(MechanicalKind::MatchesRegex {
+                ref pattern,
+                path: Some(ref path),
+            }) if pattern == "Error [0-9]+" && path == "outputs/Report.md"
+        ));
+    }
+
+    #[test]
+    fn mechanical_schema_validation_is_an_authoring_error_when_no_schema_is_named() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
+
+        let kind = MechanicalKind::SchemaValidation {
+            schema: None,
+            path: Some("output.json".to_string()),
+        };
+        let err = evaluate_mechanical(&kind, &ctx).unwrap_err();
+        assert!(err.to_string().contains("does not name a schema"), "{err}");
+    }
+
+    #[test]
+    fn mechanical_schema_validation_resolves_the_schema_against_the_skill_directory() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::create_dir_all(&ctx.skill_dir).unwrap();
+        fs::write(
+            ctx.skill_dir.join("report.schema.json"),
+            r#"{"type": "object", "required": ["ok"]}"#,
+        )
+        .unwrap();
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
+
+        let kind = MechanicalKind::SchemaValidation {
+            schema: Some("report.schema.json".to_string()),
+            path: Some("output.json".to_string()),
+        };
+        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
+        assert!(passed);
+
+        fs::write(ctx.outputs_dir.join("output.json"), r#"{"nope": true}"#).unwrap();
+        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
+        assert!(!passed);
+    }
+
+    #[test]
     fn mechanical_valid_csv() {
         let tmp = tempdir().unwrap();
         let ctx = ctx_with_outputs(tmp.path());
@@ -2549,7 +4636,9 @@ mod tests {
                 rationale: None,
                 unsupported: None,
                 excluded: None,
+                ungraded: None,
                 votes: None,
+                weight: None,
             }],
             summary: GradingSummary {
                 passed: 1,
@@ -2557,6 +4646,7 @@ mod tests {
                 total: 1,
                 unsupported: 0,
                 excluded: 0,
+                ungraded: 0,
                 pass_rate: Some(1.0),
             },
         };
@@ -2599,10 +4689,270 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         }))
         .unwrap();
 
-        let result = grade_with_script("custom assertion", &eval_case, &ctx, &options).unwrap();
+        let result = grade_with_script("custom assertion", None, &eval_case, &ctx, &options).unwrap();
         assert!(result.passed);
         assert_eq!(result.grader.kind, GraderKind::Script);
         assert!(result.evidence.contains("script verified"));
+    }
+
+    fn baseline_case() -> EvalCase {
+        serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+        }))
+        .unwrap()
+    }
+
+    fn reference_in(dir: &Path, text: &str) -> BaselineReference {
+        let resolved = dir.join("golden.md");
+        fs::create_dir_all(dir).unwrap();
+        fs::write(&resolved, text).unwrap();
+        BaselineReference::read(
+            &serde_json::from_value(serde_json::json!("golden.md")).unwrap(),
+            &resolved,
+        )
+        .unwrap()
+    }
+
+    /// A run that produced nothing is not at least as good as a reference that
+    /// exists, and there is nothing for a judge to read but the absence. Billing one
+    /// to be told so is the cost half of the same mistake.
+    #[test]
+    fn a_run_that_produced_nothing_falls_short_of_its_baseline_without_a_judge_being_asked() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let reference = reference_in(&ctx.skill_dir, "The reference answer.\n");
+        let options = GradeOptions {
+            grader: GraderMode::Llm,
+            ..GradeOptions::default()
+        };
+        let session = GradeSession {
+            options: &options,
+            judge: None,
+        };
+
+        let result = grade_against_baseline(
+            "final text is at least as good as baseline 'golden.md' on: is as complete",
+            "is as complete",
+            &GradeTarget::File(serde_json::from_value(serde_json::json!("missing.json")).unwrap()),
+            &reference,
+            &baseline_case(),
+            &DeclarativeContext::load(&ctx),
+            &ctx,
+            &session,
+        )
+        .unwrap();
+
+        assert!(!result.passed);
+        assert_eq!(result.grader.kind, GraderKind::Declarative);
+        assert!(result.grader.model.is_none(), "no judge answered this one");
+    }
+
+    #[test]
+    fn a_run_whose_output_is_empty_falls_short_of_its_baseline_without_a_judge_being_asked() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let reference = reference_in(&ctx.skill_dir, "The reference answer.\n");
+        let options = GradeOptions {
+            grader: GraderMode::Llm,
+            ..GradeOptions::default()
+        };
+        let session = GradeSession {
+            options: &options,
+            judge: None,
+        };
+
+        let result = grade_against_baseline(
+            "final text is at least as good as baseline 'golden.md' on: is as complete",
+            "is as complete",
+            &GradeTarget::FinalText,
+            &reference,
+            &baseline_case(),
+            &DeclarativeContext::load(&ctx),
+            &ctx,
+            &session,
+        )
+        .unwrap();
+
+        assert!(!result.passed, "nothing is not at least as good as a baseline");
+        assert!(result.grader.model.is_none(), "no judge was billed for an empty run");
+    }
+
+    #[test]
+    fn a_baseline_graded_by_script_hands_the_script_what_it_must_compare_against() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/bash
+payload=$(cat)
+case "$payload" in
+  *"The reference answer."*) echo '{"passed": true, "evidence": "the reference reached the script"}' ;;
+  *) echo '{"passed": false, "evidence": "the script was asked to compare against nothing"}' ;;
+esac
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let reference = reference_in(&ctx.skill_dir, "The reference answer.\n");
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            ..GradeOptions::default()
+        };
+
+        let result = grade_with_script("is as complete", Some(&reference), &baseline_case(), &ctx, &options).unwrap();
+
+        assert!(result.passed, "{}", result.evidence);
+    }
+
+    /// A crash is not a verdict. Counting a broken grader as a failed assertion reports that
+    /// the skill did the wrong thing on the strength of evidence that says nothing about the
+    /// skill at all.
+    #[test]
+    fn a_crashed_grader_script_grades_nothing_rather_than_failing_the_assertion() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("broken-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+echo 'grader could not reach the model' >&2
+exit 3
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
+            grader_model: None,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
+            strict: false,
+        };
+        let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+        }))
+        .unwrap();
+
+        let result = grade_with_script("custom assertion", None, &eval_case, &ctx, &options).unwrap();
+
+        assert!(
+            result.is_ungraded(),
+            "a grader that never exited cleanly attempted nothing"
+        );
+        assert!(!result.is_scored());
+        assert!(result.evidence.contains("grader could not reach the model"));
+
+        let counts = GradingCounts::tally(std::slice::from_ref(&result));
+        assert_eq!(counts.ungraded, 1);
+        assert_eq!(counts.failed, 0, "a broken grader must not read as the skill failing");
+    }
+
+    /// A payload too large for the pipe buffer cannot be handed over without the script reading
+    /// it, so the script exiting first closes the pipe every time rather than only when it wins
+    /// a race. That is the shape a real grader crash takes, and it must still reach a verdict.
+    #[test]
+    fn a_grader_that_exits_without_reading_its_payload_is_answered_by_its_exit_status() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("deaf-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+echo 'grader refused the payload' >&2
+exit 4
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ctx = ctx_with_outputs(tmp.path());
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_provider: JudgeProvider::default(),
+            grader_model: None,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            grader_votes: JudgeVotes::single(),
+            strict: false,
+        };
+        let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "case",
+            "prompt": "prompt long enough",
+            "expected_output": "expected output",
+            "assertions": ["custom assertion"],
+            "grader_hints": { "blob": "x".repeat(512 * 1024) },
+        }))
+        .unwrap();
+
+        let result = grade_with_script("custom assertion", None, &eval_case, &ctx, &options).unwrap();
+
+        assert!(
+            result.is_ungraded(),
+            "a grader that never exited cleanly attempted nothing"
+        );
+        assert!(result.evidence.contains("grader refused the payload"));
+    }
+
+    /// Both pipes are filled past what they hold, in the one order that wedges a parent which
+    /// insists on finishing the write before it starts reading. The deadline is the assertion:
+    /// a regression here hangs rather than fails, and a hung test reports nothing at all.
+    #[test]
+    fn a_grader_printing_more_than_a_pipe_holds_does_not_wedge_the_harness() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("loud-grader.sh");
+        fs::write(
+            &script,
+            r#"#!/bin/sh
+awk 'BEGIN { while (i++ < 40000) print "padding for the stderr pipe" }' >&2
+echo '{"passed": true, "evidence": "script verified"}'
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let outputs = tmp.path().to_path_buf();
+        let command = script.to_string_lossy().into_owned();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ctx = ctx_with_outputs(&outputs);
+            let options = GradeOptions {
+                grader: GraderMode::Script,
+                grader_provider: JudgeProvider::default(),
+                grader_model: None,
+                grader_command: Some(command),
+                grader_votes: JudgeVotes::single(),
+                strict: false,
+            };
+            let eval_case: EvalCase = serde_json::from_value(serde_json::json!({
+                "id": "case",
+                "prompt": "prompt long enough",
+                "expected_output": "expected output",
+                "assertions": ["custom assertion"],
+                "grader_hints": { "blob": "x".repeat(512 * 1024) },
+            }))
+            .unwrap();
+            let _ =
+                done.send(grade_with_script("custom assertion", None, &eval_case, &ctx, &options).map(|r| r.passed));
+        });
+
+        match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(Ok(passed)) => assert!(passed, "the grader reported a pass once both pipes drained"),
+            Ok(Err(e)) => panic!("grading the loud script failed: {e}"),
+            Err(_) => panic!("the harness and the grader each waited on a pipe only the other could drain"),
+        }
     }
 
     fn result_with_votes(votes: Option<JudgeVoteTally>) -> AssertionGradeResult {
@@ -2619,7 +4969,9 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             rationale: None,
             unsupported: None,
             excluded: None,
+            ungraded: None,
             votes,
+            weight: None,
         }
     }
 
@@ -2655,5 +5007,96 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
         }))
         .unwrap();
         assert!(parsed.votes.is_none());
+    }
+
+    const READ_ONLY_FIXTURE_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {"type": "contains", "text": "all done"}
+                ]
+            }
+        ]
+    }"#;
+
+    fn single_run_report_dir(temp: &tempfile::TempDir) -> PathBuf {
+        let skill_dir = temp.path().join("demo-skill");
+        fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        let skill_md = "---\nname: demo-skill\ndescription: d\n---\n";
+        fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+        fs::write(skill_dir.join("evals/evals.json"), READ_ONLY_FIXTURE_SUITE).unwrap();
+
+        let mem = MemFS::new();
+        let mem_skill = Path::new("demo-skill");
+        mem.insert(mem_skill.join("SKILL.md"), skill_md);
+        mem.insert(mem_skill.join("evals/evals.json"), READ_ONLY_FIXTURE_SUITE);
+
+        let bundle = build_report_bundle(
+            &mem,
+            mem_skill,
+            &skill_dir,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            BuildReportOptions {
+                report_id: Some("report-read-only".to_string()),
+                generated_at: Some("2026-05-26T12:00:00Z".to_string()),
+                runner: Some("codex".to_string()),
+                ..BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+
+        let report_dir = write_report_bundle(&temp.path().join("out"), &bundle, WriteReportOptions::default()).unwrap();
+        let workspace = report_dir.join(&bundle.document.runs[0].paths.workspace);
+        let run_dir = workspace.parent().unwrap().to_path_buf();
+        fs::write(workspace.join("outputs").join(FINAL_MD), "all done\n").unwrap();
+        let transcript_path = run_dir.join("transcript.jsonl");
+        fs::write(&transcript_path, "{\"type\":\"turn.completed\"}\n").unwrap();
+        write_normalized_transcript(&transcript_path, &NormalizedTranscript::unavailable("codex")).unwrap();
+
+        report_dir
+    }
+
+    /// The run-level outcome field is what the grading layer turns into a failed case: this
+    /// proves that path end to end, including that the case cannot pass on the strength of
+    /// its own grader once a read-only fixture it was handed came back changed.
+    #[test]
+    fn a_read_only_fixture_violation_fails_the_case_even_when_its_own_grader_passes() {
+        let temp = tempdir().unwrap();
+        let report_dir = single_run_report_dir(&temp);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: ReportDocument = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document.runs[0].read_only_fixture_violations = vec!["evals/files/input.csv".to_string()];
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.passed, 1, "the case's own grader still passes");
+        assert_eq!(
+            report.failed, 1,
+            "a mutated read-only fixture fails the case regardless of what its own checks found"
+        );
+
+        let (_, grading) = &grading_files_by_scenario(&report_dir)[0];
+        let violation = grading
+            .assertion_results
+            .iter()
+            .find(|result| result.evidence.contains("evals/files/input.csv"))
+            .expect("the operator sees the fixture path, not just a count");
+        assert!(!violation.passed);
     }
 }
