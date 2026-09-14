@@ -2002,7 +2002,7 @@ together, never one without the other.
 
 | Control | `claude-code` | `codex` | `cursor-agent` |
 | ------- | ------------- | ------- | -------------- |
-| tool allowlist | `--allowedTools` (harness only) | no | no |
+| tool allowlist | `--allowedTools` | no | no |
 | turn cap | no | no | no |
 | system prompt append | `--append-system-prompt` (harness only) | no | no |
 | mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | no | no |

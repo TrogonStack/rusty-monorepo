@@ -333,6 +333,17 @@
     "EvalCase": {
       "additionalProperties": false,
       "properties": {
+        "allowed_tools": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "This case's own ceiling on what its run's harness may reach for.\n\nNarrows whatever the operator granted at the CLI; it can never widen it. Absent\nmeans the case adds no ceiling of its own, leaving the operator's grant whole."
+        },
         "assertions": {
           "default": [],
           "items": {
@@ -632,6 +643,14 @@
           "type": "string"
         }
       ]
+    },
+    "ToolGrant": {
+      "description": "A named, finite set of tools a run's harness may use.\n\nNever parsed as empty: naming zero tools is not how an operator or a case denies\nevery gated tool, since a grant with nothing in it reads in a report exactly like a\ngrant nobody declared. [`ToolGrant::narrowed_by`] is the one place an empty set is\nlegitimate, because it answers \"what do both sides admit\", not \"what was declared\".",
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
     },
     "ToolName": {
       "type": "string"

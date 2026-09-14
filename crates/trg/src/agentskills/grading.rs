@@ -3487,6 +3487,7 @@ mod tests {
                 outputs: "runs/run-001/workspace/outputs".to_string(),
             },
             mirror_path: "iteration-1/eval-case-a/with-skill/".to_string(),
+            tool_grant: None,
             artifacts,
             metrics: RunMetrics {
                 duration_ms: Some(1),

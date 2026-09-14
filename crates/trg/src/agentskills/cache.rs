@@ -10,6 +10,7 @@ use super::evals::EVAL_SUITE_DIR_NAME;
 use super::mocks::MOCK_CALLS_LOG_NAME;
 use super::report::{EnvironmentPolicy, PermissionGrant, RunRecord, ScenarioKind, SkillStaging};
 use super::runner::Runner;
+use super::tool_grant::ToolGrant;
 
 pub use super::prompt::PROMPT_CONTRACT_VERSION;
 
@@ -100,6 +101,14 @@ pub struct CacheKeyInput {
     /// reproducibility the grant exists to provide reported away by the cache.
     #[serde(default)]
     pub permission: PermissionGrant,
+    /// The tool grant the run's harness was actually given, once the operator's
+    /// ceiling and the case's own declaration are combined.
+    ///
+    /// A different grant can permit a different set of tool calls, so a run answers
+    /// only for the grant it ran under; serving it to a request under another grant
+    /// would report tool access the run never had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_grant: Option<ToolGrant>,
     #[serde(default)]
     pub skill_staging: SkillStaging,
     /// What the case's workspace scaffold said, for a case that declares one.
@@ -126,6 +135,11 @@ pub struct CacheKeyInput {
 /// It cannot forget the scaffold either, for the same reason it cannot forget the fixtures:
 /// both decide what was in the directory the run worked in, and a run answers only for the
 /// directory it was handed.
+///
+/// Nor the tool grant, for the same reason again. What a run could reach decides what it
+/// could do, so serving a run made under one grant to a request made under another answers
+/// a question nobody asked, and does it invisibly: the report would attribute the reused
+/// run the grant of the request rather than the grant it actually ran with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReuseKeyInput {
     pub eval_case_id: String,
@@ -138,6 +152,8 @@ pub struct ReuseKeyInput {
     pub attempt: u32,
     #[serde(default)]
     pub scaffold_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_grant: Option<ToolGrant>,
 }
 
 impl ReuseKeyInput {
@@ -151,6 +167,7 @@ impl ReuseKeyInput {
             scenario: key_input.scenario,
             attempt: key_input.attempt,
             scaffold_hash: key_input.scaffold_hash.clone(),
+            tool_grant: key_input.tool_grant.clone(),
         }
     }
 
@@ -368,6 +385,7 @@ pub fn apply_cache_hit(
         failure_kind,
         paths: _paths,
         mirror_path: _mirror_path,
+        tool_grant: _tool_grant,
         artifacts,
         metrics,
         cache: _cache,
@@ -530,6 +548,7 @@ mod tests {
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             environment: EnvironmentPolicy::default(),
             permission: PermissionGrant::default(),
+            tool_grant: None,
             skill_staging: SkillStaging::default(),
             scaffold_hash: None,
         }
@@ -678,6 +697,7 @@ mod tests {
                 outputs: format!("runs/{run_id}/workspace/outputs"),
             },
             mirror_path: format!("iteration-1/eval-{eval_case_id}/{}/", scenario.as_str()),
+            tool_grant: None,
             artifacts: vec![serde_json::json!({"kind":"transcript","path":format!("runs/{run_id}/transcript.jsonl")})],
             metrics: RunMetrics {
                 duration_ms: Some(42),
@@ -763,6 +783,7 @@ mod tests {
                 outputs: format!("runs/{run_id}/workspace/outputs"),
             },
             mirror_path: format!("iteration-1/eval-{eval_case_id}/with_skill/"),
+            tool_grant: None,
             artifacts: vec![serde_json::json!({"kind":"transcript","path":format!("runs/{run_id}/transcript.jsonl")})],
             metrics: RunMetrics {
                 duration_ms: Some(42),
@@ -892,6 +913,7 @@ mod tests {
                 outputs: "runs/run-001/workspace/outputs".to_string(),
             },
             mirror_path: "iteration-2/eval-one/with_skill/".to_string(),
+            tool_grant: None,
             artifacts: Vec::new(),
             metrics: RunMetrics {
                 duration_ms: None,
@@ -956,6 +978,7 @@ mod tests {
                 outputs: "runs/run-001/workspace/outputs".to_string(),
             },
             mirror_path: "iteration-2/eval-one/with_skill/".to_string(),
+            tool_grant: None,
             artifacts: Vec::new(),
             metrics: RunMetrics {
                 duration_ms: None,
@@ -1025,6 +1048,7 @@ mod tests {
                 outputs: "runs/run-001/workspace/outputs".to_string(),
             },
             mirror_path: "iteration-2/eval-one/with_skill/".to_string(),
+            tool_grant: None,
             artifacts: Vec::new(),
             metrics: RunMetrics {
                 duration_ms: None,
@@ -1142,6 +1166,54 @@ mod tests {
 
         let pointer = lookup_reuse(&out_dir, &ReuseKeyInput::of(&with_skill)).unwrap();
         assert_eq!(pointer.run_id, "run-001");
+    }
+
+    /// What a run could reach decides what it could do, which is the whole premise of
+    /// granting tools at all. Serving a run made under one grant to a request made under
+    /// another measures a skill against tool access it never had, and the report would
+    /// name the request's grant rather than the one the run really used.
+    #[test]
+    fn reuse_completed_does_not_serve_a_run_produced_under_another_tool_grant() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        fs::create_dir_all(&report_a).unwrap();
+        write_completed_run(&report_a, "run-001", "one", ScenarioKind::WithSkill);
+
+        let mut granted = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        granted.tool_grant = Some(ToolGrant::parse(["Read"]).unwrap());
+        record_completion(
+            &out_dir,
+            &CacheKey::from_input(&granted),
+            &granted,
+            &report_a,
+            "run-001",
+        )
+        .unwrap();
+
+        let pointer = lookup_reuse(&out_dir, &ReuseKeyInput::of(&granted)).unwrap();
+        assert_eq!(pointer.run_id, "run-001");
+
+        // A key mismatch evicts the slot, and every grant shares one slot, so each of these
+        // is asked of its own recording rather than of the leftovers of the last question.
+        for (label, grant) in [
+            (
+                "a wider grant is a different run",
+                Some(ToolGrant::parse(["Read", "Write"]).unwrap()),
+            ),
+            ("no grant at all is a different run again", None),
+        ] {
+            let temp = tempdir().unwrap();
+            let out_dir = temp.path().join("out");
+            let report = out_dir.join("demo/report-a");
+            fs::create_dir_all(&report).unwrap();
+            write_completed_run(&report, "run-001", "one", ScenarioKind::WithSkill);
+            record_completion(&out_dir, &CacheKey::from_input(&granted), &granted, &report, "run-001").unwrap();
+
+            let mut other = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+            other.tool_grant = grant;
+            assert!(lookup_reuse(&out_dir, &ReuseKeyInput::of(&other)).is_none(), "{label}");
+        }
     }
 
     /// What `--reuse-completed` is for: the run that answered this case under a different

@@ -791,6 +791,7 @@ mod tests {
                 runner_version: None,
                 environment: Default::default(),
                 permission: Default::default(),
+                allowed_tools: None,
                 ci: None::<CiSection>,
             },
             suite: SuiteSection {
@@ -828,6 +829,7 @@ mod tests {
                     outputs: "runs/run-001/workspace/outputs".to_string(),
                 },
                 mirror_path: "iteration-1/eval-case/with_skill/".to_string(),
+                tool_grant: None,
                 artifacts: vec![serde_json::json!({
                     "kind": "output",
                     "path": IMG_PAYLOAD,
@@ -966,6 +968,7 @@ mod tests {
                 outputs: "runs/run-001/workspace/outputs".to_string(),
             },
             mirror_path: "iteration-1/eval-case/with_skill/".to_string(),
+            tool_grant: None,
             artifacts: Vec::new(),
             metrics: RunMetrics::default(),
             cache: None,
