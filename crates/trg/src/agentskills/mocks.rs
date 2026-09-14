@@ -44,6 +44,8 @@ pub enum MocksError {
     },
     #[error("the mock server must be spawned by an absolute path, but `{path}` is relative")]
     RelativeMockServerBinary { path: PathBuf },
+    #[error("the materialized mcp config cannot be handed to a harness: {detail}")]
+    UnmaterializableConfig { detail: String },
     #[error("could not locate the running trg binary: {source}")]
     UnlocatableBinary { source: std::io::Error },
     #[error("{path}: `{{{{file:{reference}}}}}` does not resolve to a file")]
@@ -386,10 +388,66 @@ pub fn resolve_mock_set(skill_path: &Path, eval_dir: &EvalDirName, eval_id: &str
 pub const MOCK_CALLS_LOG_NAME: &str = "mock-calls.jsonl";
 const MATERIALIZED_MOCKS_DIR_NAME: &str = "mcp-mocks";
 const MCP_CONFIG_FILE_NAME: &str = "mcp-config.json";
+const MCP_CONFIG_TOML_FILE_NAME: &str = "mcp-config.toml";
 
-/// Materialize a resolved mock set for a run: one JSON file per declared tool, plus an
-/// `--mcp-config` document that points each declared server at its own invocation of the
-/// hidden `mock-server` subcommand. Returns the path to that config document.
+/// One mock server as a harness has to be told to start it: a command and its arguments.
+///
+/// The two harnesses that can be driven with mocks read that in two different file formats,
+/// so the table is built once and rendered twice. Building it per format is how the JSON a
+/// report keeps as the record of what was injected and the TOML a run actually injected
+/// would be free to disagree.
+#[derive(Debug, Clone, Serialize)]
+struct MockServerInvocation {
+    command: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CodexMcpServers {
+    mcp_servers: BTreeMap<String, MockServerInvocation>,
+}
+
+/// Where a run's materialized mock server table was written, in each of the formats a
+/// harness reads it from.
+///
+/// The two files always describe the same servers, so they are made together and travel
+/// together: a caller holding only one of them cannot pick the wrong one for its harness,
+/// and cannot reconstruct the other by guessing at a file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedMcpConfig {
+    json: PathBuf,
+    toml: PathBuf,
+}
+
+impl MaterializedMcpConfig {
+    /// Both paths are resolved by a child process with a working directory of its own, so
+    /// a relative one names a different file there than it does here.
+    pub fn parse(json: PathBuf, toml: PathBuf) -> Result<Self, String> {
+        for path in [&json, &toml] {
+            if !path.is_absolute() {
+                return Err(format!(
+                    "an mcp config is read by a child process, so `{}` must be absolute",
+                    path.display()
+                ));
+            }
+        }
+        Ok(Self { json, toml })
+    }
+
+    /// The `{"mcpServers": ...}` document claude-code reads through `--mcp-config`.
+    pub fn json(&self) -> &Path {
+        &self.json
+    }
+
+    /// The `[mcp_servers.*]` fragment codex reads as the `config.toml` of its config home.
+    pub fn toml(&self) -> &Path {
+        &self.toml
+    }
+}
+
+/// Materialize a resolved mock set for a run: one JSON file per declared tool, plus the
+/// mock server table in both of the formats a harness reads it from, each pointing every
+/// declared server at its own invocation of the hidden `mock-server` subcommand.
 ///
 /// The subcommand is handed only the JSON this function writes; it never re-parses suite
 /// markdown or re-applies a per-case override itself. That keeps the mock server process
@@ -399,7 +457,7 @@ pub fn materialize_mock_set(
     mock_set: &MockSet,
     run_dir: &Path,
     trg_binary: &MockServerBinary,
-) -> Result<PathBuf, MocksError> {
+) -> Result<MaterializedMcpConfig, MocksError> {
     // Every path written here is resolved by someone else: the harness reads the config
     // with its working directory set to the run's workspace, and it in turn spawns the
     // mock server. A relative `--out-dir` would have all of them resolve under the
@@ -409,7 +467,7 @@ pub fn materialize_mock_set(
     let mocks_dir = run_dir.join(MATERIALIZED_MOCKS_DIR_NAME);
     let calls_path = run_dir.join(MOCK_CALLS_LOG_NAME);
 
-    let mut mcp_servers = serde_json::Map::new();
+    let mut servers: BTreeMap<String, MockServerInvocation> = BTreeMap::new();
     for (server, tools) in &mock_set.servers {
         let server_dir = mocks_dir.join(server.as_str());
         create_dir(&server_dir)?;
@@ -419,31 +477,41 @@ pub fn materialize_mock_set(
             write_file(&tool_path, &json)?;
         }
 
-        mcp_servers.insert(
+        servers.insert(
             server.to_string(),
-            serde_json::json!({
-                "command": trg_binary.as_path().to_string_lossy(),
-                "args": [
-                    "ai",
-                    "skills",
-                    "eval",
-                    "mock-server",
-                    "--mocks",
-                    server_dir.to_string_lossy(),
-                    "--server",
-                    server.as_str(),
-                    "--calls",
-                    calls_path.to_string_lossy(),
+            MockServerInvocation {
+                command: trg_binary.as_path().to_string_lossy().into_owned(),
+                args: vec![
+                    "ai".to_string(),
+                    "skills".to_string(),
+                    "eval".to_string(),
+                    "mock-server".to_string(),
+                    "--mocks".to_string(),
+                    server_dir.to_string_lossy().into_owned(),
+                    "--server".to_string(),
+                    server.to_string(),
+                    "--calls".to_string(),
+                    calls_path.to_string_lossy().into_owned(),
                 ],
-            }),
+            },
         );
     }
 
-    let config = serde_json::json!({ "mcpServers": mcp_servers });
-    let config_path = run_dir.join(MCP_CONFIG_FILE_NAME);
-    let config_json = serde_json::to_string_pretty(&config).expect("mcp config serializes");
-    write_file(&config_path, &config_json)?;
-    Ok(config_path)
+    let json_path = run_dir.join(MCP_CONFIG_FILE_NAME);
+    let config = serde_json::json!({ "mcpServers": servers });
+    write_file(
+        &json_path,
+        &serde_json::to_string_pretty(&config).expect("mcp config serializes"),
+    )?;
+
+    let toml_path = run_dir.join(MCP_CONFIG_TOML_FILE_NAME);
+    let codex_config = CodexMcpServers { mcp_servers: servers };
+    write_file(
+        &toml_path,
+        &toml::to_string(&codex_config).expect("mcp config serializes as toml"),
+    )?;
+
+    MaterializedMcpConfig::parse(json_path, toml_path).map_err(|detail| MocksError::UnmaterializableConfig { detail })
 }
 
 /// The `trg` binary a mock server is spawned by, as a path that means the same thing from
@@ -1278,18 +1346,20 @@ mod tests {
             "the point of this test is a run directory that means different things from different places"
         );
 
-        let config_path = materialize_mock_set(
+        let config = materialize_mock_set(
             &mock_set,
             &run_dir,
             &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
         )
         .unwrap();
 
-        assert!(
-            config_path.is_absolute(),
-            "the harness is handed this path and reads it from the workspace, not from here"
-        );
-        let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        for path in [config.json(), config.toml()] {
+            assert!(
+                path.is_absolute(),
+                "the harness is handed this path and reads it from the workspace, not from here: {path:?}"
+            );
+        }
+        let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(config.json()).unwrap()).unwrap();
         let args: Vec<String> = config["mcpServers"]["github"]["args"]
             .as_array()
             .unwrap()
@@ -1384,7 +1454,7 @@ mod tests {
         let run_dir = temp.path().join("run-dir");
         let trg_binary = MockServerBinary::at("/usr/local/bin/trg").unwrap();
 
-        let config_path = materialize_mock_set(&mock_set, &run_dir, &trg_binary).unwrap();
+        let config = materialize_mock_set(&mock_set, &run_dir, &trg_binary).unwrap();
         let run_dir = run_dir.canonicalize().unwrap();
 
         let tool_json_path = run_dir.join("mcp-mocks/github/create_issue.json");
@@ -1392,8 +1462,8 @@ mod tests {
         let declaration: MockDeclaration = serde_json::from_str(&fs::read_to_string(&tool_json_path).unwrap()).unwrap();
         assert_eq!(declaration.body, "created");
 
-        let config: serde_json::Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-        let github_server = &config["mcpServers"]["github"];
+        let document: serde_json::Value = serde_json::from_str(&fs::read_to_string(config.json()).unwrap()).unwrap();
+        let github_server = &document["mcpServers"]["github"];
         assert_eq!(github_server["command"], "/usr/local/bin/trg");
         let args: Vec<String> = github_server["args"]
             .as_array()
@@ -1415,6 +1485,106 @@ mod tests {
                 "--calls",
                 run_dir.join(MOCK_CALLS_LOG_NAME).to_string_lossy().as_ref(),
             ]
+        );
+    }
+
+    /// The two files are the same server table in two formats, and the harness that reads
+    /// one never sees the other. Rendering them from separate builders is how the JSON a
+    /// report keeps as the record of what was injected and the TOML a codex run actually
+    /// injected would come to disagree without anything failing.
+    #[test]
+    fn the_toml_a_codex_run_is_given_names_the_same_servers_as_the_json_kept_beside_it() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\ncreated",
+        );
+        write_mock(
+            &skill.join("evals/mocks"),
+            "linear",
+            "search",
+            "---\ntype: fixed\n---\nfound",
+        );
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
+        let run_dir = temp.path().join("run-dir");
+
+        let config = materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+        )
+        .unwrap();
+
+        let from_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(config.json()).unwrap()).unwrap();
+        let from_toml: toml::Value = toml::from_str(&fs::read_to_string(config.toml()).unwrap())
+            .expect("the file handed to codex as its config.toml must parse as toml");
+
+        let json_servers = from_json["mcpServers"].as_object().expect("the json names servers");
+        let toml_servers = from_toml["mcp_servers"].as_table().expect("the toml names servers");
+        assert_eq!(json_servers.len(), toml_servers.len());
+        for (server, declared) in json_servers {
+            let mirrored = toml_servers
+                .get(server)
+                .unwrap_or_else(|| panic!("{server} is in both"));
+            assert_eq!(
+                declared["command"].as_str().unwrap(),
+                mirrored["command"].as_str().unwrap()
+            );
+            let json_args: Vec<&str> = declared["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|arg| arg.as_str().unwrap())
+                .collect();
+            let toml_args: Vec<&str> = mirrored["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|arg| arg.as_str().unwrap())
+                .collect();
+            assert_eq!(json_args, toml_args);
+        }
+    }
+
+    /// A run directory can sit under a path holding a quote, a backslash or a newline, and
+    /// every path in this table is one a child process has to open. A table rendered by
+    /// pasting strings together would hand codex a `config.toml` that either fails to parse
+    /// or names a different file than the one trg wrote.
+    #[test]
+    fn a_run_directory_whose_name_needs_escaping_still_names_the_same_paths_through_the_toml() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\ncreated",
+        );
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
+        let run_dir = temp.path().join(r#"run "dir" \ with	escapes"#);
+
+        let config = materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+        )
+        .unwrap();
+
+        let from_toml: toml::Value = toml::from_str(&fs::read_to_string(config.toml()).unwrap())
+            .expect("a run directory that needs escaping still produces parseable toml");
+        let args: Vec<&str> = from_toml["mcp_servers"]["github"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap())
+            .collect();
+        let mocks_position = args.iter().position(|arg| *arg == "--mocks").unwrap();
+        assert_eq!(
+            Path::new(args[mocks_position + 1]),
+            run_dir.canonicalize().unwrap().join("mcp-mocks/github")
         );
     }
 

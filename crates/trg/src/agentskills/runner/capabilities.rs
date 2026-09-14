@@ -1,10 +1,17 @@
 //! What each harness can be told to do, declared once rather than scattered across every
 //! call site that needs to know.
 //!
-//! Every cell in the table below was read off the harness's own `--help` on 2026-09-12.
-//! A cell may only change when the harness's help output changes; it must never be
-//! inferred from another harness or extrapolated from behaviour that was not read off
-//! `--help` directly.
+//! Every cell in the table below was read off the harness's own `--help` on 2026-09-12,
+//! except the codex `mcp servers` cell, read off `codex mcp add --help` on 2026-09-14
+//! together with a verified round trip of the `config.toml` that subcommand writes. A
+//! cell may only change when the harness's own help output or the config file shape it
+//! documents changes; it must never be inferred from another harness or extrapolated from
+//! behaviour that was not read off the harness directly.
+//!
+//! codex publishes no counterpart to claude-code's `--strict-mcp-config`: `-c` merges into
+//! the config home rather than replacing it, so the operator's own MCP servers stay live
+//! beside anything trg adds. That is why the codex `mcp servers` cell is only honoured
+//! where trg owns the config home, which is what `--environment isolated` creates.
 
 use super::Runner;
 
@@ -68,6 +75,15 @@ pub enum ControlMechanism {
         value: &'static str,
         guard: &'static str,
     },
+    /// A control delivered by writing a file into the harness's config home rather than by
+    /// anything on the command line.
+    ///
+    /// It carries no exclusivity of its own: whatever the config home already held is
+    /// still in force, so a run only gets what it declared when it owns that home.
+    ConfigFile {
+        home_var: &'static str,
+        file: &'static str,
+    },
 }
 
 impl ControlMechanism {
@@ -78,6 +94,7 @@ impl ControlMechanism {
             Self::EnvVar(var) => format!("`{var}`"),
             Self::Reported => "reported".to_string(),
             Self::GuardedFlag { value, guard } => format!("`{value}` (guarded by `{guard}`)"),
+            Self::ConfigFile { home_var, file } => format!("`{file}` in `${home_var}`"),
         }
     }
 }
@@ -119,6 +136,24 @@ impl ControlSupport {
         }
     }
 
+    /// The file in the harness's config home a `ConfigFile` cell is delivered through, so
+    /// a runner writes the name this table declares rather than one of its own.
+    pub fn config_file_name(self) -> Option<&'static str> {
+        match self {
+            Self::Driven(ControlMechanism::ConfigFile { file, .. }) => Some(file),
+            _ => None,
+        }
+    }
+
+    /// Whether this control is only honest once the run owns the harness's config home.
+    ///
+    /// A config file carries no exclusivity: the operator's own entries in that home stay
+    /// in force alongside the ones trg wrote, so a run under a config home trg does not
+    /// own is not the run the report would describe.
+    pub fn needs_run_owned_config_home(self) -> bool {
+        matches!(self, Self::Driven(ControlMechanism::ConfigFile { .. }))
+    }
+
     pub fn describe(self) -> String {
         match self {
             Self::Absent => "no".to_string(),
@@ -130,7 +165,7 @@ impl ControlSupport {
 
 impl Runner {
     pub fn support(self, control: HarnessControl) -> ControlSupport {
-        use ControlMechanism::{EnvVar, Flag, GuardedFlag, Reported, Subcommand};
+        use ControlMechanism::{ConfigFile, EnvVar, Flag, GuardedFlag, Reported, Subcommand};
 
         match (self, control) {
             (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Driven(Flag("--allowedTools")),
@@ -157,7 +192,10 @@ impl Runner {
             (Self::Codex, HarnessControl::ToolAllowlist) => ControlSupport::Absent,
             (Self::Codex, HarnessControl::TurnCap) => ControlSupport::Absent,
             (Self::Codex, HarnessControl::SystemPromptAppend) => ControlSupport::Absent,
-            (Self::Codex, HarnessControl::McpServers) => ControlSupport::Absent,
+            (Self::Codex, HarnessControl::McpServers) => ControlSupport::Driven(ConfigFile {
+                home_var: "CODEX_HOME",
+                file: "config.toml",
+            }),
             (Self::Codex, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("-s")),
             (Self::Codex, HarnessControl::ConversationResume) => ControlSupport::Offered(Subcommand("resume")),
             // `codex exec resume` only replays a session codex itself recorded; there is no
@@ -255,7 +293,10 @@ mod tests {
         );
         assert_eq!(
             Runner::Codex.support(HarnessControl::McpServers),
-            ControlSupport::Absent
+            ControlSupport::Driven(ControlMechanism::ConfigFile {
+                home_var: "CODEX_HOME",
+                file: "config.toml",
+            })
         );
         assert_eq!(
             Runner::Codex.support(HarnessControl::SandboxLevels),
@@ -520,6 +561,45 @@ mod tests {
             .describe(),
             "`--mcp-config` (guarded by `--strict-mcp-config`)"
         );
+        assert_eq!(
+            ControlSupport::Driven(ControlMechanism::ConfigFile {
+                home_var: "CODEX_HOME",
+                file: "config.toml",
+            })
+            .describe(),
+            "`config.toml` in `$CODEX_HOME`"
+        );
+    }
+
+    /// A config file is not argv. Letting it answer `flag()` would have a runner splice
+    /// `config.toml` into the command line it builds, and the harness would refuse to start.
+    #[test]
+    fn a_config_file_mechanism_is_never_mistaken_for_something_to_put_on_the_command_line() {
+        let support = ControlSupport::Driven(ControlMechanism::ConfigFile {
+            home_var: "CODEX_HOME",
+            file: "config.toml",
+        });
+        assert_eq!(support.flag(), None);
+        assert_eq!(support.guard_flag(), None);
+    }
+
+    /// The whole reason the codex cell is driven only under an isolated environment. A
+    /// mechanism that answered `false` here would let trg add mocks beside the operator's
+    /// own MCP servers and report the run as if only the mocks had been reachable.
+    #[test]
+    fn only_a_config_file_mechanism_asks_for_a_config_home_the_run_owns() {
+        assert!(Runner::Codex
+            .support(HarnessControl::McpServers)
+            .needs_run_owned_config_home());
+        assert!(!Runner::ClaudeCode
+            .support(HarnessControl::McpServers)
+            .needs_run_owned_config_home());
+        assert!(!ControlSupport::Absent.needs_run_owned_config_home());
+        assert!(!ControlSupport::Offered(ControlMechanism::ConfigFile {
+            home_var: "CODEX_HOME",
+            file: "config.toml",
+        })
+        .needs_run_owned_config_home());
     }
 
     #[test]

@@ -614,6 +614,15 @@ pub enum RunNotStarted {
     ToolGrantUnrepresentable {
         runner: Runner,
     },
+    /// The runner drives this control by writing into its config home, and the run was
+    /// told to use a config home it does not own. Injecting there would leave whatever the
+    /// operator already configured in force alongside what the case declared, so the run
+    /// would not be the run the report describes.
+    ControlNeedsRunOwnedConfigHome {
+        control: HarnessControl,
+        runner: Runner,
+        environment: EnvironmentPolicy,
+    },
 }
 
 /// The failure kinds a run carries when trg decided not to invoke the harness.
@@ -646,9 +655,9 @@ impl RunNotStarted {
     fn kind(&self) -> NotStartedKind {
         match self {
             Self::CostCeilingExhausted { .. } => NotStartedKind::CostCeiling,
-            Self::ControlUnsupported { .. } | Self::ToolGrantUnrepresentable { .. } => {
-                NotStartedKind::UnsupportedControl
-            }
+            Self::ControlUnsupported { .. }
+            | Self::ToolGrantUnrepresentable { .. }
+            | Self::ControlNeedsRunOwnedConfigHome { .. } => NotStartedKind::UnsupportedControl,
         }
     }
 
@@ -663,6 +672,16 @@ impl RunNotStarted {
             Self::ToolGrantUnrepresentable { runner } => format!(
                 "the {} harness has no way to express denying every tool, so this run was not started",
                 runner.display_name()
+            ),
+            Self::ControlNeedsRunOwnedConfigHome {
+                control,
+                runner,
+                environment,
+            } => format!(
+                "the {} harness offers no flag that excludes the operator's own {}, so trg only declares them in a config home the run owns, which `--environment isolated` creates and `--environment {}` does not, so this run was not started",
+                runner.display_name(),
+                control.label(),
+                environment.as_str()
             ),
         }
     }
@@ -1557,6 +1576,14 @@ mod tests {
                 control: HarnessControl::ConversationSeeding,
                 runner: Runner::ClaudeCode,
             },
+            RunNotStarted::ToolGrantUnrepresentable {
+                runner: Runner::ClaudeCode,
+            },
+            RunNotStarted::ControlNeedsRunOwnedConfigHome {
+                control: HarnessControl::McpServers,
+                runner: Runner::Codex,
+                environment: EnvironmentPolicy::Scrubbed,
+            },
         ];
 
         let mut kinds = Vec::new();
@@ -1571,7 +1598,39 @@ mod tests {
             kinds.push(run.failure_kind.clone().expect("a run stopped early names its kind"));
         }
 
-        assert_eq!(kinds, vec!["budget".to_string(), "unsupported".to_string()]);
+        assert_eq!(
+            kinds,
+            vec![
+                "budget".to_string(),
+                "unsupported".to_string(),
+                "unsupported".to_string(),
+                "unsupported".to_string(),
+            ]
+        );
+    }
+
+    /// A reader who sees `unsupported` on a codex run whose harness does list the control
+    /// has to be told which knob of their own turns it on, or the only way out of the
+    /// refusal is to guess.
+    #[test]
+    fn refusing_a_control_for_want_of_an_owned_config_home_names_the_environment_that_grants_one() {
+        let warning = RunNotStarted::ControlNeedsRunOwnedConfigHome {
+            control: HarnessControl::McpServers,
+            runner: Runner::Codex,
+            environment: EnvironmentPolicy::Scrubbed,
+        }
+        .warning();
+
+        assert!(warning.contains("mcp servers"), "unexpected warning: {warning}");
+        assert!(
+            warning.contains("--environment isolated"),
+            "unexpected warning: {warning}"
+        );
+        assert!(
+            warning.contains("--environment scrubbed"),
+            "unexpected warning: {warning}"
+        );
+        assert!(warning.ends_with("so this run was not started"));
     }
 
     #[test]

@@ -3,12 +3,14 @@ use std::path::Path;
 use std::process::Command;
 
 use super::capabilities::HarnessControl;
+use super::environment::{ConfigHomeOrigin, RunEnvironment};
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
     runner_failure_outcome, timeout_duration, timeout_outcome, total_tokens_from, write_runner_invocation_metadata,
     write_timing_file, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
+use crate::agentskills::mocks::MaterializedMcpConfig;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, outputs_dir, path_within_base, FINAL_MD};
 use crate::agentskills::redact::redact_command_args;
 use crate::agentskills::report::{CacheTokens, PermissionGrant};
@@ -65,8 +67,53 @@ pub(crate) fn build_args(
     args
 }
 
+/// codex takes no MCP server table on its command line, so a run's mocks reach it as the
+/// `config.toml` of the config home the run was given.
+///
+/// Nothing about that file is exclusive: codex merges it with whatever else the config home
+/// holds, so a home the operator owns would keep serving the operator's own MCP servers
+/// beside the mocks and the run would not be the run its report describes. The gate that
+/// keeps mocked codex runs to `--environment isolated` is what makes the home a run-owned
+/// one; reaching here without that is a bug, and a bug that writes into someone's home is
+/// not one to recover from.
+fn declare_mock_servers(mcp_config: &MaterializedMcpConfig, environment: &RunEnvironment) -> Result<(), RunnerError> {
+    let refuse = |detail: String| RunnerError::InvalidOutput {
+        program: PROGRAM.to_string(),
+        detail,
+    };
+
+    let file_name = Runner::Codex
+        .support(HarnessControl::McpServers)
+        .config_file_name()
+        .ok_or_else(|| refuse("the capability matrix no longer declares a codex mcp config file".to_string()))?;
+
+    let config_home = environment
+        .config_home()
+        .ok_or_else(|| refuse("this run has no codex config home to declare its mock servers in".to_string()))?;
+
+    let destination = config_home.path().join(file_name);
+    if config_home.origin() != ConfigHomeOrigin::Run {
+        return Err(refuse(format!(
+            "declaring mock servers would write `{}`, which belongs to the operator rather than to this run",
+            destination.display()
+        )));
+    }
+
+    // The run's config home is populated by linking entries out of the operator's own, so
+    // this path can already be a symlink pointing back there; writing through it would edit
+    // the operator's file rather than the run's.
+    if destination.symlink_metadata().is_ok() {
+        std::fs::remove_file(&destination)?;
+    }
+    std::fs::copy(mcp_config.toml(), &destination)?;
+    Ok(())
+}
+
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     let prepared = prepare_workspace(request, Runner::Codex)?;
+    if let Some(mcp_config) = &request.mcp_config {
+        declare_mock_servers(mcp_config, &prepared.environment)?;
+    }
     let final_text_path = outputs_dir(request.workspace_dir).join(FINAL_MD);
     path_within_base(request.workspace_dir, &final_text_path).map_err(|e| RunnerError::InvalidOutput {
         program: PROGRAM.to_string(),
@@ -200,6 +247,7 @@ fn parse_outcome(
 mod tests {
     use super::super::RunStatus;
     use super::*;
+    use crate::agentskills::report::EnvironmentPolicy;
 
     #[test]
     fn parses_turn_completed_event() {
@@ -324,5 +372,88 @@ mod tests {
 
         assert_eq!(sandbox_value_for(PermissionGrant::WorkspaceWrite), "workspace-write");
         assert_eq!(sandbox_value_for(PermissionGrant::Unrestricted), "danger-full-access");
+    }
+
+    /// Helpers for the mock-server declaration tests: a config home the run owns, and one
+    /// that belongs to the operator, built the same way a real run builds them.
+    fn environment_for(policy: EnvironmentPolicy, root: &Path) -> RunEnvironment {
+        let host = std::collections::BTreeMap::from([(
+            "HOME".to_string(),
+            root.join("host-home").to_string_lossy().into_owned(),
+        )]);
+        std::fs::create_dir_all(root.join("host-home/.codex")).unwrap();
+        RunEnvironment::prepare_from(Runner::Codex, &root.join("run"), policy, None, &host).unwrap()
+    }
+
+    fn materialized_config(root: &Path) -> MaterializedMcpConfig {
+        let json = root.join("mcp-config.json");
+        let toml = root.join("mcp-config.toml");
+        std::fs::write(&json, "{}").unwrap();
+        std::fs::write(&toml, "[mcp_servers.github]\ncommand = \"/bin/trg\"\n").unwrap();
+        MaterializedMcpConfig::parse(json, toml).unwrap()
+    }
+
+    #[test]
+    fn mock_servers_are_declared_in_the_config_file_the_capability_matrix_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = environment_for(EnvironmentPolicy::Isolated, temp.path());
+        let config = materialized_config(temp.path());
+
+        declare_mock_servers(&config, &environment).unwrap();
+
+        let written = environment.config_home().unwrap().path().join("config.toml");
+        assert_eq!(
+            std::fs::read_to_string(&written).unwrap(),
+            std::fs::read_to_string(config.toml()).unwrap()
+        );
+    }
+
+    /// The config home a run does not own is the operator's own, where their MCP servers,
+    /// model choice and every other setting live. Writing mocks there would edit a file
+    /// nobody asked trg to touch, and would still not exclude the servers already in it.
+    #[test]
+    fn declaring_mock_servers_refuses_a_config_home_that_belongs_to_the_operator() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = environment_for(EnvironmentPolicy::Scrubbed, temp.path());
+        let config = materialized_config(temp.path());
+        let operator_config = environment.config_home().unwrap().path().join("config.toml");
+        std::fs::write(&operator_config, "model = \"the operator's own\"").unwrap();
+
+        let error = declare_mock_servers(&config, &environment)
+            .expect_err("a config home the run does not own must not be written into");
+
+        assert!(
+            matches!(error, RunnerError::InvalidOutput { .. }),
+            "unexpected: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&operator_config).unwrap(),
+            "model = \"the operator's own\"",
+            "the operator's config is left exactly as they wrote it"
+        );
+    }
+
+    /// A run's config home is populated by linking entries out of the operator's own, so a
+    /// `config.toml` found there can be a symlink pointing back at the operator's file.
+    /// Writing through it would edit the operator's machine from inside an isolated run.
+    #[test]
+    fn declaring_mock_servers_replaces_a_linked_config_rather_than_writing_through_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = environment_for(EnvironmentPolicy::Isolated, temp.path());
+        let config = materialized_config(temp.path());
+
+        let operator_config = temp.path().join("host-home/.codex/config.toml");
+        std::fs::write(&operator_config, "model = \"the operator's own\"").unwrap();
+        let linked = environment.config_home().unwrap().path().join("config.toml");
+        std::os::unix::fs::symlink(&operator_config, &linked).unwrap();
+
+        declare_mock_servers(&config, &environment).unwrap();
+
+        assert!(!linked.symlink_metadata().unwrap().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&operator_config).unwrap(),
+            "model = \"the operator's own\"",
+            "the operator's config is left exactly as they wrote it"
+        );
     }
 }

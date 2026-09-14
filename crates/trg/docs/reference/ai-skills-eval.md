@@ -774,6 +774,21 @@ run is skipped with `mcp_unsupported`, and grading skips it the same way it
 skips a run stopped by the cost ceiling, rather than reading the run's
 absence as a wrong answer.
 
+### Mocks on `codex`
+
+`codex` needs `--environment isolated` before it can be driven with mocks. It
+takes an MCP server table only as the `config.toml` of the config home named
+by `CODEX_HOME`, and it offers no flag that excludes the MCP servers already
+configured there, so the operator's own servers would stay reachable beside the
+mocks and the run would not be the run its report describes. `--environment
+isolated` is the policy that gives a run a config home of its own, which is the
+only place trg will declare mock servers for `codex`.
+
+A mocked `codex` case under `--environment scrubbed` or `--environment
+inherited` is refused the same way an unsupported control is: the run is
+skipped with the `unsupported` failure kind, and its warning names the policy
+that would let it run. trg never writes into the config home the operator owns.
+
 ---
 
 ## Graders
@@ -2160,19 +2175,27 @@ argv construction and cost reporting is a fact about parsing the harness's own
 output. Those two are consistency checks between declarations rather than
 evidence that the export or the parse happens.
 
-`mcp servers` is a guarded flag rather than a plain one: `--mcp-config` only
-takes effect on `claude-code` alongside `--strict-mcp-config`, which refuses
-to start if the config names a server the harness cannot reach, instead of
-silently continuing without it. The check for a driven guarded flag covers
+`mcp servers` is the one control the two harnesses that drive it reach through
+different mechanisms. On `claude-code` it is a guarded flag rather than a plain
+one: `--mcp-config` only takes effect alongside `--strict-mcp-config`, which
+refuses to start if the config names a server the harness cannot reach, instead
+of silently continuing without it. The check for a driven guarded flag covers
 both halves: the argv trg builds must carry the value flag and its guard
 together, never one without the other.
+
+On `codex` it is not a flag at all. `codex` takes an MCP server table only as
+the `config.toml` of the config home named by `CODEX_HOME`, and it publishes no
+counterpart to `--strict-mcp-config`: a `-c` override merges into that config
+rather than replacing it, so anything the config home already declared stays
+live. Exclusivity therefore comes from owning the config home, which is why
+that cell is only honoured under `--environment isolated`.
 
 | Control | `claude-code` | `codex` | `cursor-agent` |
 | ------- | ------------- | ------- | -------------- |
 | tool allowlist | `--allowedTools` | no | no |
 | turn cap | no | no | no |
 | system prompt append | `--append-system-prompt` | no | no |
-| mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | no | no |
+| mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | `config.toml` in `$CODEX_HOME` | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
 | conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) |
 | conversation seeding | no | no | no |
