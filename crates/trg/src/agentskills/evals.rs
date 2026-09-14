@@ -1,3 +1,4 @@
+use super::case_env::CaseEnv;
 use super::exit_code::ExitCode;
 use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
@@ -805,6 +806,16 @@ pub struct EvalCase {
     /// Absent means the case takes whatever the operator asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelName>,
+    /// Variables this case adds to its own run's environment, for a case whose inputs
+    /// cannot be expressed as a file in the workspace.
+    ///
+    /// The sanctioned hole in the isolation `--environment` otherwise holds shut, which is
+    /// why the names are confined to `EVAL_*`: a case that could name `PATH` or a
+    /// credential variable would be rewriting the environment the policy promised rather
+    /// than adding its own inputs to it. Absent means the run sees only what the policy
+    /// admits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<CaseEnv>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_output_files: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2105,6 +2116,7 @@ mod tests {
         EvalCase {
             attempts: None,
             model: None,
+            env: None,
             id: EvalCaseId(id.to_string()),
             name: None,
             description: None,
@@ -2602,6 +2614,43 @@ mod tests {
                 "prompt": "a prompt long enough to pass",
                 "expected_output": "an output long enough",
                 "model": "   "
+            }]
+        }));
+
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn a_suite_can_give_a_case_its_own_variables() {
+        let suite: EvalSuite = serde_json::from_value(serde_json::json!({
+            "skill_name": "demo",
+            "evals": [{
+                "id": "one",
+                "prompt": "a prompt long enough to pass",
+                "expected_output": "an output long enough",
+                "env": { "EVAL_REGION": "eu-west-1" }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            suite.evals[0].env.as_ref().unwrap().iter().collect::<Vec<_>>(),
+            vec![("EVAL_REGION", "eu-west-1")]
+        );
+    }
+
+    /// Refused while the suite is read rather than when the run is assembled: by the time a
+    /// harness has been handed the rewritten environment, the policy the operator chose has
+    /// already been edited out from under them.
+    #[test]
+    fn a_suite_cannot_set_a_variable_the_isolation_policy_owns() {
+        let refused = serde_json::from_value::<EvalSuite>(serde_json::json!({
+            "skill_name": "demo",
+            "evals": [{
+                "id": "one",
+                "prompt": "a prompt long enough to pass",
+                "expected_output": "an output long enough",
+                "env": { "PATH": "/evil/bin" }
             }]
         }));
 

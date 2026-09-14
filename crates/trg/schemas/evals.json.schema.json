@@ -6,6 +6,16 @@
       "minimum": 1,
       "type": "integer"
     },
+    "CaseEnv": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Variables this case adds to its own run's environment. Names are confined to EVAL_* so a case cannot rewrite the environment the policy promised.",
+      "propertyNames": {
+        "pattern": "^EVAL_[A-Z0-9_]+$"
+      },
+      "type": "object"
+    },
     "CaseGrader": {
       "description": "A grader as a case declares it, together with the arm scope that decides\nwhether its result counts toward the score.",
       "oneOf": [
@@ -388,6 +398,17 @@
               "type": "null"
             }
           ]
+        },
+        "env": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaseEnv"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Variables this case adds to its own run's environment, for a case whose inputs\ncannot be expressed as a file in the workspace.\n\nThe sanctioned hole in the isolation `--environment` otherwise holds shut, which is\nwhy the names are confined to `EVAL_*`: a case that could name `PATH` or a\ncredential variable would be rewriting the environment the policy promised rather\nthan adding its own inputs to it. Absent means the run sees only what the policy\nadmits."
         },
         "expected_output": {
           "$ref": "#/$defs/NonEmptyString"

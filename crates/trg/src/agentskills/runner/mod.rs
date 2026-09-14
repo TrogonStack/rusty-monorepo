@@ -517,7 +517,12 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
     })
     .map_err(skill_error_to_runner)?;
 
-    let environment = RunEnvironment::prepare(runner, request.run_dir(), request.environment)?;
+    let environment = RunEnvironment::prepare(
+        runner,
+        request.run_dir(),
+        request.environment,
+        request.eval.env.as_ref(),
+    )?;
 
     Ok(PreparedRun {
         prompt: prompt.into_string(),
@@ -2222,7 +2227,7 @@ mod workspace_tests {
             let host = BTreeMap::from([("HOME".to_string(), "/host/home".to_string())]);
 
             let environment =
-                RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Scrubbed, &host).unwrap();
+                RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Scrubbed, None, &host).unwrap();
 
             write_runner_invocation_metadata(
                 &run_dir,
@@ -2256,7 +2261,7 @@ mod workspace_tests {
             ]);
 
             let environment =
-                RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, &host).unwrap();
+                RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, None, &host).unwrap();
 
             write_runner_invocation_metadata(
                 &run_dir,

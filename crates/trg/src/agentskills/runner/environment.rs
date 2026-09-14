@@ -11,6 +11,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::Runner;
+use crate::agentskills::case_env::CaseEnv;
 use crate::agentskills::redact::is_secret_env_key;
 use crate::agentskills::report::EnvironmentPolicy;
 use crate::agentskills::schema_version::SchemaVersion;
@@ -313,27 +314,46 @@ impl AuthEntry {
 pub struct RunEnvironment {
     policy: EnvironmentPolicy,
     vars: BTreeMap<String, String>,
+    /// Held apart from `vars` because they are the one thing every policy hands over:
+    /// under `Inherited` nothing is cleared, so there is no assembled environment to fold
+    /// them into, and a case that declared them would otherwise see them only when the
+    /// operator happened not to be inheriting.
+    case_vars: BTreeMap<String, String>,
     config_home: Option<RecordedConfigHome>,
 }
 
 impl RunEnvironment {
-    pub fn prepare(runner: Runner, run_dir: &Path, policy: EnvironmentPolicy) -> std::io::Result<Self> {
-        Self::prepare_from(runner, run_dir, policy, &host_environment())
+    pub fn prepare(
+        runner: Runner,
+        run_dir: &Path,
+        policy: EnvironmentPolicy,
+        case_env: Option<&CaseEnv>,
+    ) -> std::io::Result<Self> {
+        Self::prepare_from(runner, run_dir, policy, case_env, &host_environment())
     }
 
     pub(crate) fn prepare_from(
         runner: Runner,
         run_dir: &Path,
         policy: EnvironmentPolicy,
+        case_env: Option<&CaseEnv>,
         host: &BTreeMap<String, String>,
     ) -> std::io::Result<Self> {
         let basis = runner.config_home().basis();
+        let case_vars: BTreeMap<String, String> = case_env
+            .into_iter()
+            .flat_map(CaseEnv::iter)
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
 
         if matches!(policy, EnvironmentPolicy::Inherited) {
             let config_home = host_config_home_record(runner, host, basis)?;
+            let mut vars = host.clone();
+            vars.extend(case_vars.clone());
             return Ok(Self {
                 policy,
-                vars: host.clone(),
+                vars,
+                case_vars,
                 config_home,
             });
         }
@@ -366,9 +386,12 @@ impl RunEnvironment {
             host_config_home_record(runner, host, basis)?
         };
 
+        vars.extend(case_vars.clone());
+
         Ok(Self {
             policy,
             vars,
+            case_vars,
             config_home,
         })
     }
@@ -394,6 +417,7 @@ impl RunEnvironment {
 
     pub fn apply(&self, command: &mut Command) {
         if matches!(self.policy, EnvironmentPolicy::Inherited) {
+            command.envs(&self.case_vars);
             return;
         }
         command.env_clear();
@@ -501,8 +525,14 @@ mod tests {
     #[test]
     fn scrubbed_keeps_only_the_allowlist() {
         let temp = tempdir().unwrap();
-        let env = RunEnvironment::prepare_from(Runner::ClaudeCode, temp.path(), EnvironmentPolicy::Scrubbed, &host())
-            .unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Scrubbed,
+            None,
+            &host(),
+        )
+        .unwrap();
 
         assert_eq!(env.vars.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(env.vars.get("HOME").map(String::as_str), Some("/host/home"));
@@ -518,8 +548,14 @@ mod tests {
     #[test]
     fn scrubbed_drops_the_launching_session_identity() {
         let temp = tempdir().unwrap();
-        let env = RunEnvironment::prepare_from(Runner::ClaudeCode, temp.path(), EnvironmentPolicy::Scrubbed, &host())
-            .unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Scrubbed,
+            None,
+            &host(),
+        )
+        .unwrap();
 
         for leaked in ["CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET"] {
             assert!(!env.vars.contains_key(leaked), "{leaked} must not reach a run");
@@ -530,7 +566,8 @@ mod tests {
     fn each_harness_gets_only_its_own_credentials() {
         let temp = tempdir().unwrap();
         let codex =
-            RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, &host()).unwrap();
+            RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, None, &host())
+                .unwrap();
 
         assert!(codex.vars.contains_key("OPENAI_API_KEY"));
         assert!(!codex.vars.contains_key("ANTHROPIC_API_KEY"));
@@ -540,7 +577,8 @@ mod tests {
     fn isolated_redirects_home_and_the_harness_config_home() {
         let temp = tempdir().unwrap();
         let run_dir = temp.path().join("run-001");
-        let env = RunEnvironment::prepare_from(Runner::Codex, &run_dir, EnvironmentPolicy::Isolated, &host()).unwrap();
+        let env =
+            RunEnvironment::prepare_from(Runner::Codex, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();
 
         let home = run_dir.join(RUN_HOME_DIR_NAME);
         assert_eq!(env.vars.get("HOME").map(String::as_str), Some(home.to_str().unwrap()));
@@ -567,7 +605,8 @@ mod tests {
         );
 
         let run_dir = temp.path().join("run-001");
-        let env = RunEnvironment::prepare_from(Runner::Codex, &run_dir, EnvironmentPolicy::Isolated, &host).unwrap();
+        let env =
+            RunEnvironment::prepare_from(Runner::Codex, &run_dir, EnvironmentPolicy::Isolated, None, &host).unwrap();
 
         let config_home = PathBuf::from(env.vars.get("CODEX_HOME").unwrap());
         assert!(config_home.join("auth.json").symlink_metadata().unwrap().is_symlink());
@@ -578,8 +617,14 @@ mod tests {
     #[test]
     fn isolated_pins_credential_lookup_to_the_host_config_home() {
         let temp = tempdir().unwrap();
-        let env = RunEnvironment::prepare_from(Runner::ClaudeCode, temp.path(), EnvironmentPolicy::Isolated, &host())
-            .unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Isolated,
+            None,
+            &host(),
+        )
+        .unwrap();
 
         assert_eq!(
             env.vars.get("CLAUDE_SECURESTORAGE_CONFIG_DIR").map(String::as_str),
@@ -596,8 +641,14 @@ mod tests {
             "/host/home/other".to_string(),
         );
 
-        let env =
-            RunEnvironment::prepare_from(Runner::ClaudeCode, temp.path(), EnvironmentPolicy::Isolated, &host).unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Isolated,
+            None,
+            &host,
+        )
+        .unwrap();
 
         assert_eq!(
             env.vars.get("CLAUDE_SECURESTORAGE_CONFIG_DIR").map(String::as_str),
@@ -608,17 +659,124 @@ mod tests {
     #[test]
     fn inherited_passes_the_host_environment_through() {
         let temp = tempdir().unwrap();
-        let env = RunEnvironment::prepare_from(Runner::ClaudeCode, temp.path(), EnvironmentPolicy::Inherited, &host())
-            .unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Inherited,
+            None,
+            &host(),
+        )
+        .unwrap();
 
         assert_eq!(env.vars, host());
+    }
+
+    /// `apply` under `Inherited` deliberately leaves the child to inherit, which is exactly
+    /// the path on which a case's variables have nothing to ride in on unless they are set
+    /// explicitly.
+    #[test]
+    fn an_inherited_run_is_still_handed_the_variables_its_case_declared() {
+        let temp = tempdir().unwrap();
+        let declared = CaseEnv::parse([("EVAL_SEED", "42")]).unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Inherited,
+            Some(&declared),
+            &host(),
+        )
+        .unwrap();
+
+        let mut command = Command::new("/usr/bin/env");
+        env.apply(&mut command);
+
+        let applied: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            applied,
+            vec![("EVAL_SEED".to_string(), Some("42".to_string()))],
+            "the host environment is inherited rather than re-applied, and the case's own variable is the one addition"
+        );
+    }
+
+    /// Under `Inherited` nothing is cleared, so there is no assembled environment for a
+    /// case's variables to be folded into. Reached only through `apply`, they would be the
+    /// one input that silently depends on which policy the operator picked.
+    #[test]
+    fn a_case_sets_its_own_variables_under_every_policy() {
+        let temp = tempdir().unwrap();
+        let declared = CaseEnv::parse([("EVAL_SEED", "42")]).unwrap();
+
+        for policy in [
+            EnvironmentPolicy::Inherited,
+            EnvironmentPolicy::Scrubbed,
+            EnvironmentPolicy::Isolated,
+        ] {
+            let run_dir = temp.path().join(format!("{policy:?}"));
+            std::fs::create_dir_all(&run_dir).unwrap();
+            let env =
+                RunEnvironment::prepare_from(Runner::ClaudeCode, &run_dir, policy, Some(&declared), &host()).unwrap();
+
+            assert_eq!(
+                env.vars.get("EVAL_SEED").map(String::as_str),
+                Some("42"),
+                "a case declared EVAL_SEED and {policy:?} dropped it"
+            );
+        }
+    }
+
+    /// The allowlist decides what a run can see of this machine. A case that could name a
+    /// variable outside `EVAL_*` would be editing that decision, so the refusal has to
+    /// happen while the suite is read rather than after a run has already been handed the
+    /// rewritten environment.
+    #[test]
+    fn a_case_cannot_overwrite_the_environment_the_policy_assembled() {
+        assert!(
+            serde_json::from_value::<CaseEnv>(serde_json::json!({ "PATH": "/evil/bin" })).is_err(),
+            "a case naming PATH decides which binary the harness is"
+        );
+    }
+
+    #[test]
+    fn a_case_variable_that_looks_like_a_secret_stays_out_of_the_record() {
+        let temp = tempdir().unwrap();
+        let declared = CaseEnv::parse([("EVAL_API_KEY", "sk-case"), ("EVAL_SEED", "42")]).unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Scrubbed,
+            Some(&declared),
+            &host(),
+        )
+        .unwrap();
+
+        let recorded = env.recorded_vars();
+        assert_eq!(recorded.get("EVAL_SEED").map(String::as_str), Some("42"));
+        assert!(
+            !recorded.contains_key("EVAL_API_KEY"),
+            "env.json is written next to the transcript, so a case's secret is as published as the harness's"
+        );
     }
 
     #[test]
     fn recorded_vars_leave_out_secret_values() {
         let temp = tempdir().unwrap();
-        let env = RunEnvironment::prepare_from(Runner::ClaudeCode, temp.path(), EnvironmentPolicy::Scrubbed, &host())
-            .unwrap();
+        let env = RunEnvironment::prepare_from(
+            Runner::ClaudeCode,
+            temp.path(),
+            EnvironmentPolicy::Scrubbed,
+            None,
+            &host(),
+        )
+        .unwrap();
 
         let recorded = env.recorded_vars();
         assert!(recorded.contains_key("PATH"));
@@ -631,7 +789,8 @@ mod tests {
         let mut host = host();
         host.insert("CODEX_HOME".to_string(), "/host/home/elsewhere/.codex".to_string());
 
-        let env = RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, &host).unwrap();
+        let env =
+            RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, None, &host).unwrap();
 
         assert_eq!(
             env.vars.get("CODEX_HOME").map(String::as_str),
@@ -647,7 +806,8 @@ mod tests {
         host.insert("CODEX_API_KEY".to_string(), "sk-codex".to_string());
         host.insert("CODEX_ACCESS_TOKEN".to_string(), "token-codex".to_string());
 
-        let env = RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, &host).unwrap();
+        let env =
+            RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, None, &host).unwrap();
 
         assert_eq!(env.vars.get("CODEX_API_KEY").map(String::as_str), Some("sk-codex"));
         assert_eq!(
@@ -672,8 +832,8 @@ mod tests {
         std::fs::rename(&host_config_home, temp.path().join(".cursor")).unwrap();
 
         let run_dir = temp.path().join("run-001");
-        let env =
-            RunEnvironment::prepare_from(Runner::CursorAgent, &run_dir, EnvironmentPolicy::Isolated, &host).unwrap();
+        let env = RunEnvironment::prepare_from(Runner::CursorAgent, &run_dir, EnvironmentPolicy::Isolated, None, &host)
+            .unwrap();
 
         let config_home = PathBuf::from(env.vars.get("HOME").unwrap()).join(".cursor");
         let carried: serde_json::Value =
@@ -714,7 +874,8 @@ mod tests {
             (Runner::CursorAgent, "/host/home/.cursor", ConfigHomeBasis::HomeRelative),
         ] {
             let temp = tempdir().unwrap();
-            let env = RunEnvironment::prepare_from(runner, temp.path(), EnvironmentPolicy::Scrubbed, &host()).unwrap();
+            let env =
+                RunEnvironment::prepare_from(runner, temp.path(), EnvironmentPolicy::Scrubbed, None, &host()).unwrap();
 
             let recorded = env
                 .config_home()
@@ -730,7 +891,8 @@ mod tests {
         for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
             let temp = tempdir().unwrap();
             let run_dir = temp.path().join("run-001");
-            let env = RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, &host()).unwrap();
+            let env =
+                RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();
 
             let recorded = env
                 .config_home()
@@ -763,8 +925,8 @@ mod tests {
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let run_dir = Path::new("run-001");
-            let env =
-                RunEnvironment::prepare_from(Runner::Codex, run_dir, EnvironmentPolicy::Isolated, &host()).unwrap();
+            let env = RunEnvironment::prepare_from(Runner::Codex, run_dir, EnvironmentPolicy::Isolated, None, &host())
+                .unwrap();
 
             let recorded = env
                 .config_home()
@@ -792,8 +954,8 @@ mod tests {
     #[test]
     fn env_record_carries_the_config_home_alongside_the_vars() {
         let temp = tempdir().unwrap();
-        let env =
-            RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, &host()).unwrap();
+        let env = RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, None, &host())
+            .unwrap();
 
         let record = env.record();
         assert_eq!(record.vars.get("PATH").map(String::as_str), Some("/usr/bin"));

@@ -3,6 +3,7 @@ pub mod budget;
 pub mod cache;
 pub mod call_bounds;
 pub mod case_directories;
+pub mod case_env;
 pub mod case_selection;
 pub mod ci;
 pub mod compare;

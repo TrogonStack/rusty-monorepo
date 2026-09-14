@@ -42,13 +42,13 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--model-config` | string | `ci-default` | Opaque model-configuration label recorded in `report.json` |
 | `--scenario` | enum | `with_skill` + `without_skill` | Scenario kind to include. Repeatable; values: `with_skill`, `without_skill`, `old_skill`. See [Choosing which scenarios run](#choosing-which-scenarios-run) |
 | `--runner` | enum | *(unset)* | Agent CLI to execute each (eval × scenario). When unset, runs are scaffolded with `status: skipped` |
-| `--runner-model` | string | *(unset)* | Model identifier forwarded to the runner CLI (`--model` / `-m`). When unset, the runner picks its own default |
+| `--runner-model` | string | *(unset)* | Model identifier forwarded to the runner CLI (`--model` / `-m`). A case's `model` overrides it. When neither is set, the runner picks its own default |
 | `--force` | bool | `false` | Overwrite an existing report directory if it already exists |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
 | `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
 | `--permission` | enum | `workspace_write` | How much a run's harness may do without prompting; values: `workspace_write`, `unrestricted`. See [Run permission](#run-permission) |
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
-| `--attempts` | integer | `3` | Draw each (case × scenario) cell this many times. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
+| `--attempts` | integer | *(unset, 3 draws)* | Draw each (case × scenario) cell this many times. Overrides any count a case pinned. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
 | `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. Accepts a finite amount greater than zero; a ceiling of zero or less could admit nothing and is refused, as is any ceiling over a runner that publishes no price. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
@@ -619,6 +619,9 @@ Validated before `run` executes. Unknown fields are rejected.
 | `tags` | string[] | no | Free-form labels. `--tag` selects by them. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `priority` | enum | no | `low`, `normal`, `high`, or `critical` |
 | `timeout_secs` | integer | no | Per-case runner timeout override |
+| `attempts` | integer | no | How many times this case is drawn, for a case whose stability is the question or whose cost makes the suite default too expensive. At least 1. Yields to an explicit `--attempts`. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
+| `model` | string | no | The model this case wants, for a case whose question is about one model in particular. Overrides `--runner-model` |
+| `env` | object | no | Variables added to this case's own run. Names are confined to `EVAL_*`. See [Variables a case sets](#variables-a-case-sets) |
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
 | `grader_hints` | object | no | Passed through to a script grader on stdin |
 | `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
@@ -1893,6 +1896,35 @@ reproducible anywhere else.
 Each harness receives only its own credential variables, so a `codex` run cannot
 read an Anthropic key and a `claude-code` run cannot read an OpenAI one.
 
+### Variables a case sets
+
+A case whose input cannot be expressed as a file in the workspace declares it as
+`env`:
+
+```json
+{
+  "id": "honours-the-configured-region",
+  "prompt": "Deploy the stack.",
+  "expected_output": "Deployed to eu-west-1.",
+  "env": { "EVAL_REGION": "eu-west-1" }
+}
+```
+
+Every name has to start with `EVAL_` and hold only `A-Z`, `0-9` and underscore.
+A suite that names anything else is rejected while it is read, before a run is
+started.
+
+The prefix is what keeps this an addition to the environment rather than an edit
+of it. `PATH` decides which binary the harness is, `HOME` decides where it finds
+its config, and a credential variable decides whose account pays. A case that
+could name those would be rewriting the isolation the policy just promised, and
+would do it invisibly, since nothing downstream tells a value a case set apart
+from one the allowlist admitted.
+
+The variables reach the run under every policy, `inherited` included. They are
+recorded in the run's `env.json` under the same rule as everything else there: a
+name that reads as a secret is listed without its value.
+
 ### `--environment isolated`
 
 The harness config home is where a harness keeps the per-user state that changes
@@ -2060,8 +2092,21 @@ a single invocation, for the same reason.
 
 ## How many times a cell is drawn
 
-`--attempts` defaults to `3`: every (case × scenario) cell is executed three
-times, and each draw is its own run record with its own `attempt` number.
+Every (case × scenario) cell is executed three times by default, and each draw is
+its own run record with its own `attempt` number.
+
+A case can pin its own count instead, with `attempts`, for a case whose stability
+is the question or whose cost makes three draws too expensive:
+
+```json
+{ "id": "flaky-under-ambiguity", "prompt": "...", "expected_output": "...", "attempts": 5 }
+```
+
+`--attempts` overrides every count a case pinned, so a cheap smoke pass or a deep
+one over a whole suite is still one flag. The flag is deliberately left unset
+rather than defaulted to `3`: a count defaulted at the CLI cannot be told apart
+from one an operator typed, and a case that pinned five draws would be silently
+overridden by an operator who named nothing.
 
 The default is not caution about flakiness, it is what makes the numbers
 readable. An agent asked the same question twice does not answer it the same way
