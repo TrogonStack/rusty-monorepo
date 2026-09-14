@@ -47,7 +47,7 @@ $ trg ai skills eval benchmark ./artifacts/csv-analyzer/20260526T150000Z-aabbccd
 
 ### report.json (trimmed)
 
-```json
+```json trg-example=skip
 {
   "report": {
     "id": "20260526T150000Z-aabbccdd",
@@ -118,7 +118,7 @@ Written under `runs/run-001/grading.json` after `eval grade`:
 
 Written at `iteration-1/benchmark.json` (and report root) after `eval benchmark`:
 
-```json
+```json trg-example=skip
 {
   "report_id": "20260526T150000Z-aabbccdd",
   "failed_runs_mode": "bucket",

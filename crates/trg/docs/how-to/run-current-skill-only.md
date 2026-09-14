@@ -121,7 +121,7 @@ Use `--mode strict` in CI to turn a missing `grading.json` or a failed assertion
 
 After `eval run`, the report directory contains:
 
-```json
+```json trg-example=skip
 {
   "report": {
     "id": "20260526T143022Z-7f3a2b1c",

@@ -13,6 +13,7 @@ and `eval grade` evaluates them in process:
 {
   "id": "analyze-sales",
   "prompt": "Summarize monthly revenue from sales.csv",
+  "expected_output": "A markdown summary with revenue totals by month.",
   "graders": [
     { "type": "file_exists", "path": "summary.md" },
     { "type": "contains", "text": "May", "target": { "file": "summary.md" } },

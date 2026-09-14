@@ -883,8 +883,10 @@ call, and it would break the first time the log grew a field. Object keys are
 rendered in sorted order, so the same call renders the same way twice:
 
 ```json
-{ "type": "regex", "pattern": "^github\\.create_issue .*\"repo\":\"acme/", "target": "mock_calls" }
-{ "type": "contains", "text": "github.close_issue", "target": "mock_calls", "negate": true }
+[
+  { "type": "regex", "pattern": "^github\\.create_issue .*\"repo\":\"acme/", "target": "mock_calls" },
+  { "type": "contains", "text": "github.close_issue", "target": "mock_calls", "negate": true }
+]
 ```
 
 `expect` violations are deliberately absent from the rendering. A run already

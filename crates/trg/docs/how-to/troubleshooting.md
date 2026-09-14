@@ -94,7 +94,7 @@ when the rename is intentional.
 name: csv-analyzer
 ```
 
-```json
+```json trg-example=skip
 { "skill_name": "csv-analyzer", ... }
 ```
 
