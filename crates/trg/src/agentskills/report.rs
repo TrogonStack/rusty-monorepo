@@ -383,22 +383,39 @@ pub struct GradingStrategy {
     pub strict: bool,
 }
 
+/// The judge a grading pass resolved, when it resolved one.
+///
+/// Shared by `Llm`, where a judge is always resolved, and `Auto`, where whether one was
+/// resolved depends on what the suite declares, so there is one definition of what
+/// "which judge" means rather than a copy living inside each variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct JudgeSettings {
+    pub provider: JudgeProvider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub votes: JudgeVotes,
+}
+
 /// The grading method a pass chose, and only the settings that method uses.
 ///
 /// A record shaped as a flat bag of optional fields lets a script grader's `command`
 /// and an LLM judge's `provider` and `model` sit side by side, empty rather than
 /// absent, on a pass that used neither. Tagging the choice keeps each field with the
-/// only mode it means anything for.
+/// only mode it means anything for. `Auto` carries its judge as an option rather than
+/// a bare `Llm`-shaped record: an auto pass over a suite of typed graders never
+/// resolves one, and that absence has to read as absent, not as a judge whose fields
+/// happen to be empty.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum GraderChoice {
-    Auto,
+    Auto {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        judge: Option<JudgeSettings>,
+    },
     None,
     Llm {
-        provider: JudgeProvider,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        votes: JudgeVotes,
+        #[serde(flatten)]
+        judge: JudgeSettings,
     },
     Script {
         #[serde(skip_serializing_if = "Option::is_none")]

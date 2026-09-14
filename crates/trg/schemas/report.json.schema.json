@@ -468,6 +468,16 @@
       "oneOf": [
         {
           "properties": {
+            "judge": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JudgeSettings"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "mode": {
               "const": "auto",
               "type": "string"
@@ -491,6 +501,7 @@
           "type": "object"
         },
         {
+          "description": "The judge a grading pass resolved, when it resolved one.\n\nShared by `Llm`, where a judge is always resolved, and `Auto`, where whether one was\nresolved depends on what the suite declares, so there is one definition of what\n\"which judge\" means rather than a copy living inside each variant.",
           "properties": {
             "mode": {
               "const": "llm",
@@ -671,6 +682,28 @@
           "type": "string"
         }
       ]
+    },
+    "JudgeSettings": {
+      "description": "The judge a grading pass resolved, when it resolved one.\n\nShared by `Llm`, where a judge is always resolved, and `Auto`, where whether one was\nresolved depends on what the suite declares, so there is one definition of what\n\"which judge\" means rather than a copy living inside each variant.",
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "$ref": "#/$defs/JudgeProvider"
+        },
+        "votes": {
+          "$ref": "#/$defs/JudgeVotes"
+        }
+      },
+      "required": [
+        "provider",
+        "votes"
+      ],
+      "type": "object"
     },
     "JudgeVotes": {
       "description": "The number of opinions taken on every assertion an LLM judge decides.\n\nAlways odd, because a panel that ties has decided nothing, and reporting a tie as\neither answer would invent the confidence the flag exists to measure.",
