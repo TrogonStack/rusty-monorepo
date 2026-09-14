@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::prompt::{StagedSkillDir, SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
+use super::prompt::{SkillName, StagedSkillDir, SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
 use super::redact::RedactedTranscript;
 
 pub const NORMALIZED_TRANSCRIPT_FILE: &str = "events.json";
@@ -138,7 +138,43 @@ pub enum StagedSkill {
     Nothing,
     At {
         directory: StagedSkillDir,
+        #[serde(default, skip_serializing_if = "StagedSkillName::is_unrecorded")]
+        name: StagedSkillName,
     },
+}
+
+/// What a run recorded about the name of the skill it staged.
+///
+/// A native skill tool call reports the skill it invoked by name, and the name is
+/// the only thing in that call that tells this run's skill from one the harness
+/// carries of its own. A transcript written before the name was recorded cannot
+/// tell them apart, and being unable to say which skill was invoked is not
+/// evidence that the wrong one was, so it keeps the reading it was written under.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum StagedSkillName {
+    #[default]
+    Unrecorded,
+    Known {
+        name: SkillName,
+    },
+}
+
+impl StagedSkillName {
+    pub fn known(name: SkillName) -> Self {
+        Self::Known { name }
+    }
+
+    fn recorded(&self) -> Option<&SkillName> {
+        match self {
+            Self::Unrecorded => None,
+            Self::Known { name } => Some(name),
+        }
+    }
+
+    fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
 }
 
 impl StagedSkill {
@@ -146,7 +182,7 @@ impl StagedSkill {
         match self {
             Self::Unrecorded => STAGED_SKILL_DIRS.iter().any(|directory| token.contains(directory)),
             Self::Nothing => false,
-            Self::At { directory } => token.contains(directory.as_str()),
+            Self::At { directory, .. } => token.contains(directory.as_str()),
         }
     }
 
@@ -161,7 +197,7 @@ impl StagedSkill {
                 .iter()
                 .any(|directory| relative.starts_with(directory)),
             Self::Nothing => false,
-            Self::At { directory } => relative.starts_with(directory.as_str()),
+            Self::At { directory, .. } => relative.starts_with(directory.as_str()),
         }
     }
 
@@ -171,6 +207,13 @@ impl StagedSkill {
 
     fn stages_nothing(&self) -> bool {
         matches!(self, Self::Nothing)
+    }
+
+    fn recorded_name(&self) -> Option<&SkillName> {
+        match self {
+            Self::Unrecorded | Self::Nothing => None,
+            Self::At { name, .. } => name.recorded(),
+        }
     }
 }
 
@@ -286,12 +329,14 @@ impl NormalizedTranscript {
     /// How the run engaged the staged skill, if it can be determined at all.
     ///
     /// Two signals are harness-agnostic. A harness may expose a first-class skill
-    /// tool, and any harness that reports tool inputs reveals engagement when a call
-    /// references the path we staged the skill at.
+    /// tool that names the skill it invoked, and any harness that reports tool inputs
+    /// reveals engagement when a call references the path we staged the skill at.
     ///
-    /// The arm that stages no skill has none to engage, so a native skill tool call
-    /// there is the harness reaching for a skill of its own and not for the one under
-    /// test. Reading it as engagement would cost the comparison its control arm.
+    /// Neither signal is read against what some run could have staged. A harness
+    /// carries skills of its own, so the arm that stages no skill has none to engage
+    /// and a run that invoked one installed on the host reached for a skill that was
+    /// never under test. Reading either as engagement would cost the comparison its
+    /// control arm.
     pub fn skill_engagement(&self) -> SkillEngagement {
         if !self.tool_visibility.is_observed() {
             return SkillEngagement::NotObservable;
@@ -300,7 +345,7 @@ impl NormalizedTranscript {
             let TranscriptEvent::ToolCall { tool, paths } = event else {
                 continue;
             };
-            if tool.eq_ignore_case("Skill") && !self.staged_skill.stages_nothing() {
+            if tool.eq_ignore_case("Skill") && self.invoked_the_staged_skill(paths) {
                 return SkillEngagement::NativeSkillTool;
             }
             if paths.iter().any(|path| self.references_staged_skill(path)) {
@@ -308,6 +353,27 @@ impl NormalizedTranscript {
             }
         }
         SkillEngagement::NotEngaged
+    }
+
+    /// Whether a native skill tool call invoked the skill this run staged.
+    ///
+    /// A harness carries skills of its own, so the call names which one it reached
+    /// for and nothing else in it does. Crediting every such call would score a run
+    /// that used a skill installed on the host as having used the one it was given,
+    /// and would leave a case that stages several skills with no way to ask which
+    /// one the agent picked.
+    ///
+    /// A run that staged no skill has no name to match, and the arm that recorded
+    /// no name cannot say which skill the call invoked, so each keeps the reading it
+    /// already had rather than being turned into a run that engaged nothing.
+    fn invoked_the_staged_skill(&self, named: &[String]) -> bool {
+        let Some(name) = self.staged_skill.recorded_name() else {
+            return !self.staged_skill.stages_nothing();
+        };
+        named
+            .iter()
+            .flat_map(|value| self.tokens_worth_reading(value))
+            .any(|token| name.named_by(&token))
     }
 
     /// Whether what the run named is the skill this run staged.
@@ -323,6 +389,13 @@ impl NormalizedTranscript {
     /// `cd`, or a search pattern quoting the staged directory, reads as a path to
     /// it. Resolving the text against the workspace root would not tell those
     /// apart either, since what is missing is where the run stood.
+    fn references_staged_skill(&self, named: &str) -> bool {
+        self.tokens_worth_reading(named)
+            .iter()
+            .any(|token| self.staged_skill.named_by(token))
+    }
+
+    /// The tokens of a named argument that could still be this run's own.
     ///
     /// A command-style tool records its whole command line, and one command line
     /// can name this run's skill and a host one at once, so each token is judged
@@ -331,14 +404,14 @@ impl NormalizedTranscript {
     /// takes the separator that `STAGED_SKILL_DIRS` is written in out of the
     /// text, and an escape of `~` leaves the rest of a host skill path behind to
     /// be counted as this run's.
-    fn references_staged_skill(&self, named: &str) -> bool {
+    fn tokens_worth_reading(&self, named: &str) -> Vec<String> {
         if self.left_the_workspace(named) {
-            return false;
+            return Vec::new();
         }
         named_tokens(named)
             .into_iter()
             .filter(|token| !self.left_the_workspace(token))
-            .any(|token| self.staged_skill.named_by(&token))
+            .collect()
     }
 
     fn left_the_workspace(&self, named: &str) -> bool {
@@ -1368,6 +1441,7 @@ mod tests {
     fn staged(disclosure: SkillDisclosure) -> StagedSkill {
         StagedSkill::At {
             directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
+            name: StagedSkillName::known(SkillName::parse("demo-skill").unwrap()),
         }
     }
 
@@ -1480,5 +1554,87 @@ mod tests {
             "a run that recorded nothing writes no field: {json}"
         );
         assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    }
+
+    fn a_skill_tool_call_naming(skill: &str) -> NormalizedTranscript {
+        let stdout = format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"Skill","input":{{"skill":"{skill}"}}}}]}}}}"#
+        );
+        normalize_stream_json(
+            "claude",
+            &redact_transcript_bytes(stdout.as_bytes()),
+            &WorkspaceBoundary::unknown(),
+        )
+    }
+
+    /// A harness invokes its own installed skills through the same tool, so a run
+    /// that reached for one of those never touched the skill it was handed, and a
+    /// case that stages several has no way to ask which one the agent picked unless
+    /// the name the call carries decides it.
+    #[test]
+    fn a_skill_tool_call_that_names_another_skill_is_not_this_run_s_skill() {
+        for disclosure in [SkillDisclosure::Announced, SkillDisclosure::Unannounced] {
+            let transcript = a_skill_tool_call_naming("some-installed-skill").staged_at(staged(disclosure));
+
+            assert_eq!(
+                transcript.skill_engagement(),
+                SkillEngagement::NotEngaged,
+                "{disclosure:?} credited a skill this run never staged"
+            );
+        }
+    }
+
+    /// The announced arms stage under a directory that carries no name at all, so
+    /// the name a call reports can only be read against the name the run recorded.
+    #[test]
+    fn a_skill_tool_call_that_names_the_staged_skill_is_engagement() {
+        for disclosure in [SkillDisclosure::Announced, SkillDisclosure::Unannounced] {
+            let transcript = a_skill_tool_call_naming("demo-skill").staged_at(staged(disclosure));
+
+            assert_eq!(
+                transcript.skill_engagement(),
+                SkillEngagement::NativeSkillTool,
+                "{disclosure:?} did not credit the skill it staged"
+            );
+        }
+    }
+
+    /// A harness writes the name, not this repository, so the reading does not rest
+    /// on the case it came back in.
+    #[test]
+    fn a_skill_tool_call_names_the_staged_skill_whatever_case_the_harness_reports() {
+        let transcript = a_skill_tool_call_naming("Demo-Skill").staged_at(staged(SkillDisclosure::Announced));
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NativeSkillTool);
+    }
+
+    /// A transcript written before the name was recorded cannot say which skill a
+    /// call invoked, and that is not evidence the wrong one was, so it keeps the
+    /// reading it was written under rather than losing every skill tool call.
+    #[test]
+    fn a_transcript_that_records_no_skill_name_still_reads_a_skill_tool_call_as_engagement() {
+        let transcript = a_skill_tool_call_naming("some-installed-skill").staged_at(StagedSkill::At {
+            directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Announced, "demo-skill")
+                .unwrap(),
+            name: StagedSkillName::Unrecorded,
+        });
+
+        assert_eq!(transcript.skill_engagement(), SkillEngagement::NativeSkillTool);
+    }
+
+    /// Grading reads transcripts that were written before the name was part of the
+    /// record, so the field a run now writes has to be one an older file can omit.
+    #[test]
+    fn a_staging_record_written_without_a_skill_name_is_still_read() {
+        let staged: StagedSkill = serde_json::from_str(r#"{"kind":"at","directory":".skill/"}"#).unwrap();
+
+        assert_eq!(
+            staged,
+            StagedSkill::At {
+                directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Announced, "demo-skill")
+                    .unwrap(),
+                name: StagedSkillName::Unrecorded,
+            }
+        );
     }
 }

@@ -29,11 +29,13 @@ use super::errors::SkillError;
 use super::evals::{EvalCase, EvalDirName, EvalError, EVAL_SUITE_MANIFEST_NAME};
 use super::mocks::MaterializedMcpConfig;
 use super::outputs::ensure_outputs_dir;
-use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
+use super::prompt::{build_eval_prompt, EvalPromptInput, SkillName, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
 use super::report::{CacheTokens, EnvironmentPolicy, PermissionGrant, ScenarioKind, SkillStaging};
 use super::tool_grant::ToolGrant;
-use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
+use super::transcript::{
+    write_normalized_transcript, StagedSkill, StagedSkillName, TranscriptFormat, WorkspaceBoundary,
+};
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
 use crate::agentskills::schema_version::SchemaVersion;
 use environment::{RecordedEnvironment, RunEnvironment};
@@ -542,11 +544,11 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
     )
     .map_err(scaffold_error_to_runner)?;
 
-    if let Some((skill_path, staged_dir)) = skill_to_stage(request)? {
+    if let Some(plan) = skill_to_stage(request)? {
         stage_skill_into_workspace(
-            skill_path,
+            plan.source,
             request.workspace_dir,
-            staged_dir.as_str(),
+            plan.directory.as_str(),
             request.skill_staging,
             &request.eval_dir,
         )?;
@@ -627,23 +629,42 @@ fn skill_source<'a>(request: &'a EvalRunRequest<'a>) -> Result<Option<(&'a Path,
     }
 }
 
+/// The skill a run stages, where it goes, and the name it answers to.
+///
+/// The name travels with the directory because a harness's own skill tool reports
+/// only a name, and the announced directories do not carry one.
+struct SkillStagingPlan<'a> {
+    source: &'a Path,
+    directory: StagedSkillDir,
+    name: SkillName,
+}
+
 /// The skill to stage and the workspace directory to stage it in, which the case
 /// decides by saying whether its prompt announces the skill.
-fn skill_to_stage<'a>(request: &'a EvalRunRequest<'a>) -> Result<Option<(&'a Path, StagedSkillDir)>, RunnerError> {
+fn skill_to_stage<'a>(request: &'a EvalRunRequest<'a>) -> Result<Option<SkillStagingPlan<'a>>, RunnerError> {
     let Some((skill_path, skill_md)) = skill_source(request)? else {
         return Ok(None);
     };
     let summary = SkillSummary::from_skill_md(skill_md).map_err(skill_error_to_runner)?;
+    let name = SkillName::parse(&summary.name).map_err(skill_error_to_runner)?;
     Ok(
-        StagedSkillDir::for_run(request.scenario, request.eval.skill_disclosure, &summary.name)
-            .map(|staged_dir| (skill_path, staged_dir)),
+        StagedSkillDir::for_run(request.scenario, request.eval.skill_disclosure, &summary.name).map(|directory| {
+            SkillStagingPlan {
+                source: skill_path,
+                directory,
+                name,
+            }
+        }),
     )
 }
 
 /// What this run staged, for the transcript to carry to whoever grades it.
 fn staged_skill(request: &EvalRunRequest) -> Result<StagedSkill, RunnerError> {
     Ok(match skill_to_stage(request)? {
-        Some((_, directory)) => StagedSkill::At { directory },
+        Some(plan) => StagedSkill::At {
+            directory: plan.directory,
+            name: StagedSkillName::known(plan.name),
+        },
         None => StagedSkill::Nothing,
     })
 }
@@ -1583,7 +1604,7 @@ mod workspace_tests {
 
             prepare_workspace(&request, Runner::ClaudeCode).unwrap();
 
-            let StagedSkill::At { directory } = staged_skill(&request).unwrap() else {
+            let StagedSkill::At { directory, .. } = staged_skill(&request).unwrap() else {
                 panic!("a with-skill run staged a skill");
             };
             assert!(
