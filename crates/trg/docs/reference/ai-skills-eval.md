@@ -1362,7 +1362,7 @@ other field forward as declared there, including `name`, `excluded`,
 | `status` | string | `skipped`, `completed`, or `failed` |
 | `paths.workspace` | string | Relative path to the run workspace |
 | `artifacts` | array | Artifact descriptors (transcript when runner completes, `mock_calls` when the case declares mcp mocks) |
-| `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner) |
+| `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner). See [Artifact: `timing.json`](#artifact-timingjson) for what `total_tokens` and `cached_tokens` mean |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
 | `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
 | `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
@@ -1474,14 +1474,24 @@ Location: `runs/<run-id>/timing.json` (sibling of `workspace/`).
 ```json
 {
   "duration_ms": 1234,
-  "total_tokens": 150
+  "total_tokens": 150,
+  "input_tokens": 100,
+  "output_tokens": 50,
+  "cached_tokens": { "read_tokens": 10 }
 }
 ```
 
 | Field | Type | Required | Notes |
 | ----- | ---- | -------- | ----- |
 | `duration_ms` | integer | yes | Must be > 0 |
-| `total_tokens` | integer | no | When present, must be > 0 |
+| `total_tokens` | integer | no | When present, must be > 0. Always `input_tokens + output_tokens`, the one definition every runner agrees on, so a claude-code run and a cursor-agent run are comparable without knowing which harness produced either. Never includes `cached_tokens`, because runners disagree on whether a cached token is billed on top of `input_tokens` or already counted inside it |
+| `cached_tokens.read_tokens` | integer | no | Tokens served from a cached entry, billed at a discount. Absent when this runner's harness never reports cache reads, not when it reported reading zero |
+| `cached_tokens.write_tokens` | integer | no | Tokens spent writing a fresh entry into the cache, billed at a premium. Absent when this runner's harness never reports cache writes, not when it reported writing zero |
+
+`cached_tokens` itself is absent when the harness reports no cache activity at
+all, which is a different claim from a harness that checked and cached
+nothing. `codex` and `cursor-agent` report only cache reads today, so their
+`cached_tokens` (when present) never carries a `write_tokens` side.
 
 Token counts and duration are also copied into `report.json` run metrics after
 the runner completes.

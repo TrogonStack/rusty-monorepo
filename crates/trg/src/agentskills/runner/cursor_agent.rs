@@ -5,13 +5,13 @@ use std::process::Command;
 use super::capabilities::HarnessControl;
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
-    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
-    EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
+    runner_failure_outcome, timeout_duration, timeout_outcome, total_tokens_from, write_runner_invocation_metadata,
+    write_timing_file, EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
 use crate::agentskills::redact::redact_command_args;
-use crate::agentskills::report::PermissionGrant;
+use crate::agentskills::report::{CacheTokens, PermissionGrant};
 
 const PROGRAM: &str = "cursor-agent";
 const INSTALL_HINT: &str = "install Cursor Agent CLI and ensure `cursor-agent` is on PATH";
@@ -163,12 +163,12 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
     let usage = result.get("usage");
     let input_tokens = usage.and_then(|u| u.get("inputTokens")).and_then(|v| v.as_u64());
     let output_tokens = usage.and_then(|u| u.get("outputTokens")).and_then(|v| v.as_u64());
-    let total_tokens = match (input_tokens, output_tokens) {
-        (Some(i), Some(o)) => Some(i + o),
-        (Some(i), None) => Some(i),
-        (None, Some(o)) => Some(o),
-        (None, None) => None,
-    };
+    let total_tokens = total_tokens_from(input_tokens, output_tokens);
+    // cursor-agent names only the read side of caching; it has no field for tokens spent
+    // writing a fresh entry into the cache, so `write_tokens` stays `None` rather than 0.
+    let cache_read = usage.and_then(|u| u.get("cacheReadTokens")).and_then(|v| v.as_u64());
+    let cached_tokens =
+        cache_read.map(|read| CacheTokens::parse(Some(read), None).expect("read is Some by construction"));
 
     completed_outcome(
         duration_ms,
@@ -176,6 +176,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
         total_tokens,
         input_tokens,
         output_tokens,
+        cached_tokens,
         None,
         final_text,
     )
@@ -196,7 +197,29 @@ mod tests {
         assert_eq!(outcome.input_tokens, Some(100));
         assert_eq!(outcome.output_tokens, Some(50));
         assert_eq!(outcome.total_tokens, Some(150));
+        // A reported zero is still a report: distinct from the harness saying nothing.
+        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(0), None).unwrap()));
         assert_eq!(outcome.final_text, "hello");
+    }
+
+    #[test]
+    fn a_nonzero_cache_read_is_surfaced_but_never_folded_into_the_total() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":15}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(outcome.total_tokens, Some(150));
+        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(15), None).unwrap()));
+    }
+
+    #[test]
+    fn a_result_with_no_cache_field_reports_no_cache_activity() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(
+            outcome.cached_tokens, None,
+            "a harness that never mentions cache tokens is not the same as one that measured zero"
+        );
     }
 
     #[test]

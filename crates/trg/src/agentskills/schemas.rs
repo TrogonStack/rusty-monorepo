@@ -278,6 +278,7 @@ mod tests {
                 total_tokens: Some(900),
                 input_tokens: None,
                 output_tokens: None,
+                cached_tokens: None,
                 cost_usd: None,
                 final_text: String::new(),
                 exit_code: None,

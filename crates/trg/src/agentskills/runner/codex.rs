@@ -5,13 +5,13 @@ use std::process::Command;
 use super::capabilities::HarnessControl;
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
-    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
-    EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
+    runner_failure_outcome, timeout_duration, timeout_outcome, total_tokens_from, write_runner_invocation_metadata,
+    write_timing_file, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, outputs_dir, path_within_base, FINAL_MD};
 use crate::agentskills::redact::redact_command_args;
-use crate::agentskills::report::PermissionGrant;
+use crate::agentskills::report::{CacheTokens, PermissionGrant};
 
 const PROGRAM: &str = "codex";
 const INSTALL_HINT: &str = "install Codex CLI and ensure `codex` is on PATH";
@@ -175,10 +175,11 @@ fn parse_outcome(
     let cached_input = usage
         .and_then(|u| u.get("cached_input_tokens"))
         .and_then(|v| v.as_u64());
-    let total_tokens = match (input_tokens, output_tokens) {
-        (None, None) => None,
-        (i, o) => Some(i.unwrap_or(0) + o.unwrap_or(0) + cached_input.unwrap_or(0)),
-    };
+    let total_tokens = total_tokens_from(input_tokens, output_tokens);
+    // Codex names only the read side of caching; it has no field for tokens spent writing
+    // a fresh entry into the cache, so `write_tokens` stays `None` rather than 0.
+    let cached_tokens =
+        cached_input.map(|read| CacheTokens::parse(Some(read), None).expect("read is Some by construction"));
 
     completed_outcome(
         wall_ms,
@@ -186,6 +187,7 @@ fn parse_outcome(
         total_tokens,
         input_tokens,
         output_tokens,
+        cached_tokens,
         None,
         final_text,
     )
@@ -206,9 +208,23 @@ mod tests {
         assert_eq!(outcome.duration_ms, 5000);
         assert_eq!(outcome.input_tokens, Some(120));
         assert_eq!(outcome.output_tokens, Some(40));
-        assert_eq!(outcome.total_tokens, Some(170));
+        // input + output only: the same rule claude-code and cursor-agent use, so a cached
+        // count is never folded into a total that is supposed to compare across harnesses.
+        assert_eq!(outcome.total_tokens, Some(160));
+        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(10), None).unwrap()));
         assert_eq!(outcome.final_text, "final");
         assert_eq!(outcome.exit_code, Some(0));
+    }
+
+    #[test]
+    fn a_turn_with_no_cached_input_tokens_reports_no_cache_activity() {
+        let stdout = br#"{"type":"turn.completed","usage":{"input_tokens":120,"output_tokens":40}}
+"#;
+        let outcome = parse_outcome(stdout, 5000, true, Some(0), "final".to_string());
+        assert_eq!(
+            outcome.cached_tokens, None,
+            "a harness that never mentions cache tokens is not the same as one that measured zero"
+        );
     }
 
     #[test]

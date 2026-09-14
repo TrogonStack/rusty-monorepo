@@ -1250,6 +1250,7 @@ mod tests {
                     total_tokens: Some(metrics.total_tokens),
                     input_tokens: Some(metrics.input_tokens),
                     output_tokens: Some(metrics.output_tokens),
+                    cached_tokens: None,
                     cost_usd: None,
                 },
                 cache: None,

@@ -3404,6 +3404,7 @@ mod tests {
                 total_tokens: None,
                 input_tokens: None,
                 output_tokens: None,
+                cached_tokens: None,
                 cost_usd: None,
             },
             cache: None,

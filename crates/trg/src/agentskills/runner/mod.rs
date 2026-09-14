@@ -30,7 +30,7 @@ use super::evals::{EvalCase, EvalError};
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
-use super::report::{EnvironmentPolicy, PermissionGrant, ScenarioKind, SkillStaging};
+use super::report::{CacheTokens, EnvironmentPolicy, PermissionGrant, ScenarioKind, SkillStaging};
 use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
 use environment::RunEnvironment;
@@ -165,6 +165,7 @@ pub struct EvalRunOutcome {
     pub total_tokens: Option<u64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    pub cached_tokens: Option<CacheTokens>,
     pub cost_usd: Option<f64>,
     pub final_text: String,
     /// Read-only fixture paths whose staged copy no longer matches its source.
@@ -293,6 +294,7 @@ pub fn runner_failure_outcome(duration_ms: u64, exit_code: Option<i32>, final_te
         total_tokens: None,
         input_tokens: None,
         output_tokens: None,
+        cached_tokens: None,
         cost_usd: None,
         final_text,
         read_only_fixture_violations: Vec::new(),
@@ -308,18 +310,50 @@ pub fn timeout_outcome(timeout_ms: u64, exit_code: Option<i32>) -> EvalRunOutcom
         total_tokens: None,
         input_tokens: None,
         output_tokens: None,
+        cached_tokens: None,
         cost_usd: None,
         final_text: String::new(),
         read_only_fixture_violations: Vec::new(),
     }
 }
 
+/// The one rule for `total_tokens`, so three runners parsing three different harnesses
+/// cannot each answer "what did this run cost in tokens" a different way.
+///
+/// Deliberately excludes any cached count. Harnesses do not agree on whether a cached
+/// token is billed on top of `input_tokens` or already counted inside it, so folding a
+/// cached figure in here would smuggle that disagreement back into a number a reader is
+/// told is harness-independent. `total_tokens` answers only "how much fresh input and
+/// output did this run report"; `EvalRunOutcome::cached_tokens` carries the rest.
+pub fn total_tokens_from(input_tokens: Option<u64>, output_tokens: Option<u64>) -> Option<u64> {
+    match (input_tokens, output_tokens) {
+        (None, None) => None,
+        (input, output) => Some(input.unwrap_or(0) + output.unwrap_or(0)),
+    }
+}
+
+#[cfg(test)]
+mod total_tokens_tests {
+    use super::total_tokens_from;
+
+    /// The shared rule, pinned once so a change to it is a change every runner feels.
+    #[test]
+    fn total_tokens_sums_input_and_output_only() {
+        assert_eq!(total_tokens_from(Some(80), Some(20)), Some(100));
+        assert_eq!(total_tokens_from(Some(80), None), Some(80));
+        assert_eq!(total_tokens_from(None, Some(20)), Some(20));
+        assert_eq!(total_tokens_from(None, None), None);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn completed_outcome(
     duration_ms: u64,
     exit_code: Option<i32>,
     total_tokens: Option<u64>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    cached_tokens: Option<CacheTokens>,
     cost_usd: Option<f64>,
     final_text: String,
 ) -> EvalRunOutcome {
@@ -331,6 +365,7 @@ pub fn completed_outcome(
         total_tokens,
         input_tokens,
         output_tokens,
+        cached_tokens,
         cost_usd,
         final_text,
         read_only_fixture_violations: Vec::new(),
@@ -755,6 +790,8 @@ pub struct TimingFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<CacheTokens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
 }
 
@@ -768,6 +805,7 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
         total_tokens: outcome.total_tokens,
         input_tokens: outcome.input_tokens,
         output_tokens: outcome.output_tokens,
+        cached_tokens: outcome.cached_tokens,
         cost_usd: outcome.cost_usd,
     };
     std::fs::write(timing_path, serde_json::to_string_pretty(&body).unwrap())

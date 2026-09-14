@@ -5,13 +5,13 @@ use std::process::Command;
 use super::capabilities::HarnessControl;
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
-    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
-    EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
+    runner_failure_outcome, timeout_duration, timeout_outcome, total_tokens_from, write_runner_invocation_metadata,
+    write_timing_file, EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
 use crate::agentskills::redact::redact_command_args;
-use crate::agentskills::report::PermissionGrant;
+use crate::agentskills::report::{CacheTokens, PermissionGrant};
 
 const PROGRAM: &str = "claude";
 const INSTALL_HINT: &str = "install Claude Code and ensure `claude` is on PATH";
@@ -185,9 +185,10 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
     let cache_creation = usage
         .and_then(|u| u.get("cache_creation_input_tokens"))
         .and_then(|v| v.as_u64());
-    let total_tokens = match (input_tokens, output_tokens) {
+    let total_tokens = total_tokens_from(input_tokens, output_tokens);
+    let cached_tokens = match (cache_read, cache_creation) {
         (None, None) => None,
-        (i, o) => Some(i.unwrap_or(0) + o.unwrap_or(0) + cache_read.unwrap_or(0) + cache_creation.unwrap_or(0)),
+        (read, write) => Some(CacheTokens::parse(read, write).expect("read or write is Some by the match arm")),
     };
     let cost_usd = result.get("total_cost_usd").and_then(|v| v.as_f64());
 
@@ -197,6 +198,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
         total_tokens,
         input_tokens,
         output_tokens,
+        cached_tokens,
         cost_usd,
         final_text,
     )
@@ -216,9 +218,26 @@ mod tests {
         assert_eq!(outcome.duration_ms, 2000);
         assert_eq!(outcome.input_tokens, Some(80));
         assert_eq!(outcome.output_tokens, Some(20));
-        assert_eq!(outcome.total_tokens, Some(105));
+        // input + output only: cache reads and creations are billed separately and are
+        // never folded into the total every runner agrees on.
+        assert_eq!(outcome.total_tokens, Some(100));
+        assert_eq!(
+            outcome.cached_tokens,
+            Some(CacheTokens::parse(Some(5), Some(0)).unwrap())
+        );
         assert_eq!(outcome.cost_usd, Some(0.0123));
         assert_eq!(outcome.final_text, "final text");
+    }
+
+    #[test]
+    fn a_result_with_no_cache_fields_reports_no_cache_activity() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":2000,"result":"final text","usage":{"input_tokens":80,"output_tokens":20}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(
+            outcome.cached_tokens, None,
+            "a harness that never mentions cache tokens is not the same as one that measured zero"
+        );
     }
 
     #[test]

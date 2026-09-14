@@ -51,6 +51,7 @@ pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome
         None,
         None,
         None,
+        None,
         final_text,
     ))
 }

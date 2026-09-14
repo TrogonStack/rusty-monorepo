@@ -1429,6 +1429,7 @@ fn validate_timing_file(path: &Path, timing: &TimingFile, errors: &mut Validatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::report::CacheTokens;
     use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus};
     use crate::fs::testutil::MemFS;
     use std::fs;
@@ -1772,6 +1773,7 @@ mod tests {
             total_tokens: Some(1000),
             input_tokens: Some(700),
             output_tokens: Some(300),
+            cached_tokens: Some(CacheTokens::parse(Some(50), None).unwrap()),
             cost_usd: Some(0.42),
             final_text: "done".to_string(),
             read_only_fixture_violations: Vec::new(),
@@ -1785,6 +1787,7 @@ mod tests {
         assert_eq!(timing.total_tokens, Some(1000));
         assert_eq!(timing.input_tokens, Some(700));
         assert_eq!(timing.output_tokens, Some(300));
+        assert_eq!(timing.cached_tokens, Some(CacheTokens::parse(Some(50), None).unwrap()));
         assert_eq!(timing.cost_usd, Some(0.42));
     }
 

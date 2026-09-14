@@ -61,6 +61,28 @@
       ],
       "type": "object"
     },
+    "CacheTokens": {
+      "description": "How many of a run's tokens its harness billed twice over: once to notice the content at\nall, and again either to read a cached copy back at a discount or to write a fresh copy\ninto the cache at a premium.\n\nAbsent entirely (`RunMetrics::cached_tokens` is `None`) when the harness never reports\ncache activity at all. That is a different claim from a harness that checked and cached\nnothing: collapsing the two would tell a reader chasing cost that every silent harness\nran cache-free, when the true answer is that nobody looked. `read_tokens` and\n`write_tokens` price in opposite directions, so a harness that names only one of them\n(codex's `cached_input_tokens`, cursor-agent's `cacheReadTokens`) leaves the other side\n`None` rather than folding it in at 0, which would claim a write count the harness never\ngave.",
+      "properties": {
+        "read_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "write_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "CaseSelectionRecord": {
       "description": "The selection a report was produced under, so a reader is not shown partial coverage\nas if it were a pass over the whole suite.",
       "properties": {
@@ -787,6 +809,16 @@
     },
     "RunMetrics": {
       "properties": {
+        "cached_tokens": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CacheTokens"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cost_usd": {
           "format": "double",
           "type": [
@@ -826,6 +858,7 @@
           ]
         },
         "total_tokens": {
+          "description": "The tokens every harness agrees to count the same way: input plus output, never a\ncached count folded in. See `cached_tokens` for what each harness billed again.",
           "format": "uint64",
           "minimum": 0,
           "type": [
