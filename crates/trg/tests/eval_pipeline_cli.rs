@@ -45,7 +45,7 @@ fn scaffold_bundle(skill_dir: &Path, out_dir: &Path) -> PathBuf {
         .arg(skill_dir)
         .arg("--out-dir")
         .arg(out_dir)
-        .args(["--iteration", "1"])
+        .args(["--iteration", "1", "--trust-skill"])
         .assert()
         .success();
 
@@ -182,7 +182,7 @@ fn a_minimum_pass_rate_fails_a_pass_that_scored_nothing() {
         .arg(&skill_dir)
         .arg("--out-dir")
         .arg(temp.path().join("artifacts"))
-        .args(["--iteration", "1", "--min-pass-rate", "1.0"])
+        .args(["--iteration", "1", "--trust-skill", "--min-pass-rate", "1.0"])
         .output()
         .unwrap();
 
@@ -291,7 +291,7 @@ fn a_failed_gate_and_a_broken_tool_do_not_share_a_code() {
         .arg(&skill_dir)
         .arg("--out-dir")
         .arg(temp.path().join("artifacts"))
-        .args(["--iteration", "1", "--min-pass-rate", "1.0"])
+        .args(["--iteration", "1", "--trust-skill", "--min-pass-rate", "1.0"])
         .output()
         .unwrap();
 

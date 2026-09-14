@@ -47,6 +47,7 @@ fn run_eval(skill_dir: &Path, out_dir: &Path, current_dir: Option<&Path>) {
         &out_dir.to_string_lossy(),
         "--iteration",
         "1",
+        "--trust-skill",
     ])
     .assert()
     .success();
@@ -133,6 +134,7 @@ fn run_fails_fast_when_runner_missing_from_path() {
             "codex",
             "--iteration",
             "1",
+            "--trust-skill",
         ])
         .output()
         .unwrap();
