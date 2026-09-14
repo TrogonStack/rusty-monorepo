@@ -577,7 +577,7 @@ fn run_llm_judge(
     })
 }
 
-fn parse_winner(raw: &str) -> Result<ComparisonWinner, EvalError> {
+pub(crate) fn parse_winner(raw: &str) -> Result<ComparisonWinner, EvalError> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "a" => Ok(ComparisonWinner::A),
         "b" => Ok(ComparisonWinner::B),

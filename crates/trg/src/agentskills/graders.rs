@@ -407,6 +407,44 @@ impl JsonSchema for ToolOrderCheck {
     }
 }
 
+/// The reference output a `baseline` grader holds a run against, read off disk
+/// while the grader is evaluated rather than when the judge is called.
+///
+/// Reading it here buys what `schema_validation` buys by opening its schema first:
+/// a case naming a reference that is missing or blank is an authoring error the
+/// first time it is graded, instead of a run that reads as a regression for as long
+/// as the judge happens to agree with it. It also means no judge is ever billed for
+/// a comparison that had nothing on the other side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineReference {
+    declared: String,
+    text: String,
+}
+
+impl BaselineReference {
+    pub fn read(declared: &RelativeSkillPath, resolved: &Path) -> std::result::Result<Self, String> {
+        let text = std::fs::read_to_string(resolved)
+            .map_err(|e| format!("baseline reference '{}' cannot be read: {e}", resolved.display()))?;
+        if text.trim().is_empty() {
+            return Err(format!(
+                "baseline reference '{declared}' is blank, and every output is at least as good as nothing"
+            ));
+        }
+        Ok(Self {
+            declared: declared.to_string(),
+            text,
+        })
+    }
+
+    pub fn declared(&self) -> &str {
+        &self.declared
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Grader {
@@ -466,6 +504,17 @@ pub enum Grader {
         #[serde(default)]
         target: GradeTarget,
     },
+    // `target` is a plain `GradeTarget` rather than the `TargetDeclaration` the `llm`
+    // grader carries, because the distinction that type exists to preserve, whether
+    // the mechanical shortcut may still fire ahead of the judge, cannot arise here:
+    // no mechanical check answers a comparison.
+    /// Is this run at least as good as a reference output the suite already accepts?
+    Baseline {
+        reference: RelativeSkillPath,
+        criterion: NonEmptyString,
+        #[serde(default)]
+        target: GradeTarget,
+    },
 }
 
 impl Grader {
@@ -480,6 +529,7 @@ impl Grader {
             Self::Llm { .. } => "llm",
             Self::ValidJson { .. } => "valid_json",
             Self::SchemaValidation { .. } => "schema_validation",
+            Self::Baseline { .. } => "baseline",
         }
     }
 
@@ -550,6 +600,11 @@ impl Grader {
             },
             Self::ValidJson { target } => format!("{target} is valid json"),
             Self::SchemaValidation { schema, target } => format!("{target} validates against schema '{schema}'"),
+            Self::Baseline {
+                reference,
+                criterion,
+                target,
+            } => format!("{target} is at least as good as baseline '{reference}' on: {criterion}"),
         }
     }
 
@@ -697,6 +752,15 @@ pub enum GraderOutcome {
     Deferred {
         criterion: String,
         target: TargetDeclaration,
+    },
+    /// The grader is a judgement call about two outputs rather than one, so the
+    /// judge is asked a different question, from a different prompt, about material
+    /// this evaluation already read off disk. Kept apart from `Deferred` so that no
+    /// caller can hand the judge a comparison with nothing to compare against.
+    Comparison {
+        criterion: String,
+        target: GradeTarget,
+        reference: BaselineReference,
     },
     /// The case, not the run, is malformed: a named schema is missing, unreadable, or
     /// not itself a valid JSON Schema document. Distinct from `Unsupported`, which
@@ -1020,6 +1084,21 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
         Grader::ValidJson { target } => {
             let (passed, evidence) = check_json_validity(&input.target_content(target));
             GraderOutcome::from_bool(passed, evidence)
+        }
+        Grader::Baseline {
+            reference,
+            criterion,
+            target,
+        } => {
+            let resolved = input.skill_dir.join(reference.as_path());
+            match BaselineReference::read(reference, &resolved) {
+                Ok(reference) => GraderOutcome::Comparison {
+                    criterion: criterion.to_string(),
+                    target: target.clone(),
+                    reference,
+                },
+                Err(reason) => GraderOutcome::AuthoringError { reason },
+            }
         }
         Grader::SchemaValidation { schema, target } => {
             let schema_path = input.skill_dir.join(schema.as_path());
@@ -2649,6 +2728,14 @@ mod tests {
         }
     }
 
+    fn baseline(reference: &str, criterion: &str) -> Grader {
+        Grader::Baseline {
+            reference: path(reference),
+            criterion: text(criterion),
+            target: GradeTarget::FinalText,
+        }
+    }
+
     #[test]
     fn an_outputs_prefixed_glob_is_not_answered_by_a_file_outside_the_output_tree() {
         let mut fixture = Fixture::new();
@@ -2684,5 +2771,78 @@ mod tests {
         );
 
         assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
+    }
+
+    #[test]
+    fn a_baseline_carries_its_reference_to_the_judge_rather_than_the_path_to_read_it_from() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill("golden.md", "The reference answer.\n");
+
+        match evaluate(&baseline("golden.md", "is as complete"), &fixture.input()) {
+            GraderOutcome::Comparison {
+                criterion,
+                target,
+                reference,
+            } => {
+                assert_eq!(criterion, "is as complete");
+                assert_eq!(target, GradeTarget::FinalText);
+                assert_eq!(reference.text(), "The reference answer.\n");
+                assert_eq!(reference.declared(), "golden.md", "evidence names what the case wrote");
+            }
+            other => panic!("expected a comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_baseline_naming_a_reference_that_is_not_there_is_an_authoring_error() {
+        let fixture = Fixture::new();
+
+        let outcome = evaluate(&baseline("golden.md", "is as complete"), &fixture.input());
+
+        let GraderOutcome::AuthoringError { reason } = outcome else {
+            panic!("a missing reference is a broken case, not a failed run: {outcome:?}");
+        };
+        assert!(reason.contains("cannot be read"), "{reason}");
+    }
+
+    #[test]
+    fn a_blank_baseline_reference_is_refused_instead_of_passing_everything() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill("golden.md", "   \n\t\n");
+
+        let outcome = evaluate(&baseline("golden.md", "is as complete"), &fixture.input());
+
+        let GraderOutcome::AuthoringError { reason } = outcome else {
+            panic!("a blank reference cannot be cleared, so it must not be graded: {outcome:?}");
+        };
+        assert!(reason.contains("is blank"), "{reason}");
+    }
+
+    #[test]
+    fn a_baseline_is_resolved_relative_to_the_skill_directory_not_the_workspace() {
+        let fixture = Fixture::new();
+        fixture.write_to_skill("golden.md", "The reference answer.\n");
+        fixture.write_to_workspace("golden.md", "Something the run wrote itself.\n");
+
+        match evaluate(&baseline("golden.md", "is as complete"), &fixture.input()) {
+            GraderOutcome::Comparison { reference, .. } => {
+                assert_eq!(
+                    reference.text(),
+                    "The reference answer.\n",
+                    "a run that writes over the reference must not get to choose what it is measured against"
+                );
+            }
+            other => panic!("expected a comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_baseline_grader_names_both_sides_of_the_comparison_when_it_describes_itself() {
+        let described = baseline("golden.md", "covers every column").describe();
+
+        assert_eq!(
+            described,
+            "final text is at least as good as baseline 'golden.md' on: covers every column"
+        );
     }
 }
