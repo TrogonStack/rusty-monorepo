@@ -92,13 +92,19 @@ impl StagedSkillDir {
     pub fn for_run(scenario: ScenarioKind, disclosure: SkillDisclosure, skill_name: &str) -> Option<Self> {
         let link = match (scenario, disclosure) {
             (ScenarioKind::WithoutSkill, _) => return None,
-            (_, SkillDisclosure::Unannounced) => {
-                format!("{SKILL_DIR_UNANNOUNCED}{}/", directory_segment(skill_name))
-            }
+            (_, SkillDisclosure::Unannounced) => return Some(Self::companion(skill_name)),
             (ScenarioKind::WithSkill, SkillDisclosure::Announced) => SKILL_LINK_WITH.to_string(),
             (ScenarioKind::OldSkill, SkillDisclosure::Announced) => SKILL_LINK_OLD.to_string(),
         };
         Some(Self(link))
+    }
+
+    /// Where a skill staged only to be passed over goes.
+    ///
+    /// The same shared parent an unannounced skill uses, so a listing reports the skill
+    /// under test and its distractors as peers and no prompt has to change to mention them.
+    pub fn companion(skill_name: &str) -> Self {
+        Self(format!("{SKILL_DIR_UNANNOUNCED}{}/", directory_segment(skill_name)))
     }
 
     pub fn as_str(&self) -> &str {

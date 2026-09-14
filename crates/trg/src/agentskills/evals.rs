@@ -1,9 +1,11 @@
 use super::case_env::CaseEnv;
+use super::companion_skills::CompanionSkill;
 use super::exit_code::ExitCode;
 use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
 use super::model_name::ModelName;
 use super::outputs::guess_mime_type;
+use super::prompt::StagedSkillDir;
 use super::runner::TimingFile;
 use super::sampling::AttemptCount;
 use super::system_prompt_appendix::SystemPromptAppendix;
@@ -848,6 +850,19 @@ pub struct EvalCase {
     pub graders: Vec<CaseGrader>,
     #[serde(default, skip_serializing_if = "is_announced")]
     pub skill_disclosure: SkillDisclosure,
+    /// Other skill directories staged beside the one under test, present only to be passed
+    /// over. See [`CompanionSkill`].
+    ///
+    /// Only an unannounced case may declare them, and a case that declares them anyway is
+    /// refused when the suite loads rather than at the point one would have been staged.
+    /// An announced prompt names the skill and the directory it sits in, so it has already
+    /// made the routing decision a distractor exists to leave open; staging one would put a
+    /// skill in the workspace that the prompt ruled out before the run began. Refusing it
+    /// where the suite is read means both authoring layouts are covered by one check and
+    /// the case never costs a run to find out, which the run-time refusals cannot claim:
+    /// those exist for facts only the chosen harness can supply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub companion_skills: Vec<CompanionSkill>,
     /// The state this case is asking about, for a case that is not asking about an empty
     /// directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -927,6 +942,18 @@ where
     for eval in &evals {
         if !seen.insert(eval.id.as_str()) {
             return Err(de::Error::custom(format!("evals contains duplicate id '{}'", eval.id)));
+        }
+        if !eval.companion_skills.is_empty() && eval.skill_disclosure.announces_the_skill() {
+            return Err(de::Error::custom(format!(
+                "evals id '{}' declares companion_skills ({}), but its prompt announces the skill and the directory it is staged in, so there is no routing decision left for a distractor to sit in front of; set \"skill_disclosure\": \"{}\" or drop the companions",
+                eval.id,
+                eval.companion_skills
+                    .iter()
+                    .map(|companion| format!("'{companion}'"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                SkillDisclosure::Unannounced.as_str()
+            )));
         }
     }
     Ok(evals)
@@ -1322,6 +1349,18 @@ pub fn check_eval_suite(
                     Ok(_) => {}
                 }
             }
+        }
+
+        if let Err(failure) = super::companion_skills::resolve_companions(
+            fs,
+            skill_path,
+            &eval.companion_skills,
+            &[StagedSkillDir::companion(expected_skill_name)],
+        ) {
+            errors.push(ValidationError::for_field(
+                format!("{}.companion_skills", label),
+                failure.to_string(),
+            ));
         }
 
         assertion_count += eval.assertions.len();
@@ -1831,6 +1870,78 @@ mod tests {
         assert!(err.to_string().contains("exceeds 10 byte limit"));
     }
 
+    /// Every case's companions are put through the same validation `verify` gives the rest
+    /// of the suite, so a case that could never stage is reported before a pass spends a run
+    /// finding out.
+    #[test]
+    fn check_eval_suite_rejects_a_companion_that_is_not_a_skill_directory() {
+        let fs = MemFS::new();
+        fs.insert(
+            Path::new("/csv-analyzer/evals/evals.json"),
+            r#"{
+  "skill_name": "csv-analyzer",
+  "evals": [
+    {
+      "id": "triggers-the-skill",
+      "prompt": "Work out what happened to revenue last month",
+      "expected_output": "A short summary.",
+      "skill_disclosure": "unannounced",
+      "companion_skills": ["evals/companions/not-a-skill"],
+      "assertions": ["The output includes a summary"]
+    }
+  ]
+}"#,
+        );
+        fs.insert(Path::new("/csv-analyzer/evals/companions/not-a-skill/README.md"), "hi");
+
+        let err = check_eval_suite(
+            &fs,
+            Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
+            "csv-analyzer",
+            EvalCheckOptions::default(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("evals/companions/not-a-skill"), "{err}");
+    }
+
+    #[test]
+    fn check_eval_suite_accepts_a_companion_that_is_a_skill_directory() {
+        let fs = MemFS::new();
+        fs.insert(
+            Path::new("/csv-analyzer/evals/evals.json"),
+            r#"{
+  "skill_name": "csv-analyzer",
+  "evals": [
+    {
+      "id": "triggers-the-skill",
+      "prompt": "Work out what happened to revenue last month",
+      "expected_output": "A short summary.",
+      "skill_disclosure": "unannounced",
+      "companion_skills": ["evals/companions/log-summarizer"],
+      "assertions": ["The output includes a summary"]
+    }
+  ]
+}"#,
+        );
+        fs.insert(
+            Path::new("/csv-analyzer/evals/companions/log-summarizer/SKILL.md"),
+            "---\nname: log-summarizer\ndescription: Summarizes application log files into a short report.\n---\n\nBody.\n",
+        );
+
+        let report = check_eval_suite(
+            &fs,
+            Path::new("/csv-analyzer"),
+            &EvalDirName::default(),
+            "csv-analyzer",
+            EvalCheckOptions::default(),
+        )
+        .expect("a valid companion passes verify");
+
+        assert_eq!(report.eval_count, 1);
+    }
+
     #[test]
     fn check_eval_suite_rejects_missing_fixture_file() {
         let fs = MemFS::new();
@@ -2239,6 +2350,7 @@ mod tests {
             graders: vec![],
             skill_disclosure: SkillDisclosure::default(),
             scaffold: None,
+            companion_skills: Vec::new(),
             conversation_history: None,
             allowed_tools: None,
         }
@@ -2647,6 +2759,82 @@ mod tests {
         let err = parse_eval_suite(json).unwrap_err().to_string();
         assert!(err.contains("unknown field `assertion`"), "{err}");
         assert!(err.contains("expected one of"), "{err}");
+    }
+
+    /// An announced prompt names the skill and where it sits, so it settled the routing
+    /// decision before the run began. A companion there would stage a skill the prompt has
+    /// already ruled out, and a case that says nothing about that reads as measuring a
+    /// choice nothing was ever going to make.
+    #[test]
+    fn a_companion_declared_on_an_announced_case_is_refused_by_name() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "companion_skills": ["evals/companions/other-skill"]
+    }
+  ]
+}"#;
+
+        let err = parse_eval_suite(json).unwrap_err().to_string();
+
+        assert!(err.contains("evals/companions/other-skill"), "{err}");
+        assert!(err.contains("skill_disclosure"), "{err}");
+    }
+
+    #[test]
+    fn a_companion_declared_on_an_unannounced_case_parses() {
+        let json = r#"{
+  "skill_name": "demo-skill",
+  "evals": [
+    {
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "skill_disclosure": "unannounced",
+      "companion_skills": ["evals/companions/other-skill"]
+    }
+  ]
+}"#;
+
+        let suite = parse_eval_suite(json).expect("an unannounced case may declare companions");
+
+        assert_eq!(suite.evals[0].companion_skills.len(), 1);
+        assert_eq!(
+            suite.evals[0].companion_skills[0].as_str(),
+            "evals/companions/other-skill"
+        );
+    }
+
+    /// A companion is a skill directory this run executes against, and the trust gate is
+    /// answered per directory. Keeping a companion inside the skill directory is what makes
+    /// the answer already given for the skill cover it too.
+    #[test]
+    fn a_companion_that_names_a_directory_outside_the_skill_is_refused() {
+        for escape in ["/etc/passwd", "../elsewhere"] {
+            let json = format!(
+                r#"{{
+  "skill_name": "demo-skill",
+  "evals": [
+    {{
+      "id": "one",
+      "prompt": "A sufficiently long prompt here",
+      "expected_output": "A detailed analysis output",
+      "skill_disclosure": "unannounced",
+      "companion_skills": [{}]
+    }}
+  ]
+}}"#,
+                serde_json::to_string(escape).unwrap()
+            );
+
+            let err = parse_eval_suite(&json).unwrap_err().to_string();
+
+            assert!(err.contains("companion skill"), "{escape}: {err}");
+        }
     }
 
     #[test]

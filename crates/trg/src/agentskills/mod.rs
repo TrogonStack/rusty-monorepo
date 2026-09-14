@@ -6,6 +6,7 @@ pub mod case_directories;
 pub mod case_env;
 pub mod case_selection;
 pub mod ci;
+pub mod companion_skills;
 pub mod compare;
 pub mod concurrency;
 pub mod dispersion;
