@@ -26,7 +26,16 @@ pub fn check_available() -> Result<(), EvalError> {
 /// documented non-interactive grant, so both levels collapse into it: cursor-agent draws no
 /// boundary between them for us to translate. It also has `--sandbox enabled|disabled`, but
 /// that flag's boundary is undocumented, so trg does not reach for it here.
-fn permission_args(_grant: PermissionGrant) -> [&'static str; 1] {
+///
+/// `Runner::effective_permission_grant` is the authority on what running under `--force`
+/// actually means; the assertion below exists so the two cannot silently drift apart if
+/// cursor-agent ever grows a second grant one of them forgets to learn about.
+fn permission_args(grant: PermissionGrant) -> [&'static str; 1] {
+    debug_assert_eq!(
+        Runner::CursorAgent.effective_permission_grant(grant),
+        PermissionGrant::Unrestricted,
+        "cursor-agent's only non-interactive grant is unrestricted, regardless of what was requested"
+    );
     let flag = Runner::CursorAgent
         .support(HarnessControl::SandboxLevels)
         .flag()

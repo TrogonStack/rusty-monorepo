@@ -59,6 +59,21 @@ impl Runner {
         Ok(outcome)
     }
 
+    /// The grant a run under this harness actually operates with, which is not always
+    /// the one requested.
+    ///
+    /// cursor-agent has exactly one non-interactive mode, `--force`, so any run under it
+    /// executes unrestricted no matter what an operator asked for; claude-code and codex
+    /// both offer a flag per grant, so they enforce exactly what was requested. This is
+    /// the one place that answers what a run was actually allowed to do, so a report can
+    /// say so rather than repeating the request back as if it were the outcome.
+    pub fn effective_permission_grant(self, requested: PermissionGrant) -> PermissionGrant {
+        match self {
+            Self::ClaudeCode | Self::Codex => requested,
+            Self::CursorAgent => PermissionGrant::Unrestricted,
+        }
+    }
+
     pub fn check_available(self) -> Result<(), EvalError> {
         availability::check_runner_available(self)
             .map(|_| ())
@@ -337,6 +352,39 @@ pub fn total_tokens_from(input_tokens: Option<u64>, output_tokens: Option<u64>) 
     match (input_tokens, output_tokens) {
         (None, None) => None,
         (input, output) => Some(input.unwrap_or(0) + output.unwrap_or(0)),
+    }
+}
+
+#[cfg(test)]
+mod effective_permission_grant_tests {
+    use super::{PermissionGrant, Runner};
+
+    #[test]
+    fn claude_code_and_codex_enforce_exactly_what_was_requested() {
+        for runner in [Runner::ClaudeCode, Runner::Codex] {
+            assert_eq!(
+                runner.effective_permission_grant(PermissionGrant::WorkspaceWrite),
+                PermissionGrant::WorkspaceWrite
+            );
+            assert_eq!(
+                runner.effective_permission_grant(PermissionGrant::Unrestricted),
+                PermissionGrant::Unrestricted
+            );
+        }
+    }
+
+    /// cursor-agent's only non-interactive mode is `--force`, so a run under it always
+    /// executes unrestricted, regardless of what was requested.
+    #[test]
+    fn cursor_agent_always_runs_unrestricted() {
+        assert_eq!(
+            Runner::CursorAgent.effective_permission_grant(PermissionGrant::WorkspaceWrite),
+            PermissionGrant::Unrestricted
+        );
+        assert_eq!(
+            Runner::CursorAgent.effective_permission_grant(PermissionGrant::Unrestricted),
+            PermissionGrant::Unrestricted
+        );
     }
 }
 

@@ -1205,7 +1205,7 @@ mod tests {
                 runner_binary: None,
                 runner_version: None,
                 environment: crate::agentskills::report::EnvironmentPolicy::default(),
-                permission: crate::agentskills::report::PermissionGrant::default(),
+                permission: crate::agentskills::permission_outcome::PermissionOutcome::default(),
                 allowed_tools: None,
                 ci: None,
                 iteration: 1,

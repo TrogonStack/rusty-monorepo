@@ -22,6 +22,7 @@ use super::judge::JudgeProvider;
 use super::judge_votes::JudgeVotes;
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
 use super::outputs::OUTPUTS_DIR;
+use super::permission_outcome::PermissionOutcome;
 use super::runner::capabilities::HarnessControl;
 use super::runner::{Runner, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
@@ -221,8 +222,8 @@ pub struct BuildReportOptions {
     pub skill_staging: SkillStaging,
     /// How much of the operator's machine each run is allowed to see.
     pub environment: EnvironmentPolicy,
-    /// How much a run's harness subprocess may do without prompting.
-    pub permission: PermissionGrant,
+    /// What a run's harness subprocess was asked to do, and what it actually enforced.
+    pub permission: PermissionOutcome,
     /// The operator's ceiling on which tools a run's harness may reach for.
     ///
     /// `None` means the operator set no ceiling; a case can still narrow the grant on
@@ -248,7 +249,7 @@ impl Default for BuildReportOptions {
             runner_version: None,
             skill_staging: SkillStaging::default(),
             environment: EnvironmentPolicy::default(),
-            permission: PermissionGrant::default(),
+            permission: PermissionOutcome::default(),
             allowed_tools: None,
             cases: CaseSelection::default(),
             eval_dir: EvalDirName::default(),
@@ -320,7 +321,7 @@ pub struct ReportSection {
     #[serde(default)]
     pub environment: EnvironmentPolicy,
     #[serde(default)]
-    pub permission: PermissionGrant,
+    pub permission: PermissionOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<ToolGrant>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1804,7 +1805,7 @@ mod tests {
                     runner_binary: None,
                     runner_version: None,
                     environment: EnvironmentPolicy::default(),
-                    permission: PermissionGrant::default(),
+                    permission: PermissionOutcome::default(),
                     allowed_tools: None,
                     ci: None,
                 },
@@ -2011,7 +2012,21 @@ mod tests {
             let original = load_fixture_json("v1-minimal.json", FIXTURE_V1_MINIMAL);
             let document: ReportDocument =
                 serde_json::from_value(original).expect("a report.json without a permission field still deserializes");
-            assert_eq!(document.report.permission, PermissionGrant::WorkspaceWrite);
+            assert_eq!(document.report.permission, PermissionGrant::WorkspaceWrite.into());
+        }
+
+        /// A `report.json` written before `PermissionOutcome` existed holds `permission`
+        /// as a bare grant. Reading it must not invent a widening that was never
+        /// observed: the only honest reading is that the harness enforced exactly what
+        /// was requested.
+        #[test]
+        fn a_report_json_with_a_bare_permission_grant_still_deserializes_as_unwidened() {
+            let mut original = load_fixture_json("v1-minimal.json", FIXTURE_V1_MINIMAL);
+            original["report"]["permission"] = serde_json::json!("unrestricted");
+            let document: ReportDocument = serde_json::from_value(original)
+                .expect("a report.json with a bare permission grant still deserializes");
+            assert_eq!(document.report.permission, PermissionGrant::Unrestricted.into());
+            assert!(!document.report.permission.was_widened());
         }
 
         #[test]
