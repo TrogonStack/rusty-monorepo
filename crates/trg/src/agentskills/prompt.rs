@@ -32,6 +32,35 @@ impl PromptText {
     }
 }
 
+/// The name a skill goes by, which is the name a harness's own skill tool
+/// reports when it invokes one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct SkillName(String);
+
+impl SkillName {
+    pub fn parse(value: &str) -> Result<Self, SkillError> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(SkillError::EmptyField("name"));
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Does this token name this skill?
+    ///
+    /// The validator holds a name to lowercase, but the token is text a harness
+    /// produced, so the reading does not rest on the harness having echoed the
+    /// case back.
+    pub fn named_by(&self, token: &str) -> bool {
+        self.0.eq_ignore_ascii_case(token)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillSummary {
     pub name: String,

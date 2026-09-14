@@ -1546,9 +1546,10 @@ fn before_after_holds(transcript: &NormalizedTranscript, before: &ToolReference,
 mod tests {
     use super::*;
     use crate::agentskills::evals::SkillDisclosure;
-    use crate::agentskills::prompt::StagedSkillDir;
+    use crate::agentskills::prompt::{SkillName, StagedSkillDir};
     use crate::agentskills::redact::redact_transcript_bytes;
     use crate::agentskills::report::ScenarioKind;
+    use crate::agentskills::transcript::StagedSkillName;
     use crate::agentskills::transcript::{normalize_stream_json, TranscriptFormat, WorkspaceBoundary};
 
     const CLAUDE_STREAM: &[u8] = br#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":".skill/SKILL.md"}}]}}
@@ -1893,6 +1894,7 @@ mod tests {
     fn staged_at(disclosure: SkillDisclosure) -> StagedSkill {
         StagedSkill::At {
             directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
+            name: StagedSkillName::known(SkillName::parse("demo-skill").unwrap()),
         }
     }
 

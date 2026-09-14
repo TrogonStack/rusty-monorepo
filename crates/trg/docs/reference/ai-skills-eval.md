@@ -804,7 +804,7 @@ every reader and to every runner.
 | `file_exists` | `path`, `exists` | The run produced a file at `path`, which may be a glob. `exists` defaults to `true`; set it to `false` to assert that nothing matches |
 | `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
 | `tool_order` | `tools`, or `before`/`after` | The observed tool sequence contains the listed tools in order, as a subsequence; or, with `before`/`after`, some call to `before` precedes some later call to `after` |
-| `skill_used` | `negate` | The run engaged the skill, by a native skill tool call or by reading the staged skill directory |
+| `skill_used` | `negate` | The run engaged the skill, by a native skill tool call naming the staged skill or by reading the staged skill directory |
 | `llm` | `criterion`, `target` | Handed to the LLM judge, which is the only grader that costs a request |
 | `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
 | `schema_validation` | `schema`, `target` | The target parses as JSON and validates against the named JSON Schema document. `schema` is a relative path inside the skill directory, resolved the same way `files` and `scaffold` are |
@@ -2457,7 +2457,11 @@ grader is written once rather than once per harness.
   "workspace_escapes": [
     { "tool": "read", "path": "/somewhere/outside/notes.md" }
   ],
-  "staged_skill": { "kind": "at", "directory": ".skill/" }
+  "staged_skill": {
+    "kind": "at",
+    "directory": ".skill/",
+    "name": { "kind": "known", "name": "demo-skill" }
+  }
 }
 ```
 
@@ -2469,6 +2473,8 @@ grader is written once rather than once per harness.
 | `workspace_escapes[]` | array | Paths the run named that resolve outside its workspace; omitted when empty |
 | `staged_skill.kind` | enum | `at` when the run staged a skill, `nothing` for the without-skill arm; omitted by a transcript written before trg recorded it |
 | `staged_skill.directory` | string | The workspace-relative directory the skill was staged at, present with `at` |
+| `staged_skill.name.kind` | enum | `known` when the run recorded the staged skill's name, `unrecorded` for a transcript written before trg recorded it; omitted when `unrecorded` |
+| `staged_skill.name.name` | string | The name the staged skill answers to, present with `known` |
 
 Each of the three supported runners is normalized from event shapes verified
 against that runner's own output:
@@ -2507,6 +2513,13 @@ skill of the harness's own, and a with-skill run answers only for its own
 directory. What a transcript cannot say is where a command ran, so a relative path
 reached after a `cd`, or a search pattern quoting the staged directory, still reads
 as a path to it.
+
+`staged_skill.name` is what a native skill tool call is read against. A harness
+invokes its own installed skills through the same tool, so a call is engagement
+only when it names the skill this run staged, and the announced directories carry
+no name for it to be matched against. A transcript written before the name was
+recorded cannot say which skill a call invoked, which is not evidence that the
+wrong one was, so it keeps the older reading and credits any such call.
 
 `events.json` is normalized from the redacted transcript, so it carries no
 secret that `transcript.jsonl` had stripped.
