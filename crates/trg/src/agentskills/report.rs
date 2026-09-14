@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use schemars::JsonSchema;
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -576,14 +577,124 @@ pub struct RunPaths {
     pub outputs: String,
 }
 
+/// How many of a run's tokens its harness billed twice over: once to notice the content at
+/// all, and again either to read a cached copy back at a discount or to write a fresh copy
+/// into the cache at a premium.
+///
+/// Absent entirely (`RunMetrics::cached_tokens` is `None`) when the harness never reports
+/// cache activity at all. That is a different claim from a harness that checked and cached
+/// nothing: collapsing the two would tell a reader chasing cost that every silent harness
+/// ran cache-free, when the true answer is that nobody looked. `read_tokens` and
+/// `write_tokens` price in opposite directions, so a harness that names only one of them
+/// (codex's `cached_input_tokens`, cursor-agent's `cacheReadTokens`) leaves the other side
+/// `None` rather than folding it in at 0, which would claim a write count the harness never
+/// gave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CacheTokens {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    write_tokens: Option<u64>,
+}
+
+impl CacheTokens {
+    /// Refuses a value naming neither side, since that carries no information a caller
+    /// could not already read from the whole field being absent.
+    pub fn parse(read_tokens: Option<u64>, write_tokens: Option<u64>) -> std::result::Result<Self, String> {
+        if read_tokens.is_none() && write_tokens.is_none() {
+            return Err(
+                "cache tokens must report a read count, a write count, or both: naming neither is the same claim as the field being absent"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            read_tokens,
+            write_tokens,
+        })
+    }
+
+    /// Tokens served from a cached entry, billed at a discount. `None` when this harness
+    /// never reports reads, not when it reported reading zero.
+    pub fn read_tokens(self) -> Option<u64> {
+        self.read_tokens
+    }
+
+    /// Tokens spent writing a fresh entry into the cache, billed at a premium. `None` when
+    /// this harness never reports writes, not when it reported writing zero.
+    pub fn write_tokens(self) -> Option<u64> {
+        self.write_tokens
+    }
+}
+
+#[derive(Deserialize)]
+struct RawCacheTokens {
+    #[serde(default)]
+    read_tokens: Option<u64>,
+    #[serde(default)]
+    write_tokens: Option<u64>,
+}
+
+impl<'de> Deserialize<'de> for CacheTokens {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawCacheTokens::deserialize(deserializer)?;
+        Self::parse(raw.read_tokens, raw.write_tokens).map_err(de::Error::custom)
+    }
+}
+
+/// Written by hand rather than derived because the derived shape admits `{}` and a pair of
+/// explicit nulls, which `Deserialize` then refuses. A schema looser than its own parser is
+/// worse here than elsewhere: `eval verify --mode strict` would call such an artifact
+/// conformant and the next command to read it would fail on the same bytes.
+impl JsonSchema for CacheTokens {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CacheTokens".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "description": "How many of a run's tokens its harness billed twice over. Absent entirely when the harness never reports cache activity, which is a different claim from a harness that checked and cached nothing. At least one side must be named: a value naming neither carries no information the field being absent does not already carry.",
+            "properties": {
+                "read_tokens": {
+                    "type": ["integer", "null"],
+                    "format": "uint64",
+                    "minimum": 0
+                },
+                "write_tokens": {
+                    "type": ["integer", "null"],
+                    "format": "uint64",
+                    "minimum": 0
+                }
+            },
+            "anyOf": [
+                {
+                    "required": ["read_tokens"],
+                    "properties": { "read_tokens": { "type": "integer" } }
+                },
+                {
+                    "required": ["write_tokens"],
+                    "properties": { "write_tokens": { "type": "integer" } }
+                }
+            ]
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct RunMetrics {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    /// The tokens every harness agrees to count the same way: input plus output, never a
+    /// cached count folded in. See `cached_tokens` for what each harness billed again.
     pub total_tokens: Option<u64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<CacheTokens>,
     pub cost_usd: Option<f64>,
 }
 
@@ -1618,6 +1729,74 @@ mod tests {
             !parsed.contains_key("budget"),
             "a report nothing ever priced must not claim a budget section"
         );
+    }
+
+    mod cache_tokens {
+        use super::*;
+
+        fn validator() -> jsonschema::Validator {
+            let schema = serde_json::to_value(schemars::schema_for!(CacheTokens)).unwrap();
+            jsonschema::validator_for(&schema).unwrap()
+        }
+
+        /// The schema and `Deserialize` have to refuse the same documents. When the schema is
+        /// the looser of the two, `verify --mode strict` calls a bundle conformant and the
+        /// next command to read those same bytes fails on them.
+        #[test]
+        fn the_schema_refuses_every_document_deserialize_refuses() {
+            let validator = validator();
+            for document in [
+                serde_json::json!({}),
+                serde_json::json!({ "read_tokens": null, "write_tokens": null }),
+            ] {
+                assert!(
+                    !validator.is_valid(&document),
+                    "schema admitted a document Deserialize refuses: {document}"
+                );
+                assert!(serde_json::from_value::<CacheTokens>(document).is_err());
+            }
+        }
+
+        #[test]
+        fn the_schema_admits_a_value_that_names_one_side() {
+            let validator = validator();
+            for document in [
+                serde_json::json!({ "read_tokens": 10 }),
+                serde_json::json!({ "write_tokens": 10 }),
+                serde_json::json!({ "read_tokens": 10, "write_tokens": 4 }),
+            ] {
+                assert!(
+                    validator.is_valid(&document),
+                    "schema refused a readable value: {document}"
+                );
+                assert!(serde_json::from_value::<CacheTokens>(document).is_ok());
+            }
+        }
+
+        #[test]
+        fn naming_neither_side_is_refused() {
+            assert!(CacheTokens::parse(None, None).is_err());
+        }
+
+        #[test]
+        fn naming_either_side_alone_is_accepted() {
+            assert!(CacheTokens::parse(Some(5), None).is_ok());
+            assert!(CacheTokens::parse(None, Some(5)).is_ok());
+        }
+
+        #[test]
+        fn deserializing_an_object_that_names_neither_side_is_refused() {
+            let result: std::result::Result<CacheTokens, _> = serde_json::from_value(serde_json::json!({}));
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn a_read_only_value_round_trips_without_gaining_a_write_side() {
+            let read_only = CacheTokens::parse(Some(10), None).unwrap();
+            let json = serde_json::to_value(read_only).unwrap();
+            assert_eq!(json, serde_json::json!({ "read_tokens": 10 }));
+            assert_eq!(serde_json::from_value::<CacheTokens>(json).unwrap(), read_only);
+        }
     }
 
     mod backward_compat {

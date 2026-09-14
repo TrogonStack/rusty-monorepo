@@ -1,8 +1,64 @@
 {
+  "$defs": {
+    "CacheTokens": {
+      "anyOf": [
+        {
+          "properties": {
+            "read_tokens": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "read_tokens"
+          ]
+        },
+        {
+          "properties": {
+            "write_tokens": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "write_tokens"
+          ]
+        }
+      ],
+      "description": "How many of a run's tokens its harness billed twice over. Absent entirely when the harness never reports cache activity, which is a different claim from a harness that checked and cached nothing. At least one side must be named: a value naming neither carries no information the field being absent does not already carry.",
+      "properties": {
+        "read_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "write_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
   "$id": "https://trogonstack.dev/schemas/trg/timing.json.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "cached_tokens": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CacheTokens"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "cost_usd": {
       "format": "double",
       "type": [

@@ -1284,6 +1284,7 @@ mod fake_runner {
                 total_tokens: Some(count as u64),
                 input_tokens: Some(count as u64),
                 output_tokens: Some(0),
+                cached_tokens: None,
                 cost_usd,
                 final_text: format!("transient-{count}"),
                 read_only_fixture_violations: Vec::new(),
@@ -1298,6 +1299,7 @@ mod fake_runner {
             total_tokens: Some(count as u64),
             input_tokens: Some(count as u64),
             output_tokens: Some(0),
+            cached_tokens: None,
             cost_usd,
             final_text: format!("run-{count}"),
             read_only_fixture_violations: Vec::new(),
@@ -1360,6 +1362,7 @@ fn apply_outcome(
     run.metrics.total_tokens = outcome.total_tokens;
     run.metrics.input_tokens = outcome.input_tokens;
     run.metrics.output_tokens = outcome.output_tokens;
+    run.metrics.cached_tokens = outcome.cached_tokens;
     run.metrics.cost_usd = outcome.cost_usd;
 
     run.read_only_fixture_violations = outcome.read_only_fixture_violations.clone();
