@@ -57,7 +57,7 @@ impl MockServerArgs {
                 self.calls.display(),
                 e
             );
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         let stdin = io::stdin();
