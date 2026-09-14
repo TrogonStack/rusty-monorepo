@@ -360,6 +360,17 @@
           ],
           "description": "This case's own ceiling on what its run's harness may reach for.\n\nNarrows whatever the operator granted at the CLI; it can never widen it. Absent\nmeans the case adds no ceiling of its own, leaving the operator's grant whole."
         },
+        "append_system_prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SystemPromptAppendix"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Text appended to the harness's own system prompt for this case, for a case whose\nquestion is about how the agent was instructed rather than about what it was asked.\n\nA harness that offers no way to append one cannot answer the question a case using\nthis is asking, so such a run is recorded as not started rather than run without it:\na run missing the instruction it was supposed to carry is not a weaker answer, it is\nan answer to a different question."
+        },
         "assertions": {
           "default": [],
           "items": {
@@ -704,6 +715,12 @@
           "type": "string"
         }
       ]
+    },
+    "SystemPromptAppendix": {
+      "description": "Text appended to the harness's own system prompt for this case. Not blank.",
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
     },
     "ToolGrant": {
       "description": "A named, finite set of tools a run's harness may use.\n\nNever parsed as empty: naming zero tools is not how an operator or a case denies\nevery gated tool, since a grant with nothing in it reads in a report exactly like a\ngrant nobody declared. [`ToolGrant::narrowed_by`] is the one place an empty set is\nlegitimate, because it answers \"what do both sides admit\", not \"what was declared\".",

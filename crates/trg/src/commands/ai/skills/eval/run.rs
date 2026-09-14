@@ -850,6 +850,18 @@ impl RunExecution<'_> {
             });
         }
 
+        if case.append_system_prompt.is_some()
+            && !matches!(
+                self.runner.support(HarnessControl::SystemPromptAppend),
+                ControlSupport::Driven(_)
+            )
+        {
+            return Some(RunNotStarted::ControlUnsupported {
+                control: HarnessControl::SystemPromptAppend,
+                runner: self.runner,
+            });
+        }
+
         if let Some(grant) = self.resolved_tool_grant(case) {
             if !matches!(
                 self.runner.support(HarnessControl::ToolAllowlist),
@@ -2927,6 +2939,40 @@ mod tests {
         skill_dir
     }
 
+    fn write_system_prompt_appendix_skill(root: &Path) -> PathBuf {
+        let skill_dir = root.join("steered-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: steered-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "steered-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "first prompt",
+                        "expected_output": "first output",
+                        "assertions": ["checks first"]
+                    },
+                    {
+                        "id": "steered",
+                        "prompt": "second prompt",
+                        "expected_output": "second output",
+                        "assertions": ["checks second"],
+                        "append_system_prompt": "Answer in British English."
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
     fn write_tool_grant_skill(root: &Path) -> PathBuf {
         let skill_dir = root.join("gated-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -3781,6 +3827,62 @@ mod tests {
                     .contains("offers no conversation seeding")),
             "the report has to say why the run did not start"
         );
+    }
+
+    /// A case that appends to the system prompt is asking what the agent does when it was
+    /// instructed a particular way. A harness with no way to append one cannot be asked
+    /// that question, so running it without the appendix would file an answer to a
+    /// different question under the case's name.
+    #[test]
+    fn a_case_appending_to_the_system_prompt_is_skipped_on_a_harness_that_cannot_carry_it() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_system_prompt_appendix_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report_dir = run_with_fake_runner(RunArgs {
+            runner: Some(Runner::Codex),
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][0]["status"], "completed");
+
+        assert_eq!(report["runs"][1]["status"], "skipped");
+        assert_eq!(report["runs"][1]["failure_kind"], "unsupported");
+        assert_eq!(
+            super::fake_runner::invocations(),
+            1,
+            "the only invocation must be the case with no appendix to carry"
+        );
+        assert!(
+            report["runs"][1]["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("offers no system prompt append")),
+            "the report has to say why the run did not start"
+        );
+    }
+
+    #[test]
+    fn a_case_appending_to_the_system_prompt_runs_on_a_harness_that_carries_it() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_system_prompt_appendix_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report_dir = run_with_fake_runner(RunArgs {
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(report["runs"][1]["status"], "completed");
+        assert_eq!(super::fake_runner::invocations(), 2);
     }
 
     /// `--permission` defaults to the narrowest grant, matching every other harness flag

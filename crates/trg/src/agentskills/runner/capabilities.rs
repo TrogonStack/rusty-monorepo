@@ -136,7 +136,7 @@ impl Runner {
             (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Driven(Flag("--allowedTools")),
             (Self::ClaudeCode, HarnessControl::TurnCap) => ControlSupport::Absent,
             (Self::ClaudeCode, HarnessControl::SystemPromptAppend) => {
-                ControlSupport::Offered(Flag("--append-system-prompt"))
+                ControlSupport::Driven(Flag("--append-system-prompt"))
             }
             (Self::ClaudeCode, HarnessControl::McpServers) => ControlSupport::Driven(GuardedFlag {
                 value: "--mcp-config",
@@ -214,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::SystemPromptAppend),
-            ControlSupport::Offered(ControlMechanism::Flag("--append-system-prompt"))
+            ControlSupport::Driven(ControlMechanism::Flag("--append-system-prompt"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::McpServers),
@@ -319,11 +319,13 @@ mod tests {
     #[test]
     fn every_driven_flag_is_carried_by_the_invocation_it_drives() {
         use crate::agentskills::report::PermissionGrant;
+        use crate::agentskills::system_prompt_appendix::SystemPromptAppendix;
         use crate::agentskills::tool_grant::ToolGrant;
         use std::ffi::OsString;
         use std::path::Path;
 
         let tool_grant = ToolGrant::parse(["Bash"]).unwrap();
+        let appendix = SystemPromptAppendix::parse("Answer in British English.").unwrap();
         let argv_for = |runner: Runner| -> Vec<OsString> {
             match runner {
                 Runner::ClaudeCode => super::super::claude_code::build_args(
@@ -332,6 +334,7 @@ mod tests {
                     PermissionGrant::Unrestricted,
                     Some(&tool_grant),
                     Some(Path::new("/workspace/mcp-config.json")),
+                    Some(&appendix),
                 ),
                 Runner::Codex => super::super::codex::build_args(
                     Path::new("/workspace"),
