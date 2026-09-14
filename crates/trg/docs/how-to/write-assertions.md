@@ -1,9 +1,9 @@
 # Write eval assertions
 
-An eval case checks its output with typed `graders`, with natural-language
-`assertions`, or both. If a check is mechanical, declare a typed grader: the
-verdict is deterministic and needs no judge. Reserve `assertions`, or an
-explicit `{"type": "llm", ...}` grader, for the judgments a machine cannot
+Typed `graders` are the supported way an eval case states what it checks. Prose
+`assertions` still parse and still grade, but they are retained for
+compatibility rather than recommended: write new checks as graders, and reach
+for an explicit `{"type": "llm", ...}` grader for the judgments a machine cannot
 make on its own.
 
 ## A worked example
@@ -47,14 +47,24 @@ produces `assertion_results` once graded. See
 [Graders](../reference/ai-skills-eval.md#graders) for the full grader list and
 the `target` values.
 
-## Where `assertions` still fits
+## Prose `assertions`, and why they are not the recommendation
 
-`assertions` is the lighter-weight surface it has always been: a plain string
-instead of a typed object, graded mechanically when it happens to match a
-known phrasing and handed to the LLM judge otherwise under `--grader auto`.
-That fallback is implicit, which is exactly what declaring `llm` explicitly
-avoids, so reach for a bare assertion for a suite you are not otherwise
-touching, or for a one-off judgment call not worth spelling out as a grader:
+`assertions` is a plain string instead of a typed object. Under the default
+`--grader auto`, and under `--grader none`, it is graded mechanically when it
+happens to match a known phrasing; `--grader llm` hands it to the judge instead
+and `--grader script` to the script grader.
+
+The gap is in the two modes that do the phrase matching. An assertion matching
+none of the known phrasings is not an error there: under `--grader auto` it is
+not sent to the judge either, and under both `auto` and `none` it is recorded
+`ungraded`. That is neither a pass nor a failure. It is left out of
+`pass_rate`, it measures nothing about the skill, and it is still enough to
+make the pass exit non-zero, so a typo costs a check and then reports as a
+broken harness rather than as a finding. A typed grader cannot end up in that
+state, because an unrecognized grader type is rejected when the suite loads.
+
+The field is kept, and kept working, because suites already carry it and `trg`
+does not make breaking changes before v1. An existing suite needs no rewrite:
 
 ```json
 {
@@ -111,7 +121,8 @@ Assertion IDs follow the pattern `<eval-case-id>:a<index>` (zero-based).
 Both of these are mechanical once stated this precisely: the first is a
 `regex` or `contains` grader against the known revenue figure, and the second
 is a negated `regex` for an error pattern. Writing them as assertions still
-works, but it defers to the judge a decision a grader could make for free.
+works, but it leaves the verdict to whether the sniffer recognizes the phrasing
+rather than to a check that says what it looks at.
 
 ## Pair fixtures with checks
 
