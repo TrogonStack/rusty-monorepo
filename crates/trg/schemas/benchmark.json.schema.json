@@ -179,13 +179,33 @@
       ],
       "type": "string"
     },
+    "FlakinessRatio": {
+      "description": "The share of a key's attempts that did not pass, in `0.0..=1.0`.\n\nA share rather than a count, because one flip out of twelve and six out of twelve are\nthe same verdict and very different findings.",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "type": "number"
+    },
     "FlakyAssertionRecord": {
+      "description": "What every artifact publishes about a flaky assertion.",
       "properties": {
         "assertion": {
           "type": "string"
         },
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "eval_case_id": {
           "type": "string"
+        },
+        "flakiness_ratio": {
+          "$ref": "#/$defs/FlakinessRatio"
+        },
+        "pass_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
         "scenario_id": {
           "type": "string"
@@ -194,7 +214,10 @@
       "required": [
         "eval_case_id",
         "scenario_id",
-        "assertion"
+        "assertion",
+        "attempts",
+        "pass_count",
+        "flakiness_ratio"
       ],
       "type": "object"
     },
@@ -271,10 +294,13 @@
         "eval_case_id": {
           "type": "string"
         },
+        "mad": {
+          "format": "double",
+          "type": "number"
+        },
         "median": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
+          "format": "double",
+          "type": "number"
         },
         "run_id": {
           "type": "string"
@@ -294,7 +320,8 @@
         "scenario_id",
         "attempt",
         "value",
-        "median"
+        "median",
+        "mad"
       ],
       "type": "object"
     },

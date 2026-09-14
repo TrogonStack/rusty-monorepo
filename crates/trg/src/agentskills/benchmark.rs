@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::dispersion::{self, AssertionKey, FlakinessLedger, FlakyAssertionRecord, MetricSample};
 use super::eval_suite_drift::{
     detect_eval_suite_drift_snapshots, load_report_drift_snapshot, maybe_emit_eval_suite_drift_warning,
     parse_report_iteration, EvalSuiteDriftWarning,
@@ -82,20 +83,14 @@ pub struct IterationSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct FlakyAssertionRecord {
-    pub eval_case_id: String,
-    pub scenario_id: String,
-    pub assertion: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct MetricOutlier {
     pub run_id: String,
     pub eval_case_id: String,
     pub scenario_id: String,
     pub attempt: u32,
     pub value: u64,
-    pub median: u64,
+    pub median: f64,
+    pub mad: f64,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -344,8 +339,8 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
     let allow_eval_suite_drift = options.allow_eval_suite_drift;
     let previous_report_dir = options.previous_report_dir.clone();
     let iteration_comparison = build_iteration_comparison(report_dir, &report, failed_runs);
-    let by_eval_scenario = build_by_eval_scenario(report_dir, &report.runs, failed_runs);
-    let iteration_summary = build_iteration_summary(report_dir, &report.runs, &by_eval_scenario, failed_runs);
+    let (by_eval_scenario, flaky_assertions) = build_by_eval_scenario(report_dir, &report.runs, failed_runs);
+    let iteration_summary = build_iteration_summary(report_dir, &report.runs, flaky_assertions, failed_runs);
     let warnings = collect_eval_suite_drift_warnings(
         report_dir,
         BenchmarkOptions {
@@ -839,7 +834,7 @@ fn build_by_eval_scenario(
     report_dir: &Path,
     runs: &[RunForBenchmark],
     mode: FailedRunsMode,
-) -> Vec<EvalScenarioAttemptRow> {
+) -> (Vec<EvalScenarioAttemptRow>, Vec<FlakyAssertionRecord>) {
     let mut groups: BTreeMap<(String, ScenarioKind), Vec<&RunForBenchmark>> = BTreeMap::new();
     for run in runs {
         if matches!(classify_run(run, mode), RunDisposition::Excluded) {
@@ -851,10 +846,10 @@ fn build_by_eval_scenario(
             .push(run);
     }
 
+    let mut ledger = FlakinessLedger::default();
     let mut rows = Vec::new();
     for ((eval_case_id, scenario_id), group_runs) in groups {
         let mut pass_rates = Vec::new();
-        let mut samples: Vec<(u32, GradingFileInput)> = Vec::new();
         for run in &group_runs {
             if !matches!(classify_run(run, mode), RunDisposition::Completed) {
                 continue;
@@ -868,22 +863,47 @@ fn build_by_eval_scenario(
                 if summary.total > 0 {
                     pass_rates.push(summary.pass_rate);
                 }
-                samples.push((run.attempt, grading));
+                record_assertion_outcomes(&mut ledger, &eval_case_id, scenario_id, run.attempt, &grading);
             }
         }
 
-        let attempt_count = group_runs.len() as u32;
-        let flaky_assertions = detect_flaky_assertions(&samples);
         rows.push(EvalScenarioAttemptRow {
             eval_case_id,
             scenario_id: scenario_id.as_str().to_string(),
-            attempt_count,
+            attempt_count: group_runs.len() as u32,
             pass_rate: attempt_pass_rate_stats(&pass_rates),
-            flaky_assertions,
+            flaky_assertions: Vec::new(),
         });
     }
 
-    rows
+    let records = ledger.flaky_records();
+    for row in &mut rows {
+        row.flaky_assertions = records
+            .iter()
+            .filter(|record| record.eval_case_id == row.eval_case_id && record.scenario_id == row.scenario_id)
+            .map(|record| record.assertion.clone())
+            .collect();
+    }
+
+    (rows, records)
+}
+
+fn record_assertion_outcomes(
+    ledger: &mut FlakinessLedger,
+    eval_case_id: &str,
+    scenario_id: ScenarioKind,
+    attempt: u32,
+    grading: &GradingFileInput,
+) {
+    for result in &grading.assertion_results {
+        if !result.is_scored() {
+            continue;
+        }
+        let Ok(key) = AssertionKey::parse(eval_case_id, scenario_id, &result.assertion) else {
+            continue;
+        };
+        ledger.observe(key, attempt, result.passed);
+    }
 }
 
 fn attempt_pass_rate_stats(pass_rates: &[f64]) -> AttemptPassRateStats {
@@ -928,31 +948,6 @@ pub fn pass_rate_variance(pass_rates: &[f64], mean: f64) -> f64 {
         / pass_rates.len() as f64
 }
 
-fn detect_flaky_assertions(samples: &[(u32, GradingFileInput)]) -> Vec<String> {
-    let mut by_assertion: BTreeMap<String, BTreeMap<u32, bool>> = BTreeMap::new();
-    for (attempt, grading) in samples {
-        for result in &grading.assertion_results {
-            let key = normalize_assertion_key(&result.assertion);
-            if key.is_empty() || !result.is_scored() {
-                continue;
-            }
-            by_assertion.entry(key).or_default().insert(*attempt, result.passed);
-        }
-    }
-
-    by_assertion
-        .into_iter()
-        .filter_map(|(assertion, attempts)| {
-            let outcomes: HashSet<bool> = attempts.values().copied().collect();
-            if outcomes.len() > 1 {
-                Some(assertion)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn normalize_assertion_key(assertion: &str) -> String {
     assertion.trim().to_string()
 }
@@ -960,7 +955,7 @@ fn normalize_assertion_key(assertion: &str) -> String {
 fn build_iteration_summary(
     report_dir: &Path,
     runs: &[RunForBenchmark],
-    by_eval_scenario: &[EvalScenarioAttemptRow],
+    flaky_assertions: Vec<FlakyAssertionRecord>,
     mode: FailedRunsMode,
 ) -> IterationSummary {
     let mut assertion_outcomes: BTreeMap<(String, String), (usize, usize)> = BTreeMap::new();
@@ -1034,17 +1029,6 @@ fn build_iteration_summary(
         })
         .collect();
 
-    let flaky_assertions: Vec<FlakyAssertionRecord> = by_eval_scenario
-        .iter()
-        .flat_map(|row| {
-            row.flaky_assertions.iter().map(|assertion| FlakyAssertionRecord {
-                eval_case_id: row.eval_case_id.clone(),
-                scenario_id: row.scenario_id.clone(),
-                assertion: assertion.clone(),
-            })
-        })
-        .collect();
-
     let timing_outliers = detect_metric_outliers(report_dir, runs, mode, MetricKind::Duration);
     let token_outliers = detect_metric_outliers(report_dir, runs, mode, MetricKind::Tokens);
 
@@ -1078,13 +1062,19 @@ enum MetricKind {
     Tokens,
 }
 
+struct BenchmarkRunOrigin {
+    run_id: String,
+    eval_case_id: String,
+    attempt: u32,
+}
+
 fn detect_metric_outliers(
     report_dir: &Path,
     runs: &[RunForBenchmark],
     mode: FailedRunsMode,
     kind: MetricKind,
 ) -> Vec<MetricOutlier> {
-    let mut values: Vec<(String, String, String, u32, u64)> = Vec::new();
+    let mut samples = Vec::new();
     for run in runs {
         if !matches!(classify_run(run, mode), RunDisposition::Completed) {
             continue;
@@ -1098,38 +1088,32 @@ fn detect_metric_outliers(
             MetricKind::Tokens => timing.total_tokens,
         };
         if let Some(value) = value {
-            values.push((
-                run.id.clone(),
-                run.eval_case_id.clone(),
-                run.scenario_id.as_str().to_string(),
-                run.attempt,
+            samples.push(MetricSample::new(
+                run.scenario_id,
+                BenchmarkRunOrigin {
+                    run_id: run.id.clone(),
+                    eval_case_id: run.eval_case_id.clone(),
+                    attempt: run.attempt,
+                },
                 value,
             ));
         }
     }
 
-    if values.len() < 2 {
-        return Vec::new();
-    }
-
-    let mut sorted: Vec<u64> = values.iter().map(|(_, _, _, _, v)| *v).collect();
-    sorted.sort_unstable();
-    let median = percentile(&sorted, 0.50);
-    if median == 0 {
-        return Vec::new();
-    }
-
-    let threshold = median.saturating_mul(2);
-    values
+    dispersion::outliers(samples)
         .into_iter()
-        .filter(|(_, _, _, _, value)| *value >= threshold)
-        .map(|(run_id, eval_case_id, scenario_id, attempt, value)| MetricOutlier {
-            run_id,
-            eval_case_id,
-            scenario_id,
-            attempt,
-            value,
-            median,
+        .map(|outlier| {
+            let (sample, spread) = outlier.into_parts();
+            let (scenario, origin, value) = sample.into_parts();
+            MetricOutlier {
+                run_id: origin.run_id,
+                eval_case_id: origin.eval_case_id,
+                scenario_id: scenario.as_str().to_string(),
+                attempt: origin.attempt,
+                value,
+                median: spread.centre(),
+                mad: spread.spread(),
+            }
         })
         .collect()
 }
@@ -1618,43 +1602,96 @@ mod tests {
         assert_eq!(pass_rate_variance(&[], 0.0), 0.0);
     }
 
+    fn write_timed_runs(report_dir: &Path, timings: &[(&str, &str, u32, u64, u64)]) {
+        let runs: Vec<serde_json::Value> = timings
+            .iter()
+            .map(|(id, scenario, attempt, _, _)| {
+                let mut run = sample_run(id, scenario, "completed", None);
+                run["attempt"] = serde_json::json!(attempt);
+                run
+            })
+            .collect();
+        write_report(report_dir, serde_json::json!(runs), None);
+        for (id, _, _, duration_ms, total_tokens) in timings {
+            write_run_artifacts(
+                report_dir,
+                id,
+                None,
+                Some(&format!(
+                    r#"{{ "duration_ms": {duration_ms}, "total_tokens": {total_tokens} }}"#
+                )),
+            );
+        }
+    }
+
     #[test]
-    fn timing_and_token_outliers_use_double_median_threshold() {
+    fn a_group_below_the_sample_floor_reports_no_outlier() {
         let temp = tempfile::tempdir().unwrap();
-        write_report(
+        write_timed_runs(
             temp.path(),
-            serde_json::json!([
-                sample_run("run-001", "with_skill", "completed", None),
-                sample_run("run-002", "with_skill", "completed", None),
-                sample_run("run-003", "with_skill", "completed", None),
-            ]),
-            None,
-        );
-        write_run_artifacts(
-            temp.path(),
-            "run-001",
-            None,
-            Some(r#"{ "duration_ms": 1000, "total_tokens": 100 }"#),
-        );
-        write_run_artifacts(
-            temp.path(),
-            "run-002",
-            None,
-            Some(r#"{ "duration_ms": 1200, "total_tokens": 120 }"#),
-        );
-        write_run_artifacts(
-            temp.path(),
-            "run-003",
-            None,
-            Some(r#"{ "duration_ms": 3000, "total_tokens": 400 }"#),
+            &[
+                ("run-001", "with_skill", 1, 1000, 100),
+                ("run-002", "with_skill", 2, 1200, 120),
+                ("run-003", "with_skill", 3, 9000, 900),
+            ],
         );
 
         let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
-        assert_eq!(benchmark.iteration_summary.timing_outliers.len(), 1);
-        assert_eq!(benchmark.iteration_summary.timing_outliers[0].run_id, "run-003");
-        assert_eq!(benchmark.iteration_summary.timing_outliers[0].median, 1200);
-        assert_eq!(benchmark.iteration_summary.token_outliers.len(), 1);
-        assert_eq!(benchmark.iteration_summary.token_outliers[0].value, 400);
+        assert!(benchmark.iteration_summary.timing_outliers.is_empty());
+        assert!(benchmark.iteration_summary.token_outliers.is_empty());
+    }
+
+    /// The arms pay different costs by construction, so a pooled centre sits between
+    /// them and publishes the slower arm as a field of outliers against the faster one.
+    #[test]
+    fn each_arm_is_judged_against_its_own_cost_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        write_timed_runs(
+            temp.path(),
+            &[
+                ("run-001", "with_skill", 1, 1000, 100),
+                ("run-002", "with_skill", 2, 1020, 102),
+                ("run-003", "with_skill", 3, 980, 98),
+                ("run-004", "with_skill", 4, 1010, 101),
+                ("run-005", "without_skill", 1, 29000, 2900),
+                ("run-006", "without_skill", 2, 30000, 3000),
+                ("run-007", "without_skill", 3, 30500, 3050),
+                ("run-008", "without_skill", 4, 31000, 3100),
+            ],
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        assert!(benchmark.iteration_summary.timing_outliers.is_empty());
+        assert!(benchmark.iteration_summary.token_outliers.is_empty());
+    }
+
+    #[test]
+    fn an_outlier_is_published_with_the_band_its_own_arm_drew() {
+        let temp = tempfile::tempdir().unwrap();
+        write_timed_runs(
+            temp.path(),
+            &[
+                ("run-001", "with_skill", 1, 1000, 100),
+                ("run-002", "with_skill", 2, 1020, 102),
+                ("run-003", "with_skill", 3, 980, 98),
+                ("run-004", "with_skill", 4, 1010, 101),
+                ("run-005", "with_skill", 5, 9000, 900),
+            ],
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let timing = &benchmark.iteration_summary.timing_outliers;
+        assert_eq!(timing.len(), 1);
+        assert_eq!(timing[0].run_id, "run-005");
+        assert_eq!(timing[0].attempt, 5);
+        assert_eq!(timing[0].value, 9000);
+        assert_eq!(timing[0].median, 1010.0);
+        assert_eq!(timing[0].mad, 10.0);
+
+        let tokens = &benchmark.iteration_summary.token_outliers;
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].value, 900);
+        assert_eq!(tokens[0].median, 101.0);
     }
 
     #[test]

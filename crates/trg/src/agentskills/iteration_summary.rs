@@ -1,11 +1,12 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::benchmark::{stddev, FailedRunsMode};
+use super::benchmark::FailedRunsMode;
+use super::dispersion::{self, FlakinessLedger, FlakyAssertionRecord, MetricSample};
 use super::eval_suite_drift;
 use super::evals::{EvalError, Result};
 use super::layout;
@@ -43,8 +44,8 @@ pub struct AssertionKey {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AssertionStabilityRecord {
-    pub eval_id: String,
-    pub assertion_text: String,
+    pub eval_case_id: String,
+    pub assertion: String,
     pub attempts_observed: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cross_iteration_delta: Option<CrossIterationDelta>,
@@ -60,41 +61,31 @@ pub enum CrossIterationDelta {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HelpedBySkillRecord {
-    pub eval_id: String,
-    pub assertion_text: String,
+    pub eval_case_id: String,
+    pub assertion: String,
     pub with_skill_pass_rate: f64,
     pub without_skill_pass_rate: f64,
     pub delta: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct FlakyAssertionRecord {
-    pub eval_id: String,
-    pub scenario: String,
-    pub assertion_text: String,
-    pub attempts: u32,
-    pub pass_count: u32,
-    pub flakiness_ratio: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TimingOutlierRecord {
-    pub eval_id: String,
-    pub scenario: String,
+    pub eval_case_id: String,
+    pub scenario_id: String,
     pub attempt: u32,
     pub duration_ms: u64,
-    pub mean_ms: f64,
-    pub stddev_ms: f64,
+    pub median_ms: f64,
+    pub mad_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TokenOutlierRecord {
-    pub eval_id: String,
-    pub scenario: String,
+    pub eval_case_id: String,
+    pub scenario_id: String,
     pub attempt: u32,
     pub total_tokens: u64,
-    pub mean_tokens: f64,
-    pub stddev_tokens: f64,
+    pub median_tokens: f64,
+    pub mad_tokens: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -186,11 +177,10 @@ impl AssertionObservationKey {
     }
 }
 
-#[derive(Debug, Default)]
-struct ScenarioMetricSample {
-    eval_id: String,
+#[derive(Debug, Clone)]
+struct SummaryRunOrigin {
+    eval_case_id: String,
     attempt: u32,
-    value: u64,
 }
 
 pub fn build_iteration_summary_document(
@@ -245,8 +235,8 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         document.always_pass.iter().map(|record| {
             format!(
                 "{} | {} ({} attempts{})",
-                record.eval_id,
-                record.assertion_text,
+                record.eval_case_id,
+                record.assertion,
                 record.attempts_observed,
                 delta_suffix(record.cross_iteration_delta)
             )
@@ -257,8 +247,8 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         document.always_fail.iter().map(|record| {
             format!(
                 "{} | {} ({} attempts{})",
-                record.eval_id,
-                record.assertion_text,
+                record.eval_case_id,
+                record.assertion,
                 record.attempts_observed,
                 delta_suffix(record.cross_iteration_delta)
             )
@@ -269,8 +259,8 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         document.helped_by_skill.iter().map(|record| {
             format!(
                 "{} | {} (with {:.0}% vs without {:.0}%, delta {:+.0}%)",
-                record.eval_id,
-                record.assertion_text,
+                record.eval_case_id,
+                record.assertion,
                 record.with_skill_pass_rate * 100.0,
                 record.without_skill_pass_rate * 100.0,
                 record.delta * 100.0
@@ -282,12 +272,12 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         document.flaky_assertions.iter().map(|record| {
             format!(
                 "{} | {} | {} ({}/{} passes, {:.0}% flaky)",
-                record.eval_id,
-                record.scenario,
-                record.assertion_text,
+                record.eval_case_id,
+                record.scenario_id,
+                record.assertion,
                 record.pass_count,
                 record.attempts,
-                record.flakiness_ratio * 100.0
+                record.flakiness_ratio.percent()
             )
         }),
     );
@@ -295,8 +285,13 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         "Timing outliers",
         document.timing_outliers.iter().map(|record| {
             format!(
-                "{} | {} attempt {} | {} ms (mean {:.0}, σ {:.0})",
-                record.eval_id, record.scenario, record.attempt, record.duration_ms, record.mean_ms, record.stddev_ms
+                "{} | {} attempt {} | {} ms (median {:.0}, MAD {:.0})",
+                record.eval_case_id,
+                record.scenario_id,
+                record.attempt,
+                record.duration_ms,
+                record.median_ms,
+                record.mad_ms
             )
         }),
     );
@@ -304,13 +299,13 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         "Token outliers",
         document.token_outliers.iter().map(|record| {
             format!(
-                "{} | {} attempt {} | {} tokens (mean {:.0}, σ {:.0})",
-                record.eval_id,
-                record.scenario,
+                "{} | {} attempt {} | {} tokens (median {:.0}, MAD {:.0})",
+                record.eval_case_id,
+                record.scenario_id,
                 record.attempt,
                 record.total_tokens,
-                record.mean_tokens,
-                record.stddev_tokens
+                record.median_tokens,
+                record.mad_tokens
             )
         }),
     );
@@ -326,28 +321,28 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
             cross
                 .newly_always_pass
                 .iter()
-                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
+                .map(|record| format!("{} | {}", record.eval_case_id, record.assertion)),
         );
         print_section(
             "No longer always pass",
             cross
                 .no_longer_always_pass
                 .iter()
-                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
+                .map(|record| format!("{} | {}", record.eval_case_id, record.assertion)),
         );
         print_section(
             "Newly always fail",
             cross
                 .newly_always_fail
                 .iter()
-                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
+                .map(|record| format!("{} | {}", record.eval_case_id, record.assertion)),
         );
         print_section(
             "No longer always fail",
             cross
                 .no_longer_always_fail
                 .iter()
-                .map(|record| format!("{} | {}", record.eval_id, record.assertion_text)),
+                .map(|record| format!("{} | {}", record.eval_case_id, record.assertion)),
         );
     }
 }
@@ -395,9 +390,9 @@ struct AnalysisResult {
 fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRunsMode) -> AnalysisResult {
     let mut assertion_outcomes: BTreeMap<AssertionObservationKey, (u32, u32)> = BTreeMap::new();
     let mut scenario_assertion_rates: BTreeMap<(String, ScenarioKind, String), (u32, u32)> = BTreeMap::new();
-    let mut flaky_groups: BTreeMap<(String, ScenarioKind, String), BTreeMap<u32, bool>> = BTreeMap::new();
-    let mut duration_by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>> = HashMap::new();
-    let mut tokens_by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>> = HashMap::new();
+    let mut flakiness = FlakinessLedger::default();
+    let mut durations: Vec<MetricSample<SummaryRunOrigin>> = Vec::new();
+    let mut tokens: Vec<MetricSample<SummaryRunOrigin>> = Vec::new();
     let mut grading_unavailable = false;
 
     for run in &report.runs {
@@ -432,35 +427,26 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
                         scenario_entry.1 += 1;
                     }
 
-                    flaky_groups
-                        .entry((run.eval_case_id.clone(), run.scenario_id, assertion_text))
-                        .or_default()
-                        .insert(run.attempt, result.passed);
+                    if let Ok(key) =
+                        dispersion::AssertionKey::parse(&run.eval_case_id, run.scenario_id, &assertion_text)
+                    {
+                        flakiness.observe(key, run.attempt, result.passed);
+                    }
                 }
             }
             None => grading_unavailable = true,
         }
 
         if let Some(timing) = &sample.timing {
+            let origin = SummaryRunOrigin {
+                eval_case_id: run.eval_case_id.clone(),
+                attempt: run.attempt,
+            };
             if let Some(duration_ms) = timing.duration_ms {
-                duration_by_scenario
-                    .entry(run.scenario_id)
-                    .or_default()
-                    .push(ScenarioMetricSample {
-                        eval_id: run.eval_case_id.clone(),
-                        attempt: run.attempt,
-                        value: duration_ms,
-                    });
+                durations.push(MetricSample::new(run.scenario_id, origin.clone(), duration_ms));
             }
             if let Some(total_tokens) = timing.total_tokens {
-                tokens_by_scenario
-                    .entry(run.scenario_id)
-                    .or_default()
-                    .push(ScenarioMetricSample {
-                        eval_id: run.eval_case_id.clone(),
-                        attempt: run.attempt,
-                        value: total_tokens,
-                    });
+                tokens.push(MetricSample::new(run.scenario_id, origin, total_tokens));
             }
         }
     }
@@ -469,8 +455,8 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
         .iter()
         .filter(|(_, (passed, failed))| *passed > 0 && *failed == 0)
         .map(|(key, (passed, _))| AssertionStabilityRecord {
-            eval_id: key.eval_id.clone(),
-            assertion_text: key.assertion_text.clone(),
+            eval_case_id: key.eval_id.clone(),
+            assertion: key.assertion_text.clone(),
             attempts_observed: *passed,
             cross_iteration_delta: None,
         })
@@ -480,8 +466,8 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
         .iter()
         .filter(|(_, (passed, failed))| *failed > 0 && *passed == 0)
         .map(|(key, (_, failed))| AssertionStabilityRecord {
-            eval_id: key.eval_id.clone(),
-            assertion_text: key.assertion_text.clone(),
+            eval_case_id: key.eval_id.clone(),
+            assertion: key.assertion_text.clone(),
             attempts_observed: *failed,
             cross_iteration_delta: None,
         })
@@ -503,32 +489,11 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
                 return None;
             }
             Some(HelpedBySkillRecord {
-                eval_id: eval_id.clone(),
-                assertion_text: assertion_text.clone(),
+                eval_case_id: eval_id.clone(),
+                assertion: assertion_text.clone(),
                 with_skill_pass_rate: with_rate,
                 without_skill_pass_rate: without_rate,
                 delta: with_rate - without_rate,
-            })
-        })
-        .collect();
-
-    let flaky_assertions = flaky_groups
-        .into_iter()
-        .filter_map(|((eval_id, scenario, assertion_text), attempts)| {
-            let pass_count = attempts.values().filter(|passed| **passed).count() as u32;
-            let total = attempts.len() as u32;
-            if total <= 1 || pass_count == 0 || pass_count == total {
-                return None;
-            }
-            let fail_count = total - pass_count;
-            let flakiness_ratio = fail_count as f64 / total as f64;
-            Some(FlakyAssertionRecord {
-                eval_id,
-                scenario: scenario.as_str().to_string(),
-                assertion_text,
-                attempts: total,
-                pass_count,
-                flakiness_ratio,
             })
         })
         .collect();
@@ -537,9 +502,9 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
         always_pass,
         always_fail,
         helped_by_skill,
-        flaky_assertions,
-        timing_outliers: detect_timing_outliers(duration_by_scenario),
-        token_outliers: detect_token_outliers(tokens_by_scenario),
+        flaky_assertions: flakiness.flaky_records(),
+        timing_outliers: detect_timing_outliers(durations),
+        token_outliers: detect_token_outliers(tokens),
         grading_unavailable,
     }
 }
@@ -557,32 +522,32 @@ fn apply_cross_iteration_deltas(
         .newly_always_pass
         .iter()
         .map(|record| AssertionKey {
-            eval_id: record.eval_id.clone(),
-            assertion_text: record.assertion_text.clone(),
+            eval_id: record.eval_case_id.clone(),
+            assertion_text: record.assertion.clone(),
         })
         .collect();
     let lost_pass: HashSet<_> = cross
         .no_longer_always_pass
         .iter()
         .map(|record| AssertionKey {
-            eval_id: record.eval_id.clone(),
-            assertion_text: record.assertion_text.clone(),
+            eval_id: record.eval_case_id.clone(),
+            assertion_text: record.assertion.clone(),
         })
         .collect();
     let newly_fail: HashSet<_> = cross
         .newly_always_fail
         .iter()
         .map(|record| AssertionKey {
-            eval_id: record.eval_id.clone(),
-            assertion_text: record.assertion_text.clone(),
+            eval_id: record.eval_case_id.clone(),
+            assertion_text: record.assertion.clone(),
         })
         .collect();
     let lost_fail: HashSet<_> = cross
         .no_longer_always_fail
         .iter()
         .map(|record| AssertionKey {
-            eval_id: record.eval_id.clone(),
-            assertion_text: record.assertion_text.clone(),
+            eval_id: record.eval_case_id.clone(),
+            assertion_text: record.assertion.clone(),
         })
         .collect();
 
@@ -590,8 +555,8 @@ fn apply_cross_iteration_deltas(
         .iter()
         .map(|record| {
             let key = AssertionKey {
-                eval_id: record.eval_id.clone(),
-                assertion_text: record.assertion_text.clone(),
+                eval_id: record.eval_case_id.clone(),
+                assertion_text: record.assertion.clone(),
             };
             let cross_iteration_delta = if newly_pass.contains(&key) {
                 Some(CrossIterationDelta::New)
@@ -611,8 +576,8 @@ fn apply_cross_iteration_deltas(
         .iter()
         .map(|record| {
             let key = AssertionKey {
-                eval_id: record.eval_id.clone(),
-                assertion_text: record.assertion_text.clone(),
+                eval_id: record.eval_case_id.clone(),
+                assertion_text: record.assertion.clone(),
             };
             let cross_iteration_delta = if newly_fail.contains(&key) {
                 Some(CrossIterationDelta::New)
@@ -683,8 +648,8 @@ fn stability_key_set(records: &[AssertionStabilityRecord]) -> HashSet<AssertionK
     records
         .iter()
         .map(|record| AssertionKey {
-            eval_id: record.eval_id.clone(),
-            assertion_text: record.assertion_text.clone(),
+            eval_id: record.eval_case_id.clone(),
+            assertion_text: record.assertion.clone(),
         })
         .collect()
 }
@@ -697,8 +662,8 @@ fn diff_records(
         .iter()
         .filter(|record| {
             !exclude.contains(&AssertionKey {
-                eval_id: record.eval_id.clone(),
-                assertion_text: record.assertion_text.clone(),
+                eval_id: record.eval_case_id.clone(),
+                assertion_text: record.assertion.clone(),
             })
         })
         .cloned()
@@ -825,60 +790,40 @@ fn pass_rate(passed: u32, failed: u32) -> f64 {
     }
 }
 
-fn detect_timing_outliers(by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>>) -> Vec<TimingOutlierRecord> {
-    detect_outliers(by_scenario)
+fn detect_timing_outliers(samples: Vec<MetricSample<SummaryRunOrigin>>) -> Vec<TimingOutlierRecord> {
+    dispersion::outliers(samples)
         .into_iter()
-        .map(|(sample, scenario, mean, sigma)| TimingOutlierRecord {
-            eval_id: sample.eval_id,
-            scenario: scenario.as_str().to_string(),
-            attempt: sample.attempt,
-            duration_ms: sample.value,
-            mean_ms: mean,
-            stddev_ms: sigma,
-        })
-        .collect()
-}
-
-fn detect_token_outliers(by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>>) -> Vec<TokenOutlierRecord> {
-    detect_outliers(by_scenario)
-        .into_iter()
-        .map(|(sample, scenario, mean, sigma)| TokenOutlierRecord {
-            eval_id: sample.eval_id,
-            scenario: scenario.as_str().to_string(),
-            attempt: sample.attempt,
-            total_tokens: sample.value,
-            mean_tokens: mean,
-            stddev_tokens: sigma,
-        })
-        .collect()
-}
-
-fn detect_outliers(
-    by_scenario: HashMap<ScenarioKind, Vec<ScenarioMetricSample>>,
-) -> Vec<(ScenarioMetricSample, ScenarioKind, f64, f64)> {
-    let mut outliers = Vec::new();
-
-    for (scenario, samples) in by_scenario {
-        if samples.len() < 4 {
-            continue;
-        }
-
-        let values: Vec<u64> = samples.iter().map(|sample| sample.value).collect();
-        let mean = values.iter().map(|value| *value as f64).sum::<f64>() / values.len() as f64;
-        let sigma = stddev(&values, mean);
-        if sigma == 0.0 {
-            continue;
-        }
-
-        let threshold = mean + 2.0 * sigma;
-        for sample in samples {
-            if sample.value as f64 > threshold {
-                outliers.push((sample, scenario, mean, sigma));
+        .map(|outlier| {
+            let (sample, spread) = outlier.into_parts();
+            let (scenario, origin, value) = sample.into_parts();
+            TimingOutlierRecord {
+                eval_case_id: origin.eval_case_id,
+                scenario_id: scenario.as_str().to_string(),
+                attempt: origin.attempt,
+                duration_ms: value,
+                median_ms: spread.centre(),
+                mad_ms: spread.spread(),
             }
-        }
-    }
+        })
+        .collect()
+}
 
-    outliers
+fn detect_token_outliers(samples: Vec<MetricSample<SummaryRunOrigin>>) -> Vec<TokenOutlierRecord> {
+    dispersion::outliers(samples)
+        .into_iter()
+        .map(|outlier| {
+            let (sample, spread) = outlier.into_parts();
+            let (scenario, origin, value) = sample.into_parts();
+            TokenOutlierRecord {
+                eval_case_id: origin.eval_case_id,
+                scenario_id: scenario.as_str().to_string(),
+                attempt: origin.attempt,
+                total_tokens: value,
+                median_tokens: spread.centre(),
+                mad_tokens: spread.spread(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -978,8 +923,8 @@ mod tests {
         let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
 
         assert_eq!(summary.always_pass.len(), 1);
-        assert_eq!(summary.always_pass[0].eval_id, "case-a");
-        assert_eq!(summary.always_pass[0].assertion_text, "stable pass");
+        assert_eq!(summary.always_pass[0].eval_case_id, "case-a");
+        assert_eq!(summary.always_pass[0].assertion, "stable pass");
         assert_eq!(summary.always_pass[0].attempts_observed, 2);
     }
 
@@ -1080,7 +1025,7 @@ mod tests {
         assert_eq!(summary.flaky_assertions.len(), 1);
         assert_eq!(summary.flaky_assertions[0].attempts, 2);
         assert_eq!(summary.flaky_assertions[0].pass_count, 1);
-        assert!((summary.flaky_assertions[0].flakiness_ratio - 0.5).abs() < 0.0001);
+        assert!((summary.flaky_assertions[0].flakiness_ratio.value() - 0.5).abs() < 0.0001);
     }
 
     #[test]
@@ -1129,6 +1074,57 @@ mod tests {
         );
         for (run_id, duration_ms, tokens) in [
             ("run-001", 1000, 1000),
+            ("run-002", 1010, 1010),
+            ("run-003", 990, 990),
+            ("run-004", 1005, 1005),
+            ("run-005", 995, 995),
+            ("run-006", 1000, 1000),
+            ("run-007", 1010, 1010),
+            ("run-008", 50000, 50000),
+        ] {
+            write_run_artifacts(
+                &report_dir,
+                run_id,
+                None,
+                Some(&format!(
+                    r#"{{"duration_ms": {duration_ms}, "total_tokens": {tokens}}}"#
+                )),
+            );
+        }
+
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
+        assert_eq!(summary.timing_outliers.len(), 1);
+        assert_eq!(summary.timing_outliers[0].attempt, 8);
+        assert_eq!(summary.timing_outliers[0].duration_ms, 50000);
+        assert_eq!(summary.timing_outliers[0].median_ms, 1002.5);
+        assert_eq!(summary.timing_outliers[0].mad_ms, 7.5);
+        assert_eq!(summary.token_outliers.len(), 1);
+        assert_eq!(summary.token_outliers[0].total_tokens, 50000);
+    }
+
+    /// An arm whose runs mostly landed on the same number has a median absolute
+    /// deviation of zero, and a band of width zero calls every remaining value unusual.
+    #[test]
+    fn an_arm_whose_runs_mostly_agree_exactly_reports_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
+        write_report(
+            &report_dir,
+            serde_json::json!([
+                sample_run("run-001", "case-a", "with_skill", 1, "completed"),
+                sample_run("run-002", "case-a", "with_skill", 2, "completed"),
+                sample_run("run-003", "case-a", "with_skill", 3, "completed"),
+                sample_run("run-004", "case-a", "with_skill", 4, "completed"),
+                sample_run("run-005", "case-a", "with_skill", 5, "completed"),
+                sample_run("run-006", "case-a", "with_skill", 6, "completed"),
+                sample_run("run-007", "case-a", "with_skill", 7, "completed"),
+                sample_run("run-008", "case-a", "with_skill", 8, "completed"),
+            ]),
+            1,
+            "report-a",
+        );
+        for (run_id, duration_ms, tokens) in [
+            ("run-001", 1000, 1000),
             ("run-002", 1000, 1000),
             ("run-003", 1000, 1000),
             ("run-004", 1000, 1000),
@@ -1148,11 +1144,8 @@ mod tests {
         }
 
         let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
-        assert_eq!(summary.timing_outliers.len(), 1);
-        assert_eq!(summary.timing_outliers[0].attempt, 8);
-        assert_eq!(summary.timing_outliers[0].duration_ms, 50000);
-        assert_eq!(summary.token_outliers.len(), 1);
-        assert_eq!(summary.token_outliers[0].total_tokens, 50000);
+        assert!(summary.timing_outliers.is_empty());
+        assert!(summary.token_outliers.is_empty());
     }
 
     #[test]
