@@ -200,8 +200,12 @@
           },
           "type": "array"
         },
-        "graders": {
-          "items": {},
+        "grading_strategies": {
+          "default": [],
+          "description": "The distinct grading strategies actually applied to this report.\n\n`eval grade` can run more than once over the same bundle, a rerun under a\ndifferent judge included, and each distinct strategy is recorded once here. This\nis not the graders an eval case declares in its suite; those show up in\n`assertions` by way of each case's `assertion_ids`.\n\nDefaulted because this field replaced an untyped `graders` list, so every bundle\nwritten before it exists names neither. Reading those as \"no strategy recorded\" is\nthe honest answer, since the old shape carried arbitrary JSON that cannot be\nrecovered as a typed strategy, and it keeps `grade`, `benchmark` and `compare`\nable to open an eval history rather than failing on its first file.",
+          "items": {
+            "$ref": "#/$defs/GradingStrategy"
+          },
           "type": "array"
         },
         "model_configs": {
@@ -228,8 +232,7 @@
         "assertions",
         "skill_revisions",
         "model_configs",
-        "scenarios",
-        "graders"
+        "scenarios"
       ],
       "type": "object"
     },
@@ -460,6 +463,100 @@
       ],
       "type": "object"
     },
+    "GradingStrategy": {
+      "description": "One grading strategy that was used to produce the results in this report.",
+      "oneOf": [
+        {
+          "properties": {
+            "judge": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JudgeSettings"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "const": "auto",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The judge a grading pass resolved, when it resolved one.\n\nShared by `Llm`, where a judge is always resolved, and `Auto`, where whether one was\nresolved depends on what the suite declares, so there is one definition of what\n\"which judge\" means rather than a copy living inside each variant.",
+          "properties": {
+            "mode": {
+              "const": "llm",
+              "type": "string"
+            },
+            "model": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "provider": {
+              "$ref": "#/$defs/JudgeProvider"
+            },
+            "votes": {
+              "$ref": "#/$defs/JudgeVotes"
+            }
+          },
+          "required": [
+            "mode",
+            "provider",
+            "votes"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "const": "script",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "strict": {
+          "description": "Whether the pass that used this strategy rejected an ungradeable assertion\ninstead of recording it as ungraded.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "strict"
+      ],
+      "type": "object"
+    },
     "HumanFeedbackSummary": {
       "properties": {
         "by_category": {
@@ -569,6 +666,49 @@
         }
       },
       "type": "object"
+    },
+    "JudgeProvider": {
+      "oneOf": [
+        {
+          "enum": [
+            "openai",
+            "anthropic"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "compatible",
+          "description": "Any endpoint speaking the OpenAI chat-completions protocol, addressed\nthrough `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY`.",
+          "type": "string"
+        }
+      ]
+    },
+    "JudgeSettings": {
+      "description": "The judge a grading pass resolved, when it resolved one.\n\nShared by `Llm`, where a judge is always resolved, and `Auto`, where whether one was\nresolved depends on what the suite declares, so there is one definition of what\n\"which judge\" means rather than a copy living inside each variant.",
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "$ref": "#/$defs/JudgeProvider"
+        },
+        "votes": {
+          "$ref": "#/$defs/JudgeVotes"
+        }
+      },
+      "required": [
+        "provider",
+        "votes"
+      ],
+      "type": "object"
+    },
+    "JudgeVotes": {
+      "description": "The number of opinions taken on every assertion an LLM judge decides.\n\nAlways odd, because a panel that ties has decided nothing, and reporting a tie as\neither answer would invent the confidence the flag exists to measure.",
+      "minimum": 1,
+      "type": "integer"
     },
     "MetricOutlier": {
       "properties": {

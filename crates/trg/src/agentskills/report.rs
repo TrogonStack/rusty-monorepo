@@ -18,6 +18,8 @@ use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
 };
+use super::judge::JudgeProvider;
+use super::judge_votes::JudgeVotes;
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
 use super::outputs::OUTPUTS_DIR;
 use super::runner::capabilities::HarnessControl;
@@ -362,7 +364,92 @@ pub struct DimensionsSection {
     pub skill_revisions: Vec<SkillRevisionDimension>,
     pub model_configs: Vec<ModelConfigDimension>,
     pub scenarios: Vec<ScenarioDimension>,
-    pub graders: Vec<serde_json::Value>,
+    /// The distinct grading strategies actually applied to this report.
+    ///
+    /// `eval grade` can run more than once over the same bundle, a rerun under a
+    /// different judge included, and each distinct strategy is recorded once here. This
+    /// is not the graders an eval case declares in its suite; those show up in
+    /// `assertions` by way of each case's `assertion_ids`.
+    ///
+    /// Defaulted because this field replaced an untyped `graders` list, so every bundle
+    /// written before it exists names neither. Reading those as "no strategy recorded" is
+    /// the honest answer, since the old shape carried arbitrary JSON that cannot be
+    /// recovered as a typed strategy, and it keeps `grade`, `benchmark` and `compare`
+    /// able to open an eval history rather than failing on its first file.
+    #[serde(default)]
+    pub grading_strategies: Vec<GradingStrategy>,
+}
+
+#[cfg(test)]
+mod dimensions_back_compatibility {
+    use super::*;
+
+    /// This field replaced an untyped `graders` list, so a bundle written before it exists
+    /// names neither. Without the default, opening any prior eval history fails on its
+    /// first file rather than reading it as having recorded no strategy.
+    #[test]
+    fn a_dimensions_section_written_before_grading_strategies_existed_still_reads() {
+        let before = serde_json::json!({
+            "eval_cases": [],
+            "assertions": [],
+            "skill_revisions": [],
+            "model_configs": [],
+            "scenarios": [],
+            "graders": [{ "mode": "whatever the old untyped shape held" }]
+        });
+        let section: DimensionsSection = serde_json::from_value(before).unwrap();
+        assert!(section.grading_strategies.is_empty());
+    }
+}
+
+/// One grading strategy that was used to produce the results in this report.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct GradingStrategy {
+    #[serde(flatten)]
+    pub grader: GraderChoice,
+    /// Whether the pass that used this strategy rejected an ungradeable assertion
+    /// instead of recording it as ungraded.
+    pub strict: bool,
+}
+
+/// The judge a grading pass resolved, when it resolved one.
+///
+/// Shared by `Llm`, where a judge is always resolved, and `Auto`, where whether one was
+/// resolved depends on what the suite declares, so there is one definition of what
+/// "which judge" means rather than a copy living inside each variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct JudgeSettings {
+    pub provider: JudgeProvider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub votes: JudgeVotes,
+}
+
+/// The grading method a pass chose, and only the settings that method uses.
+///
+/// A record shaped as a flat bag of optional fields lets a script grader's `command`
+/// and an LLM judge's `provider` and `model` sit side by side, empty rather than
+/// absent, on a pass that used neither. Tagging the choice keeps each field with the
+/// only mode it means anything for. `Auto` carries its judge as an option rather than
+/// a bare `Llm`-shaped record: an auto pass over a suite of typed graders never
+/// resolves one, and that absence has to read as absent, not as a judge whose fields
+/// happen to be empty.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum GraderChoice {
+    Auto {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        judge: Option<JudgeSettings>,
+    },
+    None,
+    Llm {
+        #[serde(flatten)]
+        judge: JudgeSettings,
+    },
+    Script {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1034,7 +1121,7 @@ fn build_dimensions(
                 kind: *scenario,
             })
             .collect(),
-        graders: Vec::new(),
+        grading_strategies: Vec::new(),
     }
 }
 
@@ -1691,7 +1778,7 @@ mod tests {
                     skill_revisions: Vec::new(),
                     model_configs: Vec::new(),
                     scenarios: Vec::new(),
-                    graders: Vec::new(),
+                    grading_strategies: Vec::new(),
                 },
                 runs: Vec::new(),
                 assertion_results: Vec::new(),

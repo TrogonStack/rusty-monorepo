@@ -1304,7 +1304,7 @@ snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
 | ----- | ---- | ----------- |
 | `report` | object | Report metadata (id, timestamp, producer, optional CI context) |
 | `suite` | object | Skill and eval-suite hashes |
-| `dimensions` | object | Eval cases, assertions, scenarios, model configs, skill revisions |
+| `dimensions` | object | Eval cases, assertions, scenarios, model configs, skill revisions, grading strategies |
 | `runs` | array | One record per (eval case × scenario) |
 | `assertion_results` | array | Per-assertion grading outcomes |
 | `summaries` | object | Aggregated counts by scenario |

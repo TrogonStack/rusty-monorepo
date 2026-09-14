@@ -35,7 +35,7 @@ use super::graders::{
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
-use super::report::{ReportDocument, RunRecord};
+use super::report::{GraderChoice, GradingStrategy, JudgeSettings, ReportDocument, RunRecord};
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 
@@ -529,9 +529,9 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
 
     let session = GradeSession::open(&options, &suite)?;
-    let grader_config = build_grader_config(&options);
-    if document.dimensions.graders.is_empty() {
-        document.dimensions.graders.push(grader_config.clone());
+    let grading_strategy = build_grading_strategy(&options, session.judge.is_some());
+    if document.dimensions.grading_strategies.is_empty() {
+        document.dimensions.grading_strategies.push(grading_strategy.clone());
     }
 
     let mut report = GradeReport {
@@ -616,7 +616,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         report.runs_graded += 1;
     }
 
-    update_report_after_grading(&mut document, &runs, report_dir, &grader_config)?;
+    update_report_after_grading(&mut document, &runs, report_dir, &grading_strategy)?;
     std::fs::write(report_dir.join("report.json"), serde_json::to_string_pretty(&document)?)?;
 
     Ok(report)
@@ -658,15 +658,32 @@ fn created_files_from_artifacts(run: &RunRecord) -> Vec<String> {
         .collect()
 }
 
-fn build_grader_config(options: &GradeOptions) -> serde_json::Value {
-    serde_json::json!({
-        "mode": format!("{:?}", options.grader).to_lowercase(),
-        "provider": options.grader_provider.as_str(),
-        "model": options.grader_model,
-        "command": options.grader_command,
-        "votes": options.grader_votes.count(),
-        "strict": options.strict,
-    })
+/// `judge_resolved` says whether this pass actually reached a judge, per
+/// [`GradeSession::open`]'s reading of [`suite_needs_a_judge`] for `options.grader` and the
+/// suite being graded. It is taken as an argument rather than recomputed here so that whether
+/// `auto` used a judge is decided in exactly one place.
+fn build_grading_strategy(options: &GradeOptions, judge_resolved: bool) -> GradingStrategy {
+    let judge_settings = || JudgeSettings {
+        provider: options.grader_provider,
+        model: options.grader_model.clone(),
+        votes: options.grader_votes,
+    };
+    let grader = match options.grader {
+        GraderMode::Auto => GraderChoice::Auto {
+            judge: judge_resolved.then(judge_settings),
+        },
+        GraderMode::None => GraderChoice::None,
+        GraderMode::Llm => GraderChoice::Llm {
+            judge: judge_settings(),
+        },
+        GraderMode::Script => GraderChoice::Script {
+            command: options.grader_command.clone(),
+        },
+    };
+    GradingStrategy {
+        grader,
+        strict: options.strict,
+    }
 }
 
 fn grade_assertion(
@@ -2423,11 +2440,11 @@ fn update_report_after_grading(
     document: &mut ReportDocument,
     runs: &[RunRecord],
     report_dir: &Path,
-    grader_config: &serde_json::Value,
+    grading_strategy: &GradingStrategy,
 ) -> Result<()> {
     document.assertion_results.clear();
-    if !document.dimensions.graders.iter().any(|g| g == grader_config) {
-        document.dimensions.graders.push(grader_config.clone());
+    if !document.dimensions.grading_strategies.contains(grading_strategy) {
+        document.dimensions.grading_strategies.push(grading_strategy.clone());
     }
 
     for run in runs {
@@ -3120,8 +3137,8 @@ mod tests {
         )
         .unwrap();
 
-        let grader_config = build_grader_config(&GradeOptions::default());
-        update_report_after_grading(&mut document, &runs, &report_dir, &grader_config).unwrap();
+        let grading_strategy = build_grading_strategy(&GradeOptions::default(), false);
+        update_report_after_grading(&mut document, &runs, &report_dir, &grading_strategy).unwrap();
         std::fs::write(
             report_dir.join("report.json"),
             serde_json::to_string_pretty(&document).unwrap(),
@@ -3208,15 +3225,88 @@ mod tests {
     }
 
     #[test]
-    fn the_recorded_grader_config_tells_a_panel_from_a_single_opinion() {
-        let single = build_grader_config(&GradeOptions::default());
-        let panel = build_grader_config(&GradeOptions {
-            grader_votes: JudgeVotes::parse(3).unwrap(),
+    fn the_recorded_grading_strategy_tells_a_panel_from_a_single_opinion() {
+        let llm_options = GradeOptions {
+            grader: GraderMode::Llm,
             ..GradeOptions::default()
-        });
+        };
+        let single = build_grading_strategy(&llm_options, true);
+        let panel = build_grading_strategy(
+            &GradeOptions {
+                grader_votes: JudgeVotes::parse(3).unwrap(),
+                ..llm_options
+            },
+            true,
+        );
 
-        assert_eq!(single["votes"], serde_json::json!(1));
-        assert_eq!(panel["votes"], serde_json::json!(3));
+        assert_eq!(
+            single.grader,
+            GraderChoice::Llm {
+                judge: JudgeSettings {
+                    provider: JudgeProvider::default(),
+                    model: None,
+                    votes: JudgeVotes::single(),
+                },
+            }
+        );
+        assert_eq!(
+            panel.grader,
+            GraderChoice::Llm {
+                judge: JudgeSettings {
+                    provider: JudgeProvider::default(),
+                    model: None,
+                    votes: JudgeVotes::parse(3).unwrap(),
+                },
+            }
+        );
+    }
+
+    /// An `auto` pass that never reached a judge must record `Auto` with no judge, not one
+    /// whose settings merely go unused: an absent judge and an unused-but-present judge are
+    /// different claims about what the pass did.
+    #[test]
+    fn an_auto_pass_that_never_reaches_a_judge_records_no_judge() {
+        let options = GradeOptions {
+            grader: GraderMode::Auto,
+            ..GradeOptions::default()
+        };
+
+        let strategy = build_grading_strategy(&options, false);
+
+        assert_eq!(strategy.grader, GraderChoice::Auto { judge: None });
+    }
+
+    /// The bug this guards: two `auto` passes over the same bundle, each resolving a
+    /// different judge model, must be recorded as two distinct strategies rather than
+    /// collapsing to one under `Auto`'s old judge-blind equality. This is the same
+    /// push-if-absent dedup `update_report_after_grading` runs against
+    /// `dimensions.grading_strategies`, exercised directly against a `Vec` so the test
+    /// does not have to stand up a full graded bundle to reach it.
+    #[test]
+    fn two_auto_passes_with_different_judge_models_are_recorded_as_two_strategies() {
+        let mut grading_strategies: Vec<GradingStrategy> = Vec::new();
+
+        let first_options = GradeOptions {
+            grader: GraderMode::Auto,
+            grader_model: Some("model-a".to_string()),
+            ..GradeOptions::default()
+        };
+        let second_options = GradeOptions {
+            grader_model: Some("model-b".to_string()),
+            ..first_options.clone()
+        };
+
+        let first_strategy = build_grading_strategy(&first_options, true);
+        let second_strategy = build_grading_strategy(&second_options, true);
+
+        for strategy in [&first_strategy, &second_strategy] {
+            if !grading_strategies.contains(strategy) {
+                grading_strategies.push(strategy.clone());
+            }
+        }
+
+        assert_eq!(grading_strategies.len(), 2);
+        assert_ne!(first_strategy, second_strategy);
     }
 
     #[test]

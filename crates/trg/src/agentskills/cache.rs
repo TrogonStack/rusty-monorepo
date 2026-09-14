@@ -701,7 +701,7 @@ mod tests {
         let document = serde_json::json!({
             "report": {"id":"r1","generated_at":"2026-01-01T00:00:00Z","iteration":1,"producer":{"name":"trg","version":"0.0.0"}},
             "suite": {"skill_name":"demo","skill_path":"demo","skill_hash":"sha256:skill","evals_path":"demo/evals/evals.json","evals_hash":"sha256:evals"},
-            "dimensions": {"eval_cases":[],"assertions":[],"skill_revisions":[],"model_configs":[],"scenarios":[],"graders":[]},
+            "dimensions": {"eval_cases":[],"assertions":[],"skill_revisions":[],"model_configs":[],"scenarios":[],"grading_strategies":[]},
             "runs": [run],
             "assertion_results": [],
             "summaries": {"by_scenario":[]},
@@ -784,7 +784,7 @@ mod tests {
         let document = serde_json::json!({
             "report": {"id":"r1","generated_at":"2026-01-01T00:00:00Z","iteration":1,"producer":{"name":"trg","version":"0.0.0"}},
             "suite": {"skill_name":"demo","skill_path":"demo","skill_hash":"sha256:skill","evals_path":"demo/evals/evals.json","evals_hash":"sha256:evals"},
-            "dimensions": {"eval_cases":[],"assertions":[],"skill_revisions":[],"model_configs":[],"scenarios":[],"graders":[]},
+            "dimensions": {"eval_cases":[],"assertions":[],"skill_revisions":[],"model_configs":[],"scenarios":[],"grading_strategies":[]},
             "runs": [run],
             "assertion_results": [],
             "summaries": {"by_scenario":[]},

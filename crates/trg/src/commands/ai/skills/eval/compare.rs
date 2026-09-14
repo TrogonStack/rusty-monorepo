@@ -242,7 +242,7 @@ mod tests {
                 "skill_revisions": [],
                 "model_configs": [],
                 "scenarios": [],
-                "graders": []
+                "grading_strategies": []
             },
             "runs": [],
             "assertion_results": [],

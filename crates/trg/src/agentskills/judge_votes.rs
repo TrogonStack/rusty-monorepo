@@ -13,14 +13,33 @@ use std::ops::RangeInclusive;
 use std::str::FromStr;
 
 use schemars::JsonSchema;
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 /// The number of opinions taken on every assertion an LLM judge decides.
 ///
 /// Always odd, because a panel that ties has decided nothing, and reporting a tie as
 /// either answer would invent the confidence the flag exists to measure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
+#[schemars(schema_with = "judge_votes_schema")]
 pub struct JudgeVotes(u32);
+
+fn judge_votes_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "integer",
+        "minimum": 1
+    })
+}
+
+impl<'de> Deserialize<'de> for JudgeVotes {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u32::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
 
 impl JudgeVotes {
     /// One opinion, which is a judgement rather than a panel.

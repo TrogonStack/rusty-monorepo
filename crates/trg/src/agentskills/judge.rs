@@ -6,8 +6,9 @@
 //! is therefore keyed on the wire protocol the judge endpoint speaks, not on
 //! the harness that produced the transcript.
 
+use schemars::JsonSchema;
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::evals::EvalError;
 use super::graders::ImageMediaType;
@@ -20,16 +21,19 @@ pub enum JudgeApi {
     AnthropicMessages,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
 pub enum JudgeProvider {
     #[default]
     #[value(name = "openai")]
+    #[serde(rename = "openai")]
     OpenAi,
     #[value(name = "anthropic")]
+    #[serde(rename = "anthropic")]
     Anthropic,
     /// Any endpoint speaking the OpenAI chat-completions protocol, addressed
     /// through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY`.
     #[value(name = "compatible")]
+    #[serde(rename = "compatible")]
     Compatible,
 }
 

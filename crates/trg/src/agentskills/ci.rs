@@ -1224,7 +1224,7 @@ mod tests {
                 skill_revisions: Vec::new(),
                 model_configs: Vec::new(),
                 scenarios: Vec::new(),
-                graders: Vec::new(),
+                grading_strategies: Vec::new(),
             },
             runs: vec![RunRecord {
                 id: "run-001".to_string(),
