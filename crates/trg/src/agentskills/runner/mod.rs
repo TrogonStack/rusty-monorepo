@@ -27,6 +27,7 @@ use super::budget::{HarnessPricing, RunCost};
 use super::case_directories::EVAL_CASE_PROMPT_FILE_NAME;
 use super::errors::SkillError;
 use super::evals::{EvalCase, EvalDirName, EvalError, EVAL_SUITE_MANIFEST_NAME};
+use super::mocks::MaterializedMcpConfig;
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
@@ -143,11 +144,11 @@ pub struct EvalRunRequest<'a> {
     /// `Some` here; a case or operator that asks for one against such a runner is
     /// refused earlier, before a runner is ever invoked.
     pub tool_grant: Option<ToolGrant>,
-    /// Where the generated `--mcp-config` JSON lives, when the case declares mocks and the
-    /// runner drives `McpServers`. Runners that do not drive that control simply ignore it;
-    /// a case that declares mocks against one of those runners is refused earlier, before a
-    /// runner is ever invoked.
-    pub mcp_config_path: Option<PathBuf>,
+    /// Where the generated mock server table lives, in each format a harness reads, when
+    /// the case declares mocks and the runner drives `McpServers`. Runners that do not
+    /// drive that control simply ignore it; a case that declares mocks against one of those
+    /// runners is refused earlier, before a runner is ever invoked.
+    pub mcp_config: Option<MaterializedMcpConfig>,
 }
 
 impl EvalRunRequest<'_> {
@@ -1211,7 +1212,7 @@ mod workspace_tests {
             permission: PermissionGrant::WorkspaceWrite,
             scaffold_permission: ScaffoldPermission::Withheld,
             tool_grant: None,
-            mcp_config_path: None,
+            mcp_config: None,
         }
     }
 

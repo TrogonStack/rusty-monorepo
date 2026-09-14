@@ -9,6 +9,7 @@ use super::{
     write_timing_file, EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
+use crate::agentskills::mocks::MaterializedMcpConfig;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
 use crate::agentskills::redact::redact_command_args;
 use crate::agentskills::report::{CacheTokens, PermissionGrant};
@@ -104,7 +105,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         request.runner_model,
         request.permission,
         request.tool_grant.as_ref(),
-        request.mcp_config_path.as_deref(),
+        request.mcp_config.as_ref().map(MaterializedMcpConfig::json),
         request.eval.append_system_prompt.as_ref(),
     );
 

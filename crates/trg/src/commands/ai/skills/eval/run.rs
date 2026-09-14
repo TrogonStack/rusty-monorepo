@@ -17,7 +17,8 @@ use crate::agentskills::evals::{
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::mocks::{
-    materialize_mock_set, resolve_mock_set, MockCallLogEntry, MockServerBinary, MockSet, MOCK_CALLS_LOG_NAME,
+    materialize_mock_set, resolve_mock_set, MaterializedMcpConfig, MockCallLogEntry, MockServerBinary, MockSet,
+    MOCK_CALLS_LOG_NAME,
 };
 use crate::agentskills::model_name::ModelName;
 use crate::agentskills::outputs::index_output_artifacts;
@@ -948,12 +949,23 @@ impl RunExecution<'_> {
             }
         };
 
-        if !mock_set.is_empty() && !self.runner.support(HarnessControl::McpServers).is_offered() {
-            run.not_started(RunNotStarted::ControlUnsupported {
-                control: HarnessControl::McpServers,
-                runner: self.runner,
-            });
-            return;
+        if !mock_set.is_empty() {
+            let support = self.runner.support(HarnessControl::McpServers);
+            if !support.is_offered() {
+                run.not_started(RunNotStarted::ControlUnsupported {
+                    control: HarnessControl::McpServers,
+                    runner: self.runner,
+                });
+                return;
+            }
+            if support.needs_run_owned_config_home() && !matches!(self.environment, EnvironmentPolicy::Isolated) {
+                run.not_started(RunNotStarted::ControlNeedsRunOwnedConfigHome {
+                    control: HarnessControl::McpServers,
+                    runner: self.runner,
+                    environment: self.environment,
+                });
+                return;
+            }
         }
 
         let fixture_hash = match compute_fixture_hash(self.skill_path, &self.eval_dir, &run.eval_case_id) {
@@ -1035,11 +1047,11 @@ impl RunExecution<'_> {
             return;
         }
 
-        let mcp_config_path = if mock_set.is_empty() {
+        let mcp_config = if mock_set.is_empty() {
             None
         } else {
             match materialize_mock_set_for_run(&mock_set, &run_dir) {
-                Ok(path) => Some(path),
+                Ok(config) => Some(config),
                 Err(e) => {
                     eprintln!("Run {}: failed to materialize mcp mocks: {}", run.id, e);
                     run.status = "failed".to_string();
@@ -1066,7 +1078,7 @@ impl RunExecution<'_> {
             tool_grant,
             scaffold_permission: self.scaffold_permission,
             eval_dir: self.eval_dir.clone(),
-            mcp_config_path,
+            mcp_config,
         };
 
         let digest_before = match integrity {
@@ -1448,7 +1460,7 @@ mod fake_runner {
 /// `current_exe` is looked up per run rather than once for the whole pass because a pass
 /// can run for long enough that re-reading it costs nothing worth caching, and caching it
 /// would be one more piece of state a test has to seed.
-fn materialize_mock_set_for_run(mock_set: &MockSet, run_dir: &Path) -> Result<PathBuf, String> {
+fn materialize_mock_set_for_run(mock_set: &MockSet, run_dir: &Path) -> Result<MaterializedMcpConfig, String> {
     let trg_binary = MockServerBinary::locate().map_err(|e| e.to_string())?;
     materialize_mock_set(mock_set, run_dir, &trg_binary).map_err(|e| e.to_string())
 }
@@ -4508,7 +4520,7 @@ mod tests {
         let out_dir = temp.path().join("artifacts");
 
         let report = read_report(&run_with_fake_runner(RunArgs {
-            runner: Some(Runner::Codex),
+            runner: Some(Runner::CursorAgent),
             ..base_run_args(&skill_dir, &out_dir)
         }));
 
@@ -4529,5 +4541,51 @@ mod tests {
             serde_json::Value::Null,
             "a skipped run was never handed to the runner, so it has no duration to report"
         );
+    }
+
+    /// codex takes its mock servers as a file in its config home and offers no flag that
+    /// excludes the operator's own. Under a policy that leaves the operator's config home
+    /// in place, a mocked run would have reached real MCP servers alongside the mocks and
+    /// been reported as though only the mocks had answered.
+    #[test]
+    fn a_mocked_codex_case_is_refused_where_the_operators_own_mcp_servers_would_stay_live() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_mocked_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            runner: Some(Runner::Codex),
+            environment: EnvironmentPolicy::Scrubbed,
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        assert_eq!(report["runs"][0]["status"], "skipped");
+        assert_eq!(
+            report["runs"][0]["failure_kind"],
+            crate::agentskills::runner::FAILURE_KIND_UNSUPPORTED
+        );
+        let warning = report["runs"][0]["warnings"][0].as_str().unwrap();
+        assert!(
+            warning.contains("--environment isolated"),
+            "a refusal an operator can act on has to name the policy that grants the run its own config home: {warning}"
+        );
+    }
+
+    #[test]
+    fn a_mocked_codex_case_runs_once_the_run_owns_the_config_home_the_mocks_are_declared_in() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_mocked_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report = read_report(&run_with_fake_runner(RunArgs {
+            runner: Some(Runner::Codex),
+            environment: EnvironmentPolicy::Isolated,
+            ..base_run_args(&skill_dir, &out_dir)
+        }));
+
+        assert_eq!(report["runs"][0]["status"], "completed");
+        assert_eq!(report["runs"][0]["failure_kind"], serde_json::Value::Null);
     }
 }
