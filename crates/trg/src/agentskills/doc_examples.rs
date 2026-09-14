@@ -1,5 +1,5 @@
-//! Every JSON example in the crate's docs, parsed by the code that reads the
-//! real thing.
+//! Every JSON example in the crate's docs and shipped skills, parsed by the code
+//! that reads the real thing.
 //!
 //! An eval suite example is an instruction, so one that cannot be pasted is
 //! worse than no example: it sends someone off to debug their own typing. The
@@ -77,6 +77,7 @@ fn markdown_files() -> Vec<PathBuf> {
     let root = crate_root();
     let mut out = vec![root.join("README.md")];
     collect_markdown(&root.join("docs"), &mut out);
+    collect_markdown(&root.join("skills"), &mut out);
     out.sort();
     out
 }

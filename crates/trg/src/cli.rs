@@ -40,6 +40,7 @@ mod doc_commands {
         let root = crate_root();
         let mut out = vec![root.join("README.md")];
         collect(&root.join("docs"), &mut out);
+        collect(&root.join("skills"), &mut out);
         out.sort();
         out
     }

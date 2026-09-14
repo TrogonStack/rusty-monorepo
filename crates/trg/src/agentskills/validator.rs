@@ -171,6 +171,46 @@ fn validate_compatibility(compat: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::fs::testutil::MemFS;
+    use crate::fs::RealFS;
+    use std::path::PathBuf;
+
+    fn shipped_skills_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills")
+    }
+
+    /// A skill this crate ships is held to the rules this crate enforces.
+    ///
+    /// A shipped skill that its own validator rejects is a record claiming something the
+    /// thing it describes does not satisfy, and nothing else in the build would say so:
+    /// `SKILL.md` is prose to the compiler.
+    #[test]
+    fn every_shipped_skill_passes_validation() {
+        let mut checked = 0usize;
+        let entries = std::fs::read_dir(shipped_skills_dir()).expect("crates/trg/skills must exist");
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            checked += 1;
+            if let Err(error) = validate_skill(&RealFS, &path) {
+                panic!("shipped skill {} does not validate: {error}", path.display());
+            }
+        }
+
+        assert!(
+            checked >= 1,
+            "expected this crate to still ship a skill, found {checked}"
+        );
+    }
+
+    #[test]
+    fn the_eval_authoring_skill_is_shipped() {
+        let path = shipped_skills_dir().join("trg-eval-authoring");
+        let props = validate_skill(&RealFS, &path).expect("trg-eval-authoring must validate");
+        assert_eq!(props.name, "trg-eval-authoring");
+    }
 
     #[test]
     fn test_validate_name_valid() {
