@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::feedback::init_feedback;
 use crate::agentskills::report::sync_human_feedback;
-use crate::output::{print_json, OutputFormat};
+use crate::commands::ai::skills::eval::print_json;
+use crate::output::OutputFormat;
 use clap::Args;
 use serde_json::json;
 
@@ -35,18 +37,18 @@ pub struct FeedbackInitArgs {
 }
 
 impl FeedbackInitArgs {
-    pub fn handle(self) -> i32 {
+    pub fn handle(self) -> ExitCode {
         let report = match init_feedback(&self.report_dir, self.reviewer.as_deref()) {
             Ok(report) => report,
             Err(e) => {
                 eprintln!("Failed to initialize feedback artifacts: {}", e);
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
         if let Err(e) = sync_human_feedback(&self.report_dir) {
             eprintln!("Failed to sync feedback summary into report.json: {}", e);
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if self.output_format.is_json() {
@@ -55,14 +57,14 @@ impl FeedbackInitArgs {
                 "created": report.created,
                 "skipped": report.skipped,
             });
-            return print_json(&document, 0);
+            return print_json(&document, ExitCode::Success);
         }
 
         println!(
             "Initialized feedback for {} run(s) ({} already existed)",
             report.created, report.skipped
         );
-        0
+        ExitCode::Success
     }
 }
 
@@ -83,7 +85,7 @@ mod tests {
             output_format: OutputFormat::Text,
         }
         .handle();
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
 
         assert!(list_runs_needing_review(&report_dir).unwrap().is_empty());
 

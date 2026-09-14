@@ -11,6 +11,7 @@ pub mod dispersion;
 pub mod errors;
 pub mod eval_suite_drift;
 pub mod evals;
+pub mod exit_code;
 pub mod feedback;
 pub mod graders;
 pub mod grading;

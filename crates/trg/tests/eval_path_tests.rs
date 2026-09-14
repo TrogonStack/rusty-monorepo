@@ -137,7 +137,12 @@ fn run_fails_fast_when_runner_missing_from_path() {
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a runner that was never installed measured nothing about the skill, so it cannot \
+         report the code that sends someone to read the skill"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Runner 'codex' not found on PATH"));
     assert!(stderr.contains("Looked for binary: codex"));

@@ -30,7 +30,7 @@ impl SkillsCommands {
     pub fn handle(self, fs: &impl FileSystem) -> i32 {
         match self {
             Self::Validate(args) => args.handle(fs),
-            Self::Eval(args) => args.handle(fs),
+            Self::Eval(args) => args.handle(fs).into(),
             Self::ReadProperties(args) => args.handle(fs),
             Self::ToPrompt(args) => args.handle(fs),
         }

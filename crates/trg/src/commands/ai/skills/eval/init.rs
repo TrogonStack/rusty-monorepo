@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
 use crate::agentskills::evals::{check_eval_suite, write_eval_manifest_scaffold, EvalCheckOptions};
+use crate::agentskills::exit_code::ExitCode;
 use crate::fs::FileSystem;
-use crate::output::{print_json, OutputFormat};
+use crate::output::OutputFormat;
 use clap::Args;
 use serde_json::json;
+
+use super::print_json;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -38,12 +41,12 @@ pub struct InitArgs {
 }
 
 impl InitArgs {
-    pub fn handle(self, fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         let props = match crate::agentskills::validator::validate_skill(fs, &self.skill_dir) {
             Ok(props) => props,
             Err(error) => {
                 eprintln!("Skill validation failed: {error}");
-                return 1;
+                return ExitCode::GateFailed;
             }
         };
 
@@ -53,17 +56,17 @@ impl InitArgs {
                 "Refusing to overwrite existing eval manifest at {}",
                 evals_path.display()
             );
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if let Err(error) = std::fs::create_dir_all(self.skill_dir.join("evals")) {
             eprintln!("Failed to create evals directory: {error}");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if let Err(error) = write_eval_manifest_scaffold(fs, &self.skill_dir, &props.name) {
             eprintln!("Failed to write eval manifest: {error}");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if let Err(error) = check_eval_suite(
@@ -76,7 +79,7 @@ impl InitArgs {
             },
         ) {
             eprintln!("Generated eval manifest failed validation: {error}");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if self.output_format.is_json() {
@@ -85,11 +88,11 @@ impl InitArgs {
                 "evals_path": evals_path.display().to_string(),
                 "created": true,
             });
-            return print_json(&document, 0);
+            return print_json(&document, ExitCode::Success);
         }
 
         println!("Created {}", evals_path.display());
-        0
+        ExitCode::Success
     }
 }
 
@@ -122,7 +125,7 @@ mod tests {
             output_format: crate::output::OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
 
         let suite = load_eval_suite(&crate::fs::RealFS, &skill_dir).unwrap();
         assert_eq!(suite.skill_name.as_str(), "demo-skill");
@@ -146,7 +149,7 @@ mod tests {
             output_format: crate::output::OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
-        assert_eq!(status, 1);
+        assert_eq!(status, ExitCode::InfrastructureFailure);
     }
 
     #[test]
@@ -160,7 +163,7 @@ mod tests {
             output_format: crate::output::OutputFormat::Text,
         }
         .handle(&crate::fs::RealFS);
-        assert_eq!(init_status, 0);
+        assert_eq!(init_status, ExitCode::Success);
 
         let verify_status = VerifyArgs {
             workspace: None,
@@ -171,6 +174,6 @@ mod tests {
             ci: Default::default(),
         }
         .handle(&crate::fs::RealFS);
-        assert_eq!(verify_status, 0);
+        assert_eq!(verify_status, ExitCode::Success);
     }
 }

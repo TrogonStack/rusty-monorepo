@@ -8,6 +8,7 @@ use crate::agentskills::evals::{
     check_eval_suite, check_workspace, lint_eval_suite_fixtures, print_eval_lint_warnings, EvalCheckOptions,
     EvalLintOptions, WorkspaceCheckOptions,
 };
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::schemas::{validate_report_bundle_schemas, SchemaValidation};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
@@ -99,15 +100,15 @@ pub struct VerifyArgs {
 }
 
 impl VerifyArgs {
-    pub fn handle(self, fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         if self.workspace.is_none() && self.skill_dir.is_none() {
             eprintln!("Either WORKSPACE or --skill-dir is required");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if let Some(refusal) = self.mode.refusal(SchemaValidation::of_this_build()) {
             eprintln!("{refusal}");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if let Some(skill_dir) = &self.skill_dir {
@@ -117,8 +118,25 @@ impl VerifyArgs {
         }
 
         let Some(workspace) = self.workspace else {
-            return 0;
+            return ExitCode::Success;
         };
+
+        // A path that is not a bundle is not a bundle that failed its checks. There was
+        // nothing to hold against them, so the answer is about the invocation rather than
+        // about the skill. `check_workspace` reports both of these as validation failures,
+        // which is how they would otherwise reach the verdict as findings about the skill.
+        if !workspace.is_dir() {
+            let reason = if workspace.exists() {
+                "must be a directory"
+            } else {
+                "does not exist"
+            };
+            eprintln!(
+                "Bundle verification failed: workspace '{}': {reason}",
+                workspace.display()
+            );
+            return ExitCode::InfrastructureFailure;
+        }
 
         let report_dir = find_report_dir(&workspace).unwrap_or_else(|| workspace.clone());
 
@@ -130,7 +148,7 @@ impl VerifyArgs {
         if matches!(self.mode, VerifyMode::Strict) {
             if let Err(error) = validate_report_bundle_schemas(&report_dir) {
                 eprintln!("Schema validation failed: {error}");
-                return 1;
+                return ExitCode::GateFailed;
             }
         }
 
@@ -138,7 +156,7 @@ impl VerifyArgs {
             Ok(report) => report,
             Err(e) => {
                 eprintln!("Bundle verification failed: {}", e);
-                return 1;
+                return e.reported_as();
             }
         };
 
@@ -146,7 +164,7 @@ impl VerifyArgs {
             Ok(metrics) => metrics,
             Err(error) => {
                 eprintln!("Failed to collect workspace metrics: {error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -158,7 +176,7 @@ impl VerifyArgs {
             &mut failed_assertions,
         ) {
             eprintln!("Failed to collect failed assertions: {error}");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         let mut case_scores = Vec::new();
@@ -166,7 +184,7 @@ impl VerifyArgs {
             collect_case_scores_in_workspace(&workspace, None, workspace.display().to_string(), &mut case_scores)
         {
             eprintln!("Failed to collect case scores: {error}");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         let mut policy = self.ci.policy();
@@ -191,7 +209,7 @@ impl VerifyArgs {
         );
         emit_github_annotations(&check.violations);
 
-        let exit_code = if check.passed { 0 } else { 1 };
+        let exit_code = ExitCode::from_gate(check.passed);
         if self.output_format.is_json() {
             let output = EvalCommandJsonOutput {
                 report_dir: report_dir.display().to_string(),
@@ -203,7 +221,7 @@ impl VerifyArgs {
                 Ok(json) => println!("{json}"),
                 Err(error) => {
                     eprintln!("Failed to serialize eval output: {error}");
-                    return 1;
+                    return ExitCode::InfrastructureFailure;
                 }
             }
         } else {
@@ -217,12 +235,12 @@ impl VerifyArgs {
         exit_code
     }
 
-    fn verify_skill_dir(&self, fs: &impl FileSystem, skill_dir: &Path) -> Option<i32> {
+    fn verify_skill_dir(&self, fs: &impl FileSystem, skill_dir: &Path) -> Option<ExitCode> {
         let props = match crate::agentskills::validator::validate_skill(fs, skill_dir) {
             Ok(props) => props,
             Err(error) => {
                 eprintln!("Skill validation failed: {error}");
-                return Some(1);
+                return Some(ExitCode::GateFailed);
             }
         };
 
@@ -237,14 +255,14 @@ impl VerifyArgs {
             },
         ) {
             eprintln!("Eval manifest verification failed: {error}");
-            return Some(1);
+            return Some(ExitCode::GateFailed);
         }
 
         let suite = match crate::agentskills::evals::load_eval_suite(fs, skill_dir) {
             Ok(suite) => suite,
             Err(error) => {
                 eprintln!("Failed to load eval manifest: {error}");
-                return Some(1);
+                return Some(ExitCode::InfrastructureFailure);
             }
         };
         print_eval_lint_warnings(&lint_eval_suite_fixtures(

@@ -13,6 +13,7 @@ use crate::agentskills::concurrency::RunConcurrency;
 use crate::agentskills::evals::{
     effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalSuite,
 };
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::mocks::{
     materialize_mock_set, resolve_mock_set, MockCallLogEntry, MockServerBinary, MockSet, MOCK_CALLS_LOG_NAME,
@@ -31,13 +32,13 @@ use crate::agentskills::sampling::AttemptCount;
 use crate::agentskills::scenario_selection::ScenarioSelection;
 use crate::agentskills::workspace_scaffold::ScaffoldPermission;
 use crate::fs::FileSystem;
-use crate::output::{print_json, OutputFormat};
+use crate::output::OutputFormat;
 use clap::Args;
 
 use super::benchmark::benchmark_report_dir_with_document;
 use super::ci_args::EvalCiArgs;
-use super::finish_eval_output;
 use super::grade::{grade_report_dir_with_report, GradeJsonOutput};
+use super::{finish_eval_output, print_json};
 use crate::agentskills::benchmark::BenchmarkOptions;
 use crate::agentskills::grading::{GradeOptions, GraderMode};
 use crate::agentskills::transcript::{read_normalized_transcript, NormalizedTranscript};
@@ -243,12 +244,12 @@ pub struct RunArgs {
 }
 
 impl RunArgs {
-    pub fn handle(self, fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         let props = match crate::agentskills::validator::validate_skill(fs, &self.skill_dir) {
             Ok(props) => props,
             Err(e) => {
                 eprintln!("Skill validation failed: {}", e);
-                return 1;
+                return ExitCode::GateFailed;
             }
         };
 
@@ -262,7 +263,7 @@ impl RunArgs {
             },
         ) {
             eprintln!("Skill eval validation failed: {}", e);
-            return 1;
+            return ExitCode::GateFailed;
         }
 
         if self.lint_evals {
@@ -282,7 +283,7 @@ impl RunArgs {
                 }
                 Err(error) => {
                     eprintln!("Failed to load eval manifest for linting: {error}");
-                    return 1;
+                    return ExitCode::InfrastructureFailure;
                 }
             }
         }
@@ -302,13 +303,13 @@ impl RunArgs {
             Ok(selection) => selection,
             Err(error) => {
                 eprintln!("{error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
         if scenario_selection.contains(ScenarioKind::OldSkill) && self.old_skill_dir.is_none() {
             eprintln!("--old-skill-dir is required when --scenario old_skill is included");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if let Some(old_skill_dir) = &self.old_skill_dir {
@@ -319,12 +320,12 @@ impl RunArgs {
                             "Old skill name '{}' does not match current skill name '{}' (pass --allow-skill-name-mismatch to override)",
                             old_props.name, props.name
                         );
-                        return 1;
+                        return ExitCode::InfrastructureFailure;
                     }
                 }
                 Err(e) => {
                     eprintln!("Old skill validation failed: {}", e);
-                    return 1;
+                    return ExitCode::GateFailed;
                 }
             }
         }
@@ -337,7 +338,7 @@ impl RunArgs {
                     Ok(probe) => Some(probe),
                     Err(unavailable) => {
                         availability::eprint_runner_unavailable(&unavailable);
-                        return 1;
+                        return ExitCode::InfrastructureFailure;
                     }
                 }
             }
@@ -350,7 +351,7 @@ impl RunArgs {
                 Ok(ledger) => Some(ledger),
                 Err(error) => {
                     eprintln!("{error}");
-                    return 1;
+                    return ExitCode::InfrastructureFailure;
                 }
             },
             None => None,
@@ -360,7 +361,7 @@ impl RunArgs {
             Ok(cases) => cases,
             Err(error) => {
                 eprintln!("{error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -393,7 +394,7 @@ impl RunArgs {
             Ok(bundle) => bundle,
             Err(e) => {
                 eprintln!("Failed to build eval report bundle: {}", e);
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -408,7 +409,7 @@ impl RunArgs {
             Ok(dir) => dir,
             Err(e) => {
                 eprintln!("Failed to write eval report bundle: {}", e);
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -452,9 +453,9 @@ impl RunArgs {
 
         if self.grade {
             let (code, grade_report) = grade_report_dir_with_report(&report_dir, grade_options, self.output_format);
-            let last_stage = code != 0 || !self.benchmark;
+            let last_stage = !code.is_success() || !self.benchmark;
             if last_stage {
-                let exit_code = exit_code_with_budget(code, budget_exhausted);
+                let exit_code = code.or_budget_exhausted(budget_exhausted);
                 if self.output_format.is_json() {
                     return print_json(
                         &GradeJsonOutput::new(&report_dir, exit_code, grade_report.as_ref()),
@@ -467,7 +468,7 @@ impl RunArgs {
 
         if self.benchmark {
             let (code, benchmark_doc) = benchmark_report_dir_with_document(&report_dir, BenchmarkOptions::default());
-            let exit_code = exit_code_with_budget(code, budget_exhausted);
+            let exit_code = code.or_budget_exhausted(budget_exhausted);
             if self.output_format.is_json() {
                 if let Some(document) = benchmark_doc {
                     return print_json(&BenchmarkJsonOutput::new(&report_dir, exit_code, &document), exit_code);
@@ -487,40 +488,21 @@ impl RunArgs {
     }
 }
 
-/// Where a budget stop lands among the codes a stage already reports.
-///
-/// A stage that failed said so on its own terms, and the budget finding must not swallow
-/// that, so 1 still wins over 2. A stage that passed said nothing about spend, so a pass
-/// the ceiling cut short cannot report 0 either.
-///
-/// Reported when the pass got less than it asked for, or paid more than it allowed:
-/// either a run was refused, or spend went strictly past the ceiling, which a single
-/// run can do on its own because admission is checked rather than reserved. A pass that
-/// lands exactly on its ceiling having refused nothing is neither, and exits 0: it did
-/// all the work and paid what it said it would.
-const EXIT_BUDGET_EXHAUSTED: i32 = 2;
-
-pub(super) fn exit_code_with_budget(code: i32, budget_exhausted: bool) -> i32 {
-    if code != 0 {
-        code
-    } else if budget_exhausted {
-        EXIT_BUDGET_EXHAUSTED
-    } else {
-        0
-    }
-}
-
 /// The chained-benchmark shape, alongside the chained-grade shape that
 /// `grade` and `run --grade` share.
 #[derive(serde::Serialize)]
 struct BenchmarkJsonOutput<'a> {
     report_dir: String,
-    exit_code: i32,
+    exit_code: ExitCode,
     benchmark: &'a crate::agentskills::benchmark::BenchmarkDocument,
 }
 
 impl<'a> BenchmarkJsonOutput<'a> {
-    fn new(report_dir: &Path, exit_code: i32, benchmark: &'a crate::agentskills::benchmark::BenchmarkDocument) -> Self {
+    fn new(
+        report_dir: &Path,
+        exit_code: ExitCode,
+        benchmark: &'a crate::agentskills::benchmark::BenchmarkDocument,
+    ) -> Self {
         Self {
             report_dir: report_dir.display().to_string(),
             exit_code,
@@ -547,12 +529,12 @@ fn execute_runs(
     scaffold_permission: ScaffoldPermission,
     concurrency: RunConcurrency,
     cost_ledger: &CostLedger,
-) -> std::result::Result<usize, i32> {
+) -> std::result::Result<usize, ExitCode> {
     let skill_md = match std::fs::read_to_string(skill_path.join("SKILL.md")) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to read SKILL.md: {}", e);
-            return Err(1);
+            return Err(ExitCode::InfrastructureFailure);
         }
     };
 
@@ -561,7 +543,7 @@ fn execute_runs(
             Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("Failed to read old skill SKILL.md: {}", e);
-                return Err(1);
+                return Err(ExitCode::InfrastructureFailure);
             }
         }
     } else {
@@ -573,7 +555,7 @@ fn execute_runs(
             Ok(compiled) => compiled.suite,
             Err(err) => {
                 eprintln!("Failed to load eval suite: {}", err);
-                return Err(1);
+                return Err(ExitCode::InfrastructureFailure);
             }
         };
 
@@ -626,12 +608,12 @@ fn execute_runs(
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to re-serialize report.json: {}", e);
-            return Err(1);
+            return Err(ExitCode::InfrastructureFailure);
         }
     };
     if let Err(e) = std::fs::write(report_dir.join("report.json"), report_json) {
         eprintln!("Failed to write updated report.json: {}", e);
-        return Err(1);
+        return Err(ExitCode::InfrastructureFailure);
     }
 
     Ok(runs_skipped)
@@ -1692,7 +1674,7 @@ mod tests {
         }
         .handle(&crate::fs::RealFS);
 
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
 
         let report_dirs: Vec<_> = std::fs::read_dir(out_dir.join("fixture-skill"))
             .unwrap()
@@ -1749,7 +1731,7 @@ mod tests {
         out_dir: PathBuf,
         scenario: Vec<ScenarioKind>,
         reuse_completed: bool,
-    ) -> (i32, PathBuf) {
+    ) -> (ExitCode, PathBuf) {
         let status = RunArgs {
             skill_dir,
             out_dir: out_dir.clone(),
@@ -1812,7 +1794,7 @@ mod tests {
         let out_dir = temp.path().join("artifacts");
 
         let (status, report_dir) = run_with_scenario_selection(skill_dir, out_dir, Vec::new(), false);
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
         assert_eq!(
             scenario_ids(&report_dir),
             vec!["with_skill".to_string(), "without_skill".to_string()]
@@ -1827,7 +1809,7 @@ mod tests {
 
         let (status, report_dir) =
             run_with_scenario_selection(skill_dir, out_dir, vec![ScenarioKind::WithoutSkill], false);
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
         assert_eq!(scenario_ids(&report_dir), vec!["without_skill".to_string()]);
     }
 
@@ -1838,7 +1820,7 @@ mod tests {
         let out_dir = temp.path().join("artifacts");
 
         let (status, report_dir) = run_with_scenario_selection(skill_dir, out_dir, Vec::new(), true);
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
         assert_eq!(scenario_ids(&report_dir), vec!["with_skill".to_string()]);
     }
 
@@ -1912,7 +1894,7 @@ mod tests {
         }
         .handle(&crate::fs::RealFS);
 
-        assert_eq!(status, 1);
+        assert_eq!(status, ExitCode::InfrastructureFailure);
     }
 
     #[test]
@@ -1957,7 +1939,7 @@ mod tests {
         }
         .handle(&crate::fs::RealFS);
 
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
 
         let report_dirs: Vec<_> = std::fs::read_dir(out_dir.join("fixture-skill"))
             .unwrap()
@@ -2018,7 +2000,7 @@ mod tests {
         }
         .handle(&crate::fs::RealFS);
 
-        assert_eq!(status, 1);
+        assert_eq!(status, ExitCode::InfrastructureFailure);
     }
 
     fn write_cacheable_skill(root: &Path) -> PathBuf {
@@ -2050,13 +2032,13 @@ mod tests {
 
     fn run_with_fake_runner(args: RunArgs) -> PathBuf {
         let (status, report_dir) = run_with_fake_runner_reporting_status(args);
-        assert_eq!(status, 0, "eval run failed");
+        assert_eq!(status, ExitCode::Success, "eval run failed");
         report_dir
     }
 
     /// Same as `run_with_fake_runner`, without insisting the pass exited clean, so a test
     /// can look at a report a budget or a CI gate stopped from being one.
-    fn run_with_fake_runner_reporting_status(args: RunArgs) -> (i32, PathBuf) {
+    fn run_with_fake_runner_reporting_status(args: RunArgs) -> (ExitCode, PathBuf) {
         super::fake_runner::enable();
         let out_dir = args.out_dir.clone();
         let skill_name = std::fs::read_to_string(args.skill_dir.join("SKILL.md"))
@@ -2890,7 +2872,7 @@ mod tests {
         }
         .handle(&crate::fs::RealFS);
 
-        assert_eq!(status, 1);
+        assert_eq!(status, ExitCode::InfrastructureFailure);
         assert!(!out_dir.exists());
     }
 
@@ -3215,7 +3197,7 @@ mod tests {
                 ci: EvalCiArgs::default(),
             }
             .handle(&crate::fs::RealFS);
-            assert_eq!(status, 0);
+            assert_eq!(status, ExitCode::Success);
 
             std::fs::read_dir(out_dir.join("gradable-skill"))
                 .unwrap()
@@ -3239,7 +3221,7 @@ mod tests {
             OutputFormat::Text,
         );
 
-        assert_ne!(status, 0);
+        assert_ne!(status, ExitCode::Success);
         assert!(report_dir.is_dir());
         assert_eq!(
             std::fs::read_to_string(report_dir.join("report.json")).unwrap(),
@@ -3286,7 +3268,7 @@ mod tests {
         }
         .handle(&crate::fs::RealFS);
 
-        assert_ne!(status, 0);
+        assert_ne!(status, ExitCode::Success);
         let report_dirs: Vec<_> = std::fs::read_dir(out_dir.join("gradable-skill"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -3388,7 +3370,11 @@ mod tests {
             ..base_run_args(&skill_dir, &out_dir)
         });
 
-        assert_eq!(status, 2, "a budget-exhausted pass has to say so in its exit code");
+        assert_eq!(
+            status,
+            ExitCode::BudgetExhausted,
+            "a budget-exhausted pass has to say so in its exit code"
+        );
 
         let report = read_report(&report_dir);
         assert_eq!(report["runs"][0]["status"], "completed");
@@ -3565,7 +3551,8 @@ mod tests {
             "only the run that produced a workspace has anything to grade"
         );
         assert_eq!(
-            status, 2,
+            status,
+            ExitCode::BudgetExhausted,
             "the pass reports that it ran out of money, not that the skill got something wrong"
         );
     }
@@ -3587,7 +3574,11 @@ mod tests {
             ..base_run_args(&skill_dir, &out_dir)
         });
 
-        assert_eq!(status, 0, "a pass that did every run inside its ceiling has not failed");
+        assert_eq!(
+            status,
+            ExitCode::Success,
+            "a pass that did every run inside its ceiling has not failed"
+        );
 
         let report = read_report(&report_dir);
         assert_eq!(report["runs"][0]["status"], "completed");
@@ -3617,7 +3608,8 @@ mod tests {
 
         let (status, report_dir) = run_with_fake_runner_reporting_status(base_run_args(&skill_dir, &out_dir));
         assert_eq!(
-            status, 0,
+            status,
+            ExitCode::Success,
             "the pass itself is clean, so only the budget can move the code"
         );
 
@@ -3625,14 +3617,16 @@ mod tests {
         let stopped = super::super::eval_output(&report_dir, ci.policy(), &ci.thresholds(), None, true)
             .expect("the report is readable");
         assert_eq!(
-            stopped.exit_code, 2,
+            stopped.exit_code,
+            ExitCode::BudgetExhausted,
             "a pass the ceiling cut short reports the budget code in the document it prints"
         );
 
         let ran_fully = super::super::eval_output(&report_dir, ci.policy(), &ci.thresholds(), None, false)
             .expect("the report is readable");
         assert_eq!(
-            ran_fully.exit_code, 0,
+            ran_fully.exit_code,
+            ExitCode::Success,
             "and reports nothing when the ceiling took nothing"
         );
     }
@@ -3786,7 +3780,11 @@ mod tests {
             max_cost_usd: Some(CostCeiling::parse(1.0).unwrap()),
             ..base()
         });
-        assert_eq!(status, 2, "the second pass has to report the ceiling it hit");
+        assert_eq!(
+            status,
+            ExitCode::BudgetExhausted,
+            "the second pass has to report the ceiling it hit"
+        );
 
         let report = read_report(&report_dir);
         assert!(
@@ -3895,7 +3893,7 @@ mod tests {
         .handle(&crate::fs::RealFS);
         super::fake_runner::disable();
 
-        assert_eq!(status, 1);
+        assert_eq!(status, ExitCode::InfrastructureFailure);
         assert!(
             !out_dir.exists(),
             "the pass was refused before it wrote a report that would have claimed a ceiling"

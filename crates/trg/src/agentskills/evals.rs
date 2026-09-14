@@ -1,3 +1,4 @@
+use super::exit_code::ExitCode;
 use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
 use super::outputs::guess_mime_type;
@@ -34,6 +35,21 @@ pub enum EvalError {
 
     #[error("Validation failed: {0}")]
     Validation(ValidationErrors),
+}
+
+impl EvalError {
+    /// Which kind of red this failure is, so a caller does not have to re-derive it.
+    ///
+    /// A validation failure is a finding about the thing being checked, and is the answer
+    /// the check was asked for. Failing to read or parse the artifacts is not an answer at
+    /// all: the check never reached the thing it was supposed to measure, so pointing
+    /// anyone at the skill over it would be pointing them at something nothing looked at.
+    pub fn reported_as(&self) -> ExitCode {
+        match self {
+            Self::Validation(_) => ExitCode::GateFailed,
+            Self::Io(_) | Self::Json(_) => ExitCode::InfrastructureFailure,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, EvalError>;
@@ -1417,6 +1433,25 @@ mod tests {
     use crate::fs::testutil::MemFS;
     use std::fs;
     use tempfile::tempdir;
+
+    /// The three ways a check can fail are not three ways the skill can be wrong. Only the
+    /// validation failure is a finding; the other two mean the check never read what it was
+    /// pointed at, and reporting them as findings sends someone to a diff nothing measured.
+    #[test]
+    fn only_a_validation_failure_is_a_finding_about_what_was_checked() {
+        let validation = EvalError::Validation(ValidationErrors::from(ValidationError::for_field(
+            "workspace 'x'",
+            "must contain at least one grading.json",
+        )));
+        let io = EvalError::Io(std::io::Error::other("the artifact could not be read"));
+        let json = EvalError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
+
+        assert_eq!(validation.reported_as(), ExitCode::GateFailed);
+        assert_eq!(io.reported_as(), ExitCode::InfrastructureFailure);
+        assert_eq!(json.reported_as(), ExitCode::InfrastructureFailure);
+        assert_ne!(io.reported_as(), validation.reported_as());
+        assert_ne!(json.reported_as(), validation.reported_as());
+    }
 
     #[test]
     fn check_eval_suite_accepts_valid_manifest() {

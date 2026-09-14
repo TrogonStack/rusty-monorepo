@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde::Deserialize;
 
 use super::evals::{check_workspace, EvalError, WorkspaceCheckOptions, WorkspaceCheckReport};
+use super::exit_code::ExitCode;
 use super::grading::{case_score, describe_pass_rate, GradingFile};
 use super::report::RunRecord;
 
@@ -109,7 +110,7 @@ pub struct CiCheckResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct EvalCommandJsonOutput {
     pub report_dir: String,
-    pub exit_code: i32,
+    pub exit_code: ExitCode,
     pub check: CiCheckResult,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceCheckReport>,
@@ -1103,7 +1104,7 @@ mod tests {
     fn json_output_is_stable() {
         let output = EvalCommandJsonOutput {
             report_dir: "/tmp/report".to_string(),
-            exit_code: 0,
+            exit_code: ExitCode::Success,
             check: CiCheckResult {
                 passed: true,
                 violations: Vec::new(),

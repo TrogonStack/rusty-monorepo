@@ -12,7 +12,7 @@ mod output;
 mod run;
 mod verify;
 
-pub(crate) use output::print_report_dir;
+pub(crate) use output::{print_json, print_report_dir};
 
 use std::path::Path;
 
@@ -21,6 +21,7 @@ use crate::agentskills::ci::{
     emit_github_annotations, print_human_summary, run_ci_checks, EvalCommandJsonOutput,
 };
 use crate::agentskills::evals::WorkspaceCheckReport;
+use crate::agentskills::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::{Args, Subcommand};
@@ -74,7 +75,7 @@ pub enum EvalCommands {
 }
 
 impl EvalArgs {
-    pub fn handle(self, fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         match self.command {
             EvalCommands::Run(args) => args.handle(fs),
             EvalCommands::Grade(args) => args.handle(fs),
@@ -101,12 +102,12 @@ pub(crate) fn eval_output(
     thresholds: &crate::agentskills::ci::ThresholdConfig,
     workspace: Option<WorkspaceCheckReport>,
     budget_exhausted: bool,
-) -> Result<EvalCommandJsonOutput, i32> {
+) -> Result<EvalCommandJsonOutput, ExitCode> {
     let metrics = match collect_report_metrics(report_dir) {
         Ok(metrics) => metrics,
         Err(error) => {
             eprintln!("Failed to collect report metrics: {error}");
-            return Err(1);
+            return Err(ExitCode::InfrastructureFailure);
         }
     };
 
@@ -124,7 +125,7 @@ pub(crate) fn eval_output(
 
     Ok(EvalCommandJsonOutput {
         report_dir: report_dir.display().to_string(),
-        exit_code: run::exit_code_with_budget(if check.passed { 0 } else { 1 }, budget_exhausted),
+        exit_code: ExitCode::from_gate(check.passed).or_budget_exhausted(budget_exhausted),
         check,
         workspace,
     })
@@ -137,7 +138,7 @@ pub(crate) fn finish_eval_output(
     thresholds: &crate::agentskills::ci::ThresholdConfig,
     workspace: Option<WorkspaceCheckReport>,
     budget_exhausted: bool,
-) -> i32 {
+) -> ExitCode {
     let output = match eval_output(report_dir, policy, thresholds, workspace, budget_exhausted) {
         Ok(output) => output,
         Err(code) => return code,
@@ -149,7 +150,7 @@ pub(crate) fn finish_eval_output(
             Ok(json) => println!("{json}"),
             Err(error) => {
                 eprintln!("Failed to serialize eval output: {error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         }
     } else {

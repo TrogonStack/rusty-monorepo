@@ -2,6 +2,7 @@ mod init;
 mod list;
 mod validate;
 
+use crate::agentskills::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use clap::{Args, Subcommand};
 
@@ -26,7 +27,7 @@ pub enum FeedbackCommands {
 }
 
 impl FeedbackArgs {
-    pub fn handle(self, _fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         match self.command {
             FeedbackCommands::Init(args) => args.handle(),
             FeedbackCommands::List(args) => args.handle(),

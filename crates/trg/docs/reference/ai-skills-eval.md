@@ -66,11 +66,17 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 
 ### Exit codes
 
-| Code | Meaning |
-| ---- | ------- |
-| `0` | Success. Under `text` prints the report directory path on stdout; under `json` prints the document for the final stage that ran |
-| `1` | Skill validation, eval-suite validation, bundle write, or runner failure |
-| `2` | `--max-cost-usd` was set and the pass either had runs refused or spent strictly past the ceiling. A pass that lands exactly on the ceiling having refused nothing exits `0`. Only reported when `1` is not, so a genuine assertion or grading failure is never masked by a budget stop. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
+Every `trg ai skills eval` subcommand reports on the same vocabulary. A red job
+has to say which kind of red it is, because a skill that scored badly and a
+runner that was never installed ask opposite things of whoever reads the alert.
+
+| Code | Meaning | What CI should do |
+| ---- | ------- | ----------------- |
+| `0` | Success. Under `text` prints the report directory path on stdout; under `json` prints the document for the final stage that ran | Nothing. The pass ran and every gate it was held to passed |
+| `1` | A gate failed: skill validation, eval-suite validation, bundle schema conformance, a run left ungraded, a failing assertion or grade, or a threshold such as `--min-pass-rate`. The only code that means the skill is what to go and look at | Read the report and the diff. The thing under test failed a check that was asked of it |
+| `2` | `--max-cost-usd` was set and the pass either had runs refused or spent strictly past the ceiling. A pass that lands exactly on the ceiling having refused nothing exits `0`. Only reported when the pass is otherwise clean, so a genuine assertion or grading failure is never masked by a budget stop. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) | Raise the ceiling or narrow the pass, then run again. The coverage is short, not the skill |
+| `3` | The tool could not do its job: a runner missing from `PATH`, a report or manifest that could not be read or written, a result that could not be serialized, a secrets backend that could not be wired. Nothing was learned about the skill either way | Repair the job. Do not read it as a regression, and do not read a later `0` as a fix for one |
+| `128+N` | A signal took the pass down before it reached a verdict. `trg` hands the signal back to its default disposition rather than answering with a code of its own, so a caller sees `130` for `SIGINT`, `143` for `SIGTERM` and `129` for `SIGHUP` | Treat as no result, and re-run if the pass is still wanted |
 
 ### Example (scaffold only)
 
