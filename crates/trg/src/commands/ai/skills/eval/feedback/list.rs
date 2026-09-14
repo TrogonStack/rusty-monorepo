@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::feedback::list_runs_needing_review;
-use crate::output::{print_json, OutputFormat};
+use crate::commands::ai::skills::eval::print_json;
+use crate::output::OutputFormat;
 use clap::Args;
 use serde_json::json;
 
@@ -27,12 +29,12 @@ pub struct FeedbackListArgs {
 }
 
 impl FeedbackListArgs {
-    pub fn handle(self) -> i32 {
+    pub fn handle(self) -> ExitCode {
         let pending = match list_runs_needing_review(&self.report_dir) {
             Ok(pending) => pending,
             Err(e) => {
                 eprintln!("Failed to list runs needing review: {}", e);
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -41,7 +43,7 @@ impl FeedbackListArgs {
                 "report_dir": self.report_dir.display().to_string(),
                 "pending": pending,
             });
-            return print_json(&document, 0);
+            return print_json(&document, ExitCode::Success);
         }
 
         if pending.is_empty() {
@@ -53,7 +55,7 @@ impl FeedbackListArgs {
             }
         }
 
-        0
+        ExitCode::Success
     }
 }
 
@@ -73,7 +75,7 @@ mod tests {
             output_format: OutputFormat::Text,
         }
         .handle();
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
 
         init_feedback(&report_dir, Some("reviewer@example.com")).unwrap();
         let status = FeedbackListArgs {
@@ -81,6 +83,6 @@ mod tests {
             output_format: OutputFormat::Text,
         }
         .handle();
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
     }
 }

@@ -12,6 +12,7 @@
 //! those types are shaped around being the client half of the protocol, and bending them
 //! into a from-scratch server for three methods would cost more than it saves.
 
+use crate::agentskills::exit_code::ExitCode;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -41,23 +42,23 @@ pub struct MockServerArgs {
 }
 
 impl MockServerArgs {
-    pub fn handle(self) -> i32 {
+    pub fn handle(self) -> ExitCode {
         let server = ServerName::from(self.server.as_str());
         let tools = match load_server_mocks(&self.mocks) {
             Ok(tools) => tools,
             Err(e) => {
                 eprintln!("mock-server: failed to load mocks from {}: {}", self.mocks.display(), e);
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
         let stdin = io::stdin();
         let stdout = io::stdout();
         match run_stdio_loop(stdin.lock(), stdout.lock(), &server, &tools, &self.calls) {
-            Ok(()) => 0,
+            Ok(()) => ExitCode::Success,
             Err(e) => {
                 eprintln!("mock-server: {e}");
-                1
+                ExitCode::InfrastructureFailure
             }
         }
     }

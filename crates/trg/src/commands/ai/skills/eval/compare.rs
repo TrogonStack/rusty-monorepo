@@ -8,6 +8,7 @@ use crate::agentskills::eval_suite_drift::{
     detect_eval_suite_drift_snapshots, load_report_drift_snapshot, maybe_emit_eval_suite_drift_warning,
     EvalSuiteDriftWarning,
 };
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::iteration_summary::detect_previous_report_dir;
 use crate::agentskills::judge::JudgeProvider;
 use crate::fs::FileSystem;
@@ -108,7 +109,7 @@ pub struct CompareArgs {
 }
 
 impl CompareArgs {
-    pub fn handle(self, _fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let pairs = match self
             .pair
             .iter()
@@ -118,7 +119,7 @@ impl CompareArgs {
             Ok(pairs) => pairs,
             Err(error) => {
                 eprintln!("Invalid comparison pair: {error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -130,7 +131,7 @@ impl CompareArgs {
             Ok(warnings) => warnings,
             Err(error) => {
                 eprintln!("Failed to check eval suite drift: {error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -156,7 +157,7 @@ impl CompareArgs {
                         Ok(json) => println!("{json}"),
                         Err(error) => {
                             eprintln!("Failed to serialize compare output: {error}");
-                            return 1;
+                            return ExitCode::InfrastructureFailure;
                         }
                     }
                 } else if records.is_empty() {
@@ -164,11 +165,11 @@ impl CompareArgs {
                 } else {
                     println!("Compared {} eval/pair record(s)", records.len());
                 }
-                0
+                ExitCode::Success
             }
             Err(error) => {
                 eprintln!("Comparison failed: {error}");
-                1
+                ExitCode::InfrastructureFailure
             }
         }
     }

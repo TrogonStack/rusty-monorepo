@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::feedback::validate_feedback;
 use crate::agentskills::report::sync_human_feedback;
-use crate::output::{print_json, OutputFormat};
+use crate::commands::ai::skills::eval::print_json;
+use crate::output::OutputFormat;
 use clap::Args;
 use serde_json::json;
 
@@ -28,12 +30,12 @@ pub struct FeedbackValidateArgs {
 }
 
 impl FeedbackValidateArgs {
-    pub fn handle(self) -> i32 {
+    pub fn handle(self) -> ExitCode {
         let report = match validate_feedback(&self.report_dir) {
             Ok(report) => report,
             Err(e) => {
                 eprintln!("Failed to validate feedback artifacts: {}", e);
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -42,7 +44,7 @@ impl FeedbackValidateArgs {
         if !failed {
             if let Err(e) = sync_human_feedback(&self.report_dir) {
                 eprintln!("Failed to sync feedback summary into report.json: {}", e);
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         }
 
@@ -55,7 +57,7 @@ impl FeedbackValidateArgs {
                 "validated": report.validated,
                 "errors": report.errors,
             });
-            return print_json(&document, i32::from(failed));
+            return print_json(&document, ExitCode::from_gate(!failed));
         }
 
         if failed {
@@ -63,11 +65,11 @@ impl FeedbackValidateArgs {
             for error in &report.errors {
                 eprintln!("  {error}");
             }
-            return 1;
+            return ExitCode::GateFailed;
         }
 
         println!("Validated {} feedback file(s)", report.validated);
-        0
+        ExitCode::Success
     }
 }
 
@@ -88,7 +90,7 @@ mod tests {
             output_format: OutputFormat::Text,
         }
         .handle();
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
     }
 
     #[test]
@@ -112,6 +114,6 @@ mod tests {
             output_format: OutputFormat::Text,
         }
         .handle();
-        assert_eq!(status, 1);
+        assert_eq!(status, ExitCode::GateFailed);
     }
 }

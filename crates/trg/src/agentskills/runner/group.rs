@@ -7,6 +7,7 @@
 //! pipes the reader threads never see end of file, so the timeout that was supposed to
 //! bound the run never returns at all.
 
+use crate::agentskills::exit_code::TerminationSignal;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Once;
@@ -138,8 +139,8 @@ fn track(pgid: i32) -> Option<usize> {
 /// also means the terminal's own interrupt no longer reaches them.
 fn install_termination_handler() {
     INSTALL_HANDLER.call_once(|| {
-        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            handle_unless_ignored(signal);
+        for signal in TerminationSignal::ALL {
+            handle_unless_ignored(signal.number());
         }
     });
 }
@@ -176,7 +177,7 @@ extern "C" fn on_termination(signal: i32) {
         }
     }
     // Hand the signal back to the default disposition so the exit status still reports
-    // what actually happened.
+    // what actually happened, which is `ExitCode::Interrupted` as a caller reads it.
     unsafe {
         libc::signal(signal, libc::SIG_DFL);
         libc::raise(signal);

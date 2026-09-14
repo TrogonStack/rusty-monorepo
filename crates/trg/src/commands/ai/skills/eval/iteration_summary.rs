@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::agentskills::benchmark::FailedRunsMode;
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::iteration_summary::{
     build_iteration_summary_document, print_human_summary, write_iteration_summary, IterationSummaryOptions,
 };
@@ -49,7 +50,7 @@ pub struct IterationSummaryArgs {
 }
 
 impl IterationSummaryArgs {
-    pub fn handle(self, _fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let options = IterationSummaryOptions {
             failed_runs: self.failed_runs,
             previous_report_dir: self.previous,
@@ -59,13 +60,13 @@ impl IterationSummaryArgs {
             Ok(document) => document,
             Err(error) => {
                 eprintln!("Failed to build iteration summary: {error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
         if let Err(error) = write_iteration_summary(&self.report_dir, &document) {
             eprintln!("Failed to write iteration-summary.json: {error}");
-            return 1;
+            return ExitCode::InfrastructureFailure;
         }
 
         if self.output_format.is_json() {
@@ -73,7 +74,7 @@ impl IterationSummaryArgs {
                 Ok(json) => println!("{json}"),
                 Err(error) => {
                     eprintln!("Failed to serialize iteration summary: {error}");
-                    return 1;
+                    return ExitCode::InfrastructureFailure;
                 }
             }
         } else {
@@ -81,6 +82,6 @@ impl IterationSummaryArgs {
             print_report_dir(&self.report_dir);
         }
 
-        0
+        ExitCode::Success
     }
 }

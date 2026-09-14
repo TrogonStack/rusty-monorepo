@@ -1,12 +1,13 @@
 use std::path::PathBuf;
 
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::html_report::write_html_report;
 use crate::fs::FileSystem;
-use crate::output::{print_json, OutputFormat};
+use crate::output::OutputFormat;
 use clap::Args;
 use serde::Serialize;
 
-use super::print_report_dir;
+use super::{print_json, print_report_dir};
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -36,7 +37,7 @@ struct HtmlReportOutcome {
 }
 
 impl HtmlReportArgs {
-    pub fn handle(self, _fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         match write_html_report(&self.report_dir) {
             Ok(html_path) => {
                 if self.output_format.is_json() {
@@ -45,17 +46,17 @@ impl HtmlReportArgs {
                             report_dir: self.report_dir.display().to_string(),
                             html_path: html_path.display().to_string(),
                         },
-                        0,
+                        ExitCode::Success,
                     )
                 } else {
                     print_report_dir(&self.report_dir);
                     println!("html report: {}", html_path.display());
-                    0
+                    ExitCode::Success
                 }
             }
             Err(error) => {
                 eprintln!("Failed to write HTML report: {error}");
-                1
+                ExitCode::InfrastructureFailure
             }
         }
     }

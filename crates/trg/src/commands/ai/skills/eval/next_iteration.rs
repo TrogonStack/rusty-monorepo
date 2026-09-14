@@ -1,10 +1,13 @@
 use std::path::PathBuf;
 
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::improvement_bundle::{write_improvement_bundle, NextIterationOptions};
 use crate::fs::FileSystem;
-use crate::output::{print_json, OutputFormat};
+use crate::output::OutputFormat;
 use clap::Args;
 use serde_json::json;
+
+use super::print_json;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -53,12 +56,12 @@ pub struct NextIterationArgs {
 }
 
 impl NextIterationArgs {
-    pub fn handle(self, _fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let from_dir = match self.from.or(self.report_dir) {
             Some(path) => path,
             None => {
                 eprintln!("Missing report directory: pass DIR or --from <DIR>");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -72,7 +75,7 @@ impl NextIterationArgs {
             Ok(output) => output,
             Err(error) => {
                 eprintln!("Failed to build improvement bundle: {error}");
-                return 1;
+                return ExitCode::InfrastructureFailure;
             }
         };
 
@@ -82,13 +85,13 @@ impl NextIterationArgs {
                 "markdown_path": output.markdown_path.display().to_string(),
                 "json_path": output.json_path.display().to_string(),
             });
-            return print_json(&document, 0);
+            return print_json(&document, ExitCode::Success);
         }
 
         println!("Improvement bundle written to {}", output.output_dir.display());
         println!("  {}", output.markdown_path.display());
         println!("  {}", output.json_path.display());
-        0
+        ExitCode::Success
     }
 }
 
@@ -112,7 +115,7 @@ mod tests {
             output_format: OutputFormat::Text,
         }
         .handle(&crate::fs::testutil::MemFS::new());
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
 
         let bundle_dir = report_dir.parent().unwrap().join(NEXT_ITERATION_DIR);
         assert!(bundle_dir.join(BUNDLE_MD_NAME).is_file());

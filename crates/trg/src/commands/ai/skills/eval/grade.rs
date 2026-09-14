@@ -1,14 +1,15 @@
 use std::path::{Path, PathBuf};
 
+use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::grading::{grade_report_bundle, GradeOptions, GradeReport, GraderMode};
 use crate::agentskills::judge::JudgeProvider;
 use crate::agentskills::judge_votes::JudgeVotes;
 use crate::fs::FileSystem;
-use crate::output::{print_json, OutputFormat};
+use crate::output::OutputFormat;
 use clap::Args;
 use serde::Serialize;
 
-use super::print_report_dir;
+use super::{print_json, print_report_dir};
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -66,7 +67,7 @@ pub struct GradeArgs {
 }
 
 impl GradeArgs {
-    pub fn handle(self, _fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let options = GradeOptions {
             grader: self.grader,
             grader_provider: self.grader_provider,
@@ -89,13 +90,13 @@ impl GradeArgs {
 #[derive(Serialize)]
 pub(crate) struct GradeJsonOutput<'a> {
     report_dir: String,
-    exit_code: i32,
+    exit_code: ExitCode,
     #[serde(skip_serializing_if = "Option::is_none")]
     grade: Option<&'a GradeReport>,
 }
 
 impl<'a> GradeJsonOutput<'a> {
-    pub(crate) fn new(report_dir: &Path, exit_code: i32, grade: Option<&'a GradeReport>) -> Self {
+    pub(crate) fn new(report_dir: &Path, exit_code: ExitCode, grade: Option<&'a GradeReport>) -> Self {
         Self {
             report_dir: report_dir.display().to_string(),
             exit_code,
@@ -112,7 +113,7 @@ pub(crate) fn grade_report_dir_with_report(
     report_dir: &Path,
     options: GradeOptions,
     format: OutputFormat,
-) -> (i32, Option<GradeReport>) {
+) -> (ExitCode, Option<GradeReport>) {
     match grade_report_bundle(report_dir, options) {
         Ok(report) => {
             if !format.is_json() {
@@ -156,12 +157,12 @@ pub(crate) fn grade_report_dir_with_report(
                     }
                 }
             }
-            let exit_code = if report.failed > 0 || report.ungraded > 0 { 1 } else { 0 };
+            let exit_code = ExitCode::from_gate(report.failed == 0 && report.ungraded == 0);
             (exit_code, Some(report))
         }
         Err(e) => {
             eprintln!("Grading failed: {}", e);
-            (1, None)
+            (ExitCode::InfrastructureFailure, None)
         }
     }
 }
@@ -250,7 +251,7 @@ mod tests {
         }
         .handle(&crate::fs::RealFS);
 
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
         let grading_path = run_dir.join("grading.json");
         assert!(grading_path.is_file());
         let grading: serde_json::Value = serde_json::from_str(&fs::read_to_string(&grading_path).unwrap()).unwrap();
@@ -316,7 +317,8 @@ mod tests {
         .handle(&crate::fs::RealFS);
 
         assert_eq!(
-            status, 1,
+            status,
+            ExitCode::GateFailed,
             "a suite that measured less than it declared must not report success just because strict is off"
         );
 
@@ -393,6 +395,6 @@ echo '{"passed": true, "evidence": "script confirmed custom check", "rationale":
         }
         .handle(&crate::fs::RealFS);
 
-        assert_eq!(status, 0);
+        assert_eq!(status, ExitCode::Success);
     }
 }

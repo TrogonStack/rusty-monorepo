@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::agentskills::benchmark::{build_benchmark, write_benchmark, BenchmarkOptions, FailedRunsMode};
+use crate::agentskills::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
@@ -54,7 +55,7 @@ pub struct BenchmarkArgs {
 }
 
 impl BenchmarkArgs {
-    pub fn handle(self, _fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let options = BenchmarkOptions {
             failed_runs: self.failed_runs,
             allow_eval_suite_drift: self.allow_eval_suite_drift,
@@ -62,7 +63,7 @@ impl BenchmarkArgs {
         };
 
         let (code, document) = benchmark_report_dir_with_document(&self.report_dir, options);
-        if code != 0 {
+        if !code.is_success() {
             return code;
         }
 
@@ -72,35 +73,35 @@ impl BenchmarkArgs {
                     Ok(json) => println!("{json}"),
                     Err(error) => {
                         eprintln!("Failed to serialize benchmark: {error}");
-                        return 1;
+                        return ExitCode::InfrastructureFailure;
                     }
                 }
             }
         } else {
             print_report_dir(&self.report_dir);
         }
-        0
+        ExitCode::Success
     }
 }
 
 pub(crate) fn benchmark_report_dir_with_document(
     report_dir: &Path,
     options: BenchmarkOptions,
-) -> (i32, Option<crate::agentskills::benchmark::BenchmarkDocument>) {
+) -> (ExitCode, Option<crate::agentskills::benchmark::BenchmarkDocument>) {
     let document = match build_benchmark(report_dir, options) {
         Ok(document) => document,
         Err(e) => {
             eprintln!("Failed to build benchmark: {}", e);
-            return (1, None);
+            return (ExitCode::InfrastructureFailure, None);
         }
     };
 
     if let Err(e) = write_benchmark(report_dir, &document) {
         eprintln!("Failed to write benchmark.json: {}", e);
-        return (1, None);
+        return (ExitCode::InfrastructureFailure, None);
     }
 
-    (0, Some(document))
+    (ExitCode::Success, Some(document))
 }
 
 #[cfg(test)]
