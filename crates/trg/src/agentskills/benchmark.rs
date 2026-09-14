@@ -13,6 +13,7 @@ use super::eval_suite_drift::{
 };
 use super::evals::{EvalError, Result};
 use super::iteration_summary::detect_previous_report_dir;
+use super::proportion::{self, Interval, Proportion};
 use super::report::ScenarioKind;
 use super::schema_version::SchemaVersion;
 
@@ -262,7 +263,15 @@ pub struct ScenarioDeltas {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ScenarioDelta {
     pub assertion_pass_rate: f64,
+    /// The 95% interval the draws behind both arms leave around `assertion_pass_rate`.
+    /// An interval that contains zero means these arms have not been told apart, however
+    /// large the subtraction above it looks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertion_pass_rate_interval: Option<Interval>,
     pub run_pass_rate: f64,
+    /// The 95% interval around `run_pass_rate`, read the same way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_pass_rate_interval: Option<Interval>,
     pub duration_ms_mean: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_total: Option<i64>,
@@ -875,13 +884,24 @@ fn delta_between(left: Option<&ScenarioBenchmark>, right: Option<&ScenarioBenchm
 
     Some(ScenarioDelta {
         assertion_pass_rate: left.completed.assertions.pass_rate - right.completed.assertions.pass_rate,
+        assertion_pass_rate_interval: difference_interval(&left.completed.assertions, &right.completed.assertions),
         run_pass_rate: left.completed.runs.pass_rate - right.completed.runs.pass_rate,
+        run_pass_rate_interval: difference_interval(&left.completed.runs, &right.completed.runs),
         duration_ms_mean: left.completed.duration_ms.mean - right.completed.duration_ms.mean,
         tokens_total: diff_optional(left.completed.tokens.total, right.completed.tokens.total),
         cost_usd: diff_optional_f64(whole_arm_cost(&left.completed), whole_arm_cost(&right.completed)),
         left: arm_observations(left),
         right: arm_observations(right),
     })
+}
+
+/// Nothing when either side scored nothing: a difference against an arm with no draws
+/// behind it has no width to report, and a missing interval says that where a very wide
+/// one would read as a measurement.
+fn difference_interval(left: &PassFailSummary, right: &PassFailSummary) -> Option<Interval> {
+    let left = Proportion::observed(left.passed, left.failed)?;
+    let right = Proportion::observed(right.passed, right.failed)?;
+    Some(proportion::difference(left, right))
 }
 
 fn arm_observations(bench: &ScenarioBenchmark) -> ArmObservations {
@@ -1498,6 +1518,33 @@ mod tests {
 
         let delta = benchmark.deltas.with_skill_vs_without_skill.as_ref().unwrap();
         assert!((delta.assertion_pass_rate - 0.5).abs() < 0.0001);
+
+        let interval = delta
+            .assertion_pass_rate_interval
+            .expect("both arms scored assertions, so the difference has a width");
+        assert!(
+            !interval.separates_the_arms(),
+            "two assertions against two read as a finding at {interval:?}"
+        );
+    }
+
+    #[test]
+    fn a_difference_against_an_arm_that_scored_nothing_publishes_no_interval() {
+        let left = PassFailSummary {
+            passed: 2,
+            failed: 0,
+            total: 2,
+            pass_rate: 1.0,
+        };
+        let nothing = PassFailSummary {
+            passed: 0,
+            failed: 0,
+            total: 0,
+            pass_rate: 0.0,
+        };
+
+        assert!(difference_interval(&left, &nothing).is_none());
+        assert!(difference_interval(&left, &left).is_some());
     }
 
     #[test]

@@ -1560,6 +1560,11 @@ bucket's cost. For the same reason a scenario delta reports `cost_usd` only when
 both arms priced every run behind them: a difference between two totals covering
 different numbers of runs is not a cost difference.
 
+Each scenario delta publishes the interval around its pass-rate subtractions
+next to them, so a difference drawn from a handful of runs is not read as a
+finding. See
+[How many times a cell is drawn](#how-many-times-a-cell-is-drawn).
+
 ---
 
 ## Artifact: `feedback.json`
@@ -2203,6 +2208,18 @@ describe its own spread. `helped_by_skill` carries `with_skill_attempts` and
 `without_skill_attempts` alongside its `delta` for the same reason: a pass rate
 is a ratio, and the ratio alone hides whether it was drawn from three attempts
 or thirty.
+
+A `ScenarioDelta` also carries `assertion_pass_rate_interval` and
+`run_pass_rate_interval`: the 95% interval the same draws leave around each
+subtraction, as `{"low": …, "high": …}`. An interval that contains zero means
+the arms have not been told apart, however large the number above it looks, and
+three draws an arm is small enough that this is the ordinary case rather than
+the exception. Both are computed by Newcombe's hybrid score method, built from
+each arm's own Wilson interval rather than a pooled normal approximation,
+because an arm that passed everything or failed everything is an ordinary
+result here and is exactly where the normal approximation reports a width of
+zero. Either field is absent when its side scored nothing, since a difference
+against no draws has no width to report rather than an infinite one.
 
 `--attempts 1` asks for a single draw, which is the right choice while writing a
 case and reading its transcript. `--attempts 0` is refused, because a cell

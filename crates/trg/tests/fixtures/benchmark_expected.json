@@ -36,8 +36,12 @@
     }
   ],
   "iteration_summary": {
-    "always_pass": ["case-a: c"],
-    "helped_by_skill": ["case-a: b"]
+    "always_pass": [
+      "case-a: c"
+    ],
+    "helped_by_skill": [
+      "case-a: b"
+    ]
   },
   "scenarios": {
     "old_skill": {
@@ -154,6 +158,14 @@
       },
       "right": {
         "runs": 1
+      },
+      "assertion_pass_rate_interval": {
+        "low": -0.19259213101886707,
+        "high": 0.9054687942983473
+      },
+      "run_pass_rate_interval": {
+        "low": -0.12210872079072144,
+        "high": 1.0
       }
     },
     "with_skill_vs_old_skill": {
@@ -166,6 +178,14 @@
       },
       "right": {
         "runs": 1
+      },
+      "assertion_pass_rate_interval": {
+        "low": 0.027969698292900524,
+        "high": 1.0
+      },
+      "run_pass_rate_interval": {
+        "low": -0.12210872079072144,
+        "high": 1.0
       }
     }
   }

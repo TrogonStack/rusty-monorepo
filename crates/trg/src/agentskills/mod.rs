@@ -31,6 +31,7 @@ pub mod outputs;
 pub mod parser;
 pub mod permission_outcome;
 pub mod prompt;
+pub mod proportion;
 pub mod redact;
 pub mod report;
 pub mod runner;
