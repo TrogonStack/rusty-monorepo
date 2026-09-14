@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::fs::FileSystem;
 
-use super::budget::PassSpend;
+use super::budget::{PassSpend, FAILURE_KIND_BUDGET};
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
@@ -19,6 +19,8 @@ use super::feedback::{
 };
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
 use super::outputs::OUTPUTS_DIR;
+use super::runner::capabilities::HarnessControl;
+use super::runner::{Runner, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
 use super::validation::ValidationError;
 
@@ -451,6 +453,85 @@ pub struct RunRecord {
 
 fn default_runner_invocations() -> u32 {
     1
+}
+
+pub const RUN_STATUS_SKIPPED: &str = "skipped";
+
+/// Why a run never reached the harness.
+///
+/// A run stopped for one of these reasons has no workspace and no transcript, so every
+/// reader that must tell an executed run from an unexecuted one asks `RunRecord::started`
+/// rather than testing a failure kind of its own. Adding a reason here therefore teaches
+/// every such reader at once, which is what the cost ceiling and the unsupported control
+/// each failed to do for the other.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunNotStarted {
+    CostCeilingExhausted { spent_usd: f64, ceiling_usd: f64 },
+    ControlUnsupported { control: HarnessControl, runner: Runner },
+}
+
+/// The failure kinds a run carries when trg decided not to invoke the harness.
+///
+/// Every one of them is derived from a `RunNotStarted` variant, so the set a reader tests
+/// against and the set a writer can produce are the same set: a new reason to stop a run
+/// early cannot be reported without every reader recognizing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotStartedKind {
+    CostCeiling,
+    UnsupportedControl,
+}
+
+impl NotStartedKind {
+    const ALL: [Self; 2] = [Self::CostCeiling, Self::UnsupportedControl];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CostCeiling => FAILURE_KIND_BUDGET,
+            Self::UnsupportedControl => FAILURE_KIND_UNSUPPORTED,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+impl RunNotStarted {
+    fn kind(&self) -> NotStartedKind {
+        match self {
+            Self::CostCeilingExhausted { .. } => NotStartedKind::CostCeiling,
+            Self::ControlUnsupported { .. } => NotStartedKind::UnsupportedControl,
+        }
+    }
+
+    fn warning(&self) -> String {
+        match self {
+            Self::CostCeilingExhausted { spent_usd, ceiling_usd } => format!(
+                "the pass has spent ${spent_usd:.2} against a ${ceiling_usd:.2} cost ceiling, so this run was not started"
+            ),
+            Self::ControlUnsupported { control, runner } => {
+                format!("{}, so this run was not started", runner.unsupported_reason(*control))
+            }
+        }
+    }
+}
+
+impl RunRecord {
+    /// The one way a run is recorded as never having reached the harness.
+    pub fn not_started(&mut self, reason: RunNotStarted) {
+        self.status = RUN_STATUS_SKIPPED.to_string();
+        self.failure_kind = Some(reason.kind().as_str().to_string());
+        self.warnings.push(reason.warning());
+    }
+
+    /// Whether the harness was invoked for this run at all.
+    ///
+    /// A run that was not has no workspace and no transcript, so grading it would read
+    /// the absence as a wrong answer and fail every assertion, turning a decision trg
+    /// made into a reported regression.
+    pub fn started(&self) -> bool {
+        self.failure_kind.as_deref().and_then(NotStartedKind::parse).is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1071,6 +1152,46 @@ mod tests {
                 format!("iteration-1/eval-{eval_case}/with_skill/attempt-3/")
             );
         }
+    }
+
+    #[test]
+    fn every_reason_a_run_is_not_started_records_the_same_unscoreable_status() {
+        let suite = sample_suite();
+        let slugs = crate::agentskills::layout::assign_eval_slugs(&suite.evals);
+        let (mut runs, _) = build_runs(
+            &suite,
+            &[ScenarioKind::WithSkill],
+            "ci-default",
+            1,
+            AttemptCount::parse(1).unwrap(),
+            &slugs,
+            SkillStaging::Symlink,
+        );
+
+        let reasons = [
+            RunNotStarted::CostCeilingExhausted {
+                spent_usd: 4.0,
+                ceiling_usd: 3.0,
+            },
+            RunNotStarted::ControlUnsupported {
+                control: HarnessControl::ConversationSeeding,
+                runner: Runner::ClaudeCode,
+            },
+        ];
+
+        let mut kinds = Vec::new();
+        for reason in reasons {
+            let run = &mut runs[0];
+            run.warnings.clear();
+            run.not_started(reason);
+
+            assert!(!run.started());
+            assert_eq!(run.warnings.len(), 1, "the reason is said once, in the run itself");
+            assert!(run.warnings[0].ends_with("so this run was not started"));
+            kinds.push(run.failure_kind.clone().expect("a run stopped early names its kind"));
+        }
+
+        assert_eq!(kinds, vec!["budget".to_string(), "unsupported".to_string()]);
     }
 
     #[test]

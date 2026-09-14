@@ -312,6 +312,14 @@
       },
       "type": "object"
     },
+    "ConversationHistory": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RelativeSkillPath"
+        }
+      ],
+      "description": "A transcript a case would resume before its own prompt is sent.\n\nNo installed harness can adopt an arbitrary, case-authored transcript as history it\ndid not itself produce (see `HarnessControl::ConversationSeeding`), so this exists to\nlet a case say what it is asking for honestly rather than not at all: a run whose case\nsets this is skipped, naming the reason, instead of silently starting a fresh\nconversation and answering a different question than the one the case asked."
+    },
     "EvalCase": {
       "additionalProperties": false,
       "properties": {
@@ -321,6 +329,17 @@
             "$ref": "#/$defs/NonEmptyString"
           },
           "type": "array"
+        },
+        "conversation_history": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConversationHistory"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A transcript this case would resume before its own prompt, for a case that is not\nasking about a first turn. See [`ConversationHistory`]."
         },
         "description": {
           "anyOf": [

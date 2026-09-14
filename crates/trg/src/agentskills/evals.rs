@@ -582,6 +582,22 @@ mod eval_fixture_tests {
     }
 }
 
+/// A transcript a case would resume before its own prompt is sent.
+///
+/// No installed harness can adopt an arbitrary, case-authored transcript as history it
+/// did not itself produce (see `HarnessControl::ConversationSeeding`), so this exists to
+/// let a case say what it is asking for honestly rather than not at all: a run whose case
+/// sets this is skipped, naming the reason, instead of silently starting a fresh
+/// conversation and answering a different question than the one the case asked.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct ConversationHistory(RelativeSkillPath);
+
+impl ConversationHistory {
+    pub fn transcript(&self) -> &RelativeSkillPath {
+        &self.0
+    }
+}
+
 fn default_schema_version() -> u32 {
     1
 }
@@ -676,6 +692,10 @@ pub struct EvalCase {
     /// directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaffold: Option<WorkspaceScaffold>,
+    /// A transcript this case would resume before its own prompt, for a case that is not
+    /// asking about a first turn. See [`ConversationHistory`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_history: Option<ConversationHistory>,
 }
 
 impl EvalCase {
@@ -1802,6 +1822,7 @@ mod tests {
             graders: vec![],
             skill_disclosure: SkillDisclosure::default(),
             scaffold: None,
+            conversation_history: None,
         }
     }
 

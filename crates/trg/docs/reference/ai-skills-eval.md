@@ -239,6 +239,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `expected_output_files` | string[] | no | Files the case is expected to produce |
 | `grader_hints` | object | no | Passed through to a script grader on stdin |
 | `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
+| `conversation_history` | string | no | Relative path to a transcript inside the skill directory, to resume before the case's prompt. No installed harness can adopt an arbitrary transcript as its own history, so a case that sets this is skipped rather than run. See [Seeding a conversation](#seeding-a-conversation) |
 
 A case must declare at least one `assertion` or one `grader`.
 
@@ -1117,14 +1118,28 @@ A case's scaffold is part of what identifies its runs, so editing the script
 re-executes rather than serving a cached run, under `--no-cache` and under
 `--reuse-completed` alike.
 
-### What is deliberately not here
+### Seeding a conversation
 
-Seeding a conversation, so a case can ask about a mid-conversation turn rather than
-a first one, is not supported. Resuming a transcript is a per-harness mechanism:
-the file format, the flag, and whether resumption is possible at all differ across
-`claude-code`, `codex` and `cursor-agent`. A field that worked on one and silently
-did nothing on the others would make a suite's results incomparable, which is the
-one thing trg exists to avoid.
+A case may declare `conversation_history`, a relative path to a transcript inside
+the skill directory, to ask about a mid-conversation turn rather than a first one.
+Resuming a transcript is a per-harness mechanism, and none of `claude-code`,
+`codex` or `cursor-agent` offers one that adopts an arbitrary, case-authored
+transcript as history it did not itself produce: each only resumes a session it
+already recorded itself, and claude's `--input-format stream-json` re-runs every
+scripted turn as a live model call rather than replaying it. See `conversation
+seeding` in the harness support table above.
+
+A case that declares `conversation_history` is skipped rather than run, naming
+the case and the reason, on every harness. It is skipped rather than run against
+a fresh conversation because a field that quietly answered turn one on every
+harness would misreport the case's own precondition, and a suite whose results
+depended on that silent substitution would be exactly the kind of result trg
+exists to keep from happening.
+
+Such a run is recorded with `status: skipped` and `failure_kind: unsupported`,
+and `grade` passes over it for the same reason it passes over a run the cost
+ceiling refused: nothing was asked of the runner, so there is no workspace or
+transcript to read and no pass rate to charge the case with.
 
 ---
 
@@ -1394,6 +1409,7 @@ evidence that the export or the parse happens.
 | mcp servers | `--mcp-config` (harness only) | no | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
 | conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) |
+| conversation seeding | no | no | no |
 | run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no |
 | cost reporting | reported | no | no |
 
