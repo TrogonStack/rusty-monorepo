@@ -414,19 +414,18 @@ struct GradeSession<'a> {
 impl<'a> GradeSession<'a> {
     fn open(options: &'a GradeOptions, suite: &EvalSuite) -> Result<Self> {
         let judge = if suite_needs_a_judge(options, suite) {
-            let model = options
-                .grader_model
-                .as_deref()
-                .and_then(JudgeModel::new)
-                .ok_or_else(|| {
-                    EvalError::Validation(
-                        ValidationError::for_field(
-                            "--grader-model",
-                            "is required to grade with an LLM judge; pass it or drop the llm graders",
-                        )
-                        .into(),
+            let model = JudgeModel::resolve(options.grader_model.as_deref()).ok_or_else(|| {
+                EvalError::Validation(
+                    ValidationError::for_field(
+                        "--grader-model",
+                        format!(
+                            "is required to grade with an LLM judge; pass it, set {}, or drop the llm graders",
+                            judge::MODEL_ENV
+                        ),
                     )
-                })?;
+                    .into(),
+                )
+            })?;
             Some(JudgeEndpoint::resolve(
                 options.grader_provider,
                 &model,
@@ -533,7 +532,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
 
     let session = GradeSession::open(&options, &suite)?;
-    let grading_strategy = build_grading_strategy(&options, session.judge.is_some());
+    let grading_strategy = build_grading_strategy(&options, session.judge.as_ref().map(|judge| &judge.model));
     if document.dimensions.grading_strategies.is_empty() {
         document.dimensions.grading_strategies.push(grading_strategy.clone());
     }
@@ -662,19 +661,23 @@ fn created_files_from_artifacts(run: &RunRecord) -> Vec<String> {
         .collect()
 }
 
-/// `judge_resolved` says whether this pass actually reached a judge, per
-/// [`GradeSession::open`]'s reading of [`suite_needs_a_judge`] for `options.grader` and the
-/// suite being graded. It is taken as an argument rather than recomputed here so that whether
-/// `auto` used a judge is decided in exactly one place.
-fn build_grading_strategy(options: &GradeOptions, judge_resolved: bool) -> GradingStrategy {
+/// `judge` is the model this pass actually resolved, per [`GradeSession::open`]'s reading
+/// of [`suite_needs_a_judge`] for `options.grader` and the suite being graded, and is
+/// `None` when no judge was reached. It is taken as an argument rather than recomputed
+/// here so that whether `auto` used a judge is decided in exactly one place, and it
+/// carries the model rather than a flag so a record cannot name a different model from
+/// the one that answered.
+fn build_grading_strategy(options: &GradeOptions, judge: Option<&JudgeModel>) -> GradingStrategy {
     let judge_settings = || JudgeSettings {
         provider: options.grader_provider,
-        model: options.grader_model.clone(),
+        model: judge
+            .map(JudgeModel::to_string)
+            .or_else(|| options.grader_model.clone()),
         votes: options.grader_votes,
     };
     let grader = match options.grader {
         GraderMode::Auto => GraderChoice::Auto {
-            judge: judge_resolved.then(judge_settings),
+            judge: judge.is_some().then(judge_settings),
         },
         GraderMode::None => GraderChoice::None,
         GraderMode::Llm => GraderChoice::Llm {
@@ -3143,7 +3146,7 @@ mod tests {
         )
         .unwrap();
 
-        let grading_strategy = build_grading_strategy(&GradeOptions::default(), false);
+        let grading_strategy = build_grading_strategy(&GradeOptions::default(), None);
         update_report_after_grading(&mut document, &runs, &report_dir, &grading_strategy).unwrap();
         std::fs::write(
             report_dir.join("report.json"),
@@ -3236,13 +3239,14 @@ mod tests {
             grader: GraderMode::Llm,
             ..GradeOptions::default()
         };
-        let single = build_grading_strategy(&llm_options, true);
+        let model = JudgeModel::new("judge-model").unwrap();
+        let single = build_grading_strategy(&llm_options, Some(&model));
         let panel = build_grading_strategy(
             &GradeOptions {
                 grader_votes: JudgeVotes::parse(3).unwrap(),
                 ..llm_options
             },
-            true,
+            Some(&model),
         );
 
         assert_eq!(
@@ -3250,7 +3254,7 @@ mod tests {
             GraderChoice::Llm {
                 judge: JudgeSettings {
                     provider: JudgeProvider::default(),
-                    model: None,
+                    model: Some("judge-model".to_string()),
                     votes: JudgeVotes::single(),
                 },
             }
@@ -3260,8 +3264,34 @@ mod tests {
             GraderChoice::Llm {
                 judge: JudgeSettings {
                     provider: JudgeProvider::default(),
-                    model: None,
+                    model: Some("judge-model".to_string()),
                     votes: JudgeVotes::parse(3).unwrap(),
+                },
+            }
+        );
+    }
+
+    /// A record that named the flag rather than the resolved model would say nothing was
+    /// judged by on a pass whose model came from the environment, while a judge answered
+    /// every assertion in it.
+    #[test]
+    fn the_recorded_strategy_names_the_model_that_answered_rather_than_the_flag() {
+        let options = GradeOptions {
+            grader: GraderMode::Llm,
+            grader_model: None,
+            ..GradeOptions::default()
+        };
+        let resolved = JudgeModel::new("model-from-the-environment").unwrap();
+
+        let strategy = build_grading_strategy(&options, Some(&resolved));
+
+        assert_eq!(
+            strategy.grader,
+            GraderChoice::Llm {
+                judge: JudgeSettings {
+                    provider: JudgeProvider::default(),
+                    model: Some("model-from-the-environment".to_string()),
+                    votes: JudgeVotes::single(),
                 },
             }
         );
@@ -3277,7 +3307,7 @@ mod tests {
             ..GradeOptions::default()
         };
 
-        let strategy = build_grading_strategy(&options, false);
+        let strategy = build_grading_strategy(&options, None);
 
         assert_eq!(strategy.grader, GraderChoice::Auto { judge: None });
     }
@@ -3302,8 +3332,10 @@ mod tests {
             ..first_options.clone()
         };
 
-        let first_strategy = build_grading_strategy(&first_options, true);
-        let second_strategy = build_grading_strategy(&second_options, true);
+        let model_a = JudgeModel::new("model-a").unwrap();
+        let model_b = JudgeModel::new("model-b").unwrap();
+        let first_strategy = build_grading_strategy(&first_options, Some(&model_a));
+        let second_strategy = build_grading_strategy(&second_options, Some(&model_b));
 
         for strategy in [&first_strategy, &second_strategy] {
             if !grading_strategies.contains(strategy) {

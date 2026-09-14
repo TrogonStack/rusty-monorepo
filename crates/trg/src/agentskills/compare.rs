@@ -224,16 +224,18 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
 
     let endpoint = match options.judge {
         JudgeKind::Llm => {
-            let model = options
-                .judge_model
-                .as_deref()
-                .and_then(JudgeModel::new)
-                .ok_or_else(|| {
-                    EvalError::Validation(
-                        super::validation::ValidationError::for_field("judge_model", "is required when --judge llm")
-                            .into(),
+            let model = JudgeModel::resolve(options.judge_model.as_deref()).ok_or_else(|| {
+                EvalError::Validation(
+                    super::validation::ValidationError::for_field(
+                        "judge_model",
+                        format!(
+                            "is required when --judge llm; pass it or set {}",
+                            super::judge::MODEL_ENV
+                        ),
                     )
-                })?;
+                    .into(),
+                )
+            })?;
             Some(JudgeEndpoint::resolve(options.judge_provider, &model, "judge_model")?)
         }
         JudgeKind::None | JudgeKind::Script => None,
@@ -298,7 +300,10 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
                 judge: ComparisonJudgeMetadata {
                     kind: options.judge,
                     provider: endpoint.as_ref().map(|endpoint| endpoint.provider.as_str().to_string()),
-                    model: options.judge_model.clone(),
+                    model: endpoint
+                        .as_ref()
+                        .map(|endpoint| endpoint.model.to_string())
+                        .or_else(|| options.judge_model.clone()),
                     command: options.judge_command.clone(),
                 },
             };

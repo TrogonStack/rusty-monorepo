@@ -36,7 +36,11 @@ pub struct GradeArgs {
     )]
     pub grader_provider: JudgeProvider,
 
-    #[arg(long, value_name = "MODEL", help = "Model identifier for LLM grading")]
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help = "Model identifier for LLM grading. Defaults to TRG_JUDGE_MODEL."
+    )]
     pub grader_model: Option<String>,
 
     #[arg(
