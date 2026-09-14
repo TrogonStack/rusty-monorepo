@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::call_bounds::CallBounds;
 use super::evals::{EvalError, GlobPattern, NonEmptyString, RelativeSkillPath, Result};
+use super::mocks::{RenderedMockCalls, MOCK_CALLS_LOG_NAME};
 use super::transcript::{NormalizedTranscript, StagedSkill, ToolName};
 use super::validation::ValidationError;
 
@@ -259,6 +261,17 @@ pub enum GradeTarget {
     /// to the files the pattern names. A pattern that matches nothing is a target
     /// that is missing rather than one that is empty.
     Files(GlobPattern),
+    /// Every call the run made against its MCP mocks, rendered one per line as
+    /// `<server>.<tool> <input>`, the input as compact JSON with object keys in
+    /// sorted order. The `expect` violations the mock server also logs are left
+    /// out, since a run already reports each one as its own failing assertion.
+    ///
+    /// This is the only target that grades the request rather than the answer: the
+    /// other targets all describe what the agent produced, and this one describes
+    /// what it asked for. A run that hosted mocks and called none of them is an
+    /// empty target, so `negate` still means what it says; a run that hosted no
+    /// mock server at all cannot answer the question either way.
+    MockCalls,
 }
 
 impl fmt::Display for GradeTarget {
@@ -270,6 +283,7 @@ impl fmt::Display for GradeTarget {
             Self::File(path) => write!(f, "file '{path}'"),
             Self::CreatedFiles => f.write_str("created files"),
             Self::Files(pattern) => write!(f, "output files matching '{pattern}'"),
+            Self::MockCalls => f.write_str("mock calls"),
         }
     }
 }
@@ -598,6 +612,21 @@ impl Grader {
         }
     }
 
+    /// What this grader reads, for the graders that read something. `file_exists`
+    /// and the transcript graders answer from the run itself rather than from a
+    /// target, so they name none.
+    pub fn target(&self) -> Option<GradeTarget> {
+        match self {
+            Self::Regex { target, .. }
+            | Self::Contains { target, .. }
+            | Self::ValidJson { target }
+            | Self::SchemaValidation { target, .. }
+            | Self::Baseline { target, .. } => Some(target.clone()),
+            Self::Llm { target, .. } => Some(target.resolve()),
+            Self::FileExists { .. } | Self::ToolUsed { .. } | Self::ToolOrder { .. } | Self::SkillUsed { .. } => None,
+        }
+    }
+
     /// A human-readable restatement, so a typed grader can still populate the
     /// `assertion` field that the grading artifact and its consumers expect.
     pub fn describe(&self) -> String {
@@ -909,6 +938,31 @@ impl ImageMediaType {
     }
 }
 
+/// Why a run cannot answer a question about a target at all, as opposed to
+/// answering it in the negative.
+///
+/// A missing target is still a verdict about the agent: it was asked for something
+/// and did not produce it. This is the other case, where nothing about the run was
+/// ever going to fill the target in, and neither a pass nor a fail would be about
+/// the skill under test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnobservableTarget(String);
+
+/// Said of a run that left no call log at all, which is a run no mock server ever came
+/// up for.
+const NO_MOCK_SERVER_REASON: &str =
+    "this run hosted no mcp mock server, so there is no record of what the agent asked one for";
+
+impl UnobservableTarget {
+    fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetContent {
     Text(String),
@@ -972,7 +1026,44 @@ impl<'a> GradeInput<'a> {
             }
             GradeTarget::CreatedFiles => TargetContent::Text(self.created_files.join("\n")),
             GradeTarget::Files(pattern) => self.matching_outputs(pattern),
+            GradeTarget::MockCalls => match self.mock_calls() {
+                Ok(Some(calls)) => TargetContent::Text(calls.into_text()),
+                Ok(None) => TargetContent::Missing(NO_MOCK_SERVER_REASON.to_string()),
+                Err(e) => TargetContent::Missing(format!("cannot read '{}': {e}", self.mock_calls_log().display())),
+            },
         }
+    }
+
+    /// Why this run cannot be asked about `target`, if it cannot.
+    ///
+    /// Asked ahead of reading the target rather than folded into `TargetContent`,
+    /// because every reader of that type has to turn what it finds into a pass or a
+    /// fail, and this is the case where neither is honest.
+    pub(crate) fn unobservable(&self, target: &GradeTarget) -> Option<UnobservableTarget> {
+        match target {
+            // Only an absent log is unobservable. A log that is there but unreadable is a
+            // broken artifact of a run that did host a mock server, and withdrawing the
+            // check from the score would report that as a control the harness never
+            // offered, so it is left to the grader to fail on like any other.
+            GradeTarget::MockCalls => match self.mock_calls() {
+                Ok(None) => Some(UnobservableTarget::new(NO_MOCK_SERVER_REASON)),
+                Ok(Some(_)) | Err(_) => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn mock_calls_log(&self) -> PathBuf {
+        self.run_dir.join(MOCK_CALLS_LOG_NAME)
+    }
+
+    /// The mock call log this run left behind.
+    ///
+    /// A mock server writes the log once it has loaded its mocks, so no log at all means
+    /// none ever came up: the case declares no mocks, or the harness cannot host one and
+    /// trg declined to start the run, or the server died before it could answer anything.
+    fn mock_calls(&self) -> io::Result<Option<RenderedMockCalls>> {
+        RenderedMockCalls::read(&self.mock_calls_log())
     }
 
     /// Reads the output files a glob names, in path order so the same run grades
@@ -1073,6 +1164,17 @@ fn walk_for_glob_match(base: &Path, dir: &Path, regex: &Regex, staged: &StagedSk
 }
 
 pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
+    // Settled before the grader runs, and for every grader rather than inside the
+    // arms that happen to read text, because a target this run could never have
+    // filled in is not evidence about the agent in either direction: a plain check
+    // would fail on it and a negated one would pass, and both would be reporting the
+    // harness instead of the skill.
+    if let Some(unobservable) = grader.target().and_then(|target| input.unobservable(&target)) {
+        return GraderOutcome::Unsupported {
+            reason: unobservable.reason().to_string(),
+        };
+    }
+
     match grader {
         Grader::Llm { criterion, target } => GraderOutcome::Deferred {
             criterion: criterion.to_string(),
@@ -1500,7 +1602,7 @@ mod tests {
             std::fs::write(self.skill_dir.join(name), contents).unwrap();
         }
 
-        fn write_to_run_dir(&self, name: &str, contents: &str) {
+        fn write_to_run_dir(&self, name: &str, contents: impl AsRef<[u8]>) {
             std::fs::write(self.run_dir.join(name), contents).unwrap();
         }
 
@@ -3099,5 +3201,213 @@ mod tests {
             !text.contains("working notes"),
             "narrowing any_output must not read more than any_output does: {text}"
         );
+    }
+
+    fn mock_calls_target_text(fixture: &Fixture) -> TargetContent {
+        fixture.input().target_content(&GradeTarget::MockCalls)
+    }
+
+    fn mock_calls_grader(text_value: &str, negate: bool) -> Grader {
+        Grader::Contains {
+            text: text(text_value),
+            target: GradeTarget::MockCalls,
+            case: MatchCase::Sensitive,
+            negate,
+        }
+    }
+
+    #[test]
+    fn a_mock_calls_target_renders_one_call_per_line() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir(
+            MOCK_CALLS_LOG_NAME,
+            concat!(
+                r#"{"server":"github","tool":"create_issue","input":{"title":"Flaky build","repo":"acme/widgets"}}"#,
+                "\n",
+                r#"{"server":"github","tool":"close_issue","input":{"number":41}}"#,
+                "\n",
+            ),
+        );
+
+        let TargetContent::Text(rendered) = mock_calls_target_text(&fixture) else {
+            panic!("a run with a call log reads as text");
+        };
+
+        assert_eq!(
+            rendered,
+            concat!(
+                r#"github.create_issue {"repo":"acme/widgets","title":"Flaky build"}"#,
+                "\n",
+                r#"github.close_issue {"number":41}"#
+            ),
+            "the documented rendering is what a case writes its patterns against"
+        );
+    }
+
+    #[test]
+    fn a_mock_call_rendering_leaves_out_the_violations_the_run_already_reports_on_its_own() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir(
+            MOCK_CALLS_LOG_NAME,
+            concat!(
+                r#"{"server":"github","tool":"create_issue","input":{"repo":"other/widgets"},"#,
+                r#""violations":[{"server":"github","tool":"create_issue","path":"repo","#,
+                r#""constraint":"/^acme\\//","received":"other/widgets"}]}"#,
+                "\n",
+            ),
+        );
+
+        let TargetContent::Text(rendered) = mock_calls_target_text(&fixture) else {
+            panic!("a run with a call log reads as text");
+        };
+
+        assert_eq!(rendered, r#"github.create_issue {"repo":"other/widgets"}"#);
+        assert!(
+            !rendered.contains("constraint"),
+            "a mismatch already fails a case once, and must not get a second way to: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_call_log_line_that_cannot_be_read_back_is_kept_rather_than_dropped() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir(MOCK_CALLS_LOG_NAME, "{\"server\":\"github\",\"tool\":\n");
+
+        let TargetContent::Text(rendered) = mock_calls_target_text(&fixture) else {
+            panic!("a run with a call log reads as text");
+        };
+
+        assert!(
+            rendered.starts_with("<unparsed> "),
+            "a call that disappears reads as a call the agent never made: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_hosted_mocks_and_called_none_is_an_empty_target_not_a_missing_one() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir(MOCK_CALLS_LOG_NAME, "");
+
+        assert_eq!(mock_calls_target_text(&fixture), TargetContent::Text(String::new()));
+
+        let asked = evaluate(&mock_calls_grader("github.create_issue", false), &fixture.input());
+        assert!(
+            matches!(asked, GraderOutcome::Failed { .. }),
+            "a call the agent never made is a failure, not an unanswerable question: {asked:?}"
+        );
+
+        let never_asked = evaluate(&mock_calls_grader("github.delete_repo", true), &fixture.input());
+        assert!(
+            matches!(never_asked, GraderOutcome::Passed { .. }),
+            "'the agent never asked for this' has to pass on a run that asked for nothing: {never_asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_hosted_no_mock_server_cannot_answer_a_mock_calls_grader_either_way() {
+        let fixture = Fixture::new();
+
+        for negate in [false, true] {
+            let outcome = evaluate(&mock_calls_grader("github.create_issue", negate), &fixture.input());
+            let GraderOutcome::Unsupported { reason } = outcome else {
+                panic!("a mock that was never there cannot credit or blame the skill: {outcome:?}");
+            };
+            assert!(reason.contains("no mcp mock server"), "{reason}");
+        }
+    }
+
+    /// An artifact the reader broke on and an artifact that was never written are two
+    /// different claims: the first says a mock server came up and left something unusable
+    /// behind, the second says none ever came up. Only the second is a question the run
+    /// cannot answer, so only the second may take the check out of the score.
+    #[test]
+    fn a_call_log_that_exists_but_cannot_be_read_fails_the_grader_rather_than_leaving_the_score() {
+        let fixture = Fixture::new();
+        fixture.write_to_run_dir(MOCK_CALLS_LOG_NAME, [0xff, 0xfe, 0x00]);
+
+        let outcome = evaluate(&mock_calls_grader("github.create_issue", false), &fixture.input());
+
+        let GraderOutcome::Failed { evidence } = outcome else {
+            panic!("a broken artifact is a finding about the run, not a control it was never offered: {outcome:?}");
+        };
+        assert!(
+            evidence.contains(MOCK_CALLS_LOG_NAME),
+            "the evidence has to name the artifact that could not be read: {evidence}"
+        );
+    }
+
+    #[test]
+    fn a_mock_calls_grader_that_reaches_the_judge_is_stopped_before_it_costs_a_request() {
+        let fixture = Fixture::new();
+
+        let outcome = evaluate(
+            &Grader::Llm {
+                criterion: text("the issue was filed against the right repository"),
+                target: TargetDeclaration::Named(GradeTarget::MockCalls),
+            },
+            &fixture.input(),
+        );
+
+        assert!(
+            matches!(outcome, GraderOutcome::Unsupported { .. }),
+            "a judge cannot be asked about a mock that was never hosted: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn mock_calls_round_trips_through_the_grade_target_deserializer() {
+        let target: GradeTarget = serde_json::from_value(serde_json::json!("mock_calls")).unwrap();
+
+        assert_eq!(target, GradeTarget::MockCalls);
+        assert_eq!(serde_json::to_value(&target).unwrap(), serde_json::json!("mock_calls"));
+        assert_eq!(target.to_string(), "mock calls");
+
+        let grader: Grader = serde_json::from_value(serde_json::json!({
+            "type": "regex",
+            "pattern": "^github\\.create_issue ",
+            "target": "mock_calls"
+        }))
+        .unwrap();
+
+        assert_eq!(grader.target(), Some(GradeTarget::MockCalls));
+    }
+
+    #[test]
+    fn every_grader_that_reads_a_target_hands_it_back() {
+        let targeted = [
+            Grader::Regex {
+                pattern: RegexPattern::parse("x").unwrap(),
+                target: GradeTarget::MockCalls,
+                negate: false,
+                flags: RegexFlags::default(),
+                count: None,
+            },
+            mock_calls_grader("x", false),
+            Grader::ValidJson {
+                target: GradeTarget::MockCalls,
+            },
+            Grader::SchemaValidation {
+                schema: path("schema.json"),
+                target: GradeTarget::MockCalls,
+            },
+            Grader::Baseline {
+                reference: path("golden.md"),
+                criterion: text("is as complete"),
+                target: GradeTarget::MockCalls,
+            },
+            Grader::Llm {
+                criterion: text("is as complete"),
+                target: TargetDeclaration::Named(GradeTarget::MockCalls),
+            },
+        ];
+
+        for grader in targeted {
+            assert_eq!(
+                grader.target(),
+                Some(GradeTarget::MockCalls),
+                "{} reads a target and must say so, or an unobservable one reaches it unchecked",
+                grader.kind()
+            );
+        }
     }
 }

@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use gray_matter::{engine::YAML, Matter, Pod};
@@ -438,13 +439,6 @@ pub fn materialize_mock_set(
         );
     }
 
-    // Created empty up front, not only appended to on the first call: a run that never
-    // calls a declared tool must still produce `mock-calls.jsonl` as an artifact, so a
-    // reader can tell "declared but unused" apart from "the mock server never started".
-    if !calls_path.is_file() {
-        write_file(&calls_path, "")?;
-    }
-
     let config = serde_json::json!({ "mcpServers": mcp_servers });
     let config_path = run_dir.join(MCP_CONFIG_FILE_NAME);
     let config_json = serde_json::to_string_pretty(&config).expect("mcp config serializes");
@@ -735,6 +729,65 @@ pub struct MockCallLogEntry {
     pub input: serde_json::Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub violations: Vec<MockViolation>,
+}
+
+/// Every `tools/call` a run made against its mocks, rendered one call per line as
+/// `<server>.<tool> <input>` with the input as compact JSON.
+///
+/// Rendered rather than handed over as the raw log, because the log is a serde encoding:
+/// a pattern written against it would be answering questions about field order and
+/// whitespace as much as about the call the agent made. The rendering is the documented
+/// surface a case writes its patterns against, so it stays stable while the log format is
+/// free to grow fields.
+///
+/// `violations` are left out. A run already reports each one as its own failing assertion,
+/// and repeating them here would let one mismatch fail a case twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedMockCalls(String);
+
+impl RenderedMockCalls {
+    /// Reads the call log a run left behind. `Ok(None)` only where no log exists at all,
+    /// which is a run no mock server ever came up for rather than a run that called nothing.
+    ///
+    /// Every other error is handed back rather than folded into that answer. A log that is
+    /// there but unreadable is a broken artifact, and reporting it as an absent one would
+    /// say the harness never offered the control, which is a different claim and the one
+    /// that quietly drops the check out of the score.
+    pub fn read(path: &Path) -> io::Result<Option<Self>> {
+        match fs::read_to_string(path) {
+            Ok(contents) => Ok(Some(Self::render(&contents))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A line the log cannot be read back from is kept and marked rather than dropped: two
+    /// mock servers append to the same file, so an interleaved write is possible, and a
+    /// call that silently disappears reads to a grader as a call the agent never made.
+    fn render(contents: &str) -> Self {
+        let lines: Vec<String> = contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| match serde_json::from_str::<MockCallLogEntry>(line) {
+                Ok(entry) => format!(
+                    "{}.{} {}",
+                    entry.server,
+                    entry.tool,
+                    serde_json::to_string(&entry.input).unwrap_or_else(|_| "null".to_string())
+                ),
+                Err(_) => format!("<unparsed> {}", line.trim()),
+            })
+            .collect();
+        Self(lines.join("\n"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_text(self) -> String {
+        self.0
+    }
 }
 
 #[cfg(test)]
@@ -1356,6 +1409,32 @@ mod tests {
         );
     }
 
+    /// The call log is a mock server's claim to have come up, so nothing that runs before
+    /// one does may write it: a file left here would be read as an empty log by a run whose
+    /// server failed to load its mocks and never answered anything.
+    #[test]
+    fn materializing_a_mock_set_leaves_the_call_log_to_the_server_that_comes_up() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\ncreated",
+        );
+        let mock_set = resolve_mock_set(&skill, "one").unwrap();
+        let run_dir = temp.path().join("run-dir");
+
+        materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+        )
+        .unwrap();
+
+        assert!(!run_dir.join(MOCK_CALLS_LOG_NAME).exists());
+    }
+
     #[test]
     fn a_materialized_expect_constraint_round_trips_through_the_json_file_the_mock_server_reads() {
         let temp = tempdir().unwrap();
@@ -1397,5 +1476,60 @@ mod tests {
                 values: vec!["low".to_string(), "high".to_string()]
             })
         );
+    }
+
+    #[test]
+    fn a_call_renders_its_input_with_keys_in_a_fixed_order() {
+        let written = RenderedMockCalls::render(
+            r#"{"server":"github","tool":"create_issue","input":{"title":"t","labels":["bug"],"repo":"acme/w"}}"#,
+        );
+        let reordered = RenderedMockCalls::render(
+            r#"{"server":"github","tool":"create_issue","input":{"repo":"acme/w","title":"t","labels":["bug"]}}"#,
+        );
+
+        assert_eq!(
+            written.as_str(),
+            r#"github.create_issue {"labels":["bug"],"repo":"acme/w","title":"t"}"#
+        );
+        assert_eq!(
+            written, reordered,
+            "a pattern written against the rendering must not depend on how a harness ordered the call"
+        );
+    }
+
+    #[test]
+    fn blank_lines_in_a_call_log_are_not_rendered_as_calls() {
+        let rendered = RenderedMockCalls::render(
+            "\n{\"server\":\"github\",\"tool\":\"close_issue\",\"input\":{\"number\":41}}\n\n",
+        );
+
+        assert_eq!(rendered.as_str(), r#"github.close_issue {"number":41}"#);
+    }
+
+    #[test]
+    fn a_call_log_that_was_never_written_reads_as_no_log_rather_than_as_no_calls() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(MOCK_CALLS_LOG_NAME);
+
+        assert_eq!(RenderedMockCalls::read(&path).unwrap(), None);
+
+        fs::write(&path, "").unwrap();
+        let rendered = RenderedMockCalls::read(&path)
+            .expect("a log that exists is readable")
+            .expect("a log that exists is a log");
+        assert!(rendered.as_str().is_empty());
+    }
+
+    /// A log the reader broke on is a run that did host a mock server, so answering `None`
+    /// would hand a caller the one fact it must not conclude from it.
+    #[test]
+    fn a_call_log_that_cannot_be_read_is_not_reported_as_a_log_that_is_not_there() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join(MOCK_CALLS_LOG_NAME);
+        fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
+
+        let error = RenderedMockCalls::read(&path).expect_err("invalid utf-8 is not an absent log");
+
+        assert_ne!(error.kind(), io::ErrorKind::NotFound);
     }
 }

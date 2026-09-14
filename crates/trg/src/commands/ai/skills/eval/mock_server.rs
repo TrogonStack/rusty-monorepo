@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use serde_json::{json, Value};
@@ -50,6 +50,14 @@ impl MockServerArgs {
                 return 1;
             }
         };
+        if let Err(e) = open_call_log(&self.calls) {
+            eprintln!(
+                "mock-server: failed to open the call log at {}: {}",
+                self.calls.display(),
+                e
+            );
+            return 1;
+        }
 
         let stdin = io::stdin();
         let stdout = io::stdout();
@@ -61,6 +69,16 @@ impl MockServerArgs {
             }
         }
     }
+}
+
+/// The call log exists from the moment a server has its mocks, and not one step earlier.
+///
+/// Created here rather than when the mock set was materialized, because a file written
+/// before the server came up is still there when it never comes up at all, and a grader
+/// that reads it empty would report a run whose agent called nothing where in truth
+/// nothing was ever able to answer a call. Its absence is the only signal that says so.
+fn open_call_log(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new().create(true).append(true).open(path).map(|_| ())
 }
 
 fn load_server_mocks(mocks_dir: &PathBuf) -> io::Result<BTreeMap<ToolName, MockDeclaration>> {
@@ -223,6 +241,32 @@ mod tests {
             error: None,
             body: body.to_string(),
         }
+    }
+
+    /// A declared tool nobody called still owes a reader the artifact saying so, and the
+    /// only moment that can be claimed honestly is once this server holds its mocks.
+    #[test]
+    fn a_server_that_loaded_its_mocks_leaves_a_log_before_any_call_reaches_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mock-calls.jsonl");
+
+        open_call_log(&path).unwrap();
+
+        assert!(path.is_file());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+    }
+
+    /// Two servers share one log, and a second one to come up must not truncate what the
+    /// first has already answered for.
+    #[test]
+    fn a_second_server_coming_up_keeps_the_calls_the_first_already_logged() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mock-calls.jsonl");
+        fs::write(&path, "{}\n").unwrap();
+
+        open_call_log(&path).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
     }
 
     #[test]
