@@ -1,5 +1,33 @@
 {
   "$defs": {
+    "ArmObservations": {
+      "description": "What one side of a `ScenarioDelta` drew.\n\n`runs` is always available and always means something, so it is always published.\nA spread is not: duration is the only metric here still carrying its raw per-run\nvalues at the point a delta is built, so it is the only one that can honestly offer\none, and only once the arm clears the floor `Dispersion` needs to describe itself.\nPass rates and cost are already pooled sums by then, with no per-draw distribution\nleft to measure.",
+      "properties": {
+        "duration_mad_ms": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "duration_median_ms": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runs"
+      ],
+      "type": "object"
+    },
     "AttemptPassRateStats": {
       "properties": {
         "max": {
@@ -72,9 +100,24 @@
     },
     "DurationStats": {
       "properties": {
+        "mad": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "mean": {
           "format": "double",
           "type": "number"
+        },
+        "median": {
+          "description": "Present once the draws clear `SampleFloor::dispersion()`; a group any smaller has\nnothing to measure its own spread against.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "p50": {
           "format": "uint64",
@@ -408,6 +451,7 @@
       "type": "object"
     },
     "ScenarioDelta": {
+      "description": "A subtraction between two arms, with what stood behind each side of it.\n\nThree draws is the default depth of a cell, and a scenario pools several cells\ntogether, so the runs behind an arm are rarely the twelve or twenty a reader might\nassume a benchmark implies. A delta without `left`/`right` published next to it asks\nthe reader to trust a rounding of two small, unlabeled counts as if it were a finding.",
       "properties": {
         "assertion_pass_rate": {
           "format": "double",
@@ -424,6 +468,12 @@
           "format": "double",
           "type": "number"
         },
+        "left": {
+          "$ref": "#/$defs/ArmObservations"
+        },
+        "right": {
+          "$ref": "#/$defs/ArmObservations"
+        },
         "run_pass_rate": {
           "format": "double",
           "type": "number"
@@ -439,7 +489,9 @@
       "required": [
         "assertion_pass_rate",
         "run_pass_rate",
-        "duration_ms_mean"
+        "duration_ms_mean",
+        "left",
+        "right"
       ],
       "type": "object"
     },

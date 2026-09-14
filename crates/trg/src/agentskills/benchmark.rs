@@ -141,6 +141,12 @@ pub struct DurationStats {
     pub total: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stddev: Option<f64>,
+    /// Present once the draws clear `SampleFloor::dispersion()`; a group any smaller has
+    /// nothing to measure its own spread against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mad: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Default, JsonSchema)]
@@ -163,6 +169,12 @@ pub struct ScenarioDeltas {
     pub with_skill_vs_old_skill: Option<ScenarioDelta>,
 }
 
+/// A subtraction between two arms, with what stood behind each side of it.
+///
+/// Three draws is the default depth of a cell, and a scenario pools several cells
+/// together, so the runs behind an arm are rarely the twelve or twenty a reader might
+/// assume a benchmark implies. A delta without `left`/`right` published next to it asks
+/// the reader to trust a rounding of two small, unlabeled counts as if it were a finding.
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ScenarioDelta {
     pub assertion_pass_rate: f64,
@@ -172,6 +184,25 @@ pub struct ScenarioDelta {
     pub tokens_total: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    pub left: ArmObservations,
+    pub right: ArmObservations,
+}
+
+/// What one side of a `ScenarioDelta` drew.
+///
+/// `runs` is always available and always means something, so it is always published.
+/// A spread is not: duration is the only metric here still carrying its raw per-run
+/// values at the point a delta is built, so it is the only one that can honestly offer
+/// one, and only once the arm clears the floor `Dispersion` needs to describe itself.
+/// Pass rates and cost are already pooled sums by then, with no per-draw distribution
+/// left to measure.
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+pub struct ArmObservations {
+    pub runs: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_median_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_mad_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -614,9 +645,17 @@ pub fn duration_stats(values: &[u64]) -> DurationStats {
         p95: percentile(&sorted, 0.95),
         total,
         stddev: None,
+        median: None,
+        mad: None,
     };
     if sorted.len() >= 3 {
         stats.stddev = Some(stddev(&sorted, mean));
+    }
+    if dispersion::SampleFloor::dispersion().admits(values.len()) {
+        if let Some(measured) = dispersion::Dispersion::measure(values) {
+            stats.median = Some(measured.centre());
+            stats.mad = Some(measured.spread());
+        }
     }
     stats
 }
@@ -722,7 +761,17 @@ fn delta_between(left: Option<&ScenarioBenchmark>, right: Option<&ScenarioBenchm
         duration_ms_mean: left.completed.duration_ms.mean - right.completed.duration_ms.mean,
         tokens_total: diff_optional(left.completed.tokens.total, right.completed.tokens.total),
         cost_usd: diff_optional_f64(left.completed.tokens.cost_usd, right.completed.tokens.cost_usd),
+        left: arm_observations(left),
+        right: arm_observations(right),
     })
+}
+
+fn arm_observations(bench: &ScenarioBenchmark) -> ArmObservations {
+    ArmObservations {
+        runs: bench.completed.run_count,
+        duration_median_ms: bench.completed.duration_ms.median,
+        duration_mad_ms: bench.completed.duration_ms.mad,
+    }
 }
 
 fn diff_optional(left: Option<u64>, right: Option<u64>) -> Option<i64> {
@@ -1259,6 +1308,19 @@ mod tests {
     }
 
     #[test]
+    fn duration_stats_withhold_a_spread_below_the_dispersion_floor() {
+        let three = duration_stats(&[100, 200, 300]);
+        assert!(
+            three.median.is_none(),
+            "three draws cannot describe their own spread yet"
+        );
+
+        let four = duration_stats(&[100, 200, 300, 400]);
+        assert_eq!(four.median, Some(250.0));
+        assert_eq!(four.mad, Some(100.0));
+    }
+
+    #[test]
     fn percentile_and_stddev_helpers() {
         assert_eq!(percentile(&[10, 20], 0.50), 15);
         assert_eq!(percentile(&[10, 20, 30, 40], 0.50), 25);
@@ -1540,6 +1602,44 @@ mod tests {
         let delta = comparison.by_scenario.get("with_skill").unwrap();
         assert!((delta.assertion_pass_rate - 0.0).abs() < 0.0001);
         assert!((delta.duration_ms_mean - (-200.0)).abs() < 0.0001);
+        assert_eq!(delta.left.runs, 1);
+        assert_eq!(delta.right.runs, 1);
+    }
+
+    #[test]
+    fn a_scenario_delta_carries_how_many_runs_stood_behind_each_arm() {
+        let temp = tempfile::tempdir().unwrap();
+        write_report(
+            temp.path(),
+            serde_json::json!([
+                sample_run("run-001", "with_skill", "completed", None),
+                sample_run("run-002", "with_skill", "completed", None),
+                sample_run("run-003", "without_skill", "completed", None),
+            ]),
+            None,
+        );
+        for run_id in ["run-001", "run-002", "run-003"] {
+            write_run_artifacts(
+                temp.path(),
+                run_id,
+                Some(
+                    r#"{
+  "assertion_results": [{ "assertion": "a", "passed": true, "evidence": "ok" }],
+  "summary": { "passed": 1, "failed": 0, "total": 1, "pass_rate": 1.0 }
+}"#,
+                ),
+                Some(r#"{ "duration_ms": 1000 }"#),
+            );
+        }
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let delta = benchmark.deltas.with_skill_vs_without_skill.as_ref().unwrap();
+        assert_eq!(delta.left.runs, 2);
+        assert_eq!(delta.right.runs, 1);
+        assert!(
+            delta.left.duration_median_ms.is_none(),
+            "two draws is below the floor a spread needs to describe itself"
+        );
     }
 
     #[test]

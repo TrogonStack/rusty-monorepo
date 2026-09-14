@@ -2056,6 +2056,16 @@ unstable at all. `benchmark.json` reports mean, minimum, maximum and standard
 deviation across the draws of each cell, and `iteration-summary` names the
 assertions that flipped between them.
 
+The same small count is what built the deltas in `benchmark.json` and
+`iteration-summary.json`, and a bare subtraction does not say so. Every
+`ScenarioDelta` (in `deltas` and in `iteration_comparison`) carries `left.runs`
+and `right.runs`, the completed run count behind each side, plus a duration
+median and MAD once an arm's draws clear the count `Dispersion` needs to
+describe its own spread. `helped_by_skill` carries `with_skill_attempts` and
+`without_skill_attempts` alongside its `delta` for the same reason: a pass rate
+is a ratio, and the ratio alone hides whether it was drawn from three attempts
+or thirty.
+
 `--attempts 1` asks for a single draw, which is the right choice while writing a
 case and reading its transcript. `--attempts 0` is refused, because a cell
 nobody draws is a row the report cannot fill in.

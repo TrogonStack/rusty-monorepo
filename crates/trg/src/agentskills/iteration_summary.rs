@@ -59,6 +59,10 @@ pub enum CrossIterationDelta {
     Lost,
 }
 
+/// `delta` is a subtraction between two pass rates, each already a ratio over its own
+/// arm's attempts. Nothing about `with_skill_pass_rate` or `without_skill_pass_rate`
+/// says whether that ratio was drawn from three attempts or thirty, so the attempt
+/// counts ride alongside it rather than being left for a reader to assume.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HelpedBySkillRecord {
     pub eval_case_id: String,
@@ -66,6 +70,8 @@ pub struct HelpedBySkillRecord {
     pub with_skill_pass_rate: f64,
     pub without_skill_pass_rate: f64,
     pub delta: f64,
+    pub with_skill_attempts: u32,
+    pub without_skill_attempts: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -258,11 +264,13 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         "Helped by skill",
         document.helped_by_skill.iter().map(|record| {
             format!(
-                "{} | {} (with {:.0}% vs without {:.0}%, delta {:+.0}%)",
+                "{} | {} (with {:.0}% [{} attempts] vs without {:.0}% [{} attempts], delta {:+.0}%)",
                 record.eval_case_id,
                 record.assertion,
                 record.with_skill_pass_rate * 100.0,
+                record.with_skill_attempts,
                 record.without_skill_pass_rate * 100.0,
+                record.without_skill_attempts,
                 record.delta * 100.0
             )
         }),
@@ -494,6 +502,8 @@ fn analyze_report(report_dir: &Path, report: &ReportForSummary, mode: FailedRuns
                 with_skill_pass_rate: with_rate,
                 without_skill_pass_rate: without_rate,
                 delta: with_rate - without_rate,
+                with_skill_attempts: passed + failed,
+                without_skill_attempts: without_passed + without_failed,
             })
         })
         .collect();
@@ -992,6 +1002,8 @@ mod tests {
         assert_eq!(summary.helped_by_skill[0].with_skill_pass_rate, 1.0);
         assert_eq!(summary.helped_by_skill[0].without_skill_pass_rate, 0.0);
         assert!((summary.helped_by_skill[0].delta - 1.0).abs() < 0.0001);
+        assert_eq!(summary.helped_by_skill[0].with_skill_attempts, 1);
+        assert_eq!(summary.helped_by_skill[0].without_skill_attempts, 1);
     }
 
     #[test]
