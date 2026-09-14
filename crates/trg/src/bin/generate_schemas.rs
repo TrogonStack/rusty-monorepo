@@ -13,6 +13,7 @@ use trg::agentskills::grading::GradingFile;
 use trg::agentskills::improvement_bundle::ImprovementBundleDocument;
 use trg::agentskills::iteration_summary::IterationSummaryDocument;
 use trg::agentskills::report::ReportDocument;
+use trg::agentskills::runner::environment::RecordedEnvironment;
 use trg::agentskills::runner::TimingFile;
 
 fn main() -> std::io::Result<()> {
@@ -24,6 +25,7 @@ fn main() -> std::io::Result<()> {
         "comparison.json.schema.json",
         "trg skills eval comparison",
     )?;
+    write_schema::<RecordedEnvironment>(&schemas_dir, "env.json.schema.json", "trg skills eval run environment")?;
     write_schema::<EvalSuite>(&schemas_dir, "evals.json.schema.json", "trg skills eval suite")?;
     write_schema::<FeedbackDocument>(&schemas_dir, "feedback.json.schema.json", "trg skills eval feedback")?;
     write_schema::<GradingFile>(&schemas_dir, "grading.json.schema.json", "trg skills eval grading")?;

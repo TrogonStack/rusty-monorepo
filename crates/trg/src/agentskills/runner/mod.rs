@@ -33,7 +33,7 @@ use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTransc
 use super::report::{CacheTokens, EnvironmentPolicy, PermissionGrant, ScenarioKind, SkillStaging};
 use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
-use environment::RunEnvironment;
+use environment::{RecordedEnvironment, RunEnvironment};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum Runner {
@@ -770,7 +770,7 @@ pub fn write_stderr(stderr_path: &Path, raw_stderr: &[u8]) -> std::io::Result<()
 pub fn write_runner_invocation_metadata(
     run_dir: &Path,
     command_line: RedactedCommandLine,
-    env: BTreeMap<String, String>,
+    env: RecordedEnvironment,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(run_dir)?;
     std::fs::write(run_dir.join("cmd"), format!("{}\n", command_line.into_inner()))?;
@@ -1995,7 +1995,10 @@ mod workspace_tests {
         write_runner_invocation_metadata(
             &run_dir,
             redact_command_args("codex", &["exec", "--api-key", github, "--model", "gpt-4"]),
-            redact_env(),
+            RecordedEnvironment {
+                vars: redact_env(),
+                config_home: None,
+            },
         )
         .unwrap();
 
@@ -2004,8 +2007,9 @@ mod workspace_tests {
         assert!(cmd.contains("--api-key"));
         assert!(cmd.contains("<redacted>"));
 
-        let env: BTreeMap<String, String> =
+        let recorded: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(run_dir.join("env.json")).unwrap()).unwrap();
+        let env = recorded["vars"].as_object().unwrap();
         assert!(env.contains_key("TRG_REDACT_TEST_SAFE"));
         assert!(!env.contains_key(secret_key));
         assert!(!env
@@ -2014,6 +2018,78 @@ mod workspace_tests {
 
         std::env::remove_var(secret_key);
         std::env::remove_var("TRG_REDACT_TEST_SAFE");
+    }
+
+    #[test]
+    fn env_json_names_the_config_home_for_every_harness() {
+        for (runner, expected_suffix) in [
+            (Runner::ClaudeCode, ".claude"),
+            (Runner::Codex, ".codex"),
+            (Runner::CursorAgent, ".cursor"),
+        ] {
+            let temp = tempdir().unwrap();
+            let run_dir = temp.path().join("run-001");
+            let host = BTreeMap::from([("HOME".to_string(), "/host/home".to_string())]);
+
+            let environment =
+                RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Scrubbed, &host).unwrap();
+
+            write_runner_invocation_metadata(
+                &run_dir,
+                redact_command_args(runner.program_name(), &[]),
+                environment.record(),
+            )
+            .unwrap();
+
+            let recorded: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(run_dir.join("env.json")).unwrap()).unwrap();
+            let config_home = &recorded["config_home"];
+            assert_eq!(
+                config_home["origin"], "host",
+                "{runner:?} must record that it saw the host's config home"
+            );
+            assert!(
+                config_home["path"].as_str().unwrap().ends_with(expected_suffix),
+                "{runner:?} env.json did not name its config home: {config_home}"
+            );
+        }
+    }
+
+    #[test]
+    fn env_json_names_the_run_config_home_when_isolated() {
+        for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+            let temp = tempdir().unwrap();
+            let run_dir = temp.path().join("run-001");
+            let host = BTreeMap::from([
+                ("HOME".to_string(), "/host/home".to_string()),
+                ("PATH".to_string(), "/usr/bin".to_string()),
+            ]);
+
+            let environment =
+                RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, &host).unwrap();
+
+            write_runner_invocation_metadata(
+                &run_dir,
+                redact_command_args(runner.program_name(), &[]),
+                environment.record(),
+            )
+            .unwrap();
+
+            let recorded: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(run_dir.join("env.json")).unwrap()).unwrap();
+            let config_home = &recorded["config_home"];
+            assert_eq!(
+                config_home["origin"], "run",
+                "{runner:?} must record that its config home was made for this run"
+            );
+            assert!(
+                config_home["path"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(run_dir.to_str().unwrap()),
+                "{runner:?} recorded the host's config home instead of the run's: {config_home}"
+            );
+        }
     }
 
     const SKILL_MD: &str = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";

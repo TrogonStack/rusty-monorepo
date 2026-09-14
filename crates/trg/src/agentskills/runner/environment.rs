@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 use super::Runner;
 use crate::agentskills::redact::is_secret_env_key;
 use crate::agentskills::report::EnvironmentPolicy;
@@ -69,6 +72,121 @@ impl HarnessConfigHome {
         }
         host.get("HOME").map(|home| Path::new(home).join(self.dir_name()))
     }
+
+    /// How this config home is found, independent of where it currently points.
+    fn basis(self) -> ConfigHomeBasis {
+        match self {
+            Self::Redirectable { var, .. } => ConfigHomeBasis::Variable { name: var.to_string() },
+            Self::HomeRelative { .. } => ConfigHomeBasis::HomeRelative,
+        }
+    }
+}
+
+/// Whether a run's config home belonged to the operator or was made for the run.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigHomeOrigin {
+    /// The run saw the operator's own config home, with its skills, instructions, MCP
+    /// servers, and history.
+    Host,
+    /// The config home was created for this run and holds only what an isolated run
+    /// needs to authenticate.
+    Run,
+}
+
+/// How a harness's config home was found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigHomeBasis {
+    /// The harness honours this environment variable, so the config home was named
+    /// directly rather than derived.
+    Variable { name: String },
+    /// The harness has no override; the config home sits at a fixed name under `HOME`.
+    HomeRelative,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct DeclaredConfigHome {
+    path: String,
+    origin: ConfigHomeOrigin,
+    basis: ConfigHomeBasis,
+}
+
+/// Where a run's harness found its config home, recorded for `env.json`.
+///
+/// A bare path cannot say whether a run inherited the operator's skills, instructions,
+/// and history or was handed a config home made for it, and it cannot say whether the
+/// same run on another machine lands in the same place. [`ConfigHomeOrigin`] answers the
+/// first, [`ConfigHomeBasis`] the second, which is why this is a type rather than a
+/// string a reader has to interpret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedConfigHome {
+    path: PathBuf,
+    origin: ConfigHomeOrigin,
+    basis: ConfigHomeBasis,
+}
+
+impl RecordedConfigHome {
+    /// `--out-dir` is routinely relative, and a run directory derived from it is relative
+    /// in turn, so a config home built underneath it needs resolving rather than
+    /// rejecting: a reader of `env.json` cannot resolve a relative path themselves once
+    /// the run is over and the working directory that made it meaningful is gone.
+    /// [`std::path::absolute`] resolves against the current working directory and
+    /// normalizes lexically, so this fails only when that directory cannot be read.
+    pub fn new(path: PathBuf, origin: ConfigHomeOrigin, basis: ConfigHomeBasis) -> std::io::Result<Self> {
+        let path = std::path::absolute(path)?;
+        Ok(Self { path, origin, basis })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn origin(&self) -> ConfigHomeOrigin {
+        self.origin
+    }
+
+    pub fn basis(&self) -> &ConfigHomeBasis {
+        &self.basis
+    }
+}
+
+impl Serialize for RecordedConfigHome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        DeclaredConfigHome {
+            path: path_string(&self.path),
+            origin: self.origin,
+            basis: self.basis.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordedConfigHome {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let declared = DeclaredConfigHome::deserialize(deserializer)?;
+        Self::new(PathBuf::from(declared.path), declared.origin, declared.basis).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for RecordedConfigHome {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        DeclaredConfigHome::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        DeclaredConfigHome::json_schema(generator)
+    }
+}
+
+/// The document written to a run's `env.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecordedEnvironment {
+    pub vars: BTreeMap<String, String>,
+    /// Absent only when the host gave a run neither the harness's override variable nor
+    /// a `HOME` to resolve a config home against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_home: Option<RecordedConfigHome>,
 }
 
 impl Runner {
@@ -192,6 +310,7 @@ impl AuthEntry {
 pub struct RunEnvironment {
     policy: EnvironmentPolicy,
     vars: BTreeMap<String, String>,
+    config_home: Option<RecordedConfigHome>,
 }
 
 impl RunEnvironment {
@@ -199,48 +318,74 @@ impl RunEnvironment {
         Self::prepare_from(runner, run_dir, policy, &host_environment())
     }
 
-    fn prepare_from(
+    pub(crate) fn prepare_from(
         runner: Runner,
         run_dir: &Path,
         policy: EnvironmentPolicy,
         host: &BTreeMap<String, String>,
     ) -> std::io::Result<Self> {
+        let basis = runner.config_home().basis();
+
         if matches!(policy, EnvironmentPolicy::Inherited) {
+            let config_home = host_config_home_record(runner, host, basis)?;
             return Ok(Self {
                 policy,
                 vars: host.clone(),
+                config_home,
             });
         }
 
         let mut vars = allowlisted(runner, host);
 
-        if matches!(policy, EnvironmentPolicy::Isolated) {
+        let config_home = if matches!(policy, EnvironmentPolicy::Isolated) {
             let host_config_home = runner.config_home().resolve_on_host(host);
 
             let home = run_dir.join(RUN_HOME_DIR_NAME);
             std::fs::create_dir_all(&home)?;
             vars.insert("HOME".to_string(), path_string(&home));
 
-            let config_home = home.join(runner.config_home().dir_name());
-            std::fs::create_dir_all(&config_home)?;
+            let run_config_home = home.join(runner.config_home().dir_name());
+            std::fs::create_dir_all(&run_config_home)?;
             if let HarnessConfigHome::Redirectable { var, .. } = runner.config_home() {
-                vars.insert(var.to_string(), path_string(&config_home));
+                vars.insert(var.to_string(), path_string(&run_config_home));
             }
 
-            if let Some(host_config_home) = host_config_home {
-                link_auth_entries(runner, &host_config_home, &config_home)?;
+            if let Some(host_config_home) = &host_config_home {
+                link_auth_entries(runner, host_config_home, &run_config_home)?;
                 if let Some(var) = runner.credential_locator_var() {
                     vars.entry(var.to_string())
-                        .or_insert_with(|| path_string(&host_config_home));
+                        .or_insert_with(|| path_string(host_config_home));
                 }
             }
-        }
 
-        Ok(Self { policy, vars })
+            Some(RecordedConfigHome::new(run_config_home, ConfigHomeOrigin::Run, basis)?)
+        } else {
+            host_config_home_record(runner, host, basis)?
+        };
+
+        Ok(Self {
+            policy,
+            vars,
+            config_home,
+        })
     }
 
     pub fn policy(&self) -> EnvironmentPolicy {
         self.policy
+    }
+
+    /// Where this run's harness found its config home, when the host gave it a `HOME`
+    /// to resolve one against.
+    pub fn config_home(&self) -> Option<&RecordedConfigHome> {
+        self.config_home.as_ref()
+    }
+
+    /// The document to write to this run's `env.json`.
+    pub fn record(&self) -> RecordedEnvironment {
+        RecordedEnvironment {
+            vars: self.recorded_vars(),
+            config_home: self.config_home.clone(),
+        }
     }
 
     pub fn apply(&self, command: &mut Command) {
@@ -263,6 +408,17 @@ impl RunEnvironment {
 
 fn host_environment() -> BTreeMap<String, String> {
     std::env::vars().collect()
+}
+
+fn host_config_home_record(
+    runner: Runner,
+    host: &BTreeMap<String, String>,
+    basis: ConfigHomeBasis,
+) -> std::io::Result<Option<RecordedConfigHome>> {
+    let Some(path) = runner.config_home().resolve_on_host(host) else {
+        return Ok(None);
+    };
+    RecordedConfigHome::new(path, ConfigHomeOrigin::Host, basis).map(Some)
 }
 
 /// `Scrubbed` leaves the harness config home alone, so the variable that names it is on
@@ -532,5 +688,114 @@ mod tests {
             Runner::CursorAgent.config_home(),
             HarnessConfigHome::HomeRelative { .. }
         ));
+    }
+
+    #[test]
+    fn scrubbed_records_the_hosts_config_home_for_every_harness() {
+        for (runner, expected_path, expected_basis) in [
+            (
+                Runner::ClaudeCode,
+                "/host/home/.claude",
+                ConfigHomeBasis::Variable {
+                    name: "CLAUDE_CONFIG_DIR".to_string(),
+                },
+            ),
+            (
+                Runner::Codex,
+                "/host/home/.codex",
+                ConfigHomeBasis::Variable {
+                    name: "CODEX_HOME".to_string(),
+                },
+            ),
+            (Runner::CursorAgent, "/host/home/.cursor", ConfigHomeBasis::HomeRelative),
+        ] {
+            let temp = tempdir().unwrap();
+            let env = RunEnvironment::prepare_from(runner, temp.path(), EnvironmentPolicy::Scrubbed, &host()).unwrap();
+
+            let recorded = env
+                .config_home()
+                .unwrap_or_else(|| panic!("{runner:?} must record where its config home was"));
+            assert_eq!(recorded.origin(), ConfigHomeOrigin::Host);
+            assert_eq!(recorded.path(), Path::new(expected_path));
+            assert_eq!(recorded.basis(), &expected_basis);
+        }
+    }
+
+    #[test]
+    fn isolated_records_the_run_config_home_and_not_the_hosts() {
+        for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+            let temp = tempdir().unwrap();
+            let run_dir = temp.path().join("run-001");
+            let env = RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, &host()).unwrap();
+
+            let recorded = env
+                .config_home()
+                .unwrap_or_else(|| panic!("{runner:?} must record its per-run config home"));
+            assert_eq!(recorded.origin(), ConfigHomeOrigin::Run);
+            assert!(
+                recorded.path().starts_with(&run_dir),
+                "{runner:?} recorded {} instead of a path under the run directory",
+                recorded.path().display()
+            );
+            assert_ne!(
+                recorded.path(),
+                Path::new("/host/home").join(match runner.config_home() {
+                    HarnessConfigHome::Redirectable { dir_name, .. } | HarnessConfigHome::HomeRelative { dir_name } =>
+                        dir_name,
+                })
+            );
+        }
+    }
+
+    /// `--out-dir` is routinely given relative, which is why this changes the process's
+    /// working directory rather than only handing `prepare_from` a relative `PathBuf`:
+    /// the bug this guards against only appears once resolving the path actually depends
+    /// on the working directory the run started from.
+    #[test]
+    fn isolated_absolutizes_a_relative_run_dir_before_recording_its_config_home() {
+        let temp = tempdir().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let run_dir = Path::new("run-001");
+            let env =
+                RunEnvironment::prepare_from(Runner::Codex, run_dir, EnvironmentPolicy::Isolated, &host()).unwrap();
+
+            let recorded = env
+                .config_home()
+                .unwrap_or_else(|| panic!("a relative run_dir must still record a config home"));
+            assert!(
+                recorded.path().is_absolute(),
+                "recorded {} from a relative run_dir",
+                recorded.path().display()
+            );
+
+            let expected_suffix = run_dir
+                .join(RUN_HOME_DIR_NAME)
+                .join(Runner::Codex.config_home().dir_name());
+            assert!(
+                recorded.path().ends_with(&expected_suffix),
+                "recorded {} instead of the run's own config home",
+                recorded.path().display()
+            );
+        }));
+
+        std::env::set_current_dir(original_cwd).unwrap();
+        outcome.unwrap();
+    }
+
+    #[test]
+    fn env_record_carries_the_config_home_alongside_the_vars() {
+        let temp = tempdir().unwrap();
+        let env =
+            RunEnvironment::prepare_from(Runner::Codex, temp.path(), EnvironmentPolicy::Scrubbed, &host()).unwrap();
+
+        let record = env.record();
+        assert_eq!(record.vars.get("PATH").map(String::as_str), Some("/usr/bin"));
+        assert_eq!(
+            record.config_home.map(|home| home.path().to_path_buf()),
+            Some(PathBuf::from("/host/home/.codex"))
+        );
     }
 }

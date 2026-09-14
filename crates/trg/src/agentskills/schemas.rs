@@ -13,6 +13,7 @@ pub const IMPROVEMENT_BUNDLE_SCHEMA: &str = include_str!("../../schemas/improvem
 pub const COMPARISON_SCHEMA: &str = include_str!("../../schemas/comparison.json.schema.json");
 pub const TIMING_SCHEMA: &str = include_str!("../../schemas/timing.json.schema.json");
 pub const EVALS_SCHEMA: &str = include_str!("../../schemas/evals.json.schema.json");
+pub const ENV_SCHEMA: &str = include_str!("../../schemas/env.json.schema.json");
 
 /// Whether this build of `trg` can hold an artifact against its schema.
 ///
@@ -77,6 +78,7 @@ pub fn validate_report_bundle_schemas(report_dir: &Path) -> Result<()> {
 
     validate_named_artifacts(report_dir, "grading.json", GRADING_SCHEMA)?;
     validate_named_artifacts(report_dir, "timing.json", TIMING_SCHEMA)?;
+    validate_named_artifacts(report_dir, "env.json", ENV_SCHEMA)?;
     validate_named_artifacts(report_dir, FEEDBACK_FILE_NAME, FEEDBACK_SCHEMA)?;
     validate_named_artifacts(report_dir, "comparison.json", COMPARISON_SCHEMA)?;
     validate_benchmark_artifacts(report_dir)?;
@@ -178,6 +180,7 @@ mod tests {
         COMPARISON_SCHEMA,
         TIMING_SCHEMA,
         EVALS_SCHEMA,
+        ENV_SCHEMA,
     ];
 
     #[test]
