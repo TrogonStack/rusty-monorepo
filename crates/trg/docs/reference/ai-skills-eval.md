@@ -1525,6 +1525,9 @@ reported it as the cheap one.
 | `{ "kind": "unpriced", "harness": "codex" }` | This harness prices no run at all, so there is nothing to total and nothing that was free |
 | absent | The harness prices its runs and did not price this one |
 
+A run that failed or hit its timeout is recorded the same way, because what its
+harness prices did not change when the run did not finish.
+
 `cost_usd` keeps carrying the bare number for readers written before `cost`
 existed, and is present for exactly the runs `cost` reports as `priced`. The
 same pair appears in `report.json` under `runs[].metrics`; a run recorded before

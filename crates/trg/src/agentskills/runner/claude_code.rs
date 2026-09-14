@@ -128,7 +128,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
 
     if captured.timed_out {
         let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
-        let outcome = timeout_outcome(timeout_ms, captured.exit_code);
+        let outcome = timeout_outcome(Runner::ClaudeCode, timeout_ms, captured.exit_code);
         cleanup_runner_temp_files(request.workspace_dir)?;
         write_timing(request, &outcome)?;
         return Ok(outcome);
@@ -163,7 +163,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
     let text = match std::str::from_utf8(stdout) {
         Ok(text) => text,
         Err(_) => {
-            return runner_failure_outcome(wall_ms, exit_code, String::new());
+            return runner_failure_outcome(Runner::ClaudeCode, wall_ms, exit_code, String::new());
         }
     };
 
@@ -183,7 +183,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
     }
 
     let Some(result) = last_result else {
-        return runner_failure_outcome(wall_ms, exit_code, String::new());
+        return runner_failure_outcome(Runner::ClaudeCode, wall_ms, exit_code, String::new());
     };
 
     let is_error = !exit_ok || result.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -195,7 +195,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
     let duration_ms = result.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(wall_ms);
 
     if is_error {
-        return runner_failure_outcome(duration_ms, exit_code, final_text);
+        return runner_failure_outcome(Runner::ClaudeCode, duration_ms, exit_code, final_text);
     }
 
     let usage = result.get("usage");

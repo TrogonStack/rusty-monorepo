@@ -309,7 +309,16 @@ pub fn timeout_duration(timeout_secs: Option<u64>) -> Option<Duration> {
     timeout_secs.map(Duration::from_secs)
 }
 
-pub fn runner_failure_outcome(duration_ms: u64, exit_code: Option<i32>, final_text: String) -> EvalRunOutcome {
+/// A run nobody could finish still came from a harness with a pricing policy, and says the
+/// same thing about cost a finished run of that harness would. A harness that prices
+/// nothing has nothing to report for a failure either, so a reader totalling a mixed
+/// history is not handed a failed run of it to add in as zero.
+pub fn runner_failure_outcome(
+    runner: Runner,
+    duration_ms: u64,
+    exit_code: Option<i32>,
+    final_text: String,
+) -> EvalRunOutcome {
     EvalRunOutcome {
         status: RunStatus::Failed,
         failure_kind: Some(FAILURE_KIND_RUNNER),
@@ -319,13 +328,15 @@ pub fn runner_failure_outcome(duration_ms: u64, exit_code: Option<i32>, final_te
         input_tokens: None,
         output_tokens: None,
         cached_tokens: None,
-        cost: None,
+        cost: runner.pricing().price(None),
         final_text,
         read_only_fixture_violations: Vec::new(),
     }
 }
 
-pub fn timeout_outcome(timeout_ms: u64, exit_code: Option<i32>) -> EvalRunOutcome {
+/// A run the clock ended says what its harness can say about cost, for the same reason a
+/// failed one does.
+pub fn timeout_outcome(runner: Runner, timeout_ms: u64, exit_code: Option<i32>) -> EvalRunOutcome {
     EvalRunOutcome {
         status: RunStatus::Timeout,
         failure_kind: Some(FAILURE_KIND_RUNNER),
@@ -335,7 +346,7 @@ pub fn timeout_outcome(timeout_ms: u64, exit_code: Option<i32>) -> EvalRunOutcom
         input_tokens: None,
         output_tokens: None,
         cached_tokens: None,
-        cost: None,
+        cost: runner.pricing().price(None),
         final_text: String::new(),
         read_only_fixture_violations: Vec::new(),
     }
@@ -400,6 +411,43 @@ mod total_tokens_tests {
         assert_eq!(total_tokens_from(Some(80), None), Some(80));
         assert_eq!(total_tokens_from(None, Some(20)), Some(20));
         assert_eq!(total_tokens_from(None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod unfinished_run_cost_tests {
+    use super::{runner_failure_outcome, timeout_outcome, Runner};
+    use crate::agentskills::budget::RunCost;
+
+    #[test]
+    fn a_failed_run_of_a_harness_that_prices_nothing_still_names_it() {
+        let outcome = runner_failure_outcome(Runner::CursorAgent, 10, Some(1), String::new());
+
+        assert_eq!(
+            outcome.cost,
+            Some(RunCost::Unpriced {
+                harness: "cursor-agent".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_run_the_clock_ended_says_what_its_harness_can_say_about_cost() {
+        let outcome = timeout_outcome(Runner::Codex, 10, None);
+
+        assert_eq!(
+            outcome.cost,
+            Some(RunCost::Unpriced {
+                harness: "codex".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn a_failed_run_of_a_pricing_harness_carries_no_price_rather_than_naming_it() {
+        let outcome = runner_failure_outcome(Runner::ClaudeCode, 10, Some(1), String::new());
+
+        assert_eq!(outcome.cost, None);
     }
 }
 
