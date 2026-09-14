@@ -2,7 +2,7 @@
   "$defs": {
     "AssertionStabilityRecord": {
       "properties": {
-        "assertion_text": {
+        "assertion": {
           "type": "string"
         },
         "attempts_observed": {
@@ -20,13 +20,13 @@
             }
           ]
         },
-        "eval_id": {
+        "eval_case_id": {
           "type": "string"
         }
       },
       "required": [
-        "eval_id",
-        "assertion_text",
+        "eval_case_id",
+        "assertion",
         "attempts_observed"
       ],
       "type": "object"
@@ -92,9 +92,16 @@
       ],
       "type": "string"
     },
+    "FlakinessRatio": {
+      "description": "The share of a key's attempts that did not pass, in `0.0..=1.0`.\n\nA share rather than a count, because one flip out of twelve and six out of twelve are\nthe same verdict and very different findings.",
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "type": "number"
+    },
     "FlakyAssertionRecord": {
+      "description": "What every artifact publishes about a flaky assertion.",
       "properties": {
-        "assertion_text": {
+        "assertion": {
           "type": "string"
         },
         "attempts": {
@@ -102,26 +109,25 @@
           "minimum": 0,
           "type": "integer"
         },
-        "eval_id": {
+        "eval_case_id": {
           "type": "string"
         },
         "flakiness_ratio": {
-          "format": "double",
-          "type": "number"
+          "$ref": "#/$defs/FlakinessRatio"
         },
         "pass_count": {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
         },
-        "scenario": {
+        "scenario_id": {
           "type": "string"
         }
       },
       "required": [
-        "eval_id",
-        "scenario",
-        "assertion_text",
+        "eval_case_id",
+        "scenario_id",
+        "assertion",
         "attempts",
         "pass_count",
         "flakiness_ratio"
@@ -130,14 +136,14 @@
     },
     "HelpedBySkillRecord": {
       "properties": {
-        "assertion_text": {
+        "assertion": {
           "type": "string"
         },
         "delta": {
           "format": "double",
           "type": "number"
         },
-        "eval_id": {
+        "eval_case_id": {
           "type": "string"
         },
         "with_skill_pass_rate": {
@@ -150,8 +156,8 @@
         }
       },
       "required": [
-        "eval_id",
-        "assertion_text",
+        "eval_case_id",
+        "assertion",
         "with_skill_pass_rate",
         "without_skill_pass_rate",
         "delta"
@@ -170,28 +176,28 @@
           "minimum": 0,
           "type": "integer"
         },
-        "eval_id": {
+        "eval_case_id": {
           "type": "string"
         },
-        "mean_ms": {
+        "mad_ms": {
           "format": "double",
           "type": "number"
         },
-        "scenario": {
-          "type": "string"
-        },
-        "stddev_ms": {
+        "median_ms": {
           "format": "double",
           "type": "number"
+        },
+        "scenario_id": {
+          "type": "string"
         }
       },
       "required": [
-        "eval_id",
-        "scenario",
+        "eval_case_id",
+        "scenario_id",
         "attempt",
         "duration_ms",
-        "mean_ms",
-        "stddev_ms"
+        "median_ms",
+        "mad_ms"
       ],
       "type": "object"
     },
@@ -202,19 +208,19 @@
           "minimum": 0,
           "type": "integer"
         },
-        "eval_id": {
+        "eval_case_id": {
           "type": "string"
         },
-        "mean_tokens": {
+        "mad_tokens": {
           "format": "double",
           "type": "number"
         },
-        "scenario": {
-          "type": "string"
-        },
-        "stddev_tokens": {
+        "median_tokens": {
           "format": "double",
           "type": "number"
+        },
+        "scenario_id": {
+          "type": "string"
         },
         "total_tokens": {
           "format": "uint64",
@@ -223,12 +229,12 @@
         }
       },
       "required": [
-        "eval_id",
-        "scenario",
+        "eval_case_id",
+        "scenario_id",
         "attempt",
         "total_tokens",
-        "mean_tokens",
-        "stddev_tokens"
+        "median_tokens",
+        "mad_tokens"
       ],
       "type": "object"
     }

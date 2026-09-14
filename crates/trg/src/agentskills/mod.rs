@@ -7,6 +7,7 @@ pub mod case_selection;
 pub mod ci;
 pub mod compare;
 pub mod concurrency;
+pub mod dispersion;
 pub mod errors;
 pub mod eval_suite_drift;
 pub mod evals;
