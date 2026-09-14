@@ -887,6 +887,16 @@
     },
     "ReportSection": {
       "properties": {
+        "allowed_tools": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "ci": {
           "anyOf": [
             {
@@ -1152,6 +1162,17 @@
         "status": {
           "type": "string"
         },
+        "tool_grant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The tool grant this run was actually given, once the operator's ceiling and the\ncase's own declaration are combined. `None` means unrestricted."
+        },
         "warnings": {
           "items": {
             "type": "string"
@@ -1343,6 +1364,14 @@
         "by_scenario"
       ],
       "type": "object"
+    },
+    "ToolGrant": {
+      "description": "A named, finite set of tools a run's harness may use.\n\nNever parsed as empty: naming zero tools is not how an operator or a case denies\nevery gated tool, since a grant with nothing in it reads in a report exactly like a\ngrant nobody declared. [`ToolGrant::narrowed_by`] is the one place an empty set is\nlegitimate, because it answers \"what do both sides admit\", not \"what was declared\".",
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
     },
     "ToolName": {
       "type": "string"

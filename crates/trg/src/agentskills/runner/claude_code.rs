@@ -12,6 +12,7 @@ use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
 use crate::agentskills::redact::redact_command_args;
 use crate::agentskills::report::{CacheTokens, PermissionGrant};
+use crate::agentskills::tool_grant::ToolGrant;
 
 const PROGRAM: &str = "claude";
 const INSTALL_HINT: &str = "install Claude Code and ensure `claude` is on PATH";
@@ -41,6 +42,7 @@ pub(crate) fn build_args(
     prompt: &str,
     model: Option<&str>,
     permission: PermissionGrant,
+    tool_grant: Option<&ToolGrant>,
     mcp_config: Option<&Path>,
 ) -> Vec<OsString> {
     let sandbox_flag = Runner::ClaudeCode
@@ -59,6 +61,14 @@ pub(crate) fn build_args(
     if let Some(model) = model {
         args.push(OsString::from("--model"));
         args.push(OsString::from(model));
+    }
+    if let Some(tool_grant) = tool_grant {
+        let allowed_tools_flag = Runner::ClaudeCode
+            .support(HarnessControl::ToolAllowlist)
+            .flag()
+            .expect("the capability matrix declares claude-code takes its tool allowlist as a flag");
+        args.push(OsString::from(allowed_tools_flag));
+        args.push(OsString::from(tool_grant.tools().collect::<Vec<_>>().join(",")));
     }
     if let Some(mcp_config) = mcp_config {
         let mcp_flag = Runner::ClaudeCode
@@ -83,6 +93,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         &prepared.prompt,
         request.runner_model,
         request.permission,
+        request.tool_grant.as_ref(),
         request.mcp_config_path.as_deref(),
     );
 
@@ -277,7 +288,7 @@ mod tests {
     #[test]
     fn the_permission_mode_flag_actually_follows_the_requested_grant() {
         let mode_value_for = |grant: PermissionGrant| {
-            let args = build_args("do the thing", None, grant, None);
+            let args = build_args("do the thing", None, grant, None, None);
             let position = args
                 .windows(2)
                 .position(|pair| pair[0] == "--permission-mode")
@@ -295,7 +306,7 @@ mod tests {
             .support(HarnessControl::SandboxLevels)
             .flag()
             .expect("claude-code declares a sandbox flag in the capability matrix");
-        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None);
+        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None, None);
         let position = args
             .windows(2)
             .position(|pair| pair[0] == expected_flag)
@@ -312,6 +323,7 @@ mod tests {
             "do the thing",
             None,
             PermissionGrant::Unrestricted,
+            None,
             Some(Path::new("/workspace/mcp-config.json")),
         );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
@@ -328,10 +340,28 @@ mod tests {
 
     #[test]
     fn no_declared_mcp_config_carries_neither_flag() {
-        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None);
+        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None, None);
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
         assert!(!borrowed.contains(&"--mcp-config"));
         assert!(!borrowed.contains(&"--strict-mcp-config"));
+    }
+
+    #[test]
+    fn a_declared_tool_grant_is_carried_as_allowed_tools() {
+        let grant = ToolGrant::parse(["Bash", "Read"]).unwrap();
+        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, Some(&grant), None);
+        let position = args
+            .windows(2)
+            .position(|pair| pair[0] == "--allowedTools")
+            .expect("the invocation carries --allowedTools");
+        assert_eq!(args[position + 1], OsString::from("Bash,Read"));
+    }
+
+    #[test]
+    fn no_declared_tool_grant_carries_no_allowed_tools_flag() {
+        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None, None);
+        let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
+        assert!(!borrowed.contains(&"--allowedTools"));
     }
 
     #[test]
@@ -340,6 +370,7 @@ mod tests {
             "do the thing",
             Some("claude-opus-5"),
             PermissionGrant::Unrestricted,
+            None,
             None,
         );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();

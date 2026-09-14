@@ -30,6 +30,7 @@ use crate::agentskills::runner::{
 };
 use crate::agentskills::sampling::AttemptCount;
 use crate::agentskills::scenario_selection::ScenarioSelection;
+use crate::agentskills::tool_grant::{effective_tool_grant, ToolGrant};
 use crate::agentskills::workspace_scaffold::ScaffoldPermission;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
@@ -235,6 +236,14 @@ pub struct RunArgs {
 
     #[arg(
         long,
+        value_delimiter = ',',
+        value_name = "TOOL",
+        help = "The operator's ceiling on which tools a run's harness may reach for, as a comma-separated list of tool names. A case can narrow this further but never widen it. Unset means no ceiling from the operator; a harness with no equivalent control fails its runs as unsupported rather than silently ignoring this"
+    )]
+    pub allowed_tools: Vec<String>,
+
+    #[arg(
+        long,
         help = "Run the workspace scaffold a case declares. The script is author-supplied code that runs with your own reach, so a case that declares one fails its runs until this is passed"
     )]
     pub allow_scaffold: bool,
@@ -365,6 +374,18 @@ impl RunArgs {
             }
         };
 
+        let allowed_tools = if self.allowed_tools.is_empty() {
+            None
+        } else {
+            match ToolGrant::parse(self.allowed_tools.clone()) {
+                Ok(grant) => Some(grant),
+                Err(error) => {
+                    eprintln!("--allowed-tools: {error}");
+                    return ExitCode::InfrastructureFailure;
+                }
+            }
+        };
+
         let build_options = BuildReportOptions {
             iteration: Some(iteration),
             attempts: self.attempts,
@@ -378,6 +399,7 @@ impl RunArgs {
             skill_staging: self.skill_staging,
             environment: self.environment,
             permission: self.permission,
+            allowed_tools: allowed_tools.clone(),
             cases,
             ..BuildReportOptions::default()
         };
@@ -433,6 +455,7 @@ impl RunArgs {
                 self.skill_staging,
                 self.environment,
                 self.permission,
+                allowed_tools,
                 ScaffoldPermission::granted(self.allow_scaffold),
                 self.concurrency,
                 cost_ledger,
@@ -526,6 +549,7 @@ fn execute_runs(
     skill_staging: SkillStaging,
     environment: EnvironmentPolicy,
     permission: PermissionGrant,
+    allowed_tools: Option<ToolGrant>,
     scaffold_permission: ScaffoldPermission,
     concurrency: RunConcurrency,
     cost_ledger: &CostLedger,
@@ -576,6 +600,7 @@ fn execute_runs(
         skill_staging,
         environment,
         permission,
+        allowed_tools,
         scaffold_permission,
         skill_md: &skill_md,
         old_skill_md: old_skill_md.as_deref(),
@@ -648,6 +673,7 @@ struct RunExecution<'a> {
     skill_staging: SkillStaging,
     environment: EnvironmentPolicy,
     permission: PermissionGrant,
+    allowed_tools: Option<ToolGrant>,
     scaffold_permission: ScaffoldPermission,
     skill_md: &'a str,
     old_skill_md: Option<&'a str>,
@@ -799,7 +825,28 @@ impl RunExecution<'_> {
             });
         }
 
+        if let Some(grant) = self.resolved_tool_grant(case) {
+            if !matches!(
+                self.runner.support(HarnessControl::ToolAllowlist),
+                ControlSupport::Driven(_)
+            ) {
+                return Some(RunNotStarted::ControlUnsupported {
+                    control: HarnessControl::ToolAllowlist,
+                    runner: self.runner,
+                });
+            }
+            if grant.is_empty() {
+                return Some(RunNotStarted::ToolGrantUnrepresentable { runner: self.runner });
+            }
+        }
+
         None
+    }
+
+    /// The tool grant this run is actually given, once the operator's ceiling and the
+    /// case's own declaration are combined.
+    fn resolved_tool_grant(&self, case: &EvalCase) -> Option<ToolGrant> {
+        effective_tool_grant(self.allowed_tools.as_ref(), case.allowed_tools.as_ref())
     }
 
     fn execute(&self, run: &mut RunRecord, integrity: IntegrityWindow) {
@@ -888,6 +935,12 @@ impl RunExecution<'_> {
             },
         };
 
+        let tool_grant = self.resolved_tool_grant(case);
+        // `ToolGrant` never deserializes empty, and an empty grant always gets refused
+        // in `refuse_to_start` below anyway, so the report says why through its warning
+        // rather than through a `tool_grant` it could not read back.
+        run.tool_grant = tool_grant.clone().filter(|grant| !grant.is_empty());
+
         let key_input = CacheKeyInput {
             eval_case_id: run.eval_case_id.clone(),
             skill_hash,
@@ -907,6 +960,7 @@ impl RunExecution<'_> {
             prompt_contract_version: PROMPT_CONTRACT_VERSION.to_string(),
             environment: self.environment,
             permission: self.permission,
+            tool_grant: tool_grant.clone(),
             skill_staging: self.skill_staging,
             scaffold_hash,
         };
@@ -955,6 +1009,7 @@ impl RunExecution<'_> {
             skill_staging: self.skill_staging,
             environment: self.environment,
             permission: self.permission,
+            tool_grant,
             scaffold_permission: self.scaffold_permission,
             mcp_config_path,
         };
@@ -1654,6 +1709,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -1760,6 +1816,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -1889,6 +1946,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -1934,6 +1992,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -1995,6 +2054,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2113,6 +2173,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2166,6 +2227,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2219,6 +2281,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2264,6 +2327,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2311,6 +2375,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2375,6 +2440,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2539,6 +2605,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             cases: Vec::new(),
             tags: Vec::new(),
             max_cost_usd: None,
@@ -2676,6 +2743,80 @@ mod tests {
         skill_dir
     }
 
+    fn write_tool_grant_skill(root: &Path) -> PathBuf {
+        let skill_dir = root.join("gated-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: gated-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "gated-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "first prompt",
+                        "expected_output": "first output",
+                        "assertions": ["checks first"]
+                    },
+                    {
+                        "id": "disjoint",
+                        "prompt": "second prompt",
+                        "expected_output": "second output",
+                        "assertions": ["checks second"],
+                        "allowed_tools": ["Bash"]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+        skill_dir
+    }
+
+    /// The operator granted `Read` and the case narrows to `Bash`; the two share nothing,
+    /// so the effective grant is empty. `--allowedTools` has no documented meaning for an
+    /// empty value, so trg has to refuse the run rather than pass one through and let the
+    /// harness decide for itself whether that denies every tool or grants them all.
+    #[test]
+    fn a_disjoint_case_grant_is_refused_rather_than_sent_as_an_empty_allowlist() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_tool_grant_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report_dir = run_with_fake_runner(RunArgs {
+            allowed_tools: vec!["Read".to_string()],
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["runs"][0]["status"], "completed");
+
+        assert_eq!(report["runs"][1]["status"], "skipped");
+        assert_eq!(report["runs"][1]["failure_kind"], "unsupported");
+        assert_eq!(report["runs"][1]["tool_grant"], serde_json::Value::Null);
+        assert_eq!(
+            super::fake_runner::invocations(),
+            1,
+            "the only invocation must be the case whose grant was not disjoint"
+        );
+        assert!(
+            report["runs"][1]["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("has no way to express denying every tool")),
+            "the report has to say why the run did not start"
+        );
+    }
+
     #[test]
     fn reuse_completed_serves_the_same_arm_produced_under_another_model_config() {
         super::fake_runner::reset();
@@ -2708,6 +2849,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2740,6 +2882,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2789,6 +2932,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2821,6 +2965,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2867,6 +3012,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -2943,6 +3089,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -3013,6 +3160,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -3149,6 +3297,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -3193,6 +3342,7 @@ mod tests {
                 skill_staging: SkillStaging::Symlink,
                 environment: EnvironmentPolicy::Scrubbed,
                 permission: PermissionGrant::WorkspaceWrite,
+                allowed_tools: Vec::new(),
                 allow_scaffold: false,
                 cases: Vec::new(),
                 tags: Vec::new(),
@@ -3263,6 +3413,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -3312,6 +3463,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),
@@ -3520,6 +3672,7 @@ mod tests {
 
         let report_dir = run_with_fake_runner(RunArgs {
             permission: PermissionGrant::Unrestricted,
+            allowed_tools: Vec::new(),
             ..base_run_args(&skill_dir, &out_dir)
         });
 
@@ -3763,6 +3916,7 @@ mod tests {
             skill_staging: SkillStaging::Symlink,
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
+            allowed_tools: Vec::new(),
             allow_scaffold: false,
             cases: Vec::new(),
             tags: Vec::new(),

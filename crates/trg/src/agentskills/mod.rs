@@ -32,6 +32,7 @@ pub mod runner;
 pub mod sampling;
 pub mod scenario_selection;
 pub mod schemas;
+pub mod tool_grant;
 pub mod transcript;
 pub mod validation;
 pub mod validator;

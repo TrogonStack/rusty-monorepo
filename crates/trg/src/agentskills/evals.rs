@@ -3,6 +3,7 @@ use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
 use super::outputs::guess_mime_type;
 use super::runner::TimingFile;
+use super::tool_grant::ToolGrant;
 use super::validation::{ValidationError, ValidationErrors};
 use super::workspace_scaffold::WorkspaceScaffold;
 use crate::fs::FileSystem;
@@ -712,6 +713,12 @@ pub struct EvalCase {
     /// asking about a first turn. See [`ConversationHistory`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_history: Option<ConversationHistory>,
+    /// This case's own ceiling on what its run's harness may reach for.
+    ///
+    /// Narrows whatever the operator granted at the CLI; it can never widen it. Absent
+    /// means the case adds no ceiling of its own, leaving the operator's grant whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<ToolGrant>,
 }
 
 impl EvalCase {
@@ -1962,6 +1969,7 @@ mod tests {
             skill_disclosure: SkillDisclosure::default(),
             scaffold: None,
             conversation_history: None,
+            allowed_tools: None,
         }
     }
 

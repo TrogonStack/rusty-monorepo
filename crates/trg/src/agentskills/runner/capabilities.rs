@@ -133,7 +133,7 @@ impl Runner {
         use ControlMechanism::{EnvVar, Flag, GuardedFlag, Reported, Subcommand};
 
         match (self, control) {
-            (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Offered(Flag("--allowedTools")),
+            (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Driven(Flag("--allowedTools")),
             (Self::ClaudeCode, HarnessControl::TurnCap) => ControlSupport::Absent,
             (Self::ClaudeCode, HarnessControl::SystemPromptAppend) => {
                 ControlSupport::Offered(Flag("--append-system-prompt"))
@@ -206,7 +206,7 @@ mod tests {
 
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::ToolAllowlist),
-            ControlSupport::Offered(ControlMechanism::Flag("--allowedTools"))
+            ControlSupport::Driven(ControlMechanism::Flag("--allowedTools"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::TurnCap),
@@ -319,15 +319,18 @@ mod tests {
     #[test]
     fn every_driven_flag_is_carried_by_the_invocation_it_drives() {
         use crate::agentskills::report::PermissionGrant;
+        use crate::agentskills::tool_grant::ToolGrant;
         use std::ffi::OsString;
         use std::path::Path;
 
+        let tool_grant = ToolGrant::parse(["Bash"]).unwrap();
         let argv_for = |runner: Runner| -> Vec<OsString> {
             match runner {
                 Runner::ClaudeCode => super::super::claude_code::build_args(
                     "do the thing",
                     None,
                     PermissionGrant::Unrestricted,
+                    Some(&tool_grant),
                     Some(Path::new("/workspace/mcp-config.json")),
                 ),
                 Runner::Codex => super::super::codex::build_args(

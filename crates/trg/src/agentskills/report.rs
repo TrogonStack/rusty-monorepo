@@ -25,6 +25,7 @@ use super::outputs::OUTPUTS_DIR;
 use super::runner::capabilities::HarnessControl;
 use super::runner::{Runner, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
+use super::tool_grant::ToolGrant;
 use super::validation::ValidationError;
 
 #[derive(
@@ -222,6 +223,11 @@ pub struct BuildReportOptions {
     pub environment: EnvironmentPolicy,
     /// How much a run's harness subprocess may do without prompting.
     pub permission: PermissionGrant,
+    /// The operator's ceiling on which tools a run's harness may reach for.
+    ///
+    /// `None` means the operator set no ceiling; a case can still narrow the grant on
+    /// its own even when this is `None`.
+    pub allowed_tools: Option<ToolGrant>,
     /// Which of the suite's cases this run covers.
     pub cases: CaseSelection,
 }
@@ -241,6 +247,7 @@ impl Default for BuildReportOptions {
             skill_staging: SkillStaging::default(),
             environment: EnvironmentPolicy::default(),
             permission: PermissionGrant::default(),
+            allowed_tools: None,
             cases: CaseSelection::default(),
         }
     }
@@ -311,6 +318,8 @@ pub struct ReportSection {
     pub environment: EnvironmentPolicy,
     #[serde(default)]
     pub permission: PermissionGrant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<ToolGrant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiSection>,
 }
@@ -516,6 +525,10 @@ pub struct RunRecord {
     pub failure_kind: Option<String>,
     pub paths: RunPaths,
     pub mirror_path: String,
+    /// The tool grant this run was actually given, once the operator's ceiling and the
+    /// case's own declaration are combined. `None` means unrestricted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_grant: Option<ToolGrant>,
     pub artifacts: Vec<serde_json::Value>,
     pub metrics: RunMetrics,
     pub cache: Option<RunCacheInfo>,
@@ -563,8 +576,21 @@ pub const RUN_STATUS_SKIPPED: &str = "skipped";
 /// each failed to do for the other.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunNotStarted {
-    CostCeilingExhausted { spent_usd: f64, ceiling_usd: f64 },
-    ControlUnsupported { control: HarnessControl, runner: Runner },
+    CostCeilingExhausted {
+        spent_usd: f64,
+        ceiling_usd: f64,
+    },
+    ControlUnsupported {
+        control: HarnessControl,
+        runner: Runner,
+    },
+    /// The runner drives a tool allowlist, but the effective grant narrowed to nothing
+    /// the runner's own flag can express: an empty value is not how any harness denies
+    /// every tool, and no runner's help text says what it does with one, so trg refuses
+    /// to guess rather than invoke the harness on an unrepresentable grant.
+    ToolGrantUnrepresentable {
+        runner: Runner,
+    },
 }
 
 /// The failure kinds a run carries when trg decided not to invoke the harness.
@@ -597,7 +623,9 @@ impl RunNotStarted {
     fn kind(&self) -> NotStartedKind {
         match self {
             Self::CostCeilingExhausted { .. } => NotStartedKind::CostCeiling,
-            Self::ControlUnsupported { .. } => NotStartedKind::UnsupportedControl,
+            Self::ControlUnsupported { .. } | Self::ToolGrantUnrepresentable { .. } => {
+                NotStartedKind::UnsupportedControl
+            }
         }
     }
 
@@ -609,6 +637,10 @@ impl RunNotStarted {
             Self::ControlUnsupported { control, runner } => {
                 format!("{}, so this run was not started", runner.unsupported_reason(*control))
             }
+            Self::ToolGrantUnrepresentable { runner } => format!(
+                "the {} harness has no way to express denying every tool, so this run was not started",
+                runner.display_name()
+            ),
         }
     }
 }
@@ -897,6 +929,7 @@ pub fn build_report_bundle(
             runner_version: options.runner_version.clone(),
             environment: options.environment,
             permission: options.permission,
+            allowed_tools: options.allowed_tools.clone(),
             ci: build_ci_section(),
         },
         suite: SuiteSection {
@@ -1177,6 +1210,7 @@ fn build_runs(
                         outputs: outputs_path,
                     },
                     mirror_path,
+                    tool_grant: None,
                     artifacts: Vec::new(),
                     metrics: RunMetrics::default(),
                     cache: None,
@@ -1760,6 +1794,7 @@ mod tests {
                     runner_version: None,
                     environment: EnvironmentPolicy::default(),
                     permission: PermissionGrant::default(),
+                    allowed_tools: None,
                     ci: None,
                 },
                 suite: SuiteSection {

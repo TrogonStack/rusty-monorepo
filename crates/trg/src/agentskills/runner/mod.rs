@@ -31,6 +31,7 @@ use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SkillSummary, StagedSkillDir};
 use super::redact::{redact_transcript_bytes, RedactedCommandLine, RedactedTranscript};
 use super::report::{CacheTokens, EnvironmentPolicy, PermissionGrant, ScenarioKind, SkillStaging};
+use super::tool_grant::ToolGrant;
 use super::transcript::{write_normalized_transcript, StagedSkill, TranscriptFormat, WorkspaceBoundary};
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
 use environment::{RecordedEnvironment, RunEnvironment};
@@ -119,6 +120,12 @@ pub struct EvalRunRequest<'a> {
     pub environment: EnvironmentPolicy,
     pub permission: PermissionGrant,
     pub scaffold_permission: ScaffoldPermission,
+    /// The tool grant this run was actually given, once the operator's ceiling and the
+    /// case's own declaration are combined. `None` means unrestricted: nobody asked for
+    /// a tool allowlist. A runner that does not drive `ToolAllowlist` is never handed a
+    /// `Some` here; a case or operator that asks for one against such a runner is
+    /// refused earlier, before a runner is ever invoked.
+    pub tool_grant: Option<ToolGrant>,
     /// Where the generated `--mcp-config` JSON lives, when the case declares mocks and the
     /// runner drives `McpServers`. Runners that do not drive that control simply ignore it;
     /// a case that declares mocks against one of those runners is refused earlier, before a
@@ -944,6 +951,7 @@ mod workspace_tests {
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
             scaffold_permission: ScaffoldPermission::Withheld,
+            tool_grant: None,
             mcp_config_path: None,
         }
     }
