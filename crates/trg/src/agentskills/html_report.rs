@@ -25,6 +25,7 @@ use super::eval_suite_drift::load_report_document;
 use super::evals::Result;
 use super::grading::{AssertionGradeResult, GraderInfo, GraderKind, GradingFile, GradingSummary};
 use super::outputs::{FINAL_MD, OUTPUTS_DIR};
+use super::permission_outcome::PermissionOutcome;
 use super::report::{EvalCaseDimension, ReportDocument, RunRecord, ScenarioKind, ScenarioSummary};
 
 pub const HTML_REPORT_FILENAME: &str = "report.html";
@@ -192,6 +193,21 @@ fn render_header(document: &ReportDocument) -> String {
     )
 }
 
+/// How a run's harness actually behaved is only worth a separate word when it differs
+/// from what was asked for; showing both unconditionally would bury the common case in
+/// noise nobody needs to read twice.
+fn permission_label(outcome: PermissionOutcome) -> String {
+    if outcome.was_widened() {
+        format!(
+            "{} (harness ran {})",
+            outcome.requested().as_str(),
+            outcome.effective().as_str()
+        )
+    } else {
+        outcome.requested().as_str().to_string()
+    }
+}
+
 fn render_provenance(document: &ReportDocument) -> String {
     let mut rows = Vec::new();
     rows.push(kv_row(
@@ -208,7 +224,7 @@ fn render_provenance(document: &ReportDocument) -> String {
         rows.push(kv_row("runner version", version));
     }
     rows.push(kv_row("environment", document.report.environment.as_str()));
-    rows.push(kv_row("permission", document.report.permission.as_str()));
+    rows.push(kv_row("permission", &permission_label(document.report.permission)));
     if let Some(ci) = &document.report.ci {
         rows.push(kv_row("ci provider", &ci.provider));
         if let Some(run_id) = &ci.run_id {

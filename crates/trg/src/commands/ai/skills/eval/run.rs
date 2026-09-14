@@ -19,6 +19,7 @@ use crate::agentskills::mocks::{
     materialize_mock_set, resolve_mock_set, MockCallLogEntry, MockServerBinary, MockSet, MOCK_CALLS_LOG_NAME,
 };
 use crate::agentskills::outputs::index_output_artifacts;
+use crate::agentskills::permission_outcome::PermissionOutcome;
 use crate::agentskills::report::{
     build_report_bundle, write_report_bundle, BudgetReport, BuildReportOptions, EnvironmentPolicy, PermissionGrant,
     ReportBundle, RunNotStarted, RunRecord, ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
@@ -408,7 +409,13 @@ impl RunArgs {
             runner_version: runner_probe.as_ref().and_then(|probe| probe.version.clone()),
             skill_staging: self.skill_staging,
             environment: self.environment,
-            permission: self.permission,
+            permission: PermissionOutcome::new(
+                self.permission,
+                self.runner.map_or(self.permission, |runner| {
+                    runner.effective_permission_grant(self.permission)
+                }),
+            )
+            .expect("a runner's effective grant is never narrower than what was requested"),
             allowed_tools: allowed_tools.clone(),
             cases,
             eval_dir,
@@ -3715,7 +3722,29 @@ mod tests {
         });
 
         let report = read_report(&report_dir);
-        assert_eq!(report["report"]["permission"], "unrestricted");
+        assert_eq!(report["report"]["permission"]["requested"], "unrestricted");
+        assert_eq!(report["report"]["permission"]["effective"], "unrestricted");
+    }
+
+    /// cursor-agent has no `workspace_write` mode of its own: any run under it executes
+    /// unrestricted regardless of what was requested. A report that only recorded the
+    /// request would tell a reader the run was bounded when it was not.
+    #[test]
+    fn a_cursor_agent_run_reports_the_wider_grant_it_actually_ran_under() {
+        super::fake_runner::reset();
+        let temp = tempfile::tempdir().unwrap();
+        let skill_dir = write_two_case_skill(temp.path());
+        let out_dir = temp.path().join("artifacts");
+
+        let report_dir = run_with_fake_runner(RunArgs {
+            runner: Some(Runner::CursorAgent),
+            permission: PermissionGrant::WorkspaceWrite,
+            ..base_run_args(&skill_dir, &out_dir)
+        });
+
+        let report = read_report(&report_dir);
+        assert_eq!(report["report"]["permission"]["requested"], "workspace_write");
+        assert_eq!(report["report"]["permission"]["effective"], "unrestricted");
     }
 
     /// Grading a run that never started reads the empty workspace as a wrong answer, and

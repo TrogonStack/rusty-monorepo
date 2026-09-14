@@ -25,6 +25,7 @@ pub mod mocks;
 pub mod models;
 pub mod outputs;
 pub mod parser;
+pub mod permission_outcome;
 pub mod prompt;
 pub mod redact;
 pub mod report;
