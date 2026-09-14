@@ -1648,9 +1648,6 @@ mod tests {
             match (original, roundtrip) {
                 (serde_json::Value::Object(orig), serde_json::Value::Object(rt)) => {
                     for (key, orig_val) in orig {
-                        if path.is_empty() && key == "schema_version" {
-                            continue;
-                        }
                         if is_omitted_on_reserialize(orig_val) {
                             continue;
                         }

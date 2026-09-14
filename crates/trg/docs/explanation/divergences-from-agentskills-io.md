@@ -10,7 +10,8 @@ and need to know exactly where `trg ai skills eval` differs, and why.
 kinds, assertion strings) and emits **docs-compatible companion files**
 (`benchmark.json`, `grading.json`, `timing.json`, `feedback.json`,
 `comparison.json`). The session index `report.json` is a **superset** with
-`trg`-specific metadata. Compatibility is gated on `schema_version`.
+`trg`-specific metadata. There is no `schema_version` on emitted artifacts;
+this is a pre-1.0 contract and consumers should test for the field they need.
 
 | Topic | agentskills.io | `trg` |
 | ----- | -------------- | ----- |
@@ -18,7 +19,7 @@ kinds, assertion strings) and emits **docs-compatible companion files**
 | Session index | Spec report | `report.json` superset |
 | Old skill scenario | `with_old_skill` (implied) | `old_skill` |
 | CLI workflow | Implied pipeline | Explicit subcommands: `run`, `grade`, `benchmark`, `verify`, `init`, `feedback`, `compare` |
-| Schema stability | Spec versioning | Pre-1.0 contract via `schema_version`; snapshot tests in repo |
+| Schema stability | Spec versioning | Pre-1.0 contract, no `schema_version`; snapshot tests in repo |
 
 ---
 
