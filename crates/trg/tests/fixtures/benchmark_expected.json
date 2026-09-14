@@ -143,13 +143,25 @@
       "assertion_pass_rate": 0.5,
       "run_pass_rate": 1.0,
       "duration_ms_mean": -1000.0,
-      "tokens_total": -200
+      "tokens_total": -200,
+      "left": {
+        "runs": 1
+      },
+      "right": {
+        "runs": 1
+      }
     },
     "with_skill_vs_old_skill": {
       "assertion_pass_rate": 1.0,
       "run_pass_rate": 1.0,
       "duration_ms_mean": -500.0,
-      "tokens_total": -100
+      "tokens_total": -100,
+      "left": {
+        "runs": 1
+      },
+      "right": {
+        "runs": 1
+      }
     }
   }
 }

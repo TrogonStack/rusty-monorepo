@@ -135,6 +135,7 @@
       "type": "object"
     },
     "HelpedBySkillRecord": {
+      "description": "`delta` is a subtraction between two pass rates, each already a ratio over its own\narm's attempts. Nothing about `with_skill_pass_rate` or `without_skill_pass_rate`\nsays whether that ratio was drawn from three attempts or thirty, so the attempt\ncounts ride alongside it rather than being left for a reader to assume.",
       "properties": {
         "assertion": {
           "type": "string"
@@ -146,9 +147,19 @@
         "eval_case_id": {
           "type": "string"
         },
+        "with_skill_attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
         "with_skill_pass_rate": {
           "format": "double",
           "type": "number"
+        },
+        "without_skill_attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
         "without_skill_pass_rate": {
           "format": "double",
@@ -160,7 +171,9 @@
         "assertion",
         "with_skill_pass_rate",
         "without_skill_pass_rate",
-        "delta"
+        "delta",
+        "with_skill_attempts",
+        "without_skill_attempts"
       ],
       "type": "object"
     },
