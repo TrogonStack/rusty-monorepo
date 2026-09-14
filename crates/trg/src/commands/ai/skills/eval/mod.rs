@@ -6,6 +6,7 @@ mod grade;
 mod html_report;
 mod init;
 mod iteration_summary;
+mod mock_server;
 mod next_iteration;
 mod output;
 mod run;
@@ -31,6 +32,7 @@ pub use grade::GradeArgs;
 pub use html_report::HtmlReportArgs;
 pub use init::InitArgs;
 pub use iteration_summary::IterationSummaryArgs;
+pub use mock_server::MockServerArgs;
 pub use next_iteration::NextIterationArgs;
 pub use run::RunArgs;
 pub use verify::VerifyArgs;
@@ -61,6 +63,12 @@ pub enum EvalCommands {
     Compare(CompareArgs),
     /// Build an improvement bundle from a prior iteration for skill revision
     NextIteration(NextIterationArgs),
+    /// Serve one mocked mcp server's tools over stdio from a resolved mock set
+    ///
+    /// Not meant to be typed by hand: a run's generated `--mcp-config` is the only caller,
+    /// so this is hidden from `--help`.
+    #[command(hide = true)]
+    MockServer(MockServerArgs),
     /// Render a local-only, self-contained HTML report over a report bundle
     HtmlReport(HtmlReportArgs),
 }
@@ -77,6 +85,7 @@ impl EvalArgs {
             EvalCommands::Feedback(args) => args.handle(fs),
             EvalCommands::Compare(args) => args.handle(fs),
             EvalCommands::NextIteration(args) => args.handle(fs),
+            EvalCommands::MockServer(args) => args.handle(),
             EvalCommands::HtmlReport(args) => args.handle(fs),
         }
     }

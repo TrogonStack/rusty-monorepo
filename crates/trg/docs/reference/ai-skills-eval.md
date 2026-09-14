@@ -279,6 +279,112 @@ to the other always reads as a change, which is honest: its source did change.
 
 ---
 
+## MCP mocks
+
+A case can declare what a call to an MCP tool should answer with, instead of
+reaching a real MCP server. Only fixed mocks are supported: a mock always
+answers the same way, keyed only on the tool being called, not on what the
+call was asked to do. Record/replay and agent-driven mocks are a different
+feature and are not implemented; a suite that tries to declare one gets a
+named error rather than a silent fallback.
+
+```
+<skill>/evals/
+  mocks/
+    <server>/
+      <tool>.md            # suite-level: every case gets this unless it overrides it
+  <case-id>/
+    mocks/
+      <server>/
+        <tool>.md           # per-case: replaces the suite-level file for this one tool
+```
+
+A per-case override replaces the suite-level file for that exact
+`<server>/<tool>` pair; it does not merge with it. A tool with no mock at
+either level is not intercepted at all, so a case can mock some of a skill's
+tools and let the rest reach whatever the harness would otherwise reach.
+
+A `mocks/`-only directory is never mistaken for a case: `evals/mocks/` has
+none of `prompt.md`, `case.json`, or `graders/`, the only markers that make a
+directory under `evals/` a case, so it coexists safely with either suite
+layout above.
+
+### Mock declaration format
+
+Each `<tool>.md` is frontmatter plus a body, the same shape as a grader file:
+
+```markdown
+---
+type: fixed
+expect:
+  repo: acme/widgets
+  title: /^feat:/
+  labels: [bug, enhancement]
+---
+{"issue_number": 42, "url": "https://github.com/acme/widgets/issues/42"}
+```
+
+| Field | Type | Required | Notes |
+| ----- | ---- | -------- | ----- |
+| `type` | string | yes | Only `fixed` is implemented |
+| `expect` | object | no | Dotted path into the call's input, mapped to a constraint |
+| `error` | string | no | When present, the call answers as an MCP tool error with this message instead of the body |
+
+The body is the tool's result: literal JSON if the tool result should be JSON,
+or plain text otherwise. It supports two substitutions:
+
+- `{{input.<dotted.path>}}`, resolved against the actual call's arguments when
+  the call happens. A path with no matching value is a call-time error, not an
+  empty string: a mock that silently answers with nothing a skill never asked
+  for is a harder bug to notice than one that fails loudly.
+- `{{file:<relative path>}}`, resolved once when the mock declaration is
+  loaded, relative to the directory the `.md` file is in. A missing file is
+  also an error rather than an empty body.
+
+An `expect` constraint is written as a bare string and its shape decides what
+it means: `/pattern/` (opening and closing slashes) is a regex, one of
+`string`, `number`, `boolean`, `object`, `array` is a type check against the
+value's JSON type, and anything else is matched literally. A YAML list of
+strings is a one-of: the value must equal one of them. A path the input never
+carries is a violation like any other, with the received value reported as
+`null`. A `/pattern/` is compiled when the declaration is loaded, so a regex
+that does not compile fails the suite by name rather than becoming an
+expectation no call can ever satisfy.
+
+A constraint violation never stops the mock from answering the call; the
+mock still returns `body` (or `error`), because otherwise it could not tell
+the skill's next turn what it thinks its previous turn asked for. Instead,
+every call the mock server answers is logged to `mock-calls.jsonl` under the
+run's own directory, one line per call, and every violation on that log
+becomes an ordinary failing assertion during grading: no MCP mock aspect on
+its own can fail a run outside grading, since introducing a second failure
+channel that competed with ordinary assertions would only give the same
+outcome two different ways to be reported.
+
+### How a run drives a mock
+
+trg materializes the resolved mock set for a run into that run's own
+directory and generates an `--mcp-config` document that points each declared
+server at trg's own hidden `mock-server` subcommand, one invocation per
+server, so a harness never has to know a mock exists as anything other than
+an MCP server on stdio. `mock-calls.jsonl` is created for the run even if the
+skill never calls a mocked tool, so a reader can tell "declared but unused"
+apart from "the mock server never started".
+
+Resolved mock content is folded into the run's cache key. Changing a mock's
+`expect` map, body, or error message invalidates a cache entry the same way
+changing the prompt does, since the mock is as much an input to the run as
+the prompt is.
+
+A harness whose `mcp servers` cell in the [Harness support](#harness-support)
+table is `no` cannot be driven with mocks at all. A case that declares mocks
+against such a harness is not attempted and is not reported as a failure: the
+run is skipped with `mcp_unsupported`, and grading skips it the same way it
+skips a run stopped by the cost ceiling, rather than reading the run's
+absence as a wrong answer.
+
+---
+
 ## Graders
 
 A grader states one checkable property in a form trg can evaluate itself. Unlike
@@ -812,11 +918,12 @@ other field forward as declared there, including `name`, `excluded`,
 | `attempt` | integer | Which draw of the cell this run is, `1..N` for `--attempts N` |
 | `status` | string | `skipped`, `completed`, or `failed` |
 | `paths.workspace` | string | Relative path to the run workspace |
-| `artifacts` | array | Artifact descriptors (transcript when runner completes) |
+| `artifacts` | array | Artifact descriptors (transcript when runner completes, `mock_calls` when the case declares mcp mocks) |
 | `metrics` | object | `duration_ms`, token counts, `cost_usd` (populated by runner) |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
 | `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
 | `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
+| `mock_violations` | array | Every logged `expect` mismatch from `mock-calls.jsonl`, read back after the run finished. Empty when the case declares no mocks or violates nothing |
 
 Run ordering: eval cases in manifest order, then scenarios in flag order.
 
@@ -1433,12 +1540,19 @@ argv construction and cost reporting is a fact about parsing the harness's own
 output. Those two are consistency checks between declarations rather than
 evidence that the export or the parse happens.
 
+`mcp servers` is a guarded flag rather than a plain one: `--mcp-config` only
+takes effect on `claude-code` alongside `--strict-mcp-config`, which refuses
+to start if the config names a server the harness cannot reach, instead of
+silently continuing without it. The check for a driven guarded flag covers
+both halves: the argv trg builds must carry the value flag and its guard
+together, never one without the other.
+
 | Control | `claude-code` | `codex` | `cursor-agent` |
 | ------- | ------------- | ------- | -------------- |
 | tool allowlist | `--allowedTools` (harness only) | no | no |
 | turn cap | no | no | no |
 | system prompt append | `--append-system-prompt` (harness only) | no | no |
-| mcp servers | `--mcp-config` (harness only) | no | no |
+| mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | no | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
 | conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) |
 | conversation seeding | no | no | no |

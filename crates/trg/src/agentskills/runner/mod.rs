@@ -119,6 +119,11 @@ pub struct EvalRunRequest<'a> {
     pub environment: EnvironmentPolicy,
     pub permission: PermissionGrant,
     pub scaffold_permission: ScaffoldPermission,
+    /// Where the generated `--mcp-config` JSON lives, when the case declares mocks and the
+    /// runner drives `McpServers`. Runners that do not drive that control simply ignore it;
+    /// a case that declares mocks against one of those runners is refused earlier, before a
+    /// runner is ever invoked.
+    pub mcp_config_path: Option<PathBuf>,
 }
 
 impl EvalRunRequest<'_> {
@@ -901,6 +906,7 @@ mod workspace_tests {
             environment: EnvironmentPolicy::Scrubbed,
             permission: PermissionGrant::WorkspaceWrite,
             scaffold_permission: ScaffoldPermission::Withheld,
+            mcp_config_path: None,
         }
     }
 

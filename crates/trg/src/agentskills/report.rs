@@ -442,6 +442,15 @@ pub struct RunRecord {
     pub read_only_fixture_violations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Every `expect` mismatch the mock server logged against a call this run made, read
+    /// back from `mock-calls.jsonl` after the run finished.
+    ///
+    /// A violation never stops the mock from answering the call, so it cannot fail the run
+    /// on its own; grading turns each one into an ordinary failing assertion instead. A run
+    /// that declared no mocks, or violated nothing, serializes exactly as it did before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mock_violations: Vec<crate::agentskills::mocks::MockViolation>,
     /// This run's own pass rate over its scored assertions, `None` until graded
     /// or when grading scored nothing. Distinct from any suite-wide pass rate:
     /// a run with a low score here can be hidden inside a suite average that
@@ -976,6 +985,7 @@ fn build_runs(
                     skill_integrity: None,
                     read_only_fixture_violations: Vec::new(),
                     warnings: Vec::new(),
+                    mock_violations: Vec::new(),
                     case_score: None,
                 });
                 run_number += 1;

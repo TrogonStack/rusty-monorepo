@@ -304,11 +304,11 @@ mod output_format {
             .collect()
     }
 
-    /// The one command whose stdout is not a result to render.
+    /// Commands whose stdout is not a result to render.
     ///
-    /// `proxy` speaks JSON-RPC on stdout to whatever launched it, so an
-    /// `--output-format` there would offer a choice it cannot honour.
-    const WITHOUT_AN_OUTPUT_CHOICE: [&str; 1] = ["trg mcp proxy"];
+    /// `proxy` and `mock-server` both speak JSON-RPC on stdout to whatever launched them,
+    /// so an `--output-format` there would offer a choice neither can honour.
+    const WITHOUT_AN_OUTPUT_CHOICE: [&str; 2] = ["trg mcp proxy", "trg ai skills eval mock-server"];
 
     /// Offered everywhere, stated as the rule rather than as a list of the
     /// commands that happen to have it, so a command added tomorrow is held to

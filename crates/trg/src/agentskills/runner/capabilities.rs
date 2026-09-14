@@ -58,6 +58,16 @@ pub enum ControlMechanism {
     Subcommand(&'static str),
     EnvVar(&'static str),
     Reported,
+    /// A flag whose effect only holds while a second, guarding flag is also present.
+    ///
+    /// `--mcp-config` alone still lets claude-code fall back to whatever MCP servers are
+    /// configured on the operator's machine; `--strict-mcp-config` is what makes the
+    /// declared config the whole story. The two only mean anything together, so they are one
+    /// mechanism, not two cells' worth of flags smuggled into one.
+    GuardedFlag {
+        value: &'static str,
+        guard: &'static str,
+    },
 }
 
 impl ControlMechanism {
@@ -67,6 +77,7 @@ impl ControlMechanism {
             Self::Subcommand(subcommand) => format!("`{subcommand}` subcommand"),
             Self::EnvVar(var) => format!("`{var}`"),
             Self::Reported => "reported".to_string(),
+            Self::GuardedFlag { value, guard } => format!("`{value}` (guarded by `{guard}`)"),
         }
     }
 }
@@ -95,6 +106,15 @@ impl ControlSupport {
     pub fn flag(self) -> Option<&'static str> {
         match self {
             Self::Driven(ControlMechanism::Flag(flag)) => Some(flag),
+            Self::Driven(ControlMechanism::GuardedFlag { value, .. }) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The flag that must accompany `flag()` for a `GuardedFlag` cell to mean what it says.
+    pub fn guard_flag(self) -> Option<&'static str> {
+        match self {
+            Self::Driven(ControlMechanism::GuardedFlag { guard, .. }) => Some(guard),
             _ => None,
         }
     }
@@ -110,7 +130,7 @@ impl ControlSupport {
 
 impl Runner {
     pub fn support(self, control: HarnessControl) -> ControlSupport {
-        use ControlMechanism::{EnvVar, Flag, Reported, Subcommand};
+        use ControlMechanism::{EnvVar, Flag, GuardedFlag, Reported, Subcommand};
 
         match (self, control) {
             (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Offered(Flag("--allowedTools")),
@@ -118,7 +138,10 @@ impl Runner {
             (Self::ClaudeCode, HarnessControl::SystemPromptAppend) => {
                 ControlSupport::Offered(Flag("--append-system-prompt"))
             }
-            (Self::ClaudeCode, HarnessControl::McpServers) => ControlSupport::Offered(Flag("--mcp-config")),
+            (Self::ClaudeCode, HarnessControl::McpServers) => ControlSupport::Driven(GuardedFlag {
+                value: "--mcp-config",
+                guard: "--strict-mcp-config",
+            }),
             (Self::ClaudeCode, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("--permission-mode")),
             (Self::ClaudeCode, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--resume")),
             // `--input-format stream-json` looked like a candidate, but every "user" event
@@ -195,7 +218,10 @@ mod tests {
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::McpServers),
-            ControlSupport::Offered(ControlMechanism::Flag("--mcp-config"))
+            ControlSupport::Driven(ControlMechanism::GuardedFlag {
+                value: "--mcp-config",
+                guard: "--strict-mcp-config",
+            })
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::SandboxLevels),
@@ -298,9 +324,12 @@ mod tests {
 
         let argv_for = |runner: Runner| -> Vec<OsString> {
             match runner {
-                Runner::ClaudeCode => {
-                    super::super::claude_code::build_args("do the thing", None, PermissionGrant::Unrestricted)
-                }
+                Runner::ClaudeCode => super::super::claude_code::build_args(
+                    "do the thing",
+                    None,
+                    PermissionGrant::Unrestricted,
+                    Some(Path::new("/workspace/mcp-config.json")),
+                ),
                 Runner::Codex => super::super::codex::build_args(
                     Path::new("/workspace"),
                     Path::new("/workspace/outputs/final.md"),
@@ -320,13 +349,30 @@ mod tests {
         for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
             let argv = argv_for(runner);
             for control in HarnessControl::ALL {
-                if let ControlSupport::Driven(ControlMechanism::Flag(flag)) = runner.support(control) {
-                    assert!(
-                        argv.contains(&OsString::from(flag)),
-                        "{} declares '{}' driven via {flag} but its built invocation does not carry it",
-                        runner.display_name(),
-                        control.label()
-                    );
+                match runner.support(control) {
+                    ControlSupport::Driven(ControlMechanism::Flag(flag)) => {
+                        assert!(
+                            argv.contains(&OsString::from(flag)),
+                            "{} declares '{}' driven via {flag} but its built invocation does not carry it",
+                            runner.display_name(),
+                            control.label()
+                        );
+                    }
+                    ControlSupport::Driven(ControlMechanism::GuardedFlag { value, guard }) => {
+                        assert!(
+                            argv.contains(&OsString::from(value)),
+                            "{} declares '{}' driven via {value} but its built invocation does not carry it",
+                            runner.display_name(),
+                            control.label()
+                        );
+                        assert!(
+                            argv.contains(&OsString::from(guard)),
+                            "{} declares '{}' guarded by {guard} but its built invocation does not carry the guard",
+                            runner.display_name(),
+                            control.label()
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
@@ -459,6 +505,28 @@ mod tests {
         assert_eq!(
             ControlSupport::Offered(ControlMechanism::Subcommand("resume")).describe(),
             "`resume` subcommand (harness only)"
+        );
+        assert_eq!(
+            ControlSupport::Driven(ControlMechanism::GuardedFlag {
+                value: "--mcp-config",
+                guard: "--strict-mcp-config",
+            })
+            .describe(),
+            "`--mcp-config` (guarded by `--strict-mcp-config`)"
+        );
+    }
+
+    #[test]
+    fn guarded_flag_unwraps_its_value_and_guard() {
+        let support = ControlSupport::Driven(ControlMechanism::GuardedFlag {
+            value: "--mcp-config",
+            guard: "--strict-mcp-config",
+        });
+        assert_eq!(support.flag(), Some("--mcp-config"));
+        assert_eq!(support.guard_flag(), Some("--strict-mcp-config"));
+        assert_eq!(
+            ControlSupport::Driven(ControlMechanism::Flag("--force")).guard_flag(),
+            None
         );
     }
 }

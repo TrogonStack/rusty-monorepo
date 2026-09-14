@@ -837,6 +837,7 @@ mod tests {
                 skill_integrity: None,
                 read_only_fixture_violations: Vec::new(),
                 warnings: Vec::new(),
+                mock_violations: Vec::new(),
                 case_score: None,
             }],
             assertion_results: Vec::new(),
@@ -971,6 +972,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
+            mock_violations: Vec::new(),
             case_score: None,
         }
     }

@@ -567,7 +567,8 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         }
 
         let ctx = run_context(report_dir, run, &skill_path);
-        let mut assertion_results = Vec::with_capacity(case.assertions.len() + case.graders.len());
+        let mut assertion_results =
+            Vec::with_capacity(case.assertions.len() + case.graders.len() + run.mock_violations.len());
 
         let declarative = DeclarativeContext::load(&ctx);
         for grader in &case.graders {
@@ -583,6 +584,10 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         // here rather than left to whichever declared checks the case happens to have.
         for path in &run.read_only_fixture_violations {
             assertion_results.push(read_only_fixture_violation_result(path));
+        }
+
+        for violation in &run.mock_violations {
+            assertion_results.push(mock_violation_result(violation));
         }
 
         restore_when_nothing_would_be_scored(&mut assertion_results);
@@ -840,6 +845,40 @@ fn grade_declaratively(
             ));
         }
     })
+}
+
+/// Turn one logged `expect` mismatch into an ordinary failing assertion.
+///
+/// A violation never stops the mock from answering the call, so it never fails a run on
+/// its own; this is the one place it turns into something grading already knows how to
+/// tally, rather than a second reporting channel a caller has to learn.
+fn mock_violation_result(violation: &super::mocks::MockViolation) -> AssertionGradeResult {
+    AssertionGradeResult {
+        name: None,
+        assertion: format!(
+            "mcp mock {}/{} honours its declared expectations",
+            violation.server.as_str(),
+            violation.tool.as_str()
+        ),
+        passed: false,
+        evidence: format!(
+            "`{}` was expected to satisfy `{}`, but the call received {}",
+            violation.path.as_str(),
+            violation.constraint,
+            violation.received
+        ),
+        grader: GraderInfo {
+            kind: GraderKind::Mechanical,
+            model: None,
+            command: None,
+        },
+        rationale: None,
+        unsupported: None,
+        excluded: None,
+        ungraded: None,
+        votes: None,
+        weight: None,
+    }
 }
 
 /// A case whose every check is arm-scoped would otherwise measure nothing at
@@ -3314,6 +3353,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             warnings: Vec::new(),
+            mock_violations: Vec::new(),
             case_score: None,
         }
     }
@@ -4057,6 +4097,83 @@ mod tests {
             None,
             "nothing answered is not the same result as everything failed"
         );
+    }
+
+    #[test]
+    fn a_run_with_no_mcp_servers_control_is_skipped_rather_than_graded() {
+        let temp = tempdir().unwrap();
+        let (report_dir, run_dir) = unobservable_report_dir(&temp);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document["runs"][0]["status"] = serde_json::json!("skipped");
+        document["runs"][0]["failure_kind"] = serde_json::json!(crate::agentskills::runner::FAILURE_KIND_UNSUPPORTED);
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.runs_graded, 0);
+        assert_eq!(report.assertions_graded, 0);
+        assert_eq!(report.passed, 0);
+        assert_eq!(report.failed, 0);
+        assert_eq!(report.unsupported, 0);
+        assert_eq!(report.run_statuses.skipped, 1);
+        assert!(
+            !run_dir.join("grading.json").is_file(),
+            "a run that never started has nothing to write grading.json from"
+        );
+    }
+
+    #[test]
+    fn a_logged_mock_violation_becomes_a_failing_assertion() {
+        let temp = tempdir().unwrap();
+        let (report_dir, run_dir) = unobservable_report_dir(&temp);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document["runs"][0]["mock_violations"] = serde_json::json!([{
+            "server": "github",
+            "tool": "create_issue",
+            "path": "title",
+            "constraint": "matches /^feat/",
+            "received": "bug: oops",
+        }]);
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let report = grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            report.assertions_graded, 3,
+            "the two declared graders plus the logged violation"
+        );
+        assert_eq!(
+            report.failed, 1,
+            "the violation never passes, whatever the declared graders did"
+        );
+
+        let grading: GradingFile =
+            serde_json::from_str(&fs::read_to_string(run_dir.join("grading.json")).unwrap()).unwrap();
+        let violation_result = grading
+            .assertion_results
+            .iter()
+            .find(|result| result.assertion.contains("github/create_issue"))
+            .expect("the violation surfaces as an ordinary assertion result");
+        assert!(!violation_result.passed);
+        assert!(violation_result.evidence.contains("bug: oops"));
     }
 
     #[test]
