@@ -164,6 +164,7 @@ mod tests {
     use crate::agentskills::report::{
         build_report_bundle, write_report_bundle, BuildReportOptions, ScenarioKind, WriteReportOptions,
     };
+    use crate::agentskills::runner::usage::HarnessTokenUsage;
     use crate::agentskills::runner::{write_timing_file, EvalRunOutcome, RunStatus};
     use crate::fs::testutil::MemFS;
     use chrono::{SecondsFormat, Utc};
@@ -278,10 +279,7 @@ mod tests {
             &EvalRunOutcome {
                 status: RunStatus::Completed,
                 duration_ms: 1500,
-                total_tokens: Some(900),
-                input_tokens: None,
-                output_tokens: None,
-                cached_tokens: None,
+                tokens: HarnessTokenUsage::reported(Some(900), None, None),
                 cost: None,
                 final_text: String::new(),
                 exit_code: None,

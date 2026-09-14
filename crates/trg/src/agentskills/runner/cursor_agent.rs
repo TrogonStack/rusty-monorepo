@@ -3,18 +3,27 @@ use std::path::Path;
 use std::process::Command;
 
 use super::capabilities::HarnessControl;
+use super::usage::{HarnessTokenUsage, UsageFieldNames};
 use super::{
     capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
-    runner_failure_outcome, timeout_duration, timeout_outcome, total_tokens_from, write_runner_invocation_metadata,
-    write_timing_file, EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
+    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
+    EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
 use crate::agentskills::redact::redact_command_args;
-use crate::agentskills::report::{CacheTokens, PermissionGrant};
+use crate::agentskills::report::PermissionGrant;
 
 const PROGRAM: &str = "cursor-agent";
 const INSTALL_HINT: &str = "install Cursor Agent CLI and ensure `cursor-agent` is on PATH";
+
+/// How cursor-agent spells the counts in its terminal `result` event usage block.
+const USAGE_FIELDS: UsageFieldNames = UsageFieldNames {
+    input: "inputTokens",
+    output: "outputTokens",
+    cache_read: "cacheReadTokens",
+    cache_write: "cacheWriteTokens",
+};
 
 pub fn check_available() -> Result<(), EvalError> {
     check_runner_version(PROGRAM, INSTALL_HINT)
@@ -169,24 +178,12 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
         return runner_failure_outcome(Runner::CursorAgent, duration_ms, exit_code, final_text);
     }
 
-    let usage = result.get("usage");
-    let input_tokens = usage.and_then(|u| u.get("inputTokens")).and_then(|v| v.as_u64());
-    let output_tokens = usage.and_then(|u| u.get("outputTokens")).and_then(|v| v.as_u64());
-    let total_tokens = total_tokens_from(input_tokens, output_tokens);
-    let cache_read = usage.and_then(|u| u.get("cacheReadTokens")).and_then(|v| v.as_u64());
-    let cache_write = usage.and_then(|u| u.get("cacheWriteTokens")).and_then(|v| v.as_u64());
-    let cached_tokens = match (cache_read, cache_write) {
-        (None, None) => None,
-        (read, write) => Some(CacheTokens::parse(read, write).expect("read or write is Some by the match arm")),
-    };
+    let tokens = HarnessTokenUsage::read(result.get("usage"), Runner::CursorAgent, USAGE_FIELDS);
 
     completed_outcome(
         duration_ms,
         exit_code,
-        total_tokens,
-        input_tokens,
-        output_tokens,
-        cached_tokens,
+        tokens,
         Runner::CursorAgent.pricing().price(None),
         final_text,
     )
@@ -195,6 +192,7 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::report::CacheTokens;
 
     #[test]
     fn parses_terminal_result_event() {
@@ -204,11 +202,14 @@ mod tests {
         let outcome = parse_outcome(stdout, 9999, true, Some(0));
         assert!(matches!(outcome.status, RunStatus::Completed));
         assert_eq!(outcome.duration_ms, 1234);
-        assert_eq!(outcome.input_tokens, Some(100));
-        assert_eq!(outcome.output_tokens, Some(50));
-        assert_eq!(outcome.total_tokens, Some(150));
+        assert_eq!(outcome.tokens.input_tokens(), Some(100));
+        assert_eq!(outcome.tokens.output_tokens(), Some(50));
+        assert_eq!(outcome.tokens.total_tokens(), Some(150));
         // A reported zero is still a report: distinct from the harness saying nothing.
-        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(0), None).unwrap()));
+        assert_eq!(
+            outcome.tokens.cached_tokens(),
+            Some(CacheTokens::parse(Some(0), None).unwrap())
+        );
         assert_eq!(outcome.final_text, "hello");
     }
 
@@ -217,8 +218,11 @@ mod tests {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":15}}
 "#;
         let outcome = parse_outcome(stdout, 9999, true, Some(0));
-        assert_eq!(outcome.total_tokens, Some(150));
-        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(Some(15), None).unwrap()));
+        assert_eq!(outcome.tokens.total_tokens(), Some(150));
+        assert_eq!(
+            outcome.tokens.cached_tokens(),
+            Some(CacheTokens::parse(Some(15), None).unwrap())
+        );
     }
 
     #[test]
@@ -226,9 +230,9 @@ mod tests {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":15,"cacheWriteTokens":40}}
 "#;
         let outcome = parse_outcome(stdout, 9999, true, Some(0));
-        assert_eq!(outcome.total_tokens, Some(150));
+        assert_eq!(outcome.tokens.total_tokens(), Some(150));
         assert_eq!(
-            outcome.cached_tokens,
+            outcome.tokens.cached_tokens(),
             Some(CacheTokens::parse(Some(15), Some(40)).unwrap()),
             "cache writes are billed at a premium, so dropping them understates what the run cost"
         );
@@ -239,7 +243,10 @@ mod tests {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheWriteTokens":40}}
 "#;
         let outcome = parse_outcome(stdout, 9999, true, Some(0));
-        assert_eq!(outcome.cached_tokens, Some(CacheTokens::parse(None, Some(40)).unwrap()));
+        assert_eq!(
+            outcome.tokens.cached_tokens(),
+            Some(CacheTokens::parse(None, Some(40)).unwrap())
+        );
     }
 
     #[test]
@@ -248,8 +255,67 @@ mod tests {
 "#;
         let outcome = parse_outcome(stdout, 9999, true, Some(0));
         assert_eq!(
-            outcome.cached_tokens, None,
+            outcome.tokens.cached_tokens(),
+            None,
             "a harness that never mentions cache tokens is not the same as one that measured zero"
+        );
+    }
+
+    #[test]
+    fn a_usage_block_the_harness_filled_in_leaves_nothing_unreadable() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(outcome.tokens.input_tokens(), Some(100));
+        assert_eq!(outcome.tokens.output_tokens(), Some(50));
+        assert!(outcome.tokens.unreadable().is_empty());
+    }
+
+    #[test]
+    fn a_result_carrying_no_usage_block_at_all_reports_no_tokens_and_nothing_to_warn_about() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello"}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(outcome.tokens.total_tokens(), None);
+        assert!(
+            outcome.tokens.unreadable().is_empty(),
+            "a harness that reported nothing contradicted nothing"
+        );
+    }
+
+    #[test]
+    fn a_usage_block_that_leaves_a_field_out_reports_no_count_for_it_and_nothing_to_warn_about() {
+        let stdout =
+            br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(outcome.tokens.input_tokens(), Some(100));
+        assert_eq!(outcome.tokens.output_tokens(), None);
+        assert!(outcome.tokens.unreadable().is_empty());
+    }
+
+    #[test]
+    fn a_usage_field_the_harness_garbled_is_reported_as_unreadable_rather_than_as_a_count_nobody_sent() {
+        let stdout = br#"{"type":"result","is_error":false,"duration_ms":1234,"result":"hello","usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":-1}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        assert_eq!(outcome.tokens.total_tokens(), Some(150));
+        assert_eq!(
+            outcome.tokens.cached_tokens(),
+            None,
+            "a count nobody can read is not a cache read of zero"
+        );
+        let warnings: Vec<String> = outcome
+            .tokens
+            .unreadable()
+            .iter()
+            .map(|field| field.warning())
+            .collect();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("cursor-agent") && warnings[0].contains("cacheReadTokens"),
+            "unexpected warning: {}",
+            warnings[0]
         );
     }
 

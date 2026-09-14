@@ -1202,6 +1202,7 @@ mod fake_runner {
     use std::time::Duration;
 
     use crate::agentskills::budget::RunCost;
+    use crate::agentskills::runner::usage::HarnessTokenUsage;
     use crate::agentskills::runner::{EvalRunOutcome, EvalRunRequest, RunStatus};
 
     /// How long a lane waits for the lanes a test expects alongside it.
@@ -1408,10 +1409,7 @@ mod fake_runner {
                 failure_kind: Some(crate::agentskills::runner::FAILURE_KIND_RUNNER),
                 duration_ms: count as u64 * 100,
                 exit_code: Some(1),
-                total_tokens: Some(count as u64),
-                input_tokens: Some(count as u64),
-                output_tokens: Some(0),
-                cached_tokens: None,
+                tokens: HarnessTokenUsage::reported(Some(count as u64), Some(0), None),
                 cost: cost.clone(),
                 final_text: format!("transient-{count}"),
                 read_only_fixture_violations: Vec::new(),
@@ -1423,10 +1421,7 @@ mod fake_runner {
             failure_kind: None,
             duration_ms: count as u64 * 100,
             exit_code: Some(0),
-            total_tokens: Some(count as u64),
-            input_tokens: Some(count as u64),
-            output_tokens: Some(0),
-            cached_tokens: None,
+            tokens: HarnessTokenUsage::reported(Some(count as u64), Some(0), None),
             cost,
             final_text: format!("run-{count}"),
             read_only_fixture_violations: Vec::new(),
@@ -1486,11 +1481,14 @@ fn apply_outcome(
     run.failure_kind = outcome.failure_kind.map(str::to_string);
     run.metrics.duration_ms = Some(outcome.duration_ms);
     run.metrics.exit_code = outcome.exit_code;
-    run.metrics.total_tokens = outcome.total_tokens;
-    run.metrics.input_tokens = outcome.input_tokens;
-    run.metrics.output_tokens = outcome.output_tokens;
-    run.metrics.cached_tokens = outcome.cached_tokens;
+    run.metrics.total_tokens = outcome.tokens.total_tokens();
+    run.metrics.input_tokens = outcome.tokens.input_tokens();
+    run.metrics.output_tokens = outcome.tokens.output_tokens();
+    run.metrics.cached_tokens = outcome.tokens.cached_tokens();
     run.metrics.cost = outcome.cost.clone();
+    for field in outcome.tokens.unreadable() {
+        run.warnings.push(field.warning());
+    }
 
     run.read_only_fixture_violations = outcome.read_only_fixture_violations.clone();
     for path in &outcome.read_only_fixture_violations {

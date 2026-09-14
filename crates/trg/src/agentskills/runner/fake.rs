@@ -1,5 +1,6 @@
 use std::process::Command;
 
+use super::usage::HarnessTokenUsage;
 use super::{
     capture_subprocess, completed_outcome, persist_runner_io, prepare_workspace, runner_failure_outcome,
     timeout_duration, timeout_outcome, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
@@ -48,10 +49,7 @@ pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome
     Ok(completed_outcome(
         captured.duration_ms,
         captured.exit_code,
-        None,
-        None,
-        None,
-        None,
+        HarnessTokenUsage::unreported(),
         None,
         final_text,
     ))

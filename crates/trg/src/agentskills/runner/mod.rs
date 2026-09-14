@@ -5,6 +5,7 @@ pub mod codex;
 pub mod cursor_agent;
 pub mod environment;
 pub mod group;
+pub mod usage;
 
 #[cfg(test)]
 mod fake;
@@ -39,6 +40,7 @@ use super::transcript::{
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
 use crate::agentskills::schema_version::SchemaVersion;
 use environment::{RecordedEnvironment, RunEnvironment};
+use usage::HarnessTokenUsage;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 pub enum Runner {
@@ -189,10 +191,10 @@ pub struct EvalRunOutcome {
     pub failure_kind: Option<&'static str>,
     pub duration_ms: u64,
     pub exit_code: Option<i32>,
-    pub total_tokens: Option<u64>,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub cached_tokens: Option<CacheTokens>,
+    /// What the harness said about this run's tokens, including any field it wrote in a
+    /// shape that is not a count. The two travel together so a caller cannot publish the
+    /// counts and leave the contradiction behind.
+    pub tokens: HarnessTokenUsage,
     pub cost: Option<RunCost>,
     pub final_text: String,
     /// Read-only fixture paths whose staged copy no longer matches its source.
@@ -327,10 +329,7 @@ pub fn runner_failure_outcome(
         failure_kind: Some(FAILURE_KIND_RUNNER),
         duration_ms,
         exit_code,
-        total_tokens: None,
-        input_tokens: None,
-        output_tokens: None,
-        cached_tokens: None,
+        tokens: HarnessTokenUsage::unreported(),
         cost: runner.pricing().price(None),
         final_text,
         read_only_fixture_violations: Vec::new(),
@@ -345,28 +344,10 @@ pub fn timeout_outcome(runner: Runner, timeout_ms: u64, exit_code: Option<i32>) 
         failure_kind: Some(FAILURE_KIND_RUNNER),
         duration_ms: timeout_ms,
         exit_code,
-        total_tokens: None,
-        input_tokens: None,
-        output_tokens: None,
-        cached_tokens: None,
+        tokens: HarnessTokenUsage::unreported(),
         cost: runner.pricing().price(None),
         final_text: String::new(),
         read_only_fixture_violations: Vec::new(),
-    }
-}
-
-/// The one rule for `total_tokens`, so three runners parsing three different harnesses
-/// cannot each answer "what did this run cost in tokens" a different way.
-///
-/// Deliberately excludes any cached count. Harnesses do not agree on whether a cached
-/// token is billed on top of `input_tokens` or already counted inside it, so folding a
-/// cached figure in here would smuggle that disagreement back into a number a reader is
-/// told is harness-independent. `total_tokens` answers only "how much fresh input and
-/// output did this run report"; `EvalRunOutcome::cached_tokens` carries the rest.
-pub fn total_tokens_from(input_tokens: Option<u64>, output_tokens: Option<u64>) -> Option<u64> {
-    match (input_tokens, output_tokens) {
-        (None, None) => None,
-        (input, output) => Some(input.unwrap_or(0) + output.unwrap_or(0)),
     }
 }
 
@@ -400,20 +381,6 @@ mod effective_permission_grant_tests {
             Runner::CursorAgent.effective_permission_grant(PermissionGrant::Unrestricted),
             PermissionGrant::Unrestricted
         );
-    }
-}
-
-#[cfg(test)]
-mod total_tokens_tests {
-    use super::total_tokens_from;
-
-    /// The shared rule, pinned once so a change to it is a change every runner feels.
-    #[test]
-    fn total_tokens_sums_input_and_output_only() {
-        assert_eq!(total_tokens_from(Some(80), Some(20)), Some(100));
-        assert_eq!(total_tokens_from(Some(80), None), Some(80));
-        assert_eq!(total_tokens_from(None, Some(20)), Some(20));
-        assert_eq!(total_tokens_from(None, None), None);
     }
 }
 
@@ -454,14 +421,10 @@ mod unfinished_run_cost_tests {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn completed_outcome(
     duration_ms: u64,
     exit_code: Option<i32>,
-    total_tokens: Option<u64>,
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cached_tokens: Option<CacheTokens>,
+    tokens: HarnessTokenUsage,
     cost: Option<RunCost>,
     final_text: String,
 ) -> EvalRunOutcome {
@@ -470,10 +433,7 @@ pub fn completed_outcome(
         failure_kind: None,
         duration_ms,
         exit_code,
-        total_tokens,
-        input_tokens,
-        output_tokens,
-        cached_tokens,
+        tokens,
         cost,
         final_text,
         read_only_fixture_violations: Vec::new(),
@@ -1089,10 +1049,10 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
         schema_version: SchemaVersion::current(),
         duration_ms: outcome.duration_ms,
         exit_code: outcome.exit_code,
-        total_tokens: outcome.total_tokens,
-        input_tokens: outcome.input_tokens,
-        output_tokens: outcome.output_tokens,
-        cached_tokens: outcome.cached_tokens,
+        total_tokens: outcome.tokens.total_tokens(),
+        input_tokens: outcome.tokens.input_tokens(),
+        output_tokens: outcome.tokens.output_tokens(),
+        cached_tokens: outcome.tokens.cached_tokens(),
         cost: outcome.cost.clone(),
     };
     std::fs::write(timing_path, serde_json::to_string_pretty(&body).unwrap())
