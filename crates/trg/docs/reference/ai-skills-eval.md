@@ -141,7 +141,7 @@ trg ai skills eval grade <REPORT_DIR> [OPTIONS]
 | ---- | ---- | ------- | ----------- |
 | `--grader` | enum | `auto` | Grading strategy. Values: `auto`, `none`, `llm`, `script` |
 | `--grader-provider` | enum | `openai` | Judge backend for LLM grading. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
-| `--grader-model` | string | *(unset)* | Model identifier for LLM grading |
+| `--grader-model` | string | *(unset)* | Model identifier for LLM grading. Falls back to `TRG_JUDGE_MODEL` |
 | `--grader-command` | string | *(unset)* | External grader script. Reads JSON from stdin: `{assertion, workspace, outputs, transcript}`. Writes `{passed, evidence, rationale?}` to stdout |
 | `--grader-votes` | integer | `1` | Opinions to take from the LLM judge on each assertion, decided by majority. Must be odd, so the panel cannot tie. Costs one judge request per vote per assertion |
 | `--strict` | bool | `false` | Fail when evidence is missing or assertions require LLM grading |
@@ -492,7 +492,7 @@ trg ai skills eval compare <REPORT_DIR> [OPTIONS]
 | `--pair` | string | *(unset)* | Scenario pair to compare, as `<A>:<B>`. Repeatable. Each side is `with_skill`, `without_skill`, or `old_skill`, and the two sides must differ |
 | `--judge` | enum | `none` | Judge used to decide each pair. Values: `none`, `llm`, `script`. With `none`, or with no `--pair` given, the command runs no comparisons |
 | `--judge-provider` | enum | `openai` | Judge backend for `--judge llm`. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
-| `--judge-model` | string | *(unset)* | Model identifier for LLM judging. Required when `--judge llm` |
+| `--judge-model` | string | *(unset)* | Model identifier for LLM judging. Required when `--judge llm`, unless `TRG_JUDGE_MODEL` names one |
 | `--judge-command` | string | *(unset)* | External judge command. Reads JSON from stdin, writes JSON to stdout. Required when `--judge script` |
 | `--emit-comparison-json` | bool | `false` | Write `comparison.json` under iteration layout directories when present |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
@@ -1138,15 +1138,23 @@ assertion to a judge. `compare --judge llm` uses the same machinery.
 | Flag | Default | Description |
 | ---- | ------- | ----------- |
 | `--grader-provider` / `--judge-provider` | `openai` | `openai`, `anthropic`, or `compatible` |
-| `--grader-model` / `--judge-model` | *(unset)* | Required whenever a judge is needed |
+| `--grader-model` / `--judge-model` | *(unset)* | Required whenever a judge is needed, unless `TRG_JUDGE_MODEL` names one |
 | `--grader-votes` | `1` | Opinions taken per assertion, decided by majority. Odd values only. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
 
 | Variable | Description |
 | -------- | ----------- |
 | `TRG_JUDGE_BASE_URL` | Overrides the endpoint. Required for `compatible` |
+| `TRG_JUDGE_MODEL` | Model to judge with when no `--grader-model` or `--judge-model` is passed |
 | `TRG_JUDGE_API_KEY` | Overrides the credential for any provider |
 | `OPENAI_API_KEY` | Credential for `openai` when `TRG_JUDGE_API_KEY` is unset |
 | `ANTHROPIC_API_KEY` | Credential for `anthropic` when `TRG_JUDGE_API_KEY` is unset |
+
+A judge is addressed by an endpoint, a credential, and a model. The first two
+already come from the environment, so `TRG_JUDGE_MODEL` is what lets a judged
+pass run without naming a model on every invocation. A flag still wins where one
+is passed, and the model recorded in `grading.json` and `comparison.json` is
+whichever one actually answered, not the flag. There is no built-in default: a
+model identifier compiled into a release outlives the model it names.
 
 The judge is chosen independently of `--runner`: grading a `codex` run with an
 Anthropic judge, or a `claude-code` run with a local OpenAI-compatible endpoint,

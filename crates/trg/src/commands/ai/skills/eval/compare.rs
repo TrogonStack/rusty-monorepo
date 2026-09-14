@@ -80,7 +80,11 @@ pub struct CompareArgs {
     )]
     pub judge_provider: JudgeProvider,
 
-    #[arg(long, value_name = "MODEL", help = "Model identifier for LLM judging")]
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help = "Model identifier for LLM judging. Defaults to TRG_JUDGE_MODEL."
+    )]
     pub judge_model: Option<String>,
 
     #[arg(

@@ -39,6 +39,7 @@ pub enum JudgeProvider {
 
 pub const BASE_URL_ENV: &str = "TRG_JUDGE_BASE_URL";
 pub const API_KEY_ENV: &str = "TRG_JUDGE_API_KEY";
+pub const MODEL_ENV: &str = "TRG_JUDGE_MODEL";
 pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
 impl JudgeProvider {
@@ -85,6 +86,22 @@ impl JudgeModel {
             return None;
         }
         Some(Self(value))
+    }
+
+    /// The model to judge with: the flag when one was passed, and the environment
+    /// otherwise.
+    ///
+    /// The endpoint and the credential already come from the environment when no flag
+    /// names them, and the model is the remaining reason a judged pass needs a second
+    /// flag on every invocation. It is read here rather than defaulted to a built-in
+    /// identifier because a model name compiled into a release outlives the model.
+    pub fn resolve_from(env: &impl JudgeEnv, flag: Option<&str>) -> Option<Self> {
+        flag.and_then(Self::new)
+            .or_else(|| env.non_empty(MODEL_ENV).and_then(Self::new))
+    }
+
+    pub fn resolve(flag: Option<&str>) -> Option<Self> {
+        Self::resolve_from(&ProcessEnv, flag)
     }
 
     pub fn as_str(&self) -> &str {
@@ -487,6 +504,36 @@ mod tests {
         fn var(&self, key: &str) -> Option<String> {
             self.0.get(key).map(|value| (*value).to_string())
         }
+    }
+
+    #[test]
+    fn a_model_named_on_the_command_line_wins_over_the_environment() {
+        let env = MapEnv::new(&[(MODEL_ENV, "from-the-environment")]);
+
+        let model = JudgeModel::resolve_from(&env, Some("from-the-flag"));
+
+        assert_eq!(model.map(|model| model.to_string()), Some("from-the-flag".to_string()));
+    }
+
+    #[test]
+    fn a_pass_that_names_no_model_takes_the_one_the_environment_names() {
+        let env = MapEnv::new(&[(MODEL_ENV, "from-the-environment")]);
+
+        let model = JudgeModel::resolve_from(&env, None);
+
+        assert_eq!(
+            model.map(|model| model.to_string()),
+            Some("from-the-environment".to_string())
+        );
+    }
+
+    #[test]
+    fn an_environment_that_names_no_model_leaves_the_pass_without_one() {
+        let env = MapEnv::new(&[(MODEL_ENV, "   ")]);
+
+        assert!(JudgeModel::resolve_from(&env, None).is_none());
+        assert!(JudgeModel::resolve_from(&env, Some(" ")).is_none());
+        assert!(JudgeModel::resolve_from(&MapEnv::new(&[]), None).is_none());
     }
 
     fn endpoint(provider: JudgeProvider, env: &MapEnv) -> Result<JudgeEndpoint, EvalError> {
