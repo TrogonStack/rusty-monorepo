@@ -510,6 +510,23 @@ impl Backend {
         }
     }
 
+    /// The operator-facing command that removes one secret from this backend,
+    /// or `None` for a backend with no such command to give.
+    ///
+    /// Only OpenBao has an out-of-band removal path for `trg` to point at:
+    /// the Keychain and 1Password are removed through their own tools, not a
+    /// command `trg` can print. The backend that owns the path layout renders
+    /// the string, since a `SecretPath` alone is backend-relative and cannot
+    /// be pasted into a shell as-is.
+    pub fn removal_command(&self, path: &SecretPath) -> Option<String> {
+        match self {
+            Self::OpenBao(b) => Some(b.removal_command(path)),
+            Self::Keychain(_) | Self::OnePassword(_) => None,
+            #[cfg(test)]
+            Self::Fake(_) => None,
+        }
+    }
+
     /// Read one 1Password item, the unit that backend answers in.
     ///
     /// Deliberately not folded into [`Self::get`]: no other backend has
@@ -904,6 +921,23 @@ mod tests {
         let backend = openbao_backend(Some("laptop"));
         let err = backend.shared_credential_path("my server").expect_err("should refuse");
         assert!(err.to_string().contains("openbao"), "{err}");
+    }
+
+    /// Only OpenBao has an out-of-band removal command to give; the Keychain
+    /// and 1Password are removed through their own tools, not a command `trg`
+    /// prints, so they answer `None` rather than guessing one.
+    #[test]
+    fn only_openbao_offers_a_removal_command() {
+        let path = SecretPath::parse("mcp/github").expect("parse");
+
+        let openbao = openbao_backend(Some("laptop"));
+        assert_eq!(
+            openbao.removal_command(&path),
+            Some("bao kv metadata delete secret/trg/yordis/mcp/github".to_string())
+        );
+
+        let keychain = Backend::Keychain(KeychainBackend::with_default_service());
+        assert_eq!(keychain.removal_command(&path), None);
     }
 
     #[test]

@@ -307,23 +307,33 @@ was written in the config.
 
 Adding, changing, or removing `machine_id` relocates which path a login
 writes to, but it never relocates a credential already sitting under the old
-path. `trg` only ever reads a credential from the path it lives at; when the
-machine-scoped path is empty, it falls back to reading the shared,
-pre-`machine_id` path and reports that it did, rather than copying or moving
-what it found there. A background token refresh writes back to wherever the
-credential was actually read from, so a machine still reading the shared path
-keeps refreshing that same shared entry in place for as long as it stays on
-it; nothing copies it onto the machine-scoped path first. Copying on read
-would leave both paths readable, so every machine sharing the old path would
-go on refreshing the same grant after one of them was meant to have its own,
-which is the exact replay `machine_id` exists to prevent; moving it would
-break every machine that had not yet logged in again under the new layout.
-Re-authorizing with `trg mcp auth login` is what actually writes the
-machine-scoped credential: an explicit login always treats the machine-scoped
-path as the only path, so it runs the full flow even when the shared path
-still holds a usable credential. The old one is left in place until it is
-removed directly against the backend, since `trg` has no command of its own
-for that; until it is removed, it keeps being refreshed by every machine
+path. `trg` only ever reads a credential from the path it lives at, and the
+fallback that covers the gap reaches exactly one other path: the shared,
+pre-`machine_id` layout `mcp/<server-name>` with no machine segment at all.
+Declaring `machine_id` for the first time is the transition that fallback
+closes: the machine-scoped path is empty, the credential is still sitting at
+the shared path from before `machine_id` existed, and a read falls back to it
+and reports that it did, rather than copying or moving what it found there. A
+background token refresh writes back to wherever the credential was actually
+read from, so a machine still reading the shared path keeps refreshing that
+same shared entry in place for as long as it stays on it; nothing copies it
+onto the machine-scoped path first. Copying on read would leave both paths
+readable, so every machine sharing the old path would go on refreshing the
+same grant after one of them was meant to have its own, which is the exact
+replay `machine_id` exists to prevent.
+
+Changing an already-set `machine_id` to a different value, or removing one
+that was already set, is not covered: the fallback only ever probes
+`mcp/<server-name>`, never a previous `machine_id`'s own path, so a credential
+at `mcp/laptop/<server-name>` is not found by a read against
+`mcp/desktop/<server-name>` or against the bare path. Either transition needs
+`trg mcp auth login` again on that machine. Re-authorizing is also what
+actually writes the machine-scoped credential in the covered case: an
+explicit login always treats the machine-scoped path as the only path, so it
+runs the full flow even when a shared or old path still holds a usable
+credential. Whatever was left behind, at whichever path, stays there until it
+is removed directly against the backend, since `trg` has no command of its
+own for that; until it is removed, it keeps being refreshed by every machine
 still reading it.
 
 Exactly one of `token_file` or `token` must be declared. Declaring neither or
@@ -465,9 +475,12 @@ covers everything `trg` stores for them, not just MCP credentials. Declaring
 own entry to authorize separately.
 
 A read against the `machine_id` form falls back to the bare form when the
-former is empty, so turning `machine_id` on or off does not orphan whatever
-was already stored. See "`machine_id` is which holder may refresh a
-credential" above for what that fallback does and does not do.
+former is empty, which covers declaring `machine_id` for the first time: a
+credential already sitting at the bare form from before `machine_id` existed
+is still found. Changing an already-declared `machine_id`, or removing one, is
+not covered the same way, since the bare form is the only fallback and neither
+transition's old credential lives there. See "`machine_id` is which holder may
+refresh a credential" above for what that fallback does and does not do.
 
 A server stored in OpenBao must be named with `[A-Za-z0-9._-]`, since the name
 becomes a path segment. The Keychain accepts any name.

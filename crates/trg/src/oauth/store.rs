@@ -153,6 +153,30 @@ impl OAuthCredentialStore {
         self.read_from.clone()
     }
 
+    /// Whether the pre-`machine_id` shared path still holds something, for a
+    /// caller that has to answer whether this machine is still effectively
+    /// signed in, such as `logout` right after it clears the machine-scoped
+    /// path.
+    ///
+    /// Deliberately not [`Self::load_from_fallback`]: that method turns a
+    /// fallback read error into `Ok(None)`, which is right for a courtesy
+    /// read that must not block a login, but wrong here. `logout` needs to
+    /// know, and a storage error means it does not, so this propagates one
+    /// instead of reporting a clean logout it cannot vouch for. A payload
+    /// that is present but will not decode still counts as reachable, not as
+    /// clean: erring toward telling the operator something is there is the
+    /// safe direction.
+    pub async fn fallback_is_reachable(&self) -> Result<Option<SecretPath>, AuthError> {
+        let Some(fallback) = self.fallback.clone() else {
+            return Ok(None);
+        };
+        match self.backend.get(&fallback).await {
+            Ok(Some(_)) => Ok(Some(fallback)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(self.to_auth_error(e)),
+        }
+    }
+
     fn key() -> SecretKey {
         SecretKey::parse(CREDENTIALS_KEY).expect("CREDENTIALS_KEY is a valid secret key")
     }
@@ -272,7 +296,7 @@ impl OAuthCredentialStore {
             }
         };
 
-        let Some(credentials) = self.decode_from_fallback_map(&fallback, &map) else {
+        let Some(credentials) = self.decode_from_fallback_map(&fallback, &map)? else {
             return Ok(None);
         };
 
@@ -292,19 +316,31 @@ impl OAuthCredentialStore {
     /// Decode whatever credential value a fallback read turned up, without
     /// writing anything back: the fallback path stays exactly as found,
     /// migrated key shape and all.
-    fn decode_from_fallback_map(&self, path: &SecretPath, map: &SecretMap) -> Option<StoredCredentials> {
-        let raw = map.get(&Self::key_v2()).or_else(|| map.get(&Self::key()))?;
-        match serde_json::from_str(raw.expose_secret()) {
-            Ok(credentials) => Some(credentials),
-            Err(e) => {
-                tracing::debug!(
-                    path = %path,
-                    error = %e,
-                    "the shared OAuth credential fallback path did not decode"
-                );
-                None
-            }
+    ///
+    /// Applies the same corruption and newer-version handling
+    /// [`Self::load_from_map`] applies to the primary path: a fallback that
+    /// holds something this trg cannot read is not the same as a fallback
+    /// that holds nothing, and reporting it as absent would send `load` on
+    /// to open a fresh authorization flow against a path that in fact has a
+    /// credential on it. A genuinely empty fallback still answers `Ok(None)`.
+    fn decode_from_fallback_map(
+        &self,
+        path: &SecretPath,
+        map: &SecretMap,
+    ) -> Result<Option<StoredCredentials>, AuthError> {
+        if let Some(value) = map.get(&Self::key_v2()) {
+            return self.decode_or_corrupt_at(path, value.expose_secret()).map(Some);
         }
+        if let Some(value) = map.get(&Self::key()) {
+            return self.decode_or_corrupt_at(path, value.expose_secret()).map(Some);
+        }
+        if let Some(key) = newer_version_key(map) {
+            return Err(self.credential_read_error(CredentialReadError::NewerVersion {
+                path: path.clone(),
+                key,
+            }));
+        }
+        Ok(None)
     }
 
     /// Case 2: the outer map decoded. `credentials.v2` wins when present
@@ -380,11 +416,17 @@ impl OAuthCredentialStore {
     /// (line and column a person cannot act on) in favor of a message naming
     /// what to do about it. The original error still reaches the debug log.
     fn decode_or_corrupt(&self, raw: &str) -> Result<StoredCredentials, AuthError> {
+        self.decode_or_corrupt_at(&self.path, raw)
+    }
+
+    /// [`Self::decode_or_corrupt`], naming `path` rather than `self.path` in
+    /// the error: the fallback path decodes with the same rules as the
+    /// primary, but a message pointing at `self.path` would send the reader
+    /// to a secret that is not the one actually holding the bad payload.
+    fn decode_or_corrupt_at(&self, path: &SecretPath, raw: &str) -> Result<StoredCredentials, AuthError> {
         serde_json::from_str(raw).map_err(|e| {
-            tracing::debug!(path = %self.path, error = %e, "stored OAuth credentials did not decode");
-            self.credential_read_error(CredentialReadError::Corrupt {
-                path: self.path.clone(),
-            })
+            tracing::debug!(path = %path, error = %e, "stored OAuth credentials did not decode");
+            self.credential_read_error(CredentialReadError::Corrupt { path: path.clone() })
         })
     }
 
@@ -866,6 +908,71 @@ mod tests {
             .expect("a fallback read error must not fail the load");
         assert!(loaded.is_none());
         assert_eq!(read_from.get(), None);
+    }
+
+    /// The hole this covers: a fallback payload that will not decode used to
+    /// read as "nothing there", exactly like an empty fallback, so `load`
+    /// would go on to report no stored credentials and open a fresh
+    /// authorization flow against a path that in fact holds something this
+    /// trg could not read. It has to surface the same way a corrupt primary
+    /// payload does, naming the fallback path rather than the primary one.
+    #[tokio::test]
+    async fn a_corrupt_fallback_payload_is_reported_not_treated_as_absent() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let mut map = SecretMap::new();
+        map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from("not json".to_string()),
+        );
+        backend.set(&shared, &map).await.expect("seed");
+
+        let rendered = store
+            .load()
+            .await
+            .expect_err("a fallback payload that will not decode must not read as absent")
+            .to_string();
+        assert!(
+            rendered.contains("at `mcp/github`"),
+            "must name the fallback path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("at `github`"),
+            "must not name the primary path, which was never read: {rendered}"
+        );
+    }
+
+    /// Same as the primary path: an unrecognized `credentials.vN` at the
+    /// fallback is a newer `trg` sharing the backend, not a missing
+    /// credential.
+    #[tokio::test]
+    async fn a_newer_version_fallback_payload_is_reported_not_treated_as_absent() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let mut map = SecretMap::new();
+        map.insert(
+            SecretKey::parse("credentials.v7").unwrap(),
+            SecretString::from("whatever a newer trg wrote".to_string()),
+        );
+        backend.set(&shared, &map).await.expect("seed");
+
+        let rendered = store
+            .load()
+            .await
+            .expect_err("an unknown newer version at the fallback should not decode as ours")
+            .to_string();
+        assert!(
+            rendered.contains("at `mcp/github`"),
+            "must name the fallback path: {rendered}"
+        );
+        assert!(
+            !rendered.contains("at `github`"),
+            "must not name the primary path, which was never read: {rendered}"
+        );
+        assert!(rendered.contains("credentials.v7"), "{rendered}");
+        assert!(rendered.to_lowercase().contains("upgrade"), "{rendered}");
     }
 
     /// Case 2b: today's live shape, a `StoredCredentials` blob wrapped under
