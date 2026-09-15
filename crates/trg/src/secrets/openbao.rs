@@ -453,6 +453,19 @@ impl OpenBaoBackend {
         }
     }
 
+    /// The `bao` command that removes one of this backend's secrets, fully
+    /// qualified with `mount` and [`Self::storage_prefix`].
+    ///
+    /// A [`SecretPath`] is backend-relative on purpose, so it is never enough
+    /// on its own to address a command at the operator's shell: the same
+    /// relative path lives at a different fully-qualified address in every
+    /// mount and subtree. Only the backend that laid the tree out can close
+    /// that gap, which is why this lives beside [`Self::storage_prefix`]
+    /// rather than being reconstructed wherever a command wants to print one.
+    pub fn removal_command(&self, path: &SecretPath) -> String {
+        format!("bao kv metadata delete {}/{}/{path}", self.mount, self.storage_prefix())
+    }
+
     /// Whether a server name can address this backend at all.
     ///
     /// Checked when the path is built rather than when it is first used, so a
@@ -1573,6 +1586,32 @@ mod tests {
         let b = OpenBaoBackend::new(s).expect("build");
 
         assert_eq!(b.shared_credential_path("github"), None);
+    }
+
+    /// A `SecretPath` is backend-relative, so the command a person is told to
+    /// paste has to carry the mount and storage prefix too: `mcp/github`
+    /// alone is not addressable against `bao` from outside this backend's own
+    /// config.
+    #[test]
+    fn the_removal_command_is_fully_qualified_with_the_mount_and_storage_prefix() {
+        let b = backend("https://bao.example.com:8200");
+
+        let command = b.removal_command(&path("mcp/github"));
+
+        assert_eq!(command, "bao kv metadata delete secret/trg/yordis/mcp/github");
+    }
+
+    /// An empty `path_prefix` drops straight to `owner`, with no doubled or
+    /// missing separator.
+    #[test]
+    fn the_removal_command_has_no_stray_separator_when_path_prefix_is_empty() {
+        let mut s = settings("https://bao.example.com:8200");
+        s.path_prefix = String::new();
+        let b = OpenBaoBackend::new(s).expect("build");
+
+        let command = b.removal_command(&path("mcp/github"));
+
+        assert_eq!(command, "bao kv metadata delete secret/yordis/mcp/github");
     }
 
     #[test]

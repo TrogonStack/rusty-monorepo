@@ -393,6 +393,10 @@ fn format_duration(secs: u64) -> String {
 /// through the fallback once this returns. The `Some(path)` case names that
 /// shared path, for `cleared` to report honestly instead of claiming a clean
 /// logout.
+///
+/// Checks the fallback strictly, not through `load`: a storage error while
+/// checking has to surface rather than read as "nothing there", or this
+/// reports the clean logout it just stopped lying about.
 async fn logout(ctx: &McpContext) -> Result<Option<SecretPath>, AuthError> {
     let store = OAuthCredentialStore::new(
         ctx.backend.clone(),
@@ -401,18 +405,23 @@ async fn logout(ctx: &McpContext) -> Result<Option<SecretPath>, AuthError> {
         ctx.fallback.clone(),
     );
     store.clear().await?;
-
-    let read_from = store.read_from();
-    let still_authenticated = store.load().await?.is_some();
-    Ok(still_authenticated.then(|| read_from.get()).flatten())
+    Ok(store.fallback_is_reachable().await?)
 }
 
 fn cleared(format: OutputFormat, ctx: &McpContext, still_reachable_via: Option<&SecretPath>) -> i32 {
+    let removal_command = still_reachable_via.and_then(|shared| ctx.backend.removal_command(shared));
+
     if format.is_json() {
-        return print_json(&cleared_document(&ctx.server_name, still_reachable_via), 0);
+        return print_json(
+            &cleared_document(&ctx.server_name, still_reachable_via, removal_command.as_deref()),
+            0,
+        );
     }
 
-    println!("{}", cleared_message(&ctx.server_name, still_reachable_via));
+    println!(
+        "{}",
+        cleared_message(&ctx.server_name, still_reachable_via, removal_command.as_deref())
+    );
     0
 }
 
@@ -420,28 +429,50 @@ fn cleared(format: OutputFormat, ctx: &McpContext, still_reachable_via: Option<&
 /// machine is fully signed out even when `still_reachable_via` names a
 /// fallback it will keep authenticating from, so that case adds fields
 /// saying so instead of standing on its own.
-fn cleared_document(server: &str, still_reachable_via: Option<&SecretPath>) -> Value {
+///
+/// `removal_command` is fully qualified by the backend that owns the path
+/// layout, never reconstructed here: a `SecretPath` is backend-relative, so
+/// printing it alone as a command would name something that cannot be run,
+/// or worse something else entirely at that relative path under a different
+/// mount. `None` when the backend has no such command to give.
+fn cleared_document(server: &str, still_reachable_via: Option<&SecretPath>, removal_command: Option<&str>) -> Value {
     match still_reachable_via {
-        Some(shared) => json!({
-            "server": server,
-            "cleared": true,
-            "shared_path": shared.to_string(),
-            "note": format!(
-                "this machine will keep authenticating from the shared credential at `{shared}`; \
-                 remove it with `bao kv metadata delete {shared}` to sign out every machine using it"
-            ),
-        }),
+        Some(shared) => {
+            let note = match removal_command {
+                Some(command) => format!(
+                    "this machine will keep authenticating from the shared credential at `{shared}`; \
+                     remove it with `{command}` to sign out every machine using it"
+                ),
+                None => format!(
+                    "this machine will keep authenticating from the shared credential at `{shared}`; \
+                     remove it directly against the backend to sign out every machine using it"
+                ),
+            };
+            json!({
+                "server": server,
+                "cleared": true,
+                "shared_path": shared.to_string(),
+                "note": note,
+            })
+        }
         None => json!({ "server": server, "cleared": true }),
     }
 }
 
-fn cleared_message(server: &str, still_reachable_via: Option<&SecretPath>) -> String {
+fn cleared_message(server: &str, still_reachable_via: Option<&SecretPath>, removal_command: Option<&str>) -> String {
     match still_reachable_via {
-        Some(shared) => format!(
-            "Machine-scoped OAuth credentials cleared for `{server}`, but a shared credential at `{shared}` \
-             is still reachable: this machine will keep authenticating from it. Remove it with `bao kv \
-             metadata delete {shared}` to sign out every machine using it."
-        ),
+        Some(shared) => match removal_command {
+            Some(command) => format!(
+                "Machine-scoped OAuth credentials cleared for `{server}`, but a shared credential at `{shared}` \
+                 is still reachable: this machine will keep authenticating from it. Remove it with `{command}` \
+                 to sign out every machine using it."
+            ),
+            None => format!(
+                "Machine-scoped OAuth credentials cleared for `{server}`, but a shared credential at `{shared}` \
+                 is still reachable: this machine will keep authenticating from it. Remove it directly against \
+                 the backend to sign out every machine using it."
+            ),
+        },
         None => format!("OAuth credentials cleared for `{server}`."),
     }
 }
@@ -453,10 +484,26 @@ mod tests {
 
     use super::*;
     use crate::oauth::store::CREDENTIALS_KEY_V2;
-    use crate::secrets::{fake::FakeBackend, Backend, SecretKey, SecretMap};
+    use crate::secrets::{fake::FakeBackend, openbao, Backend, FakeFailure, SecretKey, SecretMap};
 
     fn stored() -> StoredCredentials {
         StoredCredentials::new("client".to_string(), None, vec!["scope".to_string()], Some(42))
+    }
+
+    fn openbao_backend() -> Backend {
+        Backend::OpenBao(
+            openbao::OpenBaoBackend::new(openbao::OpenBaoSettings {
+                addr: "https://bao.example.com:8200".to_string(),
+                mount: "secret".to_string(),
+                path_prefix: "trg".to_string(),
+                owner: "yordis".to_string(),
+                machine_id: Some("laptop".to_string()),
+                token: openbao::TokenSource::Var(crate::config::VarSource::Literal("t".to_string())),
+                ca_cert_file: None,
+                timeout: std::time::Duration::from_secs(5),
+            })
+            .expect("build"),
+        )
     }
 
     async fn seed(backend: &Backend, path: &SecretPath, client_id: &str) {
@@ -503,11 +550,15 @@ mod tests {
     fn cleared_text_names_the_shared_path_and_the_removal_command_when_one_is_still_reachable() {
         let shared = SecretPath::parse("mcp/github").expect("parse");
 
-        let message = cleared_message("github", Some(&shared));
+        let message = cleared_message(
+            "github",
+            Some(&shared),
+            Some("bao kv metadata delete secret/trg/yordis/mcp/github"),
+        );
 
         assert!(message.contains("mcp/github"), "must name the shared path: {message}");
         assert!(
-            message.contains("bao kv metadata delete mcp/github"),
+            message.contains("bao kv metadata delete secret/trg/yordis/mcp/github"),
             "must name the removal command: {message}"
         );
         assert!(
@@ -516,9 +567,26 @@ mod tests {
         );
     }
 
+    /// A backend with no removal command to give (none today, but the call
+    /// site must not assume OpenBao is the only kind that can end up here)
+    /// still says the credential is reachable, just without a command to
+    /// paste.
+    #[test]
+    fn cleared_text_still_names_the_shared_path_when_the_backend_has_no_removal_command() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+
+        let message = cleared_message("github", Some(&shared), None);
+
+        assert!(message.contains("mcp/github"), "must name the shared path: {message}");
+        assert!(
+            message.contains("directly against the backend"),
+            "must still point at a remedy: {message}"
+        );
+    }
+
     #[test]
     fn cleared_text_reports_a_clean_logout_when_nothing_is_left_reachable() {
-        let message = cleared_message("github", None);
+        let message = cleared_message("github", None, None);
 
         assert_eq!(message, "OAuth credentials cleared for `github`.");
     }
@@ -527,7 +595,11 @@ mod tests {
     fn cleared_json_says_more_than_cleared_true_when_a_shared_path_is_still_reachable() {
         let shared = SecretPath::parse("mcp/github").expect("parse");
 
-        let document = cleared_document("github", Some(&shared));
+        let document = cleared_document(
+            "github",
+            Some(&shared),
+            Some("bao kv metadata delete secret/trg/yordis/mcp/github"),
+        );
 
         assert_eq!(document["cleared"], true);
         assert_eq!(document["shared_path"], "mcp/github");
@@ -535,16 +607,39 @@ mod tests {
             document["note"]
                 .as_str()
                 .unwrap()
-                .contains("bao kv metadata delete mcp/github"),
+                .contains("bao kv metadata delete secret/trg/yordis/mcp/github"),
             "the note must name the removal command: {document}"
         );
     }
 
     #[test]
     fn cleared_json_reports_cleared_true_alone_when_nothing_is_left_reachable() {
-        let document = cleared_document("github", None);
+        let document = cleared_document("github", None, None);
 
         assert_eq!(document, json!({ "server": "github", "cleared": true }));
+    }
+
+    /// The hole this covers: a `SecretPath` is backend-relative, so a note
+    /// naming only `mcp/github` prints a command that either fails to
+    /// address anything or, worse, addresses some other secret under a
+    /// mount named `mcp`. `cleared` has to ask the backend for the fully
+    /// qualified command, mount and storage prefix and all, rather than
+    /// printing the relative path itself.
+    #[test]
+    fn cleared_names_the_fully_qualified_removal_command_not_just_the_relative_path() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let removal_command = openbao_backend()
+            .removal_command(&shared)
+            .expect("openbao offers a removal command");
+
+        assert_eq!(removal_command, "bao kv metadata delete secret/trg/yordis/mcp/github");
+        let document = cleared_document("github", Some(&shared), Some(&removal_command));
+
+        assert_eq!(
+            document["note"].as_str().unwrap(),
+            "this machine will keep authenticating from the shared credential at `mcp/github`; remove it \
+             with `bao kv metadata delete secret/trg/yordis/mcp/github` to sign out every machine using it"
+        );
     }
 
     /// A machine with no fallback (or an already-empty one) logs out clean:
@@ -586,5 +681,28 @@ mod tests {
             backend.get(&cred_path).await.expect("get").is_none(),
             "the machine-scoped credential must still be deleted"
         );
+    }
+
+    /// The hole this covers: `load` turns a fallback read error into a clean
+    /// miss, which is right for a courtesy read but wrong for `logout`, which
+    /// has to answer whether this machine is still signed in. A storage error
+    /// while checking must surface rather than read as "nothing there".
+    #[tokio::test]
+    async fn logout_propagates_a_fallback_read_error_instead_of_reporting_a_clean_logout() {
+        let backend = Backend::Fake(FakeBackend::new());
+        let cred_path = SecretPath::parse("mcp/laptop/github").expect("parse");
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        seed(&backend, &cred_path, "machine-cred").await;
+        let Backend::Fake(fake) = &backend else {
+            unreachable!("built as fake above");
+        };
+        fake.set_get_failure_at(shared.clone(), FakeFailure::Transport);
+        let ctx = McpContext::credentials_only("github".to_string(), backend, cred_path, Some(shared));
+
+        let err = logout(&ctx)
+            .await
+            .expect_err("a fallback read error must not read as a clean logout");
+
+        assert!(matches!(err, AuthError::Store(_)), "{err}");
     }
 }
