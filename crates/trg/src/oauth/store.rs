@@ -1089,11 +1089,7 @@ mod tests {
         let (backend, store) = store();
         fake(&backend).set_get_failure(Some(FakeFailure::MalformedWithRaw("not json at all".to_string())));
 
-        let rendered = store
-            .load()
-            .await
-            .expect_err("garbage should not parse")
-            .to_string();
+        let rendered = store.load().await.expect_err("garbage should not parse").to_string();
         assert!(!rendered.contains("line"), "{rendered}");
         assert!(!rendered.contains("column"), "{rendered}");
         assert!(rendered.contains("trg mcp auth logout"), "{rendered}");
