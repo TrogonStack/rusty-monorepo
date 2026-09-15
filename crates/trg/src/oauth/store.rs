@@ -812,6 +812,57 @@ mod tests {
         );
     }
 
+    /// The other half of the guarantee `ensure_credentials_for` relies on for
+    /// a freshly minted grant: with no fallback configured, `save` has no
+    /// shared path to target, even when one happens to be populated at what
+    /// would otherwise be the fallback address. A fresh grant can only ever
+    /// land on the primary path, not the address a fallback-carrying store
+    /// would have read from.
+    #[tokio::test]
+    async fn a_store_with_no_fallback_always_saves_to_the_primary_even_when_a_would_be_fallback_path_is_populated() {
+        let would_be_fallback = SecretPath::parse("mcp/github").expect("parse");
+        let backend = Backend::Fake(FakeBackend::new());
+
+        let shared_json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json.clone()),
+        );
+        backend
+            .set(&would_be_fallback, &shared_map)
+            .await
+            .expect("seed the would-be fallback path");
+
+        let path = SecretPath::parse("github").expect("parse");
+        let store = OAuthCredentialStore::new(backend.clone(), path.clone(), "github", None);
+
+        store.save(credentials("fresh-cred")).await.expect("save");
+
+        let primary = backend.get(&path).await.expect("get").expect("some");
+        let raw = primary
+            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+            .expect("v2 key");
+        let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
+        assert_eq!(
+            decoded.client_id, "fresh-cred",
+            "a store with no fallback must save a fresh grant to the primary path"
+        );
+
+        let would_be_fallback_after = backend
+            .get(&would_be_fallback)
+            .await
+            .expect("get")
+            .expect("still there");
+        assert_eq!(
+            would_be_fallback_after
+                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .map(|v| v.expose_secret()),
+            Some(shared_json.as_str()),
+            "a store with no fallback must never touch the would-be fallback path"
+        );
+    }
+
     #[tokio::test]
     async fn a_primary_hit_never_reads_the_fallback() {
         let shared = SecretPath::parse("mcp/github").expect("parse");
