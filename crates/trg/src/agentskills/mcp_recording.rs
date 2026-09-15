@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 
 use super::mocks::{ExpectConstraint, ExpectPath, JsonTypeName, ServerName, ToolName};
 use super::real_mcp_server::RealServerCommand;
+use super::runner::group::{self, ProcessGroupGuard};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecordingError {
@@ -64,11 +65,15 @@ pub enum RecordingError {
 /// `real_mcp_server::admit_real_server` has let the command through.
 ///
 /// This holds a process that was admitted specifically because it runs as the operator,
-/// outside anything a run confines; `Drop` is the backstop that kills and reaps it on every
-/// path that ends the session without a clean `finish`, so a failed or timed-out recording
-/// cannot leave that process running behind `trg`.
+/// outside anything a run confines. Many real MCP servers are started through a wrapper
+/// (`npx`, `uvx`, a shell script) that forks the actual server as a grandchild, so the
+/// session leads its own process group and signals the whole group rather than just the
+/// wrapper's pid; `Drop` is the backstop that tears the group down on every path that ends
+/// the session without a clean `finish`, so a failed or timed-out recording cannot leave
+/// that process, or anything it forked, running behind `trg`.
 pub struct RealMcpServerSession {
     child: Child,
+    group: ProcessGroupGuard,
     stdin: Option<ChildStdin>,
     responses: mpsc::Receiver<String>,
     command_label: String,
@@ -77,7 +82,7 @@ pub struct RealMcpServerSession {
 
 impl Drop for RealMcpServerSession {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.group.terminate();
         let _ = self.child.wait();
     }
 }
@@ -85,16 +90,17 @@ impl Drop for RealMcpServerSession {
 impl RealMcpServerSession {
     pub fn spawn(command: &RealServerCommand) -> Result<Self, RecordingError> {
         let command_label = command.to_string();
-        let mut child = Command::new(command.program())
-            .args(command.args())
+        let mut cmd = Command::new(command.program());
+        cmd.args(command.args())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| RecordingError::Spawn {
-                command: command_label.clone(),
-                source,
-            })?;
+            .stderr(Stdio::piped());
+        group::lead_own_group(&mut cmd);
+        let mut child = cmd.spawn().map_err(|source| RecordingError::Spawn {
+            command: command_label.clone(),
+            source,
+        })?;
+        let group = ProcessGroupGuard::led_by(&child);
 
         let stdin = child.stdin.take().expect("spawned with a piped stdin");
         let stdout = child.stdout.take().expect("spawned with a piped stdout");
@@ -122,6 +128,7 @@ impl RealMcpServerSession {
 
         Ok(Self {
             child,
+            group,
             stdin: Some(stdin),
             responses: rx,
             command_label,
@@ -179,9 +186,13 @@ impl RealMcpServerSession {
         let deadline = Instant::now() + timeout;
         loop {
             match self.child.try_wait() {
-                Ok(Some(_)) => return Ok(()),
+                Ok(Some(_)) => {
+                    self.group.stop_leftovers();
+                    return Ok(());
+                }
                 Ok(None) => {
                     if Instant::now() >= deadline {
+                        self.group.terminate();
                         let _ = self.child.kill();
                         let _ = self.child.wait();
                         return Ok(());
@@ -365,10 +376,12 @@ fn type_name_label(type_name: JsonTypeName) -> &'static str {
 ///
 /// The frontmatter is built directly rather than through a YAML serializer (none is in this
 /// workspace; `gray_matter` only parses YAML, it does not write it): every `expect` value it
-/// carries is one of the five fixed `JsonTypeName` labels, which need no quoting, and every
-/// key or `error` string that is not already a safe bare identifier is rendered as a
-/// double-quoted scalar using `serde_json`'s escaping, which YAML's double-quoted style
-/// reads the same way JSON does.
+/// carries is one of the five fixed `JsonTypeName` labels, which need no quoting; every
+/// `expect` key and the `error` string are field names and text taken verbatim from the
+/// server's own answer, so each is rendered as a double-quoted scalar using `serde_json`'s
+/// escaping, which YAML's double-quoted style reads the same way JSON does. A key is never
+/// left bare: a field named, say, `0755` would otherwise round-trip through the YAML parser
+/// as the integer `755`, silently renaming it.
 pub fn write_recorded_mock(
     mocks_dir: &Path,
     server: &ServerName,
@@ -402,7 +415,7 @@ fn render_fixed_mock(expect: &BTreeMap<ExpectPath, ExpectConstraint>, answer: &R
                 _ => "string",
             };
             out.push_str("  ");
-            out.push_str(&yaml_scalar(path.as_str()));
+            out.push_str(&yaml_quoted(path.as_str()));
             out.push_str(": ");
             out.push_str(label);
             out.push('\n');
@@ -420,25 +433,8 @@ fn render_fixed_mock(expect: &BTreeMap<ExpectPath, ExpectConstraint>, answer: &R
     out
 }
 
-fn yaml_scalar(raw: &str) -> String {
-    if is_bare_yaml_scalar(raw) {
-        raw.to_string()
-    } else {
-        yaml_quoted(raw)
-    }
-}
-
 fn yaml_quoted(raw: &str) -> String {
     serde_json::to_string(raw).expect("a string always serializes to a JSON string")
-}
-
-fn is_bare_yaml_scalar(raw: &str) -> bool {
-    let mut chars = raw.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphanumeric() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 #[cfg(test)]
@@ -615,7 +611,7 @@ done
         let path = write_recorded_mock(&mocks_dir, &server, &tool, &input, &answer).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("type: fixed"), "content:\n{content}");
-        assert!(content.contains("message: string"), "content:\n{content}");
+        assert!(content.contains("\"message\": string"), "content:\n{content}");
         assert!(content.ends_with("echo: hello"), "content:\n{content}");
 
         session.finish(Duration::from_secs(5)).unwrap();
@@ -642,6 +638,49 @@ done
         assert!(
             !still_running,
             "pid {pid} is still running after the session was dropped"
+        );
+    }
+
+    #[test]
+    fn a_session_dropped_without_finishing_also_stops_a_grandchild_forked_by_a_wrapper() {
+        let temp = tempdir().unwrap();
+        let pidfile = temp.path().join("grandchild.pid");
+        let path = temp.path().join("wrapper.sh");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh
+sleep 100 &
+echo $! > {}
+wait
+",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+        let command = RealServerCommand::new(path.display().to_string(), vec![]);
+
+        let session = RealMcpServerSession::spawn(&command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pidfile.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        let grandchild_pid: i32 = fs::read_to_string(&pidfile)
+            .expect("wrapper wrote the grandchild pid in time")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            crate::agentskills::runner::group::process_is_alive(grandchild_pid),
+            "grandchild {grandchild_pid} should be running before the session is dropped"
+        );
+
+        drop(session);
+
+        assert!(
+            !crate::agentskills::runner::group::process_is_alive(grandchild_pid),
+            "grandchild {grandchild_pid} is still running after the session was dropped"
         );
     }
 
@@ -696,6 +735,46 @@ done
                 assert!(!is_error);
             }
             other => panic!("expected an answered call: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_field_name_that_looks_like_a_yaml_integer_survives_the_expect_key_round_trip() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        let mocks_dir = skill.join("evals/mocks");
+        let server = ServerName::from("probeserver");
+        let tool = ToolName::from("probe");
+        // "0755", "+5" and "0x2a" are YAML plain scalars that resolve to an integer, whose
+        // canonical decimal spelling differs from the source text; "true"/"1.5"/"on"/"yes"/
+        // "null" all round-trip identically already and are included here only as a check
+        // that quoting every key does not itself introduce a regression for them.
+        let input = json!({
+            "0755": "a",
+            "+5": "b",
+            "0x2a": "c",
+            "true": "d",
+            "1.5": "e",
+            "on": "f",
+            "yes": "g",
+            "null": "h",
+        });
+        let answer = RecordedToolAnswer {
+            text: "ok".to_string(),
+            is_error: false,
+        };
+        write_recorded_mock(&mocks_dir, &server, &tool, &input, &answer).unwrap();
+        fs::create_dir_all(skill.join("evals/one")).unwrap();
+
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
+        let declaration = set.tools_for(&server).unwrap().get(&tool).unwrap();
+        let keys: std::collections::BTreeSet<&str> = declaration.expect.keys().map(ExpectPath::as_str).collect();
+
+        for original in ["0755", "+5", "0x2a", "true", "1.5", "on", "yes", "null"] {
+            assert!(
+                keys.contains(original),
+                "expected key {original:?} to survive the round trip, got {keys:?}"
+            );
         }
     }
 }
