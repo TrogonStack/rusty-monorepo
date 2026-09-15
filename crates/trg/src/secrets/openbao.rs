@@ -325,6 +325,14 @@ impl OpenBaoBackend {
         &self.mount
     }
 
+    /// Where this backend puts things, phrased for a person reading command
+    /// output. It lives beside the address and mount it quotes so that
+    /// renaming one cannot leave a copy of the other behind somewhere else in
+    /// the tree.
+    pub fn describe(&self) -> String {
+        format!("OpenBao at {} (mount `{}`)", self.addr, self.mount)
+    }
+
     pub fn owner(&self) -> &str {
         &self.owner
     }

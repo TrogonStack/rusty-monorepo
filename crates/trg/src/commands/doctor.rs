@@ -309,7 +309,7 @@ fn keychain(name: &str, kc: &KeychainBackend) -> Report {
     Report {
         backend: name.to_string(),
         kind: "keychain",
-        target: format!("the macOS Keychain (service `{}`)", kc.service()),
+        target: kc.describe(),
         checks: vec![
             Check::new("platform", platform),
             Check::new(
@@ -335,7 +335,7 @@ async fn onepassword(name: &str, op: &OnePasswordBackend) -> Report {
     let report = |checks| Report {
         backend: name.to_string(),
         kind: "onepassword",
-        target: format!("1Password via `op` (account `{account_ref}`)"),
+        target: op.describe(),
         checks,
     };
 

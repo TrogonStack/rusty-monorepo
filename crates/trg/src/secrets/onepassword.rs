@@ -708,6 +708,13 @@ impl OnePasswordBackend {
         &self.account
     }
 
+    /// Where this backend puts things, phrased for a person reading command
+    /// output. It lives beside the account it quotes so that renaming one
+    /// cannot leave a copy of the other behind somewhere else in the tree.
+    pub fn describe(&self) -> String {
+        format!("1Password via `op` (account `{}`)", self.account)
+    }
+
     /// Read every field of one item in a single `op item get`.
     ///
     /// The whole item rather than one field, because a config typically

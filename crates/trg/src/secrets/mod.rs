@@ -438,12 +438,17 @@ impl Backend {
     }
 
     /// User-facing description of where this backend puts things, for command
-    /// output that used to hardcode "macOS Keychain".
+    /// output that used to name one backend's storage whatever the config
+    /// actually selected.
+    ///
+    /// Each backend phrases its own: the wording quotes settings only that
+    /// backend owns, so keeping it here would put a second copy of every such
+    /// string one rename away from disagreeing with the first.
     pub fn describe(&self) -> String {
         match self {
-            Self::Keychain(b) => format!("the macOS Keychain (service `{}`)", b.service()),
-            Self::OpenBao(b) => format!("OpenBao at {} (mount `{}`)", b.addr(), b.mount()),
-            Self::OnePassword(b) => format!("1Password via `op` (account `{}`)", b.account()),
+            Self::Keychain(b) => b.describe(),
+            Self::OpenBao(b) => b.describe(),
+            Self::OnePassword(b) => b.describe(),
             #[cfg(test)]
             Self::Fake(_) => "an in-memory fake".to_string(),
         }
