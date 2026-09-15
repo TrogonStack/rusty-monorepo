@@ -397,15 +397,13 @@ impl OpenBaoBackend {
     /// Turning `machine_id` on or off relocates this path, so a credential
     /// written under the other layout would otherwise go quiet: the new path
     /// misses, the old payload is still sitting there, and every server asks
-    /// for a fresh login. That is the breakage `credentials.v2` removed for
-    /// the payload shape, still present for the path, so this path carries no
-    /// version segment of its own; instead, the OAuth credential store reads
-    /// this path as the primary and falls back to
-    /// [`Self::shared_credential_path`] when the primary is empty. A version
-    /// segment was deliberately avoided: it invites an open-ended ladder, one
-    /// probe per layout that ever existed, and leaves a miss indistinguishable
-    /// from a first-time login. Only two layouts are reachable here, so a
-    /// single fallback closes the set for good.
+    /// for a fresh login. This path carries no version segment of its own;
+    /// instead, the OAuth credential store reads this path as the primary
+    /// and falls back to [`Self::shared_credential_path`] when the primary
+    /// is empty. A version segment was deliberately avoided: it invites an
+    /// open-ended ladder, one probe per layout that ever existed, and leaves
+    /// a miss indistinguishable from a first-time login. Only two layouts
+    /// are reachable here, so a single fallback closes the set for good.
     ///
     /// That fallback stays read-only. Copying the shared credential into the
     /// machine-scoped path would leave the shared one readable, so both

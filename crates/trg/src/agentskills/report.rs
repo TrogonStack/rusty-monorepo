@@ -27,7 +27,6 @@ use super::permission_outcome::PermissionOutcome;
 use super::runner::capabilities::HarnessControl;
 use super::runner::{Runner, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
-use super::schema_version::SchemaVersion;
 use super::tool_grant::ToolGrant;
 use super::validation::ValidationError;
 
@@ -270,8 +269,6 @@ pub struct ReportBundle {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReportDocument {
-    #[serde(default)]
-    pub schema_version: SchemaVersion,
     pub report: ReportSection,
     pub suite: SuiteSection,
     pub dimensions: DimensionsSection,
@@ -398,36 +395,7 @@ pub struct DimensionsSection {
     /// different judge included, and each distinct strategy is recorded once here. This
     /// is not the graders an eval case declares in its suite; those show up in
     /// `assertions` by way of each case's `assertion_ids`.
-    ///
-    /// Defaulted because this field replaced an untyped `graders` list, so every bundle
-    /// written before it exists names neither. Reading those as "no strategy recorded" is
-    /// the honest answer, since the old shape carried arbitrary JSON that cannot be
-    /// recovered as a typed strategy, and it keeps `grade`, `benchmark` and `compare`
-    /// able to open an eval history rather than failing on its first file.
-    #[serde(default)]
     pub grading_strategies: Vec<GradingStrategy>,
-}
-
-#[cfg(test)]
-mod dimensions_back_compatibility {
-    use super::*;
-
-    /// This field replaced an untyped `graders` list, so a bundle written before it exists
-    /// names neither. Without the default, opening any prior eval history fails on its
-    /// first file rather than reading it as having recorded no strategy.
-    #[test]
-    fn a_dimensions_section_written_before_grading_strategies_existed_still_reads() {
-        let before = serde_json::json!({
-            "eval_cases": [],
-            "assertions": [],
-            "skill_revisions": [],
-            "model_configs": [],
-            "scenarios": [],
-            "graders": [{ "mode": "whatever the old untyped shape held" }]
-        });
-        let section: DimensionsSection = serde_json::from_value(before).unwrap();
-        assert!(section.grading_strategies.is_empty());
-    }
 }
 
 /// One grading strategy that was used to produce the results in this report.
@@ -1069,7 +1037,6 @@ pub fn build_report_bundle(
         .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
 
     let document = ReportDocument {
-        schema_version: SchemaVersion::current(),
         report: ReportSection {
             id: report_id.clone(),
             generated_at,
@@ -2074,7 +2041,6 @@ mod tests {
             report_id: "report-123".to_string(),
             skill_name: "demo-skill".to_string(),
             document: ReportDocument {
-                schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
                 report: ReportSection {
                     id: "report-123".to_string(),
                     generated_at: "2026-05-25T22:00:00Z".to_string(),
@@ -2277,8 +2243,7 @@ mod tests {
         }
     }
 
-    mod backward_compat {
-        use super::*;
+    mod schema_fixtures {
         use crate::agentskills::schemas::{validate_artifact, REPORT_SCHEMA};
 
         const FIXTURE_V1: &str = include_str!("testdata/reports/v1.json");
@@ -2286,90 +2251,6 @@ mod tests {
 
         fn load_fixture_json(name: &str, content: &str) -> serde_json::Value {
             serde_json::from_str(content).unwrap_or_else(|error| panic!("{name} is valid JSON: {error}"))
-        }
-
-        fn is_omitted_on_reserialize(original: &serde_json::Value) -> bool {
-            match original {
-                serde_json::Value::Null => true,
-                serde_json::Value::Array(items) => items.is_empty(),
-                serde_json::Value::Object(fields) => fields.is_empty(),
-                _ => false,
-            }
-        }
-
-        fn assert_round_trip_preserves_fields(original: &serde_json::Value, roundtrip: &serde_json::Value, path: &str) {
-            if is_omitted_on_reserialize(original) {
-                return;
-            }
-
-            match (original, roundtrip) {
-                (serde_json::Value::Object(orig), serde_json::Value::Object(rt)) => {
-                    for (key, orig_val) in orig {
-                        if is_omitted_on_reserialize(orig_val) {
-                            continue;
-                        }
-                        let child_path = if path.is_empty() {
-                            key.clone()
-                        } else {
-                            format!("{path}.{key}")
-                        };
-                        let rt_val = rt.get(key).unwrap_or_else(|| {
-                            panic!("field {child_path} missing after round-trip (possible breaking change)")
-                        });
-                        assert_round_trip_preserves_fields(orig_val, rt_val, &child_path);
-                    }
-                }
-                (serde_json::Value::Array(orig_items), serde_json::Value::Array(rt_items)) => {
-                    assert_eq!(orig_items.len(), rt_items.len(), "array length mismatch at {path}");
-                    for (index, orig_item) in orig_items.iter().enumerate() {
-                        assert_round_trip_preserves_fields(orig_item, &rt_items[index], &format!("{path}[{index}]"));
-                    }
-                }
-                (orig, rt) => {
-                    assert_eq!(orig, rt, "value mismatch at {path}");
-                }
-            }
-        }
-
-        #[test]
-        fn report_v1_fixture_deserializes_and_round_trips() {
-            let original = load_fixture_json("v1.json", FIXTURE_V1);
-            let document: ReportDocument =
-                serde_json::from_value(original.clone()).expect("v1 fixture deserializes into ReportDocument");
-
-            let roundtrip = serde_json::to_value(&document).expect("ReportDocument serializes");
-            assert_round_trip_preserves_fields(&original, &roundtrip, "");
-        }
-
-        #[test]
-        fn report_v1_minimal_fixture_deserializes() {
-            let original = load_fixture_json("v1-minimal.json", FIXTURE_V1_MINIMAL);
-            let document: ReportDocument = serde_json::from_value(original)
-                .expect("v1-minimal fixture deserializes (required fields must stay optional or defaulted)");
-            assert_eq!(document.runs.len(), 0);
-            assert_eq!(document.report.iteration, 1);
-        }
-
-        #[test]
-        fn a_report_json_written_before_permission_existed_still_deserializes_as_workspace_write() {
-            let original = load_fixture_json("v1-minimal.json", FIXTURE_V1_MINIMAL);
-            let document: ReportDocument =
-                serde_json::from_value(original).expect("a report.json without a permission field still deserializes");
-            assert_eq!(document.report.permission, PermissionGrant::WorkspaceWrite.into());
-        }
-
-        /// A `report.json` written before `PermissionOutcome` existed holds `permission`
-        /// as a bare grant. Reading it must not invent a widening that was never
-        /// observed: the only honest reading is that the harness enforced exactly what
-        /// was requested.
-        #[test]
-        fn a_report_json_with_a_bare_permission_grant_still_deserializes_as_unwidened() {
-            let mut original = load_fixture_json("v1-minimal.json", FIXTURE_V1_MINIMAL);
-            original["report"]["permission"] = serde_json::json!("unrestricted");
-            let document: ReportDocument = serde_json::from_value(original)
-                .expect("a report.json with a bare permission grant still deserializes");
-            assert_eq!(document.report.permission, PermissionGrant::Unrestricted.into());
-            assert!(!document.report.permission.was_widened());
         }
 
         #[test]

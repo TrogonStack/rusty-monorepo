@@ -706,10 +706,6 @@ impl ConversationHistory {
     }
 }
 
-fn default_schema_version() -> u32 {
-    1
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EvalPriority {
@@ -757,8 +753,6 @@ fn is_announced(disclosure: &SkillDisclosure) -> bool {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EvalSuite {
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
     pub skill_name: NonEmptyString,
     /// The suite author's own claim about which directory this manifest was found in.
     ///
@@ -2288,7 +2282,6 @@ mod tests {
 
     fn sample_suite_with_eval(eval: EvalCase) -> EvalSuite {
         EvalSuite {
-            schema_version: 1,
             skill_name: NonEmptyString("demo-skill".to_string()),
             eval_dir: None,
             evals: vec![eval],
@@ -2462,7 +2455,6 @@ mod tests {
         let suite = scaffold_eval_suite("demo-skill");
         let json = serde_json::to_string_pretty(&suite).unwrap();
         let parsed = parse_eval_suite(&json).unwrap();
-        assert_eq!(parsed.schema_version, 1);
         assert_eq!(parsed.skill_name.as_str(), "demo-skill");
         assert_eq!(parsed.evals.len(), 2);
         assert_eq!(parsed.evals[0].id.as_str(), "produces-a-summary");
@@ -2474,29 +2466,6 @@ mod tests {
     fn scaffold_declares_only_typed_graders() {
         let suite = scaffold_eval_suite("demo-skill");
         assert!(suite.evals.iter().all(|eval| !eval.graders.is_empty()));
-    }
-
-    #[test]
-    fn a_manifest_that_omits_schema_version_still_parses_documented_fields() {
-        let json = r#"{
-  "skill_name": "demo-skill",
-  "evals": [
-    {
-      "id": "one",
-      "prompt": "A sufficiently long prompt here",
-      "expected_output": "A detailed analysis output",
-      "tags": ["smoke"],
-      "grader_hints": { "hint": "value" },
-      "graders": [{ "type": "skill_used" }]
-    }
-  ]
-}"#;
-
-        let suite = parse_eval_suite(json).expect("a manifest without schema_version must still parse");
-        assert_eq!(suite.schema_version, 1);
-        assert_eq!(suite.evals[0].tags.as_deref(), Some(&["smoke".to_string()][..]));
-        assert!(suite.evals[0].grader_hints.is_some());
-        assert!(!suite.evals[0].graders.is_empty());
     }
 
     #[test]
@@ -2530,7 +2499,6 @@ mod tests {
     #[test]
     fn parse_v2_manifest_with_all_metadata_fields_round_trips() {
         let json = r#"{
-  "schema_version": 2,
   "skill_name": "demo-skill",
   "evals": [
     {
@@ -2551,7 +2519,6 @@ mod tests {
         let round_trip = serde_json::to_string(&suite).unwrap();
         let reparsed = parse_eval_suite(&round_trip).unwrap();
         let eval = &reparsed.evals[0];
-        assert_eq!(reparsed.schema_version, 2);
         assert_eq!(
             eval.tags.as_deref(),
             Some(["smoke".to_string(), "regression".to_string()].as_slice())
@@ -2592,7 +2559,6 @@ mod tests {
     #[test]
     fn parse_v2_manifest_rejects_unknown_suite_fields() {
         let json = r#"{
-  "schema_version": 2,
   "skill_name": "demo-skill",
   "future_suite_field": true,
   "evals": [
@@ -2611,7 +2577,6 @@ mod tests {
     #[test]
     fn parse_rejects_a_misspelled_case_field_regardless_of_schema_version() {
         let json = r#"{
-  "schema_version": 2,
   "skill_name": "demo-skill",
   "evals": [
     {
@@ -2709,7 +2674,6 @@ mod tests {
     #[test]
     fn parse_current_version_manifest_rejects_unknown_suite_fields() {
         let json = r#"{
-  "schema_version": 3,
   "skill_name": "demo-skill",
   "future_suite_field": true,
   "evals": [
@@ -2728,7 +2692,6 @@ mod tests {
     #[test]
     fn parse_current_version_manifest_rejects_misspelled_case_fields() {
         let json = r#"{
-  "schema_version": 3,
   "skill_name": "demo-skill",
   "evals": [
     {
@@ -2750,37 +2713,6 @@ mod tests {
         let err = parse_eval_suite(json).unwrap_err().to_string();
         assert!(err.contains("grader"), "{err}");
         assert!(err.contains("evals[1]"), "{err}");
-    }
-
-    #[test]
-    fn parse_accepts_any_schema_version_value_as_inert() {
-        let below_minimum = r#"{
-  "schema_version": 0,
-  "skill_name": "demo-skill",
-  "evals": [
-    {
-      "id": "one",
-      "prompt": "A sufficiently long prompt here",
-      "expected_output": "A detailed analysis output"
-    }
-  ]
-}"#;
-        let suite = parse_eval_suite(below_minimum).expect("schema_version 0 must no longer be rejected");
-        assert_eq!(suite.schema_version, 0);
-
-        let far_beyond_any_release = r#"{
-  "schema_version": 99,
-  "skill_name": "demo-skill",
-  "evals": [
-    {
-      "id": "one",
-      "prompt": "A sufficiently long prompt here",
-      "expected_output": "A detailed analysis output"
-    }
-  ]
-}"#;
-        let suite = parse_eval_suite(far_beyond_any_release).expect("schema_version 99 must no longer be rejected");
-        assert_eq!(suite.schema_version, 99);
     }
 
     /// A case whose stability is the question needs more draws than the pass default, and a

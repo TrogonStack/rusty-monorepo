@@ -11,7 +11,6 @@ use super::eval_suite_drift;
 use super::evals::{EvalError, Result};
 use super::layout;
 use super::report::ScenarioKind;
-use super::schema_version::SchemaVersion;
 
 pub const OUTPUT_FILE_NAME: &str = "iteration-summary.json";
 
@@ -23,8 +22,6 @@ pub struct IterationSummaryOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct IterationSummaryDocument {
-    #[serde(default)]
-    pub schema_version: SchemaVersion,
     pub report_id: String,
     pub iteration: u32,
     pub generated_at: String,
@@ -141,7 +138,7 @@ struct GradingFileInput {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct AssertionResultInput {
-    #[serde(default, alias = "text")]
+    #[serde(default)]
     assertion: String,
     #[serde(default)]
     passed: bool,
@@ -212,7 +209,6 @@ pub fn build_iteration_summary_document(
         apply_cross_iteration_deltas(&current.always_pass, &current.always_fail, cross_iteration.as_ref());
 
     Ok(IterationSummaryDocument {
-        schema_version: SchemaVersion::current(),
         report_id: report.report.id,
         iteration: report.report.iteration,
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),

@@ -205,11 +205,7 @@ pub struct RunArgs {
     )]
     pub output_format: OutputFormat,
 
-    #[arg(
-        long,
-        alias = "require-assertions",
-        help = "Fail when any eval case declares no grader"
-    )]
+    #[arg(long, help = "Fail when any eval case declares no grader")]
     pub require_graders: bool,
 
     #[arg(long, help = "Print eval manifest lint warnings to stderr")]
@@ -1699,30 +1695,6 @@ mod tests {
         ToolName, ToolVisibility, TranscriptFormat, WorkspaceBoundary, WorkspaceEscape,
     };
     use std::path::{Path, PathBuf};
-
-    /// `--require-assertions` is the pre-rename spelling: suites and CI invocations
-    /// pinned to it must keep working, so it stays as an alias with identical meaning.
-    #[test]
-    fn require_assertions_is_an_alias_for_require_graders() {
-        use clap::Parser;
-
-        #[derive(clap::Parser)]
-        struct Wrapper {
-            #[command(flatten)]
-            args: RunArgs,
-        }
-
-        let by_new_name = Wrapper::try_parse_from(["trg", "--skill-dir", "s", "--out-dir", "o", "--require-graders"])
-            .unwrap()
-            .args;
-        let by_old_name =
-            Wrapper::try_parse_from(["trg", "--skill-dir", "s", "--out-dir", "o", "--require-assertions"])
-                .unwrap()
-                .args;
-
-        assert!(by_new_name.require_graders);
-        assert_eq!(by_new_name.require_graders, by_old_name.require_graders);
-    }
 
     #[test]
     fn a_path_reached_outside_the_workspace_becomes_a_run_warning() {
@@ -3361,7 +3333,6 @@ mod tests {
             skill_dir.join("evals/evals.json"),
             format!(
                 r#"{{
-                "schema_version": 2,
                 "skill_name": "timeout-skill",
                 "evals": [
                     {{
@@ -3434,7 +3405,6 @@ mod tests {
         std::fs::write(
             skill_dir.join("evals/evals.json"),
             r#"{
-                "schema_version": 2,
                 "skill_name": "expected-output-skill",
                 "evals": [
                     {
