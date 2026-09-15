@@ -114,10 +114,13 @@ impl FallbackRead {
 pub struct OAuthCredentialStore {
     backend: Backend,
     path: SecretPath,
-    /// The pre-`machine_id` shared path to read when `path` is empty. Read
-    /// only: `load` never copies, moves, or deletes what it finds here, since
-    /// doing so would leave both the shared and machine-scoped payloads
-    /// refreshing the same grant, which is the replay `machine_id` exists to
+    /// The pre-`machine_id` shared path to read when `path` is empty.
+    /// `load` never copies, moves, or deletes what it finds here. `save`
+    /// does write here, but only when this is where the credential being
+    /// refreshed was last read from: that refreshes the shared grant in
+    /// place, the same way it worked before `machine_id` existed, rather
+    /// than copying it onto the machine-scoped path, which would leave both
+    /// paths refreshing the same grant, the replay `machine_id` exists to
     /// prevent.
     fallback: Option<SecretPath>,
     /// The `--server` name recovery advice has to quote. Not recoverable from
@@ -177,11 +180,19 @@ impl CredentialStore for OAuthCredentialStore {
         }
     }
 
+    /// Writes back to wherever the credential being refreshed actually came
+    /// from: `self.path` when the last `load` hit it (or there was no prior
+    /// `load`), the fallback when the last `load` fell through to it. rmcp
+    /// runs every token refresh through `save`, so targeting `self.path`
+    /// unconditionally would copy a fallback-origin credential onto the
+    /// machine-scoped path on its first refresh, leaving two paths
+    /// refreshing the same grant, the replay `machine_id` exists to prevent.
     async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
         let json = serde_json::to_string(&credentials)
             .map_err(|e| AuthError::InternalError(format!("encode credentials: {e}")))?;
+        let target = self.read_from.get().unwrap_or_else(|| self.path.clone());
 
-        let mut map = match self.backend.get(&self.path).await {
+        let mut map = match self.backend.get(&target).await {
             Ok(existing) => existing.unwrap_or_default(),
             // An outer payload that will not decode leaves nothing structured
             // behind it, whether that is a pre-#73 raw `StoredCredentials`
@@ -196,12 +207,15 @@ impl CredentialStore for OAuthCredentialStore {
         map.remove(&Self::key());
         map.insert(Self::key_v2(), SecretString::from(json));
 
-        self.backend
-            .set(&self.path, &map)
-            .await
-            .map_err(|e| self.to_auth_error(e))
+        self.backend.set(&target, &map).await.map_err(|e| self.to_auth_error(e))
     }
 
+    /// Always deletes `self.path`, never the fallback: deleting the shared
+    /// path would sign out every other machine still reading from it. A
+    /// caller that needs to know whether this machine is still effectively
+    /// signed in afterward (because the fallback still holds a credential)
+    /// has to check with a subsequent `load`; `clear` itself does not report
+    /// it.
     async fn clear(&self) -> Result<(), AuthError> {
         let existing = match self.backend.get(&self.path).await {
             Ok(existing) => existing,
@@ -703,9 +717,11 @@ mod tests {
 
     /// The load-bearing guarantee this fallback exists for: a credential
     /// left at the pre-`machine_id` shared path is still readable, its
-    /// origin is reported, and it is never copied onto the primary path.
+    /// origin is reported, and `load` itself never writes anywhere. Whether
+    /// a later `save` writes back to the shared path is covered separately,
+    /// below.
     #[tokio::test]
-    async fn a_shared_credential_is_read_but_never_moved() {
+    async fn a_shared_credential_load_reads_without_writing_anywhere() {
         let shared = SecretPath::parse("mcp/github").expect("parse");
         let (backend, store) = store_with_fallback(shared.clone());
         let read_from = store.read_from();
@@ -730,6 +746,30 @@ mod tests {
         );
     }
 
+    /// The mechanism `trg mcp auth login`'s no-fallback fix depends on: with
+    /// no fallback configured, a credential sitting at what would otherwise
+    /// be the shared path is invisible to `load`, so `initialize_from_store`
+    /// cannot report `AlreadyAuthorized` off it and an explicit login
+    /// actually runs the flow instead of quietly no-op'ing.
+    #[tokio::test]
+    async fn a_store_with_no_fallback_never_sees_a_shared_credential_as_already_there() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let backend = Backend::Fake(FakeBackend::new());
+
+        let json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
+        let mut map = SecretMap::new();
+        map.insert(SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(), SecretString::from(json));
+        backend.set(&shared, &map).await.expect("seed the shared path");
+
+        let path = SecretPath::parse("github").expect("parse");
+        let store = OAuthCredentialStore::new(backend, path, "github", None);
+
+        assert!(
+            store.load().await.expect("load").is_none(),
+            "a login-shaped store (no fallback) must not treat the shared path as already authorized"
+        );
+    }
+
     #[tokio::test]
     async fn a_primary_hit_never_reads_the_fallback() {
         let shared = SecretPath::parse("mcp/github").expect("parse");
@@ -747,8 +787,11 @@ mod tests {
         assert_eq!(read_from.get(), None);
     }
 
+    /// With no prior `load`, `save` has no recorded origin to write back to,
+    /// so it defaults to the primary path, exactly as it did before a
+    /// fallback existed.
     #[tokio::test]
-    async fn save_writes_only_the_primary_path_leaving_the_shared_payload_untouched() {
+    async fn a_save_with_no_prior_load_targets_the_primary_path_leaving_the_shared_payload_untouched() {
         let shared = SecretPath::parse("mcp/github").expect("parse");
         let (backend, store) = store_with_fallback(shared.clone());
 
@@ -768,8 +811,45 @@ mod tests {
                 .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
                 .map(|v| v.expose_secret()),
             Some(shared_json.as_str()),
-            "save must never write, move, or delete the shared fallback payload"
+            "a save with no recorded fallback origin must never touch the shared payload"
         );
+    }
+
+    /// The core guarantee behind the fix: rmcp runs every token refresh
+    /// through `save`, so a refresh of a credential that was last read from
+    /// the shared path must land back on the shared path, not create a
+    /// machine-scoped copy. That is what keeps a machine still on the
+    /// shared path refreshing it in place, precisely the pre-`machine_id`
+    /// behaviour, rather than orphaning the shared grant the moment it is
+    /// refreshed.
+    #[tokio::test]
+    async fn a_save_after_a_fallback_load_writes_the_refresh_back_to_the_shared_path() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        store.load().await.expect("load").expect("some");
+        store.save(credentials("refreshed-cred")).await.expect("save");
+
+        let primary = SecretPath::parse("github").expect("parse");
+        assert!(
+            backend.get(&primary).await.expect("get").is_none(),
+            "a refresh of a fallback-origin credential must not create a machine-scoped copy"
+        );
+
+        let shared_after = backend.get(&shared).await.expect("get").expect("still there");
+        let raw = shared_after
+            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+            .expect("v2 key");
+        let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
+        assert_eq!(decoded.client_id, "refreshed-cred");
     }
 
     #[tokio::test]

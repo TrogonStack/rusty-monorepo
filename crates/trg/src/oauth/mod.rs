@@ -61,6 +61,16 @@ fn storage_or(failure: &StorageFailure, err: AuthError) -> EnsureError {
 ///
 /// The backend and the path it stores under are injected: this function neither
 /// reads config nor decides where credentials live. See `main`.
+///
+/// `fallback` decides whether a credential still sitting at the
+/// pre-`machine_id` shared path counts as already being authorized. An
+/// explicit `trg mcp auth login` is the act of re-authorizing this machine,
+/// so it must pass `None`: seeing only the machine-scoped path is what
+/// forces the flow to run and actually write `cred_path`, rather than
+/// reading the shared credential and reporting `AlreadyAuthorized` without
+/// writing anything. Callers that merely need a working credential, such as
+/// the proxy, pass the real fallback so a machine that has not logged in yet
+/// keeps working off the shared path without a forced re-login.
 pub async fn ensure_credentials_for(
     profile: &ResolvedMcpServer,
     server_name: &str,

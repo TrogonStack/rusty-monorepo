@@ -188,7 +188,7 @@ impl AuthCommands {
                 Err(e) => emit(e),
             },
             AuthCommands::Logout(args) => match logout(ctx).await {
-                Ok(()) => cleared(args.output_format, ctx),
+                Ok(still_reachable) => cleared(args.output_format, ctx, still_reachable.as_ref()),
                 Err(e) => emit(e),
             },
         }
@@ -203,14 +203,11 @@ fn emit<E: std::fmt::Display>(e: E) -> i32 {
 async fn login(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError> {
     let server = ctx.server_name.as_str();
     let where_stored = ctx.backend.describe();
-    let outcome = ensure_credentials_for(
-        ctx.endpoint()?,
-        server,
-        &ctx.backend,
-        &ctx.cred_path,
-        ctx.fallback.as_ref(),
-    )
-    .await?;
+    // No fallback: an explicit login is re-authorizing this machine, so a
+    // credential still sitting at the shared path must not count as already
+    // being authorized, or the flow never runs and `cred_path` never gets
+    // written.
+    let outcome = ensure_credentials_for(ctx.endpoint()?, server, &ctx.backend, &ctx.cred_path, None).await?;
 
     if format.is_json() {
         let document = json!({
@@ -389,7 +386,14 @@ fn format_duration(secs: u64) -> String {
     parts.join(" ")
 }
 
-async fn logout(ctx: &McpContext) -> Result<(), AuthError> {
+/// Deletes the machine-scoped credential and reports whether this machine is
+/// still effectively signed in afterward. `clear` only ever touches
+/// `ctx.cred_path`, since deleting the shared path would sign out every
+/// other machine reading from it, so a credential can still be reachable
+/// through the fallback once this returns. The `Some(path)` case names that
+/// shared path, for `cleared` to report honestly instead of claiming a clean
+/// logout.
+async fn logout(ctx: &McpContext) -> Result<Option<SecretPath>, AuthError> {
     let store = OAuthCredentialStore::new(
         ctx.backend.clone(),
         ctx.cred_path.clone(),
@@ -397,26 +401,75 @@ async fn logout(ctx: &McpContext) -> Result<(), AuthError> {
         ctx.fallback.clone(),
     );
     store.clear().await?;
-    Ok(())
+
+    let read_from = store.read_from();
+    let still_authenticated = store.load().await?.is_some();
+    Ok(still_authenticated.then(|| read_from.get()).flatten())
 }
 
-fn cleared(format: OutputFormat, ctx: &McpContext) -> i32 {
+fn cleared(format: OutputFormat, ctx: &McpContext, still_reachable_via: Option<&SecretPath>) -> i32 {
     if format.is_json() {
-        let document = json!({ "server": ctx.server_name, "cleared": true });
-        return print_json(&document, 0);
+        return print_json(&cleared_document(&ctx.server_name, still_reachable_via), 0);
     }
 
-    println!("OAuth credentials cleared for `{}`.", ctx.server_name);
+    println!("{}", cleared_message(&ctx.server_name, still_reachable_via));
     0
+}
+
+/// The JSON shape for `logout`. `cleared: true` alone would claim this
+/// machine is fully signed out even when `still_reachable_via` names a
+/// fallback it will keep authenticating from, so that case adds fields
+/// saying so instead of standing on its own.
+fn cleared_document(server: &str, still_reachable_via: Option<&SecretPath>) -> Value {
+    match still_reachable_via {
+        Some(shared) => json!({
+            "server": server,
+            "cleared": true,
+            "shared_path": shared.to_string(),
+            "note": format!(
+                "this machine will keep authenticating from the shared credential at `{shared}`; \
+                 remove it with `bao kv metadata delete {shared}` to sign out every machine using it"
+            ),
+        }),
+        None => json!({ "server": server, "cleared": true }),
+    }
+}
+
+fn cleared_message(server: &str, still_reachable_via: Option<&SecretPath>) -> String {
+    match still_reachable_via {
+        Some(shared) => format!(
+            "Machine-scoped OAuth credentials cleared for `{server}`, but a shared credential at `{shared}` \
+             is still reachable: this machine will keep authenticating from it. Remove it with `bao kv \
+             metadata delete {shared}` to sign out every machine using it."
+        ),
+        None => format!("OAuth credentials cleared for `{server}`."),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rmcp::transport::auth::StoredCredentials;
+    use secrecy::SecretString;
+
+    use super::*;
+    use crate::oauth::store::CREDENTIALS_KEY_V2;
+    use crate::secrets::{fake::FakeBackend, Backend, SecretKey, SecretMap};
 
     fn stored() -> StoredCredentials {
         StoredCredentials::new("client".to_string(), None, vec!["scope".to_string()], Some(42))
+    }
+
+    async fn seed(backend: &Backend, path: &SecretPath, client_id: &str) {
+        let json = serde_json::to_string(&StoredCredentials::new(
+            client_id.to_string(),
+            None,
+            vec!["scope".to_string()],
+            Some(42),
+        ))
+        .expect("encode");
+        let mut map = SecretMap::new();
+        map.insert(SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(), SecretString::from(json));
+        backend.set(path, &map).await.expect("seed");
     }
 
     /// The text output says when a credential was read from the shared path.
@@ -443,6 +496,95 @@ mod tests {
         assert!(
             document.get("read_from_shared_path").is_none(),
             "a primary hit must not imply a fallback happened"
+        );
+    }
+
+    #[test]
+    fn cleared_text_names_the_shared_path_and_the_removal_command_when_one_is_still_reachable() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+
+        let message = cleared_message("github", Some(&shared));
+
+        assert!(message.contains("mcp/github"), "must name the shared path: {message}");
+        assert!(
+            message.contains("bao kv metadata delete mcp/github"),
+            "must name the removal command: {message}"
+        );
+        assert!(
+            message.contains("keep authenticating"),
+            "must say this machine stays signed in through it: {message}"
+        );
+    }
+
+    #[test]
+    fn cleared_text_reports_a_clean_logout_when_nothing_is_left_reachable() {
+        let message = cleared_message("github", None);
+
+        assert_eq!(message, "OAuth credentials cleared for `github`.");
+    }
+
+    #[test]
+    fn cleared_json_says_more_than_cleared_true_when_a_shared_path_is_still_reachable() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+
+        let document = cleared_document("github", Some(&shared));
+
+        assert_eq!(document["cleared"], true);
+        assert_eq!(document["shared_path"], "mcp/github");
+        assert!(
+            document["note"]
+                .as_str()
+                .unwrap()
+                .contains("bao kv metadata delete mcp/github"),
+            "the note must name the removal command: {document}"
+        );
+    }
+
+    #[test]
+    fn cleared_json_reports_cleared_true_alone_when_nothing_is_left_reachable() {
+        let document = cleared_document("github", None);
+
+        assert_eq!(document, json!({ "server": "github", "cleared": true }));
+    }
+
+    /// A machine with no fallback (or an already-empty one) logs out clean:
+    /// `logout` reports nothing still reachable.
+    #[tokio::test]
+    async fn logout_with_no_credential_left_reports_nothing_reachable() {
+        let backend = Backend::Fake(FakeBackend::new());
+        let cred_path = SecretPath::parse("mcp/laptop/github").expect("parse");
+        seed(&backend, &cred_path, "client").await;
+        let ctx = McpContext::credentials_only("github".to_string(), backend, cred_path, None);
+
+        let still_reachable = logout(&ctx).await.expect("logout");
+
+        assert!(still_reachable.is_none());
+    }
+
+    /// The hole this covers: `clear` only ever deletes the machine-scoped
+    /// path, so a machine that still has a shared fallback credential is not
+    /// actually signed out. `logout` must say so rather than reporting a
+    /// clean logout.
+    #[tokio::test]
+    async fn logout_with_a_populated_fallback_reports_the_shared_path_still_reachable() {
+        let backend = Backend::Fake(FakeBackend::new());
+        let cred_path = SecretPath::parse("mcp/laptop/github").expect("parse");
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        seed(&backend, &cred_path, "machine-cred").await;
+        seed(&backend, &shared, "shared-cred").await;
+        let ctx = McpContext::credentials_only(
+            "github".to_string(),
+            backend.clone(),
+            cred_path.clone(),
+            Some(shared.clone()),
+        );
+
+        let still_reachable = logout(&ctx).await.expect("logout");
+
+        assert_eq!(still_reachable, Some(shared));
+        assert!(
+            backend.get(&cred_path).await.expect("get").is_none(),
+            "the machine-scoped credential must still be deleted"
         );
     }
 }

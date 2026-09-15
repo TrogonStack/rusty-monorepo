@@ -310,14 +310,21 @@ writes to, but it never relocates a credential already sitting under the old
 path. `trg` only ever reads a credential from the path it lives at; when the
 machine-scoped path is empty, it falls back to reading the shared,
 pre-`machine_id` path and reports that it did, rather than copying or moving
-what it found there. Copying would leave both paths readable, so every
-machine sharing the old path would go on refreshing the same grant after one
-of them was meant to have its own, which is the exact replay `machine_id`
-exists to prevent; moving it would break every machine that had not yet
-logged in again under the new layout. Re-authorizing with `trg mcp auth
-login` is what actually writes the machine-scoped credential; the old one is
-left in place until it is removed directly against the backend, since `trg`
-has no command of its own for that.
+what it found there. A background token refresh writes back to wherever the
+credential was actually read from, so a machine still reading the shared path
+keeps refreshing that same shared entry in place for as long as it stays on
+it; nothing copies it onto the machine-scoped path first. Copying on read
+would leave both paths readable, so every machine sharing the old path would
+go on refreshing the same grant after one of them was meant to have its own,
+which is the exact replay `machine_id` exists to prevent; moving it would
+break every machine that had not yet logged in again under the new layout.
+Re-authorizing with `trg mcp auth login` is what actually writes the
+machine-scoped credential: an explicit login always treats the machine-scoped
+path as the only path, so it runs the full flow even when the shared path
+still holds a usable credential. The old one is left in place until it is
+removed directly against the backend, since `trg` has no command of its own
+for that; until it is removed, it keeps being refreshed by every machine
+still reading it.
 
 Exactly one of `token_file` or `token` must be declared. Declaring neither or
 both fails at load time.
