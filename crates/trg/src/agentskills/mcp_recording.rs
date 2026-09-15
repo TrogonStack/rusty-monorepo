@@ -53,6 +53,42 @@ pub enum RecordingError {
     },
     #[error("could not write mock file at {}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
+    #[error(
+        "{tool}: the recorded answer contains `{sequence}`, which {expands_via} on replay; rerun once the \
+         server stops returning that sequence, or write this mock by hand instead of recording it"
+    )]
+    UnrepresentablePlaceholder {
+        tool: ToolName,
+        sequence: &'static str,
+        expands_via: &'static str,
+    },
+}
+
+/// Which literal placeholder prefixes a recorded answer cannot safely contain depends on
+/// which surface `resolve_call` puts the text on. `{{input.` is unsafe either way:
+/// `substitute_input_placeholders` runs over whichever text answered the call, body or
+/// `error:`. `{{file:` is unsafe only in the body: `parse_mock_file` runs
+/// `resolve_file_references` over `MockDeclaration.body`, but reads `error:` straight out of
+/// the frontmatter and never passes it through that function, so a recorded error is free to
+/// contain `{{file:` and still replay verbatim. The mock format has no escape syntax for
+/// either, so an answer that contains one on the surface that expands it cannot be written
+/// as a `fixed` mock at all.
+fn reject_unrepresentable_placeholder(tool: &ToolName, answer: &RecordedToolAnswer) -> Result<(), RecordingError> {
+    if !answer.is_error && answer.text.contains("{{file:") {
+        return Err(RecordingError::UnrepresentablePlaceholder {
+            tool: tool.clone(),
+            sequence: "{{file:",
+            expands_via: "`resolve_file_references` expands it in the mock body",
+        });
+    }
+    if answer.text.contains("{{input.") {
+        return Err(RecordingError::UnrepresentablePlaceholder {
+            tool: tool.clone(),
+            sequence: "{{input.",
+            expands_via: "`substitute_input_placeholders` expands it",
+        });
+    }
+    Ok(())
 }
 
 /// A live JSON-RPC-over-stdio session with a real MCP server, opened only after
@@ -337,8 +373,9 @@ impl RecordedToolAnswer {
 /// value it happened to carry would fail the very next call that varies it; pinning the
 /// JSON type it must still hold is the constraint a single recording can honestly support.
 ///
-/// Object values are flattened into dotted paths so a nested field gets its own constraint,
-/// the same way a hand-written `expect: repo.owner: string` would; arrays are left as leaf
+/// Object values get an `object` constraint of their own and are also flattened into dotted
+/// paths so each nested field gets its own constraint too, the same way a hand-written
+/// `expect: repo: object` plus `expect: repo.owner: string` would; arrays are left as leaf
 /// `array` constraints rather than descended into, since an element's own path has no stable
 /// name to hang a constraint on. A `null` leaf is skipped rather than constrained: nothing in
 /// `ExpectConstraint` represents "was null", and emitting a type constraint for it would fail
@@ -373,7 +410,10 @@ fn collect_expect(
         };
         match value {
             Value::Null => {}
-            Value::Object(nested) => collect_expect(nested, &path, out),
+            Value::Object(nested) => {
+                insert_type(out, path.clone(), JsonTypeName::Object);
+                collect_expect(nested, &path, out);
+            }
             Value::String(_) => insert_type(out, path, JsonTypeName::String),
             Value::Number(_) => insert_type(out, path, JsonTypeName::Number),
             Value::Bool(_) => insert_type(out, path, JsonTypeName::Boolean),
@@ -417,6 +457,7 @@ pub fn write_recorded_mock(
     input: &Value,
     answer: &RecordedToolAnswer,
 ) -> Result<PathBuf, RecordingError> {
+    reject_unrepresentable_placeholder(tool, answer)?;
     let expect = derive_expect(input);
     let rendered = render_fixed_mock(&expect, answer);
 
@@ -516,9 +557,30 @@ mod tests {
         let expect = derive_expect(&input);
 
         assert_eq!(
+            expect.get(&ExpectPath::from("repo")),
+            Some(&ExpectConstraint::TypeName {
+                type_name: JsonTypeName::Object
+            })
+        );
+        assert_eq!(
             expect.get(&ExpectPath::from("repo.owner")),
             Some(&ExpectConstraint::TypeName {
                 type_name: JsonTypeName::String
+            })
+        );
+        assert_eq!(expect.len(), 2);
+    }
+
+    #[test]
+    fn an_object_value_gets_its_own_constraint_even_when_empty() {
+        let input = json!({"repo": {}});
+
+        let expect = derive_expect(&input);
+
+        assert_eq!(
+            expect.get(&ExpectPath::from("repo")),
+            Some(&ExpectConstraint::TypeName {
+                type_name: JsonTypeName::Object
             })
         );
         assert_eq!(expect.len(), 1);
@@ -557,6 +619,66 @@ mod tests {
 
         assert!(rendered.contains("error: \"rate limited\""), "rendered:\n{rendered}");
         assert!(rendered.ends_with("---\n"), "an error mock has no body: {rendered:?}");
+    }
+
+    #[test]
+    fn a_recorded_body_containing_a_file_placeholder_is_refused_rather_than_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let mocks_dir = temp.path().join("mocks");
+        let server = ServerName::from("probeserver");
+        let tool = ToolName::from("probe");
+        let answer = RecordedToolAnswer {
+            text: "see {{file:secret.json}} for details".to_string(),
+            is_error: false,
+        };
+
+        let err = write_recorded_mock(&mocks_dir, &server, &tool, &json!({}), &answer).unwrap_err();
+
+        assert!(
+            matches!(err, RecordingError::UnrepresentablePlaceholder { .. }),
+            "err: {err:?}"
+        );
+        assert!(!mocks_dir.exists(), "no mock file should have been written: {err}");
+    }
+
+    #[test]
+    fn a_recorded_error_containing_an_input_placeholder_is_refused_rather_than_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let mocks_dir = temp.path().join("mocks");
+        let server = ServerName::from("probeserver");
+        let tool = ToolName::from("probe");
+        let answer = RecordedToolAnswer {
+            text: "value is {{input.secret}}".to_string(),
+            is_error: true,
+        };
+
+        let err = write_recorded_mock(&mocks_dir, &server, &tool, &json!({}), &answer).unwrap_err();
+
+        assert!(
+            matches!(err, RecordingError::UnrepresentablePlaceholder { .. }),
+            "err: {err:?}"
+        );
+        assert!(!mocks_dir.exists(), "no mock file should have been written: {err}");
+    }
+
+    #[test]
+    fn a_recorded_error_containing_a_file_placeholder_is_written_as_is() {
+        let temp = tempfile::tempdir().unwrap();
+        let mocks_dir = temp.path().join("mocks");
+        let server = ServerName::from("probeserver");
+        let tool = ToolName::from("probe");
+        let answer = RecordedToolAnswer {
+            text: "see {{file:secret.json}} for details".to_string(),
+            is_error: true,
+        };
+
+        let path = write_recorded_mock(&mocks_dir, &server, &tool, &json!({}), &answer).unwrap();
+
+        let rendered = fs::read_to_string(&path).unwrap();
+        assert!(
+            rendered.contains("{{file:secret.json}}"),
+            "error field is never expanded on replay, so it should carry the sequence verbatim: {rendered}"
+        );
     }
 
     #[test]

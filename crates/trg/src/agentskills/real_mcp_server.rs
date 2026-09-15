@@ -37,13 +37,19 @@ impl RealServerCommand {
     }
 }
 
+/// Prints the program but never an argument value. This is what reaches refusal messages,
+/// every `RecordingError` variant, the stderr passthrough, and a machine-readable summary's
+/// `command` field, and a real MCP server routinely takes a credential as an argument; the
+/// program name identifies which server failed, which is all any of those call sites need.
 impl fmt::Display for RealServerCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.program)?;
-        for arg in &self.args {
-            write!(f, " {arg}")?;
-        }
-        Ok(())
+        write!(
+            f,
+            "{} ({} arg{})",
+            self.program,
+            self.args.len(),
+            if self.args.len() == 1 { "" } else { "s" }
+        )
     }
 }
 
@@ -113,9 +119,27 @@ mod tests {
             "refusal should name the opt-in flag: {message}"
         );
         assert!(
-            message.contains("./fixture-server --stdio"),
+            message.contains("./fixture-server (1 arg)"),
             "refusal should name the command that was withheld: {message}"
         );
+        assert!(
+            !message.contains("--stdio"),
+            "refusal should not leak the argument value: {message}"
+        );
+    }
+
+    #[test]
+    fn displaying_a_command_never_prints_an_argument_value() {
+        let command = RealServerCommand::new(
+            "./mcp-servers/github".to_string(),
+            vec!["--token".to_string(), "sk-super-secret".to_string()],
+        );
+
+        let rendered = command.to_string();
+
+        assert_eq!(rendered, "./mcp-servers/github (2 args)");
+        assert!(!rendered.contains("sk-super-secret"), "rendered: {rendered}");
+        assert!(!rendered.contains("--token"), "rendered: {rendered}");
     }
 
     #[test]

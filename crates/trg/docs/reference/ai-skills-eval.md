@@ -614,7 +614,7 @@ $ trg ai skills eval record-mcp \
     --call 'create_issue={"repo":"acme/widgets","title":"hi"}' \
     --mocks-dir ./my-skill/evals/mocks \
     --allow-real-mcp-server
-Recorded github against ./mcp-servers/github --stdio:
+Recorded github against ./mcp-servers/github (1 arg):
   create_issue [ok] -> ./my-skill/evals/mocks/github/create_issue.md
 ```
 

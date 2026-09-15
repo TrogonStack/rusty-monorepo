@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -34,6 +34,11 @@ impl FromStr for RecordedCallSpec {
         }
         let input: Value =
             serde_json::from_str(json).map_err(|e| format!("`{raw}`: call input is not valid JSON: {e}"))?;
+        if !input.is_object() {
+            return Err(format!(
+                "`{raw}`: call input must be a JSON object, since it becomes `tools/call`'s `arguments`"
+            ));
+        }
         Ok(Self {
             tool: ToolName::from(tool),
             input,
@@ -98,17 +103,46 @@ pub struct RecordMcpArgs {
     pub output_format: OutputFormat,
 }
 
-/// Rejects an empty `--server` or `--command` before anything is spawned. Both are plain
-/// `String` flags rather than a value object, so nothing else in the type system stops an
-/// empty one from reaching `ServerName::from` (which is infallible and would silently write
-/// a mock one directory above where `eval run` looks for it) or `Command::new` (which would
-/// fail far less clearly than naming the flag here does).
-fn validate_flags(server: &str, command: &str) -> Result<(), String> {
+/// Rejects an empty `--server` or `--command`, a `--server` or `--call` tool name that is
+/// not a single path component, or a repeated `--call` tool name, before anything is
+/// spawned. `--server`, `--command` and a call's tool name are plain `String`/`ToolName`
+/// values rather than a path-shaped value object, so nothing else in the type system stops
+/// an empty, absolute, or `..`-carrying one from reaching `ServerName::from` /
+/// `ToolName::from` (both infallible) and then `mocks_dir.join(server).join(format!("{tool}
+/// .md"))`: `Path::join` with an absolute argument replaces the whole path instead of
+/// extending it, and `..` walks back out of it, so either can write a mock file outside the
+/// documented `<mocks-dir>/<server>/<tool>.md` layout. A repeated tool name would instead
+/// have the second call's mock file silently overwrite the first's, while the summary still
+/// reports both as recorded.
+fn validate_flags(server: &str, command: &str, calls: &[RecordedCallSpec]) -> Result<(), String> {
     if server.is_empty() {
         return Err("--server must not be empty".to_string());
     }
     if command.is_empty() {
         return Err("--command must not be empty".to_string());
+    }
+    validate_path_component("--server", server)?;
+
+    let mut seen_tools = std::collections::BTreeSet::new();
+    for call in calls {
+        let tool = call.tool.as_str();
+        validate_path_component("--call tool name", tool)?;
+        if !seen_tools.insert(tool) {
+            return Err(format!(
+                "--call tool `{tool}` is repeated: each tool can only be recorded once per invocation, since its \
+                 mock file would otherwise be overwritten"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_path_component(flag: &str, value: &str) -> Result<(), String> {
+    if Path::new(value).is_absolute() || value.contains('/') || value == "." || value == ".." {
+        return Err(format!(
+            "{flag} `{value}` must be a single path component, not a path: it becomes part of \
+             <mocks-dir>/<server>/<tool>.md"
+        ));
     }
     Ok(())
 }
@@ -130,7 +164,7 @@ struct RecordMcpOutput {
 
 impl RecordMcpArgs {
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
-        if let Err(e) = validate_flags(&self.server, &self.command) {
+        if let Err(e) = validate_flags(&self.server, &self.command, &self.calls) {
             eprintln!("record-mcp: {e}");
             return ExitCode::InfrastructureFailure;
         }
@@ -233,16 +267,60 @@ mod tests {
     }
 
     #[test]
+    fn a_call_spec_whose_input_is_not_a_json_object_is_rejected() {
+        for json in ["[1,2,3]", "1", "\"hi\"", "true", "null"] {
+            let err = RecordedCallSpec::from_str(&format!("create_issue={json}"))
+                .expect_err(&format!("{json} should have been rejected"));
+            assert!(err.contains("JSON object"), "json {json:?}: {err}");
+        }
+    }
+
+    fn one_call() -> Vec<RecordedCallSpec> {
+        vec![RecordedCallSpec::from_str("probe={}").unwrap()]
+    }
+
+    #[test]
     fn an_empty_server_name_is_rejected_by_name() {
-        let err = validate_flags("", "./mcp-servers/github").unwrap_err();
+        let err = validate_flags("", "./mcp-servers/github", &one_call()).unwrap_err();
 
         assert!(err.contains("--server"), "error should name the empty flag: {err}");
     }
 
     #[test]
     fn an_empty_command_is_rejected_by_name() {
-        let err = validate_flags("github", "").unwrap_err();
+        let err = validate_flags("github", "", &one_call()).unwrap_err();
 
         assert!(err.contains("--command"), "error should name the empty flag: {err}");
+    }
+
+    #[test]
+    fn a_server_name_that_is_not_a_single_path_component_is_rejected() {
+        for server in ["../outside", "/etc/passwd", ".", ".."] {
+            let err = validate_flags(server, "./mcp-servers/github", &one_call())
+                .expect_err(&format!("{server:?} should have been rejected"));
+            assert!(err.contains("--server"), "server {server:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_call_tool_name_that_is_not_a_single_path_component_is_rejected() {
+        for tool in ["../escape", "/abs", ".", ".."] {
+            let calls = vec![RecordedCallSpec::from_str(&format!("{tool}={{}}")).unwrap()];
+            let err = validate_flags("github", "./mcp-servers/github", &calls)
+                .expect_err(&format!("{tool:?} should have been rejected"));
+            assert!(err.contains("--call"), "tool {tool:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn duplicate_call_tool_names_are_rejected_before_any_server_is_spawned() {
+        let calls = vec![
+            RecordedCallSpec::from_str("probe={}").unwrap(),
+            RecordedCallSpec::from_str(r#"probe={"x":1}"#).unwrap(),
+        ];
+
+        let err = validate_flags("github", "./mcp-servers/github", &calls).unwrap_err();
+
+        assert!(err.contains("probe"), "error should name the repeated tool: {err}");
     }
 }
