@@ -742,6 +742,7 @@ fn grade_declaratively(
             };
             result.excluded = excluded;
             result.name = name;
+            result.weight = declared.weight;
             result
         }
         GraderOutcome::AuthoringError { reason } => {
@@ -2298,6 +2299,64 @@ mod tests {
                 .find(|result| result.name.as_deref() == Some("wraps-up"))
                 .unwrap_or_else(|| panic!("{scenario:?} must report the declared grader name"));
             assert!(named_result.assertion.contains("all done"));
+        }
+    }
+
+    const WEIGHTED_BASELINE_SUITE: &str = r#"{
+        "schema_version": 3,
+        "skill_name": "demo-skill",
+        "evals": [
+            {
+                "id": "case-a",
+                "prompt": "prompt a",
+                "expected_output": "output a",
+                "graders": [
+                    {
+                        "type": "baseline",
+                        "reference": "golden.md",
+                        "criterion": "is as complete",
+                        "name": "matches-the-golden",
+                        "weight": 3.0
+                    }
+                ]
+            }
+        ]
+    }"#;
+
+    /// A comparison is the one outcome that reaches its verdict through a second
+    /// grader, and the weight has to survive that hop. Losing it is silent: an
+    /// undeclared weight counts as one full vote, so the case still grades and
+    /// still reports, just against a weighting nobody asked for.
+    #[test]
+    fn a_weighted_baseline_grader_keeps_its_weight_through_a_comparison() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, WEIGHTED_BASELINE_SUITE);
+        fs::write(
+            temp.path().join("demo-skill").join("golden.md"),
+            "the reference answer\n",
+        )
+        .unwrap();
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        for (scenario, grading) in grading_files_by_scenario(&report_dir) {
+            let result = grading
+                .assertion_results
+                .iter()
+                .find(|result| result.name.as_deref() == Some("matches-the-golden"))
+                .unwrap_or_else(|| panic!("{scenario:?} must report the declared grader"));
+            assert_eq!(
+                result.weight,
+                Some(GraderWeight::parse(3.0).unwrap()),
+                "{scenario:?} dropped the weight the case declared"
+            );
         }
     }
 
