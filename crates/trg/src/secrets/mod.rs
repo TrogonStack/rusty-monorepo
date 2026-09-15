@@ -684,6 +684,13 @@ pub mod fake {
                 .insert(path, failure);
         }
 
+        /// Lift a failure set by [`Self::set_get_failure_at`], for a caller
+        /// that has to exercise what happens *after* a transient read error,
+        /// not just during one.
+        pub fn clear_get_failure_at(&self, path: &SecretPath) {
+            self.get_failure_at.lock().expect("fake backend lock").remove(path);
+        }
+
         /// Make every subsequent `set` fail until cleared, for exercising a
         /// caller that must tolerate a write it issued along the way (such as
         /// a migration) failing without failing the call that triggered it.

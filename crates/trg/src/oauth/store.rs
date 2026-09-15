@@ -172,16 +172,30 @@ impl OAuthCredentialStore {
     /// fallback read error into `Ok(None)`, which is right for a courtesy
     /// read that must not block a login, but wrong here. `logout` needs to
     /// know, and a storage error means it does not, so this propagates one
-    /// instead of reporting a clean logout it cannot vouch for. A payload
-    /// that is present but will not decode still counts as reachable, not as
-    /// clean: erring toward telling the operator something is there is the
-    /// safe direction.
+    /// instead of reporting a clean logout it cannot vouch for.
+    ///
+    /// What counts as reachable is an OAuth credential, not a populated
+    /// path. [`Self::load_from_fallback`] already reads it that way, and a
+    /// path holding only unrelated sibling keys would otherwise have
+    /// `logout` tell the operator this machine keeps authenticating from a
+    /// shared credential that is not there.
+    ///
+    /// A payload that is present but will not decode, or that carries a
+    /// `credentials.vN` this trg does not understand, still counts as
+    /// reachable rather than clean, and deliberately does not propagate the
+    /// decoder error: `logout` calls this only after `clear` has already
+    /// deleted the machine-scoped path, so failing here would leave the
+    /// operator with a half-done logout and no answer. Erring toward telling
+    /// them something is there is the safe direction.
     pub async fn fallback_is_reachable(&self) -> Result<Option<SecretPath>, AuthError> {
         let Some(fallback) = self.fallback.clone() else {
             return Ok(None);
         };
         match self.backend.get(&fallback).await {
-            Ok(Some(_)) => Ok(Some(fallback)),
+            Ok(Some(map)) => match self.decode_from_fallback_map(&fallback, &map) {
+                Ok(Some(_)) | Err(_) => Ok(Some(fallback)),
+                Ok(None) => Ok(None),
+            },
             Ok(None) => Ok(None),
             Err(e) => Err(self.to_auth_error(e)),
         }
@@ -199,20 +213,40 @@ impl OAuthCredentialStore {
 #[async_trait]
 impl CredentialStore for OAuthCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
-        // Reset up front so a store reused across more than one `load` never
-        // reports the previous call's fallback hit as this one's.
-        self.read_from.record(None);
+        // `read_from` is deliberately not reset on the way in. Resetting up
+        // front would clear it for reads that then fail, and a read that
+        // failed says nothing about where the credential rmcp is still
+        // holding came from; the next token-carrying `save` would take the
+        // empty slot at face value and copy a fallback-origin grant onto the
+        // machine-scoped path, the replay `machine_id` exists to prevent,
+        // reached through an error path. Only an outcome this can vouch for
+        // moves the slot, so every arm below either records or deliberately
+        // leaves it alone. A store reused across more than one `load` is
+        // still safe: each vouchable outcome overwrites the last one.
         match self.backend.get(&self.path).await {
             // Once `clear` has invalidated a fallback-origin credential, this
             // store must not turn around and read it straight back.
-            Ok(None) if self.fallback_disabled.load(Ordering::Relaxed) => Ok(None),
+            Ok(None) if self.fallback_disabled.load(Ordering::Relaxed) => {
+                self.read_from.record(None);
+                Ok(None)
+            }
             Ok(None) => self.load_from_fallback().await,
-            Ok(Some(map)) => self.load_from_map(map).await,
+            // The primary path answered, so whatever comes of decoding it,
+            // nothing is being served from the fallback any more.
+            Ok(Some(map)) => {
+                self.read_from.record(None);
+                self.load_from_map(map).await
+            }
             // The outer map itself would not decode: what a payload written
             // before credentials lived in a keyed map looks like. `raw` is
             // only `Some` when the backend that hit this had the exact text
-            // on hand to retry under that older shape.
-            Err(SecretsError::Malformed { raw, .. }) => self.load_legacy_v1(raw).await,
+            // on hand to retry under that older shape. The primary path holds
+            // a payload either way, so the same reasoning applies.
+            Err(SecretsError::Malformed { raw, .. }) => {
+                self.read_from.record(None);
+                self.load_legacy_v1(raw).await
+            }
+            // Transient: leaves `read_from` untouched on purpose.
             Err(err) => Err(self.to_auth_error(err)),
         }
     }
@@ -331,15 +365,23 @@ impl OAuthCredentialStore {
     /// read-only rule forbids.
     async fn load_from_fallback(&self) -> Result<Option<StoredCredentials>, AuthError> {
         let Some(fallback) = self.fallback.clone() else {
+            self.read_from.record(None);
             return Ok(None);
         };
 
         let map = match self.backend.get(&fallback).await {
             Ok(Some(map)) => map,
-            Ok(None) => return Ok(None),
+            Ok(None) => {
+                self.read_from.record(None);
+                return Ok(None);
+            }
             // A read error at the fallback is not a reason to refuse a login
             // that would otherwise proceed normally against an empty primary
-            // path: the fallback is a courtesy, not a dependency.
+            // path: the fallback is a courtesy, not a dependency. It is a
+            // reason to leave `read_from` alone, though: answering `Ok(None)`
+            // here is this method admitting it could not tell, and clearing
+            // the slot on the way out would turn that into a claim that
+            // nothing was ever read from the fallback. See `load`.
             Err(e) => {
                 tracing::debug!(
                     path = %fallback,
@@ -350,8 +392,16 @@ impl OAuthCredentialStore {
             }
         };
 
-        let Some(credentials) = self.decode_from_fallback_map(&fallback, &map)? else {
-            return Ok(None);
+        // Same distinction once more: a fallback that decodes to no credential
+        // of ours is a clean empty answer, one that will not decode at all is
+        // not, and only the first may clear the slot.
+        let credentials = match self.decode_from_fallback_map(&fallback, &map) {
+            Ok(Some(credentials)) => credentials,
+            Ok(None) => {
+                self.read_from.record(None);
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
         };
 
         self.read_from.record(Some(fallback.clone()));
@@ -1393,6 +1443,162 @@ mod tests {
         fake(&backend).set_get_failure(None);
 
         assert!(backend.get(&path).await.expect("get").is_none());
+    }
+
+    /// The hole this covers: `load` used to clear `read_from` on the way in,
+    /// before it knew how the read would turn out, and a fallback read error
+    /// is reported to rmcp as `Ok(None)` so as not to block a login. Together
+    /// those turned "we could not tell" into "nothing was read from the
+    /// fallback", and the next refresh wrote a fallback-origin grant onto the
+    /// machine-scoped path, leaving two paths refreshing one grant: the
+    /// replay `machine_id` exists to prevent, reached through an error path.
+    #[tokio::test]
+    async fn a_failed_fallback_read_does_not_retarget_the_next_refresh_at_the_primary() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let primary = SecretPath::parse("github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        let read_from = store.read_from();
+        store.load().await.expect("load").expect("some");
+        assert_eq!(
+            read_from.get().as_ref(),
+            Some(&shared),
+            "the first load reads the shared path"
+        );
+
+        fake(&backend).set_get_failure_at(shared.clone(), FakeFailure::Transport);
+        assert!(
+            store
+                .load()
+                .await
+                .expect("a fallback read error must not fail the load")
+                .is_none(),
+            "a fallback the store could not read still answers as absent, so a login is not blocked"
+        );
+        assert_eq!(
+            read_from.get().as_ref(),
+            Some(&shared),
+            "a read that failed says nothing about where rmcp's credential came from, so it must not clear the slot"
+        );
+        fake(&backend).clear_get_failure_at(&shared);
+
+        store
+            .save(credentials_with_token("refreshed-cred"))
+            .await
+            .expect("save");
+
+        let shared_after = backend.get(&shared).await.expect("get").expect("still there");
+        let raw = shared_after
+            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+            .expect("v2 key");
+        let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
+        assert_eq!(
+            decoded.client_id, "refreshed-cred",
+            "the refresh must still write back to the path it was read from"
+        );
+        assert!(
+            backend.get(&primary).await.expect("get").is_none(),
+            "the refresh must not have been copied onto the machine-scoped path"
+        );
+    }
+
+    /// The counterpart: a fallback that answers cleanly with no credential of
+    /// ours *is* something the store can vouch for, so it must clear the slot
+    /// rather than leave a stale origin behind for the next save.
+    #[tokio::test]
+    async fn a_clean_empty_fallback_read_does_clear_the_recorded_origin() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        let read_from = store.read_from();
+        store.load().await.expect("load").expect("some");
+        assert_eq!(read_from.get().as_ref(), Some(&shared));
+
+        backend
+            .delete(&shared)
+            .await
+            .expect("someone removed the shared credential");
+        assert!(store.load().await.expect("load").is_none());
+        assert_eq!(
+            read_from.get(),
+            None,
+            "a fallback that is cleanly empty means nothing is being served from it any more"
+        );
+    }
+
+    /// The hole this covers: `fallback_is_reachable` answered on whether the
+    /// path held a map at all, so a shared path holding only unrelated
+    /// sibling keys made `logout` tell the operator this machine would keep
+    /// authenticating from a shared credential that was never there. `load`
+    /// already reads that same map as holding nothing of ours.
+    #[tokio::test]
+    async fn fallback_is_reachable_ignores_a_path_that_only_holds_sibling_keys() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let mut sibling_only = SecretMap::new();
+        sibling_only.insert(SecretKey::parse("api_key").unwrap(), SecretString::from("keep-me"));
+        backend.set(&shared, &sibling_only).await.expect("seed the shared path");
+
+        assert_eq!(
+            store.fallback_is_reachable().await.expect("reachable"),
+            None,
+            "sibling keys are not an OAuth credential, and logout must not claim they are"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_is_reachable_reports_a_recognized_credential() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        assert_eq!(store.fallback_is_reachable().await.expect("reachable"), Some(shared),);
+    }
+
+    /// A payload that will not decode is still a payload sitting there, and
+    /// `logout` has already deleted the machine-scoped path by the time it
+    /// asks, so failing here would leave a half-done logout with no answer.
+    #[tokio::test]
+    async fn fallback_is_reachable_reports_a_corrupt_shared_payload_as_still_there() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let mut corrupt = SecretMap::new();
+        corrupt.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from("{not json"),
+        );
+        backend.set(&shared, &corrupt).await.expect("seed the shared path");
+
+        assert_eq!(
+            store.fallback_is_reachable().await.expect("reachable"),
+            Some(shared),
+            "erring toward telling the operator something is there is the safe direction"
+        );
     }
 }
 
