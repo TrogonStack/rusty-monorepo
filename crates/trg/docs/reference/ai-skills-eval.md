@@ -45,7 +45,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--runner-model` | string | *(unset)* | Model identifier forwarded to the runner CLI (`--model` / `-m`). A case's `model` overrides it. When neither is set, the runner picks its own default |
 | `--force` | bool | `false` | Overwrite an existing report directory if it already exists |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document for the final pipeline stage |
-| `--environment` | enum | `scrubbed` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
+| `--environment` | enum | `isolated` | How much of the host machine each run may see; values: `scrubbed`, `isolated`, `inherited`. See [Run environment](#run-environment) |
 | `--permission` | enum | `workspace_write` | How much a run's harness may do without prompting; values: `workspace_write`, `unrestricted`. See [Run permission](#run-permission) |
 | `--timeout-secs` | integer | *(unset)* | Per-run timeout. A case's `timeout_secs` overrides it. See [Timeouts](#timeouts) |
 | `--attempts` | integer | *(unset, 3 draws)* | Draw each (case × scenario) cell this many times. Overrides any count a case pinned. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
@@ -2043,8 +2043,8 @@ much of the host machine a run can see.
 
 | Policy | Environment | `HOME` | Harness config home |
 | ------ | ----------- | ------ | ------------------- |
-| `scrubbed` (default) | Replaced with an allowlist | Host | Host |
-| `isolated` | Replaced with an allowlist | Per run | Per run |
+| `scrubbed` | Replaced with an allowlist | Host | Host |
+| `isolated` (default) | Replaced with an allowlist | Per run | Per run |
 | `inherited` | Passed through untouched | Host | Host |
 
 The allowlist is fixed: the variables a CLI needs to start (`PATH`, `TMPDIR`,

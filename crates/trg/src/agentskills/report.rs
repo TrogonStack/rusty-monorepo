@@ -111,14 +111,14 @@ pub enum EnvironmentPolicy {
     #[value(name = "inherited")]
     Inherited,
     /// Replace the environment with an allowlist, and leave the harness config home alone.
-    #[default]
     #[value(name = "scrubbed")]
     Scrubbed,
     /// Scrub, and additionally give the run its own `HOME` and harness config home.
     ///
-    /// The strongest guarantee, and what CI should use. It needs the harness to be able to
+    /// The strongest guarantee, and the default. It needs the harness to be able to
     /// authenticate without its host config home, which in practice means credentials
     /// reachable from the environment or from the auth files linked in for the run.
+    #[default]
     #[value(name = "isolated")]
     Isolated,
 }
@@ -323,7 +323,11 @@ pub struct ReportSection {
     pub runner_binary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runner_version: Option<String>,
-    #[serde(default)]
+    /// Deliberately does not track `EnvironmentPolicy::default()`. This field was added
+    /// after the fact, `scrubbed` was the behaviour at the time, and reading a bundle that
+    /// recorded no policy as the strongest one would claim an isolation guarantee the run
+    /// never had.
+    #[serde(default = "environment_before_it_was_recorded")]
     pub environment: EnvironmentPolicy,
     #[serde(default)]
     pub permission: PermissionOutcome,
@@ -586,6 +590,10 @@ pub struct RunRecord {
 
 fn default_runner_invocations() -> u32 {
     1
+}
+
+fn environment_before_it_was_recorded() -> EnvironmentPolicy {
+    EnvironmentPolicy::Scrubbed
 }
 
 pub const RUN_STATUS_SKIPPED: &str = "skipped";
@@ -1451,6 +1459,30 @@ mod tests {
     use super::*;
     use crate::fs::testutil::MemFS;
     use std::path::Path;
+
+    #[test]
+    fn a_bundle_written_before_the_environment_field_reads_as_scrubbed_not_as_the_new_default() {
+        let section: ReportSection = serde_json::from_str(
+            r#"{
+                "id": "report-1",
+                "generated_at": "2026-01-01T00:00:00Z",
+                "iteration": 1,
+                "producer": { "name": "trg", "version": "0.0.0" }
+            }"#,
+        )
+        .expect("a bundle predating the environment field still opens");
+
+        assert_eq!(
+            section.environment,
+            EnvironmentPolicy::Scrubbed,
+            "a bundle that recorded no policy must not be read as having had the strongest one"
+        );
+        assert_eq!(
+            EnvironmentPolicy::default(),
+            EnvironmentPolicy::Isolated,
+            "the CLI default moved, and this field deliberately does not track it"
+        );
+    }
 
     fn sample_suite() -> EvalSuite {
         serde_json::from_str(

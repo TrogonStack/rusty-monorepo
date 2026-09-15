@@ -233,8 +233,8 @@ pub struct RunArgs {
         long,
         value_enum,
         value_name = "POLICY",
-        default_value_t = EnvironmentPolicy::Scrubbed,
-        help = "How much of this machine each run may see: scrubbed (default) replaces the environment with an allowlist; isolated also gives the run its own HOME and harness config home, so installed skills, global instructions, and MCP servers cannot reach it; inherited passes the environment through"
+        default_value_t = EnvironmentPolicy::Isolated,
+        help = "How much of this machine each run may see: isolated (default) gives the run its own HOME and harness config home, so installed skills, global instructions, and MCP servers cannot reach it; scrubbed replaces the environment with an allowlist but leaves the host's HOME and config home in place; inherited passes the environment through"
     )]
     pub environment: EnvironmentPolicy,
 
