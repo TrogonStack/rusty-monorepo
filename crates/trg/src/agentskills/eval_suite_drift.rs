@@ -306,7 +306,7 @@ mod tests {
         let evals = r#"{
             "skill_name": "demo-skill",
             "evals": [
-                { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                { "id": "case-a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] }
             ]
         }"#;
         let skill_path = sample_skill(&fs, evals);
@@ -321,15 +321,15 @@ mod tests {
         let previous_evals = r#"{
             "skill_name": "demo-skill",
             "evals": [
-                { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] },
-                { "id": "case-b", "prompt": "p", "expected_output": "o", "assertions": ["b"] }
+                { "id": "case-a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] },
+                { "id": "case-b", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "b" }] }
             ]
         }"#;
         let current_evals = r#"{
             "skill_name": "demo-skill",
             "evals": [
-                { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] },
-                { "id": "case-c", "prompt": "p", "expected_output": "o", "assertions": ["c"] }
+                { "id": "case-a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] },
+                { "id": "case-c", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "c" }] }
             ]
         }"#;
 
@@ -388,8 +388,8 @@ mod tests {
                     r#"{{
                         "skill_name": "demo-skill",
                         "evals": [
-                            {{ "id": "case-a", "prompt": "{prompt}", "expected_output": "o", "assertions": ["a"] }},
-                            {{ "id": "case-b", "prompt": "{prompt}", "expected_output": "o", "assertions": ["b"] }}
+                            {{ "id": "case-a", "prompt": "{prompt}", "expected_output": "o", "graders": [{{ "type": "contains", "text": "a" }}] }},
+                            {{ "id": "case-b", "prompt": "{prompt}", "expected_output": "o", "graders": [{{ "type": "contains", "text": "b" }}] }}
                         ]
                     }}"#
                 ),
@@ -411,8 +411,8 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] },
-                    { "id": "case-b", "prompt": "p", "expected_output": "o", "assertions": ["b"] }
+                    { "id": "case-a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] },
+                    { "id": "case-b", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "b" }] }
                 ]
             }"#,
         );
@@ -426,8 +426,8 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "case-a", "prompt": "edited", "expected_output": "o", "assertions": ["a"] },
-                    { "id": "case-b", "prompt": "edited", "expected_output": "o", "assertions": ["b"] }
+                    { "id": "case-a", "prompt": "edited", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] },
+                    { "id": "case-b", "prompt": "edited", "expected_output": "o", "graders": [{ "type": "contains", "text": "b" }] }
                 ]
             }"#,
         )
@@ -491,7 +491,7 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                    { "id": "case-a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] }
                 ]
             }"#,
         );
@@ -518,7 +518,7 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                    { "id": "case-a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] }
                 ]
             }"#,
         );
@@ -542,7 +542,7 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "case-a", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                    { "id": "case-a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] }
                 ]
             }"#,
         );

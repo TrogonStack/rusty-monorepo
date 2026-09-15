@@ -39,7 +39,7 @@ impl VerifyMode {
         }
     }
 
-    fn requires_assertions(self) -> bool {
+    fn requires_graders(self) -> bool {
         matches!(self, Self::Strict)
     }
 
@@ -91,8 +91,12 @@ pub struct VerifyArgs {
     #[arg(long, value_enum, default_value_t = VerifyMode::Lenient)]
     pub mode: VerifyMode,
 
-    #[arg(long, help = "Fail when any eval case has an empty assertions array")]
-    pub require_assertions: bool,
+    #[arg(
+        long,
+        alias = "require-assertions",
+        help = "Fail when any eval case declares no grader"
+    )]
+    pub require_graders: bool,
 
     #[arg(
         long,
@@ -251,7 +255,7 @@ impl VerifyArgs {
             }
         };
 
-        let require_assertions = self.require_assertions || self.mode.requires_assertions();
+        let require_graders = self.require_graders || self.mode.requires_graders();
         let eval_dir = self.eval_dir.clone().unwrap_or_default();
         if let Err(error) = check_eval_suite(
             fs,
@@ -259,7 +263,7 @@ impl VerifyArgs {
             &eval_dir,
             &props.name,
             EvalCheckOptions {
-                require_assertions,
+                require_graders,
                 ..EvalCheckOptions::default()
             },
         ) {
@@ -279,7 +283,7 @@ impl VerifyArgs {
             skill_dir,
             &suite,
             EvalLintOptions {
-                allow_empty_assertions: require_assertions,
+                allow_empty_graders: require_graders,
                 ..EvalLintOptions::default()
             },
         ));
@@ -291,6 +295,25 @@ impl VerifyArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--require-assertions` is the pre-rename spelling: suites and CI invocations
+    /// pinned to it must keep working, so it stays as an alias with identical meaning.
+    #[test]
+    fn require_assertions_is_an_alias_for_require_graders() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: VerifyArgs,
+        }
+
+        let by_new_name = Wrapper::try_parse_from(["trg", "--require-graders"]).unwrap().args;
+        let by_old_name = Wrapper::try_parse_from(["trg", "--require-assertions"]).unwrap().args;
+
+        assert!(by_new_name.require_graders);
+        assert_eq!(by_new_name.require_graders, by_old_name.require_graders);
+    }
 
     /// A validator that cannot say it is not validating is worse than none: strict mode
     /// would exit clean on a bundle nothing had read, and the operator would take that

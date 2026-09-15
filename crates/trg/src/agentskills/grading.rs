@@ -1,28 +1,9 @@
 //! Mechanical and script-based grading for skill eval runs.
-//!
-//! # Mechanical assertion patterns
-//!
-//! Assertions are matched case-insensitively against the following phrasing:
-//!
-//! | Kind | Example patterns |
-//! |------|------------------|
-//! | File exists | `file "out.json" exists`, `outputs/report.md exists` |
-//! | File count | `file count is 3`, `contains 2 files`, `3 files in outputs` |
-//! | Valid JSON | `valid json`, `out.json is valid json` |
-//! | Valid CSV | `valid csv`, `data.csv is valid csv` |
-//! | Markdown headings | `valid markdown headings`, `report.md has valid markdown headings` |
-//! | Image exists | `image chart.png exists`, `image exists at outputs/chart.png` |
-//! | Image dimensions | `chart.png is 800x600`, `image dimensions are 800x600` |
-//! | Contains string | `contains "hello"`, `output includes summary`, `includes "foo" in out.txt` |
-//! | Regex match | `matches regex /pattern/`, `matches /foo.*/` |
-//! | Row count | `row count is 10`, `data.csv has 10 rows`, `10 rows in data.csv` |
-//! | Schema validation | `validates against schema foo`, `schema validation for out.json` |
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -92,10 +73,10 @@ pub struct AssertionGradeResult {
     /// work and not the premise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub excluded: Option<String>,
-    /// No grader could answer this assertion at all: the text matched no mechanical
-    /// pattern and no judge was consulted. Distinct from `unsupported`, which means a
-    /// grader existed and the harness could not answer it, and from `excluded`, which
-    /// means the author scoped it to the other arm.
+    /// No grader could answer this assertion at all: it deferred to a judge and
+    /// grading ran under `--grader none`, so no judge was consulted. Distinct from
+    /// `unsupported`, which means a grader existed and the harness could not answer
+    /// it, and from `excluded`, which means the author scoped it to the other arm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ungraded: Option<String>,
     /// How a panel of judges split, present only when more than one opinion was taken.
@@ -449,9 +430,8 @@ impl<'a> GradeSession<'a> {
 
 /// Whether anything in the suite can reach the LLM judge under these options.
 ///
-/// `--grader llm` always can. Under `auto` only a declared `llm` grader or a
-/// free-text assertion that no mechanical pattern recognizes can, so a suite
-/// of typed graders is graded without a credential.
+/// `--grader llm` always can. Under `auto` only a declared `llm` grader can, so a suite
+/// of purely mechanical graders is graded without a credential.
 fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
     match options.grader {
         GraderMode::Llm => true,
@@ -460,56 +440,8 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
             case.graders
                 .iter()
                 .any(|declared| matches!(declared.grader, Grader::Llm { .. } | Grader::Baseline { .. }))
-                || case
-                    .assertions
-                    .iter()
-                    .any(|assertion| parse_mechanical_kind(assertion.as_str()).is_none())
         }),
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum MechanicalKind {
-    FileExists {
-        path: String,
-    },
-    FileCount {
-        count: usize,
-        dir: Option<String>,
-    },
-    ValidJson {
-        path: Option<String>,
-    },
-    ValidCsv {
-        path: Option<String>,
-    },
-    ValidMarkdownHeadings {
-        path: Option<String>,
-    },
-    ImageExists {
-        path: String,
-    },
-    ImageDimensions {
-        path: String,
-        width: u32,
-        height: u32,
-    },
-    ContainsString {
-        needle: String,
-        path: Option<String>,
-    },
-    MatchesRegex {
-        pattern: String,
-        path: Option<String>,
-    },
-    RowCount {
-        count: usize,
-        path: Option<String>,
-    },
-    SchemaValidation {
-        schema: Option<String>,
-        path: Option<String>,
-    },
 }
 
 pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport> {
@@ -570,16 +502,11 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         }
 
         let ctx = run_context(report_dir, run, &skill_path);
-        let mut assertion_results =
-            Vec::with_capacity(case.assertions.len() + case.graders.len() + run.mock_violations.len());
+        let mut assertion_results = Vec::with_capacity(case.graders.len() + run.mock_violations.len());
 
         let declarative = DeclarativeContext::load(&ctx);
         for grader in &case.graders {
             assertion_results.push(grade_declaratively(grader, case, &declarative, &ctx, &session)?);
-        }
-
-        for assertion in &case.assertions {
-            assertion_results.push(grade_assertion(assertion.as_str(), case, &declarative, &ctx, &session)?);
         }
 
         // A read-only fixture that was modified during the run is a failure of the run
@@ -690,52 +617,6 @@ fn build_grading_strategy(options: &GradeOptions, judge: Option<&JudgeModel>) ->
     GradingStrategy {
         grader,
         strict: options.strict,
-    }
-}
-
-fn grade_assertion(
-    assertion: &str,
-    eval_case: &EvalCase,
-    declarative: &DeclarativeContext,
-    ctx: &RunContext,
-    session: &GradeSession,
-) -> Result<AssertionGradeResult> {
-    let options = session.options;
-    match options.grader {
-        GraderMode::Script => grade_with_script(assertion, None, eval_case, ctx, options),
-        GraderMode::Llm => grade_with_llm(assertion, &TargetDeclaration::Default, declarative, ctx, session),
-        GraderMode::None | GraderMode::Auto => {
-            if let Some(kind) = parse_mechanical_kind(assertion) {
-                let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
-                Ok(AssertionGradeResult {
-                    name: None,
-                    assertion: assertion.to_string(),
-                    passed,
-                    evidence,
-                    grader: GraderInfo {
-                        kind: GraderKind::Mechanical,
-                        model: None,
-                        command: None,
-                    },
-                    rationale: None,
-                    unsupported: None,
-                    excluded: None,
-                    ungraded: None,
-                    votes: None,
-                    weight: None,
-                })
-            } else if options.grader == GraderMode::None {
-                Ok(needs_llm_result(
-                    assertion,
-                    "no mechanical pattern matched and grader mode is none",
-                ))
-            } else {
-                Ok(needs_llm_result(
-                    assertion,
-                    "assertion requires LLM grading; re-run with --grader llm",
-                ))
-            }
-        }
     }
 }
 
@@ -1136,29 +1017,6 @@ fn grade_with_llm(
     ctx: &RunContext,
     session: &GradeSession,
 ) -> Result<AssertionGradeResult> {
-    if !target.is_explicit() {
-        if let Some(kind) = parse_mechanical_kind(assertion) {
-            let (passed, evidence) = evaluate_mechanical(&kind, ctx)?;
-            return Ok(AssertionGradeResult {
-                name: None,
-                assertion: assertion.to_string(),
-                passed,
-                evidence,
-                grader: GraderInfo {
-                    kind: GraderKind::Mechanical,
-                    model: None,
-                    command: None,
-                },
-                rationale: None,
-                unsupported: None,
-                excluded: None,
-                ungraded: None,
-                votes: None,
-                weight: None,
-            });
-        }
-    }
-
     let endpoint = session.endpoint()?;
     let payload = llm_grader_payload(assertion, &target.resolve(), declarative, ctx)?;
     let mut request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, payload.text);
@@ -1747,511 +1605,6 @@ struct LlmGraderResponse {
     rationale: Option<String>,
 }
 
-/// The assertion as the author wrote it, beside an ASCII-lowercased copy used only to
-/// locate keywords.
-///
-/// Keyword matching has to ignore case; capture must not. Mapping each byte to itself or
-/// to exactly one other byte keeps the two copies index-aligned, so an offset found in
-/// `lower` names the same position in `original`, and every path, needle and pattern
-/// handed back is a slice of what was written. Nothing here can hand out lowercased text,
-/// which is the property that was missing when captures came off the lowercase copy.
-struct AssertionText {
-    original: String,
-    lower: String,
-}
-
-impl AssertionText {
-    fn new(assertion: &str) -> Self {
-        let original = assertion.trim().to_string();
-        let lower = original.to_ascii_lowercase();
-        Self { original, lower }
-    }
-
-    fn contains(&self, needle: &str) -> bool {
-        self.lower.contains(needle)
-    }
-
-    fn starts_with(&self, prefix: &str) -> bool {
-        self.lower.starts_with(prefix)
-    }
-
-    fn ends_with(&self, suffix: &str) -> bool {
-        self.lower.ends_with(suffix)
-    }
-
-    fn after(&self, prefix: &str) -> Option<&str> {
-        let idx = self.lower.find(prefix)? + prefix.len();
-        Some(self.original[idx..].trim())
-    }
-
-    fn before(&self, suffix: &str) -> Option<&str> {
-        let idx = self.lower.find(suffix)?;
-        Some(self.original[..idx].trim())
-    }
-
-    fn between(&self, prefix: &str, suffix: &str) -> Option<&str> {
-        let start = self.lower.find(prefix)? + prefix.len();
-        let end = self.lower[start..].find(suffix)? + start;
-        Some(self.original[start..end].trim())
-    }
-
-    fn unquoted_after(&self, prefix: &str) -> Option<&str> {
-        non_empty(unquote(self.after(prefix)?))
-    }
-
-    fn unquoted_before(&self, suffix: &str) -> Option<&str> {
-        non_empty(unquote(self.before(suffix)?))
-    }
-
-    fn unquoted_between(&self, prefix: &str, suffix: &str) -> Option<&str> {
-        non_empty(unquote(self.between(prefix, suffix)?))
-    }
-}
-
-/// One matched pair of surrounding quotes, removed, and only a matched pair.
-///
-/// Authors quote a path that carries spaces, and each capture site used to decide for
-/// itself whether to strip them, so a site that forgot opened a file whose name included
-/// the quote characters. Trimming every quote at both ends is what the sites that
-/// remembered did, and that also eats an apostrophe the author meant to keep.
-fn unquote(value: &str) -> &str {
-    let mut chars = value.chars();
-    match (chars.next(), chars.next_back()) {
-        (Some(open), Some(close)) if open == close && (open == '"' || open == '\'') => chars.as_str(),
-        _ => value,
-    }
-}
-
-fn non_empty(value: &str) -> Option<&str> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-pub(crate) fn parse_mechanical_kind(assertion: &str) -> Option<MechanicalKind> {
-    let text = AssertionText::new(assertion);
-
-    if let Some(path) = extract_quoted_or_token_after(&text, "file ", " exists") {
-        return Some(MechanicalKind::FileExists { path });
-    }
-    if text.ends_with(" exists") && !text.contains("file count") && !text.contains("image ") {
-        if let Some(path) = extract_path_before(&text, " exists") {
-            if !path.contains(' ') {
-                return Some(MechanicalKind::FileExists { path });
-            }
-        }
-    }
-
-    if let Some(count) = extract_usize_after(&text, "file count is ") {
-        return Some(MechanicalKind::FileCount { count, dir: None });
-    }
-    if let Some(count) = extract_usize_before(&text, " files") {
-        let dir = text.after(" in ").map(str::to_string);
-        return Some(MechanicalKind::FileCount { count, dir });
-    }
-    if let Some(count) = extract_usize_after(&text, "contains ") {
-        if text.contains(" files") {
-            return Some(MechanicalKind::FileCount { count, dir: None });
-        }
-    }
-
-    if text.contains("valid json") {
-        let path = extract_path_before(&text, " is valid json").or_else(|| extract_path_before(&text, "valid json"));
-        return Some(MechanicalKind::ValidJson { path });
-    }
-
-    if text.contains("valid csv") {
-        let path = extract_path_before(&text, " is valid csv").or_else(|| extract_path_before(&text, "valid csv"));
-        return Some(MechanicalKind::ValidCsv { path });
-    }
-
-    if text.contains("markdown headings") || text.contains("valid markdown") {
-        let path = extract_path_before(&text, " has valid markdown headings");
-        return Some(MechanicalKind::ValidMarkdownHeadings { path });
-    }
-
-    if let Some(path) = text.after("image exists at ") {
-        return Some(MechanicalKind::ImageExists { path: path.to_string() });
-    }
-    if text.starts_with("image ") && text.ends_with(" exists") {
-        if let Some(path) = text.between("image ", " exists") {
-            return Some(MechanicalKind::ImageExists { path: path.to_string() });
-        }
-    }
-
-    if let Some(dims) = extract_dimensions(&text) {
-        if let Some(path) = extract_path_before(&text, " is ") {
-            return Some(MechanicalKind::ImageDimensions {
-                path,
-                width: dims.0,
-                height: dims.1,
-            });
-        }
-        if text.contains("image dimensions are ") {
-            return Some(MechanicalKind::ImageDimensions {
-                path: "outputs".to_string(),
-                width: dims.0,
-                height: dims.1,
-            });
-        }
-    }
-
-    if let Some(needle) = extract_quoted(&text, "contains ") {
-        let path = text.after(" in ").map(str::to_string);
-        return Some(MechanicalKind::ContainsString { needle, path });
-    }
-    if let Some(needle) = extract_quoted(&text, "includes ") {
-        let path = text.after(" in ").map(str::to_string);
-        return Some(MechanicalKind::ContainsString { needle, path });
-    }
-    if text.starts_with("output includes ") {
-        if let Some(rest) = text.unquoted_after("output includes ") {
-            return Some(MechanicalKind::ContainsString {
-                needle: rest.to_string(),
-                path: None,
-            });
-        }
-    }
-
-    if let Some(pattern) = extract_regex_pattern(&text) {
-        let path = extract_path_before(&text, " matches");
-        return Some(MechanicalKind::MatchesRegex { pattern, path });
-    }
-
-    if let Some(count) = extract_usize_after(&text, "row count is ") {
-        let path = text.before(" row count").map(str::to_string);
-        return Some(MechanicalKind::RowCount { count, path });
-    }
-    if let Some(count) = extract_usize_before(&text, " rows") {
-        let path = text.before(" has ").or_else(|| text.before(" in ")).map(str::to_string);
-        return Some(MechanicalKind::RowCount { count, path });
-    }
-
-    if text.contains("schema validation") || text.contains("validates against schema ") {
-        let schema = text
-            .unquoted_between("validates against schema ", " for ")
-            .or_else(|| text.unquoted_after("validates against schema "))
-            .map(str::to_string);
-        let path = text
-            .unquoted_after(" for ")
-            .map(str::to_string)
-            .or_else(|| extract_path_before(&text, " validates against schema"));
-        return Some(MechanicalKind::SchemaValidation { schema, path });
-    }
-
-    None
-}
-
-fn evaluate_mechanical(kind: &MechanicalKind, ctx: &RunContext) -> Result<(bool, String)> {
-    match kind {
-        MechanicalKind::FileExists { path } => {
-            let resolved = resolve_path(ctx, path);
-            let exists = resolved.is_file();
-            Ok((
-                exists,
-                if exists {
-                    format!("file exists at {}", resolved.display())
-                } else {
-                    format!("file not found at {}", resolved.display())
-                },
-            ))
-        }
-        MechanicalKind::FileCount { count, dir } => {
-            let base = dir
-                .as_ref()
-                .map(|d| resolve_path(ctx, d))
-                .unwrap_or_else(|| ctx.outputs_dir.clone());
-            let actual = count_files(&base)?;
-            Ok((
-                actual == *count,
-                format!("found {actual} file(s) in {}", base.display()),
-            ))
-        }
-        MechanicalKind::ValidJson { path } => {
-            let target = path
-                .as_ref()
-                .map(|p| resolve_path(ctx, p))
-                .unwrap_or_else(|| ctx.outputs_dir.clone());
-            Ok(graders::check_json_validity(&graders::TargetContent::from_path(
-                &target,
-            )))
-        }
-        MechanicalKind::ValidCsv { path } => {
-            let target = path
-                .as_ref()
-                .map(|p| resolve_path(ctx, p))
-                .unwrap_or_else(|| ctx.outputs_dir.clone());
-            validate_csv_file(&target)
-        }
-        MechanicalKind::ValidMarkdownHeadings { path } => {
-            let target = path
-                .as_ref()
-                .map(|p| resolve_path(ctx, p))
-                .unwrap_or_else(|| find_first_file_with_extension(&ctx.outputs_dir, "md"));
-            validate_markdown_headings(&target)
-        }
-        MechanicalKind::ImageExists { path } => {
-            let resolved = resolve_path(ctx, path);
-            let exists = resolved.is_file() && is_image_file(&resolved);
-            Ok((
-                exists,
-                if exists {
-                    format!("image exists at {}", resolved.display())
-                } else {
-                    format!("image not found at {}", resolved.display())
-                },
-            ))
-        }
-        MechanicalKind::ImageDimensions { path, width, height } => {
-            let resolved = if path == "outputs" {
-                find_first_image(&ctx.outputs_dir)
-            } else {
-                resolve_path(ctx, path)
-            };
-            match read_image_dimensions(&resolved) {
-                Ok((w, h)) => {
-                    let passed = w == *width && h == *height;
-                    Ok((
-                        passed,
-                        format!("image at {} is {w}x{h} (expected {width}x{height})", resolved.display()),
-                    ))
-                }
-                Err(msg) => Ok((false, msg)),
-            }
-        }
-        MechanicalKind::ContainsString { needle, path } => {
-            let content = if let Some(p) = path {
-                std::fs::read_to_string(resolve_path(ctx, p)).unwrap_or_default()
-            } else {
-                read_search_content(ctx)?
-            };
-            let found = content.contains(needle);
-            Ok((
-                found,
-                if found {
-                    format!("found {:?} in output", needle)
-                } else {
-                    format!("{:?} not found in output", needle)
-                },
-            ))
-        }
-        MechanicalKind::MatchesRegex { pattern, path } => {
-            let content = if let Some(p) = path {
-                std::fs::read_to_string(resolve_path(ctx, p)).unwrap_or_default()
-            } else {
-                read_search_content(ctx)?
-            };
-            let re = Regex::new(pattern).map_err(|e| {
-                EvalError::Validation(ValidationError::for_field("assertion regex", e.to_string()).into())
-            })?;
-            let found = re.is_match(&content);
-            Ok((
-                found,
-                if found {
-                    format!("content matches /{pattern}/")
-                } else {
-                    format!("content does not match /{pattern}/")
-                },
-            ))
-        }
-        MechanicalKind::RowCount { count, path } => {
-            let target = path
-                .as_ref()
-                .map(|p| resolve_path(ctx, p))
-                .unwrap_or_else(|| find_first_file_with_extension(&ctx.outputs_dir, "csv"));
-            let rows = count_csv_rows(&target)?;
-            Ok((rows == *count, format!("{} has {rows} data row(s)", target.display())))
-        }
-        MechanicalKind::SchemaValidation { schema, path } => {
-            let schema_name = schema.as_ref().ok_or_else(|| {
-                EvalError::Validation(
-                    ValidationError::for_field("schema validation", "does not name a schema to validate against")
-                        .into(),
-                )
-            })?;
-            let target = path
-                .as_ref()
-                .map(|p| resolve_path(ctx, p))
-                .unwrap_or_else(|| ctx.outputs_dir.join("output.json"));
-            let content = graders::TargetContent::from_path(&target);
-            graders::check_schema_validation(&ctx.skill_dir.join(schema_name), &content)
-        }
-    }
-}
-
-fn resolve_path(ctx: &RunContext, relative: &str) -> PathBuf {
-    let path = Path::new(relative);
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-    if relative.starts_with("outputs/") {
-        return ctx.outputs_dir.join(relative.trim_start_matches("outputs/"));
-    }
-    let in_outputs = ctx.outputs_dir.join(relative);
-    if in_outputs.exists() {
-        return in_outputs;
-    }
-    let in_workspace = ctx.workspace_dir.join(relative);
-    if in_workspace.exists() {
-        return in_workspace;
-    }
-    ctx.workspace_dir.join(relative)
-}
-
-fn count_files(dir: &Path) -> Result<usize> {
-    if !dir.is_dir() {
-        return Ok(0);
-    }
-    let mut count = 0;
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-fn validate_csv_file(path: &Path) -> Result<(bool, String)> {
-    if !path.is_file() {
-        return Ok((false, format!("CSV file not found at {}", path.display())));
-    }
-    let content = std::fs::read_to_string(path)?;
-    let valid = !content.trim().is_empty() && content.lines().all(|line| !line.trim().is_empty() || line.is_empty());
-    Ok((
-        valid,
-        if valid {
-            format!("{} is valid CSV", path.display())
-        } else {
-            format!("{} is empty or invalid CSV", path.display())
-        },
-    ))
-}
-
-fn validate_markdown_headings(path: &Path) -> Result<(bool, String)> {
-    if !path.is_file() {
-        return Ok((false, format!("Markdown file not found at {}", path.display())));
-    }
-    let content = std::fs::read_to_string(path)?;
-    let has_heading = content.lines().any(|line| line.starts_with('#'));
-    Ok((
-        has_heading,
-        if has_heading {
-            format!("{} contains markdown headings", path.display())
-        } else {
-            format!("{} has no markdown headings", path.display())
-        },
-    ))
-}
-
-fn count_csv_rows(path: &Path) -> Result<usize> {
-    if !path.is_file() {
-        return Ok(0);
-    }
-    let content = std::fs::read_to_string(path)?;
-    let lines: Vec<_> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-    Ok(lines.len().saturating_sub(1))
-}
-
-fn read_search_content(ctx: &RunContext) -> Result<String> {
-    let mut parts = Vec::new();
-    if ctx.transcript_path.is_file() {
-        parts.push(std::fs::read_to_string(&ctx.transcript_path)?);
-    }
-    if ctx.outputs_dir.is_dir() {
-        collect_text_files(&ctx.outputs_dir, &mut parts)?;
-    }
-    Ok(parts.join("\n"))
-}
-
-fn collect_text_files(dir: &Path, parts: &mut Vec<String>) -> Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            collect_text_files(&path, parts)?;
-        } else if entry.file_type()?.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                parts.push(content);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn is_image_file(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_lowercase)
-            .as_deref(),
-        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp")
-    )
-}
-
-fn find_first_file_with_extension(dir: &Path, ext: &str) -> PathBuf {
-    if !dir.is_dir() {
-        return dir.to_path_buf();
-    }
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some(ext) {
-            return path;
-        }
-    }
-    dir.join(format!("output.{ext}"))
-}
-
-fn find_first_image(dir: &Path) -> PathBuf {
-    if !dir.is_dir() {
-        return dir.to_path_buf();
-    }
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_file() && is_image_file(&path) {
-            return path;
-        }
-    }
-    dir.join("image.png")
-}
-
-fn read_image_dimensions(path: &Path) -> std::result::Result<(u32, u32), String> {
-    if !path.is_file() {
-        return Err(format!("image not found at {}", path.display()));
-    }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
-        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
-        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-        return Ok((w, h));
-    }
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return read_jpeg_dimensions(&bytes);
-    }
-    Err(format!("unsupported or corrupt image at {}", path.display()))
-}
-
-fn read_jpeg_dimensions(bytes: &[u8]) -> std::result::Result<(u32, u32), String> {
-    let mut i = 2;
-    while i + 9 < bytes.len() {
-        if bytes[i] != 0xFF {
-            i += 1;
-            continue;
-        }
-        let marker = bytes[i + 1];
-        if matches!(marker, 0xC0..=0xC2) {
-            let h = u32::from(u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]));
-            let w = u32::from(u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]));
-            return Ok((w, h));
-        }
-        let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
-        i += 2 + len;
-    }
-    Err("could not parse JPEG dimensions".to_string())
-}
-
 pub fn build_grading_file(assertion_results: Vec<AssertionGradeResult>) -> Result<GradingFile> {
     let summary = GradingCounts::tally(&assertion_results).summary();
 
@@ -2478,56 +1831,6 @@ fn update_report_after_grading(
     }
 
     Ok(())
-}
-
-fn extract_quoted(text: &AssertionText, prefix: &str) -> Option<String> {
-    let rest = text.after(prefix)?;
-    if let Some(stripped) = rest.strip_prefix('"') {
-        let end = stripped.find('"')?;
-        return Some(stripped[..end].to_string());
-    }
-    if let Some(stripped) = rest.strip_prefix('\'') {
-        let end = stripped.find('\'')?;
-        return Some(stripped[..end].to_string());
-    }
-    None
-}
-
-fn extract_quoted_or_token_after(text: &AssertionText, prefix: &str, suffix: &str) -> Option<String> {
-    text.unquoted_between(prefix, suffix).map(str::to_string)
-}
-
-fn extract_path_before(text: &AssertionText, suffix: &str) -> Option<String> {
-    text.unquoted_before(suffix).map(str::to_string)
-}
-
-fn extract_usize_after(text: &AssertionText, prefix: &str) -> Option<usize> {
-    text.after(prefix)?.split_whitespace().next()?.parse().ok()
-}
-
-fn extract_usize_before(text: &AssertionText, suffix: &str) -> Option<usize> {
-    text.before(suffix)?.split_whitespace().last()?.parse().ok()
-}
-
-fn extract_dimensions(text: &AssertionText) -> Option<(u32, u32)> {
-    let re = Regex::new(r"(\d+)\s*[x×]\s*(\d+)").ok()?;
-    let caps = re.captures(&text.lower)?;
-    Some((caps[1].parse().ok()?, caps[2].parse().ok()?))
-}
-
-/// The pattern between the `/` delimiters of a `matches` assertion.
-///
-/// The delimiters are looked for after the keyword rather than from the start of the
-/// assertion, because a target path carries slashes of its own. Taking the first pair in
-/// the whole string swallowed the path and the keyword into the pattern, and made every
-/// later prose form unreachable for any assertion that named a path at all.
-fn extract_regex_pattern(text: &AssertionText) -> Option<String> {
-    const KEYWORD: &str = "matches";
-    let idx = text.lower.find(KEYWORD)? + KEYWORD.len();
-    let rest = &text.original[idx..];
-    let start = rest.find('/')?;
-    let end = rest[start + 1..].find('/')? + start + 1;
-    Some(rest[start + 1..end].to_string())
 }
 
 #[cfg(test)]
@@ -3007,9 +2310,9 @@ mod tests {
                 "prompt": "prompt a",
                 "expected_output": "output a",
                 "graders": [
-                    {"type": "contains", "text": "all done", "name": "wraps-up"}
-                ],
-                "assertions": ["the tone stays professional throughout"]
+                    {"type": "contains", "text": "all done", "name": "wraps-up"},
+                    {"type": "contains", "text": "professional"}
+                ]
             }
         ]
     }"#;
@@ -3019,7 +2322,7 @@ mod tests {
     /// rendered description: an unnamed grader indistinguishable from a
     /// named one defeats the point of naming one at all.
     #[test]
-    fn an_unnamed_prose_assertion_stays_unnamed_next_to_a_named_grader() {
+    fn an_unnamed_grader_stays_unnamed_next_to_a_named_grader() {
         let temp = tempdir().unwrap();
         let report_dir = both_arms_report_dir(&temp, NAMED_AND_UNNAMED_SUITE);
 
@@ -3033,20 +2336,20 @@ mod tests {
         .unwrap();
 
         for (scenario, grading) in grading_files_by_scenario(&report_dir) {
-            let prose_result = grading
+            let unnamed_result = grading
                 .assertion_results
                 .iter()
                 .find(|result| result.assertion.contains("professional"))
-                .unwrap_or_else(|| panic!("{scenario:?} must still report the prose assertion"));
+                .unwrap_or_else(|| panic!("{scenario:?} must still report the unnamed grader"));
             assert_eq!(
-                prose_result.name, None,
-                "{scenario:?} prose assertion must stay unnamed"
+                unnamed_result.name, None,
+                "{scenario:?} unnamed grader must stay unnamed"
             );
         }
 
         let published: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
-        let flattened_prose = published["assertion_results"]
+        let flattened_unnamed = published["assertion_results"]
             .as_array()
             .unwrap()
             .iter()
@@ -3056,9 +2359,9 @@ mod tests {
                     .unwrap_or_default()
                     .contains("professional")
             })
-            .expect("the prose result must survive the flatten");
+            .expect("the unnamed result must survive the flatten");
         assert!(
-            flattened_prose.get("name").is_none(),
+            flattened_unnamed.get("name").is_none(),
             "an unnamed grader must not gain a name key in the published report.json"
         );
 
@@ -4000,30 +3303,6 @@ mod tests {
     }
 
     #[test]
-    fn a_free_text_assertion_no_mechanical_pattern_recognizes_needs_a_judge_under_auto() {
-        let suite = suite_from(
-            r#"{
-                "schema_version": 3,
-                "skill_name": "demo-skill",
-                "evals": [
-                    {
-                        "id": "case-a",
-                        "prompt": "p",
-                        "expected_output": "o",
-                        "assertions": ["the tone is appropriate for an executive"]
-                    }
-                ]
-            }"#,
-        );
-        let options = GradeOptions {
-            grader: GraderMode::Auto,
-            ..GradeOptions::default()
-        };
-
-        assert!(suite_needs_a_judge(&options, &suite));
-    }
-
-    #[test]
     fn script_mode_never_resolves_a_judge() {
         let suite = suite_from(
             r#"{
@@ -4048,8 +3327,12 @@ mod tests {
         assert!(!suite_needs_a_judge(&options, &suite));
     }
 
+    /// A declared `llm` grader's whole contract is deferring to the configured judge; it
+    /// is the one grader kind that does. Whether its criterion happens to read like a
+    /// mechanical pattern is not the author's declaration, so it must not change which
+    /// grader answers it, defaulted target or explicit alike.
     #[test]
-    fn an_explicit_target_suppresses_the_mechanical_shortcut_even_when_the_criterion_parses_as_mechanical() {
+    fn a_declared_llm_grader_reaches_the_judge_even_when_its_criterion_reads_like_a_mechanical_check() {
         let tmp = tempdir().unwrap();
         let ctx = ctx_with_outputs(tmp.path());
         let declarative = declarative_context("done", "the agent reported that report.md exists");
@@ -4061,31 +3344,19 @@ mod tests {
 
         let mechanical_sounding = "report.md exists";
 
-        let defaulted = grade_with_llm(
-            mechanical_sounding,
-            &TargetDeclaration::Default,
-            &declarative,
-            &ctx,
-            &session,
-        );
-        assert!(
-            defaulted.is_ok(),
-            "a defaulted target should still take the mechanical shortcut without a judge: {defaulted:?}"
-        );
-        assert_eq!(defaulted.unwrap().grader.kind, GraderKind::Mechanical);
-
-        let declared = grade_with_llm(
-            mechanical_sounding,
-            &TargetDeclaration::Named(GradeTarget::Transcript),
-            &declarative,
-            &ctx,
-            &session,
-        );
-        let err = declared.expect_err("an explicit target must reach the judge instead of the mechanical shortcut");
-        assert!(
-            err.to_string().contains("no LLM judge was resolved"),
-            "expected the judge lookup to fail, got: {err}"
-        );
+        for target in [
+            TargetDeclaration::Default,
+            TargetDeclaration::Named(GradeTarget::Transcript),
+        ] {
+            let result = grade_with_llm(mechanical_sounding, &target, &declarative, &ctx, &session);
+            let err = result.expect_err(
+                "a declared llm grader must reach the judge regardless of target, even when its criterion reads like a mechanical pattern",
+            );
+            assert!(
+                err.to_string().contains("no LLM judge was resolved"),
+                "expected the judge lookup to fail, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -4436,366 +3707,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_exists_patterns() {
-        assert!(matches!(
-            parse_mechanical_kind(r#"file "out.json" exists"#),
-            Some(MechanicalKind::FileExists { .. })
-        ));
-        assert!(matches!(
-            parse_mechanical_kind("outputs/report.md exists"),
-            Some(MechanicalKind::FileExists { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_file_count_patterns() {
-        assert!(matches!(
-            parse_mechanical_kind("file count is 3"),
-            Some(MechanicalKind::FileCount { count: 3, .. })
-        ));
-        assert!(matches!(
-            parse_mechanical_kind("contains 2 files"),
-            Some(MechanicalKind::FileCount { count: 2, .. })
-        ));
-    }
-
-    #[test]
-    fn parse_valid_json_and_csv() {
-        assert!(matches!(
-            parse_mechanical_kind("out.json is valid json"),
-            Some(MechanicalKind::ValidJson { .. })
-        ));
-        assert!(matches!(
-            parse_mechanical_kind("data.csv is valid csv"),
-            Some(MechanicalKind::ValidCsv { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_markdown_headings() {
-        assert!(matches!(
-            parse_mechanical_kind("report.md has valid markdown headings"),
-            Some(MechanicalKind::ValidMarkdownHeadings { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_image_patterns() {
-        assert!(matches!(
-            parse_mechanical_kind("image chart.png exists"),
-            Some(MechanicalKind::ImageExists { .. })
-        ));
-        assert!(matches!(
-            parse_mechanical_kind("chart.png is 800x600"),
-            Some(MechanicalKind::ImageDimensions {
-                width: 800,
-                height: 600,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn parse_contains_and_regex() {
-        assert!(matches!(
-            parse_mechanical_kind(r#"contains "hello""#),
-            Some(MechanicalKind::ContainsString { .. })
-        ));
-        assert!(matches!(
-            parse_mechanical_kind("matches regex /foo.*/"),
-            Some(MechanicalKind::MatchesRegex { .. })
-        ));
-    }
-
-    #[test]
-    fn parse_row_count_and_schema() {
-        assert!(matches!(
-            parse_mechanical_kind("row count is 10"),
-            Some(MechanicalKind::RowCount { count: 10, .. })
-        ));
-        assert!(matches!(
-            parse_mechanical_kind("validates against schema output"),
-            Some(MechanicalKind::SchemaValidation { .. })
-        ));
-    }
-
-    #[test]
-    fn mechanical_file_exists_passes_and_fails() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("out.json"), "{}").unwrap();
-
-        let kind = MechanicalKind::FileExists {
-            path: "out.json".to_string(),
-        };
-        let (passed, evidence) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(passed);
-        assert!(evidence.contains("exists"));
-
-        let kind = MechanicalKind::FileExists {
-            path: "missing.json".to_string(),
-        };
-        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(!passed);
-    }
-
-    #[test]
-    fn mechanical_file_count() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("a.txt"), "a").unwrap();
-        fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
-
-        let kind = MechanicalKind::FileCount { count: 2, dir: None };
-        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(passed);
-    }
-
-    #[test]
-    fn mechanical_valid_json() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("out.json"), r#"{"ok": true}"#).unwrap();
-
-        let kind = MechanicalKind::ValidJson {
-            path: Some("out.json".to_string()),
-        };
-        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(passed);
-    }
-
-    #[test]
-    fn parse_schema_validation_separates_the_schema_name_from_the_target_clause() {
-        let kind = parse_mechanical_kind("output.json validates against schema report for outputs/output.json");
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::SchemaValidation {
-                schema: Some(ref schema),
-                path: Some(ref path),
-            }) if schema == "report" && path == "outputs/output.json"
-        ));
-    }
-
-    #[test]
-    fn parse_schema_validation_for_a_path_alone_names_no_schema() {
-        let kind = parse_mechanical_kind("schema validation for outputs/output.json");
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::SchemaValidation { schema: None, .. })
-        ));
-    }
-
-    #[test]
-    fn a_prose_schema_form_grades_the_target_it_names() {
-        let kind = parse_mechanical_kind("outputs/report.json validates against schema schemas/report.schema.json");
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::SchemaValidation {
-                schema: Some(ref schema),
-                path: Some(ref path),
-            }) if schema == "schemas/report.schema.json" && path == "outputs/report.json"
-        ));
-    }
-
-    #[test]
-    fn a_quoted_prose_schema_name_is_read_without_its_quotes() {
-        let kind = parse_mechanical_kind("outputs/report.json validates against schema \"schemas/Report.schema.json\"");
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::SchemaValidation {
-                schema: Some(ref schema),
-                path: Some(ref path),
-            }) if schema == "schemas/Report.schema.json" && path == "outputs/report.json"
-        ));
-    }
-
-    #[test]
-    fn a_quoted_prose_schema_target_is_read_without_its_quotes() {
-        let kind = parse_mechanical_kind("validates against schema report.schema.json for \"outputs/a report.json\"");
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::SchemaValidation {
-                schema: Some(ref schema),
-                path: Some(ref path),
-            }) if schema == "report.schema.json" && path == "outputs/a report.json"
-        ));
-    }
-
-    /// An apostrophe inside a name is not a quote to strip, and a lone leading quote is not
-    /// a pair. Trimming every quote character at both ends got both of these wrong.
-    #[test]
-    fn unquoting_a_captured_name_leaves_an_unpaired_quote_alone() {
-        assert_eq!(unquote("\"schema.json\""), "schema.json");
-        assert_eq!(unquote("'schema.json'"), "schema.json");
-        assert_eq!(unquote("\"schema.json"), "\"schema.json");
-        assert_eq!(unquote("yordis's report.json"), "yordis's report.json");
-        assert_eq!(unquote("\""), "\"");
-    }
-
-    #[test]
-    fn a_prose_schema_name_and_target_keep_the_case_the_author_wrote() {
-        let kind = parse_mechanical_kind("outputs/Report.json validates against schema schemas/Report.schema.json");
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::SchemaValidation {
-                schema: Some(ref schema),
-                path: Some(ref path),
-            }) if schema == "schemas/Report.schema.json" && path == "outputs/Report.json"
-        ));
-    }
-
-    #[test]
-    fn a_prose_target_keeps_the_case_the_author_wrote() {
-        let kind = parse_mechanical_kind(r#"contains "Hello World" in outputs/Report.md"#);
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::ContainsString {
-                ref needle,
-                path: Some(ref path),
-            }) if needle == "Hello World" && path == "outputs/Report.md"
-        ));
-    }
-
-    #[test]
-    fn a_prose_regex_keeps_the_case_the_author_wrote() {
-        let kind = parse_mechanical_kind("outputs/Report.md matches /Error [0-9]+/");
-        assert!(matches!(
-            kind,
-            Some(MechanicalKind::MatchesRegex {
-                ref pattern,
-                path: Some(ref path),
-            }) if pattern == "Error [0-9]+" && path == "outputs/Report.md"
-        ));
-    }
-
-    #[test]
-    fn mechanical_schema_validation_is_an_authoring_error_when_no_schema_is_named() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
-
-        let kind = MechanicalKind::SchemaValidation {
-            schema: None,
-            path: Some("output.json".to_string()),
-        };
-        let err = evaluate_mechanical(&kind, &ctx).unwrap_err();
-        assert!(err.to_string().contains("does not name a schema"), "{err}");
-    }
-
-    #[test]
-    fn mechanical_schema_validation_resolves_the_schema_against_the_skill_directory() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::create_dir_all(&ctx.skill_dir).unwrap();
-        fs::write(
-            ctx.skill_dir.join("report.schema.json"),
-            r#"{"type": "object", "required": ["ok"]}"#,
-        )
-        .unwrap();
-        fs::write(ctx.outputs_dir.join("output.json"), r#"{"ok": true}"#).unwrap();
-
-        let kind = MechanicalKind::SchemaValidation {
-            schema: Some("report.schema.json".to_string()),
-            path: Some("output.json".to_string()),
-        };
-        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(passed);
-
-        fs::write(ctx.outputs_dir.join("output.json"), r#"{"nope": true}"#).unwrap();
-        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(!passed);
-    }
-
-    #[test]
-    fn mechanical_valid_csv() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("data.csv"), "a,b\n1,2").unwrap();
-
-        let kind = MechanicalKind::ValidCsv {
-            path: Some("data.csv".to_string()),
-        };
-        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(passed);
-    }
-
-    #[test]
-    fn mechanical_markdown_headings() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("report.md"), "# Title\n\nBody").unwrap();
-
-        let kind = MechanicalKind::ValidMarkdownHeadings {
-            path: Some("report.md".to_string()),
-        };
-        let (passed, _) = evaluate_mechanical(&kind, &ctx).unwrap();
-        assert!(passed);
-    }
-
-    #[test]
-    fn mechanical_image_exists_and_dimensions() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        // Minimal 1x1 PNG
-        let png: [u8; 33] = [
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
-            0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
-        ];
-        fs::write(ctx.outputs_dir.join("chart.png"), png).unwrap();
-
-        let exists = MechanicalKind::ImageExists {
-            path: "chart.png".to_string(),
-        };
-        assert!(evaluate_mechanical(&exists, &ctx).unwrap().0);
-
-        let dims = MechanicalKind::ImageDimensions {
-            path: "chart.png".to_string(),
-            width: 1,
-            height: 1,
-        };
-        assert!(evaluate_mechanical(&dims, &ctx).unwrap().0);
-    }
-
-    #[test]
-    fn mechanical_contains_string() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("out.txt"), "hello world").unwrap();
-
-        let kind = MechanicalKind::ContainsString {
-            needle: "hello".to_string(),
-            path: Some("out.txt".to_string()),
-        };
-        assert!(evaluate_mechanical(&kind, &ctx).unwrap().0);
-    }
-
-    #[test]
-    fn mechanical_regex_match() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("out.txt"), "foo123").unwrap();
-
-        let kind = MechanicalKind::MatchesRegex {
-            pattern: "foo\\d+".to_string(),
-            path: Some("out.txt".to_string()),
-        };
-        assert!(evaluate_mechanical(&kind, &ctx).unwrap().0);
-    }
-
-    #[test]
-    fn mechanical_row_count() {
-        let tmp = tempdir().unwrap();
-        let ctx = ctx_with_outputs(tmp.path());
-        fs::write(ctx.outputs_dir.join("data.csv"), "h1,h2\n1,2\n3,4").unwrap();
-
-        let kind = MechanicalKind::RowCount {
-            count: 2,
-            path: Some("data.csv".to_string()),
-        };
-        assert!(evaluate_mechanical(&kind, &ctx).unwrap().0);
-    }
-
-    #[test]
     fn evidence_is_trivial_rejects_restatement() {
         assert!(evidence_is_trivial(
             "The output includes a summary",
@@ -4874,7 +3785,6 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             "id": "case",
             "prompt": "prompt long enough",
             "expected_output": "expected output",
-            "assertions": ["custom assertion"],
         }))
         .unwrap();
 
@@ -4889,7 +3799,6 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             "id": "case",
             "prompt": "prompt long enough",
             "expected_output": "expected output",
-            "assertions": ["custom assertion"],
         }))
         .unwrap()
     }
@@ -5031,7 +3940,6 @@ exit 3
             "id": "case",
             "prompt": "prompt long enough",
             "expected_output": "expected output",
-            "assertions": ["custom assertion"],
         }))
         .unwrap();
 
@@ -5080,7 +3988,6 @@ exit 4
             "id": "case",
             "prompt": "prompt long enough",
             "expected_output": "expected output",
-            "assertions": ["custom assertion"],
             "grader_hints": { "blob": "x".repeat(512 * 1024) },
         }))
         .unwrap();
@@ -5129,7 +4036,6 @@ echo '{"passed": true, "evidence": "script verified"}'
                 "id": "case",
                 "prompt": "prompt long enough",
                 "expected_output": "expected output",
-                "assertions": ["custom assertion"],
                 "grader_hints": { "blob": "x".repeat(512 * 1024) },
             }))
             .unwrap();

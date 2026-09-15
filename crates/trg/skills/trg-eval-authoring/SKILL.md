@@ -54,11 +54,10 @@ linter as too vague.
 
 ## Step 3: state the difference as typed graders
 
-Prefer `graders` over prose `assertions` for anything mechanical. A typed
-grader is deterministic, costs no model request, and cannot disagree with
-itself between runs. See
-[Write eval assertions](../../docs/how-to/write-assertions.md) for when a
-judgment genuinely needs the LLM judge instead.
+Use a typed grader for anything mechanical. A typed grader is deterministic,
+costs no model request, and cannot disagree with itself between runs. See
+[Write graders](../../docs/how-to/write-graders.md) for when a judgment
+genuinely needs the LLM judge instead.
 
 The grader vocabulary:
 
@@ -267,7 +266,7 @@ Say so plainly rather than working around it:
 
 ## Further reading
 
-- [Write eval assertions](../../docs/how-to/write-assertions.md)
+- [Write graders](../../docs/how-to/write-graders.md)
 - [Author an eval suite by hand](../../docs/how-to/author-an-eval-suite.md)
 - [Run with a skill vs without a skill](../../docs/how-to/run-with-skill-vs-without-skill.md)
 - [AI skills eval reference](../../docs/reference/ai-skills-eval.md)

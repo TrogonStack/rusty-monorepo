@@ -380,7 +380,7 @@ Test Description
                 "evals/files/sales.csv",
                 "evals/files/readme.txt"
             ],
-            "assertions": ["Summary mentions total revenue"],
+            "graders": [{ "type": "contains", "text": "Summary mentions total revenue" }],
         }))
         .unwrap()
     }

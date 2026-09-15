@@ -5,7 +5,7 @@ under both `with_skill` and `without_skill` scenarios in a single report.
 
 ## Prerequisites
 
-- Eval suite with assertions defined in `evals/evals.json`
+- Eval suite with graders defined in `evals/evals.json`
 - Agent runner installed
 
 ## 1. Run both scenarios

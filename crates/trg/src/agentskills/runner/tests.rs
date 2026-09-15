@@ -16,7 +16,6 @@ fn make_case() -> EvalCase {
         "prompt": "do the thing",
         "expected_output": "done",
         "files": [],
-        "assertions": [],
     }))
     .unwrap()
 }

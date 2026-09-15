@@ -35,7 +35,7 @@
           ]
         },
         "ungraded": {
-          "description": "No grader could answer this assertion at all: the text matched no mechanical\npattern and no judge was consulted. Distinct from `unsupported`, which means a\ngrader existed and the harness could not answer it, and from `excluded`, which\nmeans the author scoped it to the other arm.",
+          "description": "No grader could answer this assertion at all: it deferred to a judge and\ngrading ran under `--grader none`, so no judge was consulted. Distinct from\n`unsupported`, which means a grader existed and the harness could not answer\nit, and from `excluded`, which means the author scoped it to the other arm.",
           "type": [
             "string",
             "null"

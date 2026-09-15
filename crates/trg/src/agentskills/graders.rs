@@ -294,9 +294,9 @@ impl fmt::Display for GradeTarget {
 /// A bare `GradeTarget` cannot answer that question: `#[serde(default)]` fills
 /// the field in either case, so by the time the grader is deserialized, an
 /// omitted `target` and one written out as `final_text` look identical. That
-/// distinction is exactly what decides whether the mechanical shortcut may
-/// still fire ahead of the judge, so it has to survive deserialization as part
-/// of the value.
+/// distinction decides whether re-serializing the grader writes `target` back
+/// out or leaves it omitted the way the author wrote it, so it has to survive
+/// deserialization as part of the value.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TargetDeclaration {
     #[default]
@@ -584,9 +584,9 @@ pub enum Grader {
         target: GradeTarget,
     },
     // `target` is a plain `GradeTarget` rather than the `TargetDeclaration` the `llm`
-    // grader carries, because the distinction that type exists to preserve, whether
-    // the mechanical shortcut may still fire ahead of the judge, cannot arise here:
-    // no mechanical check answers a comparison.
+    // grader carries, because a comparison always serializes its target: there is no
+    // case here where the field should be omitted for having been left at its
+    // default, which is the only distinction `TargetDeclaration` exists to preserve.
     /// Is this run at least as good as a reference output the suite already accepts?
     Baseline {
         reference: RelativeSkillPath,
@@ -900,10 +900,7 @@ pub struct GradeInput<'a> {
 }
 
 /// The image formats a `file` target can hand the judge as a picture rather
-/// than as text.
-///
-/// Detected from the extension, the same signal `MechanicalKind::ImageExists`
-/// already trusts to decide whether a file is a picture at all.
+/// than as text, detected from the file extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageMediaType {
     Png,

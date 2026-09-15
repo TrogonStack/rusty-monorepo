@@ -215,13 +215,13 @@ mod tests {
                         "id": "case-a",
                         "prompt": "prompt a",
                         "expected_output": "output a",
-                        "assertions": ["assert a"]
+                        "graders": [{ "type": "contains", "text": "assert a" }]
                     },
                     {
                         "id": "case-b",
                         "prompt": "prompt b",
                         "expected_output": "output b",
-                        "assertions": ["assert b"]
+                        "graders": [{ "type": "contains", "text": "assert b" }]
                     }
                 ]
             }"#,
@@ -591,7 +591,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
                         "id": "case-a",
                         "prompt": "prompt a long enough",
                         "expected_output": "output a long",
-                        "assertions": ["assert a"]
+                        "graders": [{ "type": "contains", "text": "assert a" }]
                     }
                 ]
             }"#,

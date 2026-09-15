@@ -88,7 +88,7 @@ impl InitArgs {
             &eval_dir,
             &props.name,
             EvalCheckOptions {
-                require_assertions: true,
+                require_graders: true,
                 ..EvalCheckOptions::default()
             },
         ) {
@@ -187,7 +187,7 @@ mod tests {
             skill_dir: Some(skill_dir),
             eval_dir: None,
             mode: VerifyMode::Strict,
-            require_assertions: false,
+            require_graders: false,
             output_format: crate::output::OutputFormat::Text,
             ci: Default::default(),
         }

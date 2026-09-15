@@ -785,18 +785,6 @@ pub struct EvalCase {
     pub expected_output: NonEmptyString,
     #[serde(default)]
     pub files: Vec<EvalFixture>,
-    /// Natural-language checks, retained for suites written before `graders` existed.
-    ///
-    /// Superseded by the typed `graders` below, because a prose assertion is only ever as
-    /// good as the sniffer's guess at what it meant: one that matches no mechanical
-    /// pattern is recorded ungraded under the default `--grader auto` rather than
-    /// answered, so it measures nothing about the skill and still fails the pass. The
-    /// field stays parsed and scored exactly as it always was, since dropping it would
-    /// break every suite that already carries one, which this crate does not do before
-    /// v1.
-    #[serde(default)]
-    #[schemars(extend("deprecated" = true))]
-    pub assertions: Vec<NonEmptyString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -880,10 +868,9 @@ pub struct EvalCase {
 }
 
 impl EvalCase {
-    /// Whether the case states any checkable property at all, in either the
-    /// legacy natural-language form or the typed form.
+    /// Whether the case declares any grader at all.
     pub fn has_checks(&self) -> bool {
-        !self.assertions.is_empty() || !self.graders.is_empty()
+        !self.graders.is_empty()
     }
 
     /// Whether any of the case's checks is about the run reaching for the skill,
@@ -977,13 +964,13 @@ where
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EvalCheckOptions {
-    pub require_assertions: bool,
+    pub require_graders: bool,
     pub max_fixture_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EvalLintOptions {
-    pub allow_empty_assertions: bool,
+    pub allow_empty_graders: bool,
     pub max_fixture_bytes: Option<u64>,
 }
 
@@ -998,7 +985,6 @@ pub struct EvalCheckReport {
     pub skill_name: String,
     pub eval_count: usize,
     pub file_count: usize,
-    pub assertion_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace: Option<WorkspaceCheckReport>,
 }
@@ -1150,24 +1136,10 @@ pub fn lint_eval_suite(suite: &EvalSuite, options: EvalLintOptions) -> Vec<EvalL
             });
         }
 
-        // A case that also declares graders is warned in the same words as one that does
-        // not: the exposure is per assertion rather than per case, so its prose checks
-        // measure no more for having typed siblings, and telling the mixed case apart
-        // would only give the author two texts to read for one migration.
-        if !eval.assertions.is_empty() {
-            warnings.push(EvalLintWarning {
-                eval_id: eval_id.clone(),
-                message: format!(
-                    "{} prose assertion(s) are declared; they are kept only so suites written before typed graders keep running, and \"graders\" is the supported way to state a check. A prose assertion the mechanical patterns do not recognize is not handed to a judge under the default --grader auto: it is recorded ungraded, which measures nothing about the skill, is left out of the pass rate, and fails the pass as though the harness were broken. A typed grader is either understood or rejected outright",
-                    eval.assertions.len()
-                ),
-            });
-        }
-
-        if !options.allow_empty_assertions && !eval.has_checks() {
+        if !options.allow_empty_graders && !eval.has_checks() {
             warnings.push(EvalLintWarning {
                 eval_id,
-                message: "neither assertions nor graders are declared".to_string(),
+                message: "no graders are declared".to_string(),
             });
         }
     }
@@ -1293,7 +1265,6 @@ pub fn check_eval_suite(
 
     let mut errors = ValidationErrors::new();
     let mut file_count = 0;
-    let mut assertion_count = 0;
 
     if suite.skill_name.as_str() != expected_skill_name {
         errors.push(ValidationError::for_field(
@@ -1308,10 +1279,10 @@ pub fn check_eval_suite(
     for eval in &suite.evals {
         let label = format!("evals id '{}'", eval.id);
 
-        if options.require_assertions && !eval.has_checks() {
+        if options.require_graders && !eval.has_checks() {
             errors.push(ValidationError::for_field(
                 label.clone(),
-                "must define at least one assertion or grader",
+                "must define at least one grader",
             ));
         }
 
@@ -1362,8 +1333,6 @@ pub fn check_eval_suite(
                 failure.to_string(),
             ));
         }
-
-        assertion_count += eval.assertions.len();
     }
 
     if !errors.is_empty() {
@@ -1374,7 +1343,6 @@ pub fn check_eval_suite(
         skill_name: suite.skill_name.as_str().to_string(),
         eval_count: suite.evals.len(),
         file_count,
-        assertion_count,
         workspace: None,
     })
 }
@@ -1702,7 +1670,7 @@ mod tests {
       "prompt": "Analyze evals/files/sales.csv",
       "expected_output": "A short summary.",
       "files": ["evals/files/sales.csv"],
-      "assertions": ["The output includes a summary"]
+      "graders": [{ "type": "file_exists", "path": "summary.md" }]
     }
   ]
 }"#,
@@ -1718,7 +1686,7 @@ mod tests {
             &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
-                require_assertions: true,
+                require_graders: true,
                 ..EvalCheckOptions::default()
             },
         )
@@ -1727,13 +1695,12 @@ mod tests {
         assert_eq!(report.skill_name, "csv-analyzer");
         assert_eq!(report.eval_count, 1);
         assert_eq!(report.file_count, 1);
-        assert_eq!(report.assertion_count, 1);
     }
 
-    /// The worked example in docs/how-to/write-assertions.md is what a reader is told to
+    /// The worked example in docs/how-to/write-graders.md is what a reader is told to
     /// copy, so nothing else proves it still loads through the parser that `eval run` uses.
     #[test]
-    fn write_assertions_doc_worked_example_loads_through_the_real_parser() {
+    fn write_graders_doc_worked_example_loads_through_the_real_parser() {
         let fs = MemFS::new();
         fs.insert(
             Path::new("/csv-analyzer/evals/evals.json"),
@@ -1771,7 +1738,7 @@ mod tests {
             &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
-                require_assertions: true,
+                require_graders: true,
                 ..EvalCheckOptions::default()
             },
         )
@@ -1779,7 +1746,6 @@ mod tests {
 
         assert_eq!(report.eval_count, 1);
         assert_eq!(report.file_count, 1);
-        assert_eq!(report.assertion_count, 0);
 
         let suite = load_eval_suite(&fs, Path::new("/csv-analyzer"), &EvalDirName::default()).unwrap();
         assert_eq!(suite.evals[0].graders.len(), 5);
@@ -1788,7 +1754,7 @@ mod tests {
     /// The same doc's fixture-pairing example, where neither check has a typed equivalent,
     /// so both are declared as `llm` rather than left as an implicit assertion fallback.
     #[test]
-    fn write_assertions_doc_fixture_pairing_example_loads_through_the_real_parser() {
+    fn write_graders_doc_fixture_pairing_example_loads_through_the_real_parser() {
         let fs = MemFS::new();
         fs.insert(
             Path::new("/csv-analyzer/evals/evals.json"),
@@ -1820,7 +1786,7 @@ mod tests {
             &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
-                require_assertions: true,
+                require_graders: true,
                 ..EvalCheckOptions::default()
             },
         )
@@ -1887,7 +1853,7 @@ mod tests {
       "expected_output": "A short summary.",
       "skill_disclosure": "unannounced",
       "companion_skills": ["evals/companions/not-a-skill"],
-      "assertions": ["The output includes a summary"]
+      "graders": [{ "type": "file_exists", "path": "summary.md" }]
     }
   ]
 }"#,
@@ -1920,7 +1886,7 @@ mod tests {
       "expected_output": "A short summary.",
       "skill_disclosure": "unannounced",
       "companion_skills": ["evals/companions/log-summarizer"],
-      "assertions": ["The output includes a summary"]
+      "graders": [{ "type": "file_exists", "path": "summary.md" }]
     }
   ]
 }"#,
@@ -2054,7 +2020,7 @@ mod tests {
     }
 
     #[test]
-    fn check_eval_suite_requires_assertions_when_requested() {
+    fn check_eval_suite_requires_graders_when_requested() {
         let fs = MemFS::new();
         fs.insert(
             Path::new("/csv-analyzer/evals/evals.json"),
@@ -2076,13 +2042,13 @@ mod tests {
             &EvalDirName::default(),
             "csv-analyzer",
             EvalCheckOptions {
-                require_assertions: true,
+                require_graders: true,
                 ..EvalCheckOptions::default()
             },
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("must define at least one assertion"));
+        assert!(err.to_string().contains("must define at least one grader"));
     }
 
     #[test]
@@ -2341,13 +2307,16 @@ mod tests {
             prompt: NonEmptyString(prompt.to_string()),
             expected_output: NonEmptyString(expected_output.to_string()),
             files: vec![],
-            assertions: vec![NonEmptyString("checks something".to_string())],
             tags: None,
             priority: None,
             timeout_secs: None,
             expected_output_files: None,
             grader_hints: None,
-            graders: vec![],
+            graders: vec![serde_json::from_value(serde_json::json!({
+                "type": "file_exists",
+                "path": "summary.md"
+            }))
+            .unwrap()],
             skill_disclosure: SkillDisclosure::default(),
             scaffold: None,
             companion_skills: Vec::new(),
@@ -2412,137 +2381,39 @@ mod tests {
     #[test]
     fn lint_eval_suite_warns_on_empty_assertions_by_default() {
         let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
-        eval.assertions = vec![];
+        eval.graders = vec![];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
         assert!(warnings
             .iter()
-            .any(|warning| warning.message.contains("neither assertions nor graders")));
+            .any(|warning| warning.message.contains("no graders are declared")));
     }
 
     #[test]
-    fn lint_eval_suite_does_not_warn_when_only_typed_graders_are_declared() {
-        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
-        eval.assertions = vec![];
-        eval.graders = vec![serde_json::from_value(serde_json::json!({
-            "type": "file_exists",
-            "path": "summary.md"
-        }))
-        .unwrap()];
+    fn lint_eval_suite_does_not_warn_when_typed_graders_are_declared() {
+        let eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
         let suite = sample_suite_with_eval(eval);
 
         assert!(lint_eval_suite(&suite, EvalLintOptions::default()).is_empty());
     }
 
     #[test]
-    fn a_case_declaring_prose_assertions_is_told_to_use_typed_graders() {
-        let suite = sample_suite_with_eval(sample_eval_case(
-            "one",
-            "A sufficiently long prompt here",
-            "A detailed analysis output",
-        ));
-
-        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
-        let message = warnings
-            .iter()
-            .find(|warning| warning.message.contains("prose assertion(s) are declared"))
-            .map(|warning| warning.message.as_str())
-            .expect("a case with prose assertions is warned about them");
-        assert!(message.contains("\"graders\" is the supported way"));
-        assert!(message.contains("recorded ungraded"));
-    }
-
-    #[test]
-    fn a_case_declaring_only_typed_graders_is_not_told_anything_about_prose_assertions() {
-        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
-        eval.assertions = vec![];
-        eval.graders = vec![serde_json::from_value(serde_json::json!({
-            "type": "file_exists",
-            "path": "summary.md"
-        }))
-        .unwrap()];
-        let suite = sample_suite_with_eval(eval);
-
-        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
-        assert!(!warnings
-            .iter()
-            .any(|warning| warning.message.contains("prose assertion(s) are declared")));
-    }
-
-    /// A case that declares both is still carrying prose checks, so it hears the same
-    /// thing: the typed graders beside them do not make them any more measurable.
-    #[test]
-    fn a_case_declaring_both_prose_assertions_and_typed_graders_is_still_told_to_migrate() {
-        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
-        eval.graders = vec![serde_json::from_value(serde_json::json!({
-            "type": "file_exists",
-            "path": "summary.md"
-        }))
-        .unwrap()];
-        let suite = sample_suite_with_eval(eval);
-
-        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.message.contains("1 prose assertion(s) are declared")));
-    }
-
-    /// The count is what tells an author how much of the case is still on prose, so a
-    /// case carrying several must not report as though it carried one.
-    #[test]
-    fn the_warning_counts_the_prose_assertions_the_case_actually_declares() {
-        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
-        eval.assertions = vec![
-            NonEmptyString("the summary names May".to_string()),
-            NonEmptyString("the summary names June".to_string()),
-        ];
-        let suite = sample_suite_with_eval(eval);
-
-        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.message.contains("2 prose assertion(s) are declared")));
-    }
-
-    /// `allow_empty_assertions` says a case may declare no checks at all, which is a
-    /// different question from which mechanism a case that does declare them used.
-    #[test]
-    fn allowing_empty_assertions_does_not_silence_the_prose_assertion_warning() {
-        let suite = sample_suite_with_eval(sample_eval_case(
-            "one",
-            "A sufficiently long prompt here",
-            "A detailed analysis output",
-        ));
-
-        let warnings = lint_eval_suite(
-            &suite,
-            EvalLintOptions {
-                allow_empty_assertions: true,
-                ..EvalLintOptions::default()
-            },
-        );
-        assert!(warnings
-            .iter()
-            .any(|warning| warning.message.contains("prose assertion(s) are declared")));
-    }
-
-    #[test]
     fn lint_eval_suite_allows_empty_assertions_when_requested() {
         let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
-        eval.assertions = vec![];
+        eval.graders = vec![];
         let suite = sample_suite_with_eval(eval);
 
         let warnings = lint_eval_suite(
             &suite,
             EvalLintOptions {
-                allow_empty_assertions: true,
+                allow_empty_graders: true,
                 ..EvalLintOptions::default()
             },
         );
         assert!(!warnings
             .iter()
-            .any(|warning| warning.message.contains("neither assertions nor graders")));
+            .any(|warning| warning.message.contains("no graders are declared")));
     }
 
     /// The contradiction this lint exists to catch: a case that checks whether the
@@ -2600,9 +2471,8 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_declares_only_typed_graders_so_nothing_needs_string_sniffing() {
+    fn scaffold_declares_only_typed_graders() {
         let suite = scaffold_eval_suite("demo-skill");
-        assert!(suite.evals.iter().all(|eval| eval.assertions.is_empty()));
         assert!(suite.evals.iter().all(|eval| !eval.graders.is_empty()));
     }
 
@@ -2650,7 +2520,7 @@ mod tests {
             &EvalDirName::default(),
             "demo-skill",
             EvalCheckOptions {
-                require_assertions: true,
+                require_graders: true,
                 ..EvalCheckOptions::default()
             },
         )
@@ -2668,7 +2538,6 @@ mod tests {
       "prompt": "A sufficiently long prompt here",
       "expected_output": "A detailed analysis output",
       "files": ["evals/files/input.csv"],
-      "assertions": ["checks output"],
       "tags": ["smoke", "regression"],
       "priority": "critical",
       "timeout_secs": 90,
