@@ -394,32 +394,41 @@ impl OpenBaoBackend {
     /// refresh tokens and detects replay will revoke the whole grant when two
     /// machines refresh the same one, and `machine_id` is how you avoid that.
     ///
-    /// TODO: turning `machine_id` on or off relocates every credential this
-    /// backend holds, and nothing reads the layout a payload was written
-    /// under, so the credentials go quiet rather than moving. The new path
+    /// Turning `machine_id` on or off relocates this path, so a credential
+    /// written under the other layout would otherwise go quiet: the new path
     /// misses, the old payload is still sitting there, and every server asks
     /// for a fresh login. That is the breakage `credentials.v2` removed for
-    /// the payload shape, still present for the path.
+    /// the payload shape, still present for the path, so this path carries no
+    /// version segment of its own; instead, the OAuth credential store reads
+    /// this path as the primary and falls back to
+    /// [`Self::shared_credential_path`] when the primary is empty. A version
+    /// segment was deliberately avoided: it invites an open-ended ladder, one
+    /// probe per layout that ever existed, and leaves a miss indistinguishable
+    /// from a first-time login. Only two layouts are reachable here, so a
+    /// single fallback closes the set for good.
     ///
-    /// Fixing it does not need a version segment in the path, and should not
-    /// use one. A version invites an open-ended ladder, one probe per layout
-    /// that ever existed, and leaves a miss indistinguishable from a
-    /// first-time login. Only two layouts are reachable here, so reading the
-    /// machine-scoped path and falling back to the shared one closes the set
-    /// for good.
-    ///
-    /// That fallback has to stay read-only. Copying the shared credential
-    /// into the machine-scoped path would leave the shared one readable, so
-    /// both machines would go on refreshing the same grant, which is the
-    /// replay `machine_id` was set to prevent; moving it would break the
-    /// machine that did not run the migration. Reading it and saying so
-    /// leaves the person to re-authorize once when it suits them, rather than
-    /// at the moment they edited their config.
+    /// That fallback stays read-only. Copying the shared credential into the
+    /// machine-scoped path would leave the shared one readable, so both
+    /// machines would go on refreshing the same grant, which is the replay
+    /// `machine_id` was set to prevent; moving it would break the machine
+    /// that did not run the migration. The store reads it and says so
+    /// instead, leaving the person to re-authorize once when it suits them,
+    /// rather than at the moment they edited their config.
     pub fn credential_path(&self, server: &str) -> String {
         match &self.machine_id {
             Some(id) => format!("mcp/{id}/{server}"),
             None => format!("mcp/{server}"),
         }
+    }
+
+    /// The pre-`machine_id` shared path for this server, to fall back onto
+    /// when the machine-scoped primary is empty.
+    ///
+    /// `None` when no `machine_id` is configured: then [`Self::credential_path`]
+    /// already returns this same shared path, and there is nothing left to
+    /// fall back onto.
+    pub fn shared_credential_path(&self, server: &str) -> Option<String> {
+        self.machine_id.is_some().then(|| format!("mcp/{server}"))
     }
 
     /// Everything this backend stores lives under `path_prefix`, then
@@ -442,6 +451,19 @@ impl OpenBaoBackend {
             Some(id) => format!("{}/{}/mcp/{id}/", self.mount, self.storage_prefix()),
             None => format!("{}/{}/mcp/", self.mount, self.storage_prefix()),
         }
+    }
+
+    /// The `bao` command that removes one of this backend's secrets, fully
+    /// qualified with `mount` and [`Self::storage_prefix`].
+    ///
+    /// A [`SecretPath`] is backend-relative on purpose, so it is never enough
+    /// on its own to address a command at the operator's shell: the same
+    /// relative path lives at a different fully-qualified address in every
+    /// mount and subtree. Only the backend that laid the tree out can close
+    /// that gap, which is why this lives beside [`Self::storage_prefix`]
+    /// rather than being reconstructed wherever a command wants to print one.
+    pub fn removal_command(&self, path: &SecretPath) -> String {
+        format!("bao kv metadata delete {}/{}/{path}", self.mount, self.storage_prefix())
     }
 
     /// Whether a server name can address this backend at all.
@@ -1545,6 +1567,51 @@ mod tests {
 
         assert_eq!(b.credential_path("github"), "mcp/github");
         assert_eq!(b.machine_id(), None);
+    }
+
+    /// With a `machine_id` configured, the pre-`machine_id` layout is still
+    /// reachable as a fallback, at the path it would have used before.
+    #[test]
+    fn a_shared_credential_path_is_offered_as_a_fallback_when_machine_id_is_set() {
+        let b = backend("https://bao.example.com:8200");
+        assert_eq!(b.shared_credential_path("github").as_deref(), Some("mcp/github"));
+    }
+
+    /// Without `machine_id`, the shared path already is the primary, so
+    /// there is nothing left to fall back onto.
+    #[test]
+    fn there_is_no_fallback_left_once_the_shared_path_is_already_the_primary() {
+        let mut s = settings("https://bao.example.com:8200");
+        s.machine_id = None;
+        let b = OpenBaoBackend::new(s).expect("build");
+
+        assert_eq!(b.shared_credential_path("github"), None);
+    }
+
+    /// A `SecretPath` is backend-relative, so the command a person is told to
+    /// paste has to carry the mount and storage prefix too: `mcp/github`
+    /// alone is not addressable against `bao` from outside this backend's own
+    /// config.
+    #[test]
+    fn the_removal_command_is_fully_qualified_with_the_mount_and_storage_prefix() {
+        let b = backend("https://bao.example.com:8200");
+
+        let command = b.removal_command(&path("mcp/github"));
+
+        assert_eq!(command, "bao kv metadata delete secret/trg/yordis/mcp/github");
+    }
+
+    /// An empty `path_prefix` drops straight to `owner`, with no doubled or
+    /// missing separator.
+    #[test]
+    fn the_removal_command_has_no_stray_separator_when_path_prefix_is_empty() {
+        let mut s = settings("https://bao.example.com:8200");
+        s.path_prefix = String::new();
+        let b = OpenBaoBackend::new(s).expect("build");
+
+        let command = b.removal_command(&path("mcp/github"));
+
+        assert_eq!(command, "bao kv metadata delete secret/yordis/mcp/github");
     }
 
     #[test]

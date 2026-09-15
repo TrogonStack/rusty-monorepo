@@ -146,7 +146,29 @@ bao kv get secret/trg/alice/mcp/internal
 
 Every machine reading that path now uses the same credential. To give this
 machine its own instead, add `machine_id = "laptop"` to the backend and log in
-again; the entry moves to `secret/trg/alice/mcp/laptop/internal`.
+again. Nothing moves: `trg` writes the new login to
+`secret/trg/alice/mcp/laptop/internal` and leaves
+`secret/trg/alice/mcp/internal` exactly as it was. Reads still fall back to the
+shared path when the machine-scoped one is empty, so `trg mcp auth status` on a
+machine that has not yet logged in again will report that it read the shared
+credential and name the path it is still sitting at. `trg mcp auth login`
+always treats the machine-scoped path as the only path, so it re-authorizes
+this machine even when the shared credential is still usable, rather than
+seeing it and reporting there is nothing to do.
+
+Every machine still reading the shared path keeps refreshing it in place as
+before, which is deliberate: a background refresh writes back to wherever the
+credential was read from, so it lands on the shared path again rather than
+copying it onto the machine-scoped one, which would leave both refreshing the
+same grant, the exact replay `machine_id` exists to prevent. `trg mcp auth
+logout` on a machine only ever deletes that machine's own entry; if the shared
+path still holds a credential, logout says so and names it rather than
+claiming a clean sign-out, since this machine would otherwise fall right back
+to authenticating from it on the next read. Once every machine that needs its
+own credential has logged in again, remove the shared entry yourself with `bao
+kv metadata delete secret/trg/alice/mcp/internal`; `trg` has no command of its
+own for this, and doing it earlier signs every machine still on the shared
+path out at once.
 
 ## Letting the server enforce the subtree
 
