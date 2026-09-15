@@ -44,11 +44,10 @@ prompts shorter than 20 characters and `expected_output` shorter than 10.
 
 ## 3. State the difference as typed graders
 
-Prefer `graders` over prose `assertions` for anything mechanical: the verdict is
-deterministic and costs no model request. Reserve `assertions` and the `llm`
-grader for judgments no mechanical check answers. See
-[Write assertions](write-assertions.md) for the full treatment, the grader list,
-and the `target` values.
+Use a mechanical grader for anything it can answer: the verdict is
+deterministic and costs no model request. Reserve the `llm` grader for
+judgments no mechanical check answers. See [Write graders](write-graders.md)
+for the full treatment, the grader list, and the `target` values.
 
 ```json
 {
@@ -101,7 +100,7 @@ both arms and scored in neither. Read it on its own; it is not the delta.
 $ trg ai skills eval verify --skill-dir ./skills/my-skill --mode strict
 ```
 
-`--mode strict` requires each case to declare at least one assertion or grader,
+`--mode strict` requires each case to declare at least one grader,
 and the same invocation prints the lint warnings: vague prompts, generic
 `expected_output`, duplicate fixture paths, fixtures the prompt never mentions,
 and a case that checks skill engagement from a prompt that announces the skill.

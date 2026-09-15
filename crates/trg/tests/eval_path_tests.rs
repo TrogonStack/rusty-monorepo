@@ -21,7 +21,7 @@ fn write_fixture_skill(root: &Path, relative_dir: &str, skill_name: &str) -> Pat
                     "id": "one",
                     "prompt": "first prompt",
                     "expected_output": "first output",
-                    "assertions": ["checks first"]
+                    "graders": [{{ "type": "contains", "text": "checks first" }}]
                 }}
             ]
         }}"#

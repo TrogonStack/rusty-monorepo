@@ -1218,7 +1218,6 @@ mod workspace_tests {
             "prompt": "do the thing",
             "expected_output": "done",
             "files": files,
-            "assertions": [],
         }))
         .unwrap()
     }
@@ -1264,7 +1263,6 @@ mod workspace_tests {
             "id": "case-1",
             "prompt": "do the thing",
             "expected_output": "done",
-            "assertions": [],
             "scaffold": script,
         }))
         .unwrap()
@@ -1399,7 +1397,6 @@ mod workspace_tests {
             "prompt": "do the thing",
             "expected_output": "done",
             "files": ["evals/files/input.txt"],
-            "assertions": [],
             "scaffold": "evals/scaffold.sh",
         }))
         .unwrap();
@@ -1528,7 +1525,6 @@ mod workspace_tests {
             "id": "case-1",
             "prompt": "do the thing",
             "expected_output": "done",
-            "assertions": [],
             "scaffold": "../../etc/setup.sh",
         }))
         .expect_err("a path that escapes is refused");
@@ -2739,7 +2735,6 @@ mod workspace_tests {
             "prompt": "do the thing",
             "expected_output": "done",
             "files": files,
-            "assertions": [],
         }))
         .unwrap()
     }

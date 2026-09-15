@@ -60,7 +60,7 @@ pub(crate) mod testutil {
                         "id": "case-a",
                         "prompt": "prompt a",
                         "expected_output": "output a",
-                        "assertions": ["assert a"]
+                        "graders": [{ "type": "contains", "text": "assert a" }]
                     }
                 ]
             }"#,

@@ -57,7 +57,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--allow-scaffold` | bool | `false` | Run the `scaffold` a case declares. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 | `--trust-skill` | bool | `false` | Run a skill directory from outside this working tree without being asked about it. See [Running a skill from outside your working tree](#running-a-skill-from-outside-your-working-tree) |
-| `--require-assertions` | bool | `false` | Fail when an eval case declares neither an assertion nor a grader |
+| `--require-graders` (alias `--require-assertions`) | bool | `false` | Fail when an eval case declares no grader |
 | `--lint-evals` | bool | `false` | Print the suite lint's warnings to stderr. Off by default, so a run that does not ask for them prints none, and they change no exit code either way |
 
 ### Runner values
@@ -191,7 +191,7 @@ the grading for that run.
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: hold every artifact against its schema, require at least one `grading.json`, and fail on failed assertions. Refused outright on a build compiled without the `schema-validation` feature. See [What strict mode needs from the build](#what-strict-mode-needs-from-the-build) |
-| `--require-assertions` | bool | `false` | Fail when an eval case declares neither an assertion nor a grader |
+| `--require-graders` (alias `--require-assertions`) | bool | `false` | Fail when an eval case declares no grader |
 | `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
 | `--eval-dir` | name | `evals` | Directory under `--skill-dir` the eval suite is resolved from |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
@@ -616,7 +616,6 @@ Validated before `run` executes. Unknown fields are rejected.
 | `prompt` | string | yes | Non-empty |
 | `expected_output` | string | yes | Non-empty reference output for graders |
 | `files` | (string \| object)[] | no | Relative paths inside the skill directory, staged into the run workspace. A bare string is writable; an object names `path` and `mode` (`writable`, the default, or `read_only`). See [Read-only fixtures](#read-only-fixtures) |
-| `assertions` | string[] | no | Natural-language checks, retained for compatibility. `graders` is the supported mechanism. Under `--grader auto` (the default) and `--grader none`, graded mechanically when a known pattern matches and recorded ungraded when none does; `--grader llm` sends it to the judge and `--grader script` to the script grader. See [Prose assertions](#prose-assertions) |
 | `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
 | `companion_skills` | string[] | no | Relative paths to other skill directories inside the skill directory, staged beside the one under test so an unannounced case has something to pass over. Only an unannounced case may declare them. See [Skills staged only to be passed over](#skills-staged-only-to-be-passed-over) |
@@ -632,34 +631,15 @@ Validated before `run` executes. Unknown fields are rejected.
 | `scaffold` | string | no | Relative path to a script inside the skill directory, run in the workspace before the agent starts. Requires `--allow-scaffold`. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 | `conversation_history` | string | no | Relative path to a transcript inside the skill directory, to resume before the case's prompt. No installed harness can adopt an arbitrary transcript as its own history, so a case that sets this is skipped rather than run. See [Seeding a conversation](#seeding-a-conversation) |
 
-A case must declare at least one `assertion` or one `grader`.
+A case is not required to declare a `grader`, but a suite where none of them do
+is warned by the suite lint (see below), and `--require-graders` turns that
+into a load-time error. `--require-assertions` still works, as an alias.
 
-### Prose assertions
-
-`graders` is the supported way to state what a case checks. `assertions` is the
-older surface and is kept only so that suites written before typed graders
-existed keep running unchanged; it is still parsed, still graded, and still
-scored exactly as it always was, because removing a field that published suites
-already carry would be a breaking change and `trg` does not make one before v1.
-
-The reason to move is what the two mechanisms do with a check they cannot
-parse. A typed grader is either understood or rejected outright, at load time,
-by name. A prose assertion is matched against a fixed set of phrasings, and one
-that matches none of them is not an error: under the default `--grader auto` it
-is recorded `ungraded`, which is neither a pass nor a failure. It measures
-nothing about the skill, it is left out of `pass_rate`, and it still turns the
-pass red, so a mistyped assertion reads as a broken harness rather than as a
-finding about the skill it was meant to check. Only `--grader llm` sends an
-unrecognized assertion to the judge.
-
-A case declaring `assertions` is warned by the suite lint, which names `graders`
-as the replacement. `eval verify` lints every time; `eval run` lints only when
-`--lint-evals` is passed, so a run that does not ask for the lint prints no
-warning. The warning changes no exit code either way.
-
-An existing suite does not have to be rewritten to keep working. The reference
-for what the prose forms are and how each is matched is unchanged; see
-[Graders](#graders) for the typed equivalents.
+`graders` is the only supported way to state what a case checks; see
+[Graders](#graders) for the typed vocabulary. A case that declares no grader is
+warned by the suite lint. `eval verify` lints every time; `eval run` lints only
+when `--lint-evals` is passed, so a run that does not ask for the lint prints
+no warning. The warning changes no exit code either way.
 
 ### Eval case directories (`evals/<case-id>/`)
 
@@ -891,15 +871,6 @@ the workspace itself, then the run directory. Declared outputs therefore win
 over an incidental file of the same name, and a plain `summary.md` still
 resolves when the agent wrote it straight into its working directory. A path
 that matches nowhere reports against the workspace candidate.
-
-An `llm` grader whose criterion text also happens to parse as a known
-mechanical pattern (see the `assertions` row above) is graded mechanically
-under `--grader auto` and `--grader llm` alike, as a shortcut that skips the
-judge request. Declaring `target` on that grader turns the shortcut off, even
-when the declared value is `final_text`, the same value the field would have
-defaulted to: writing `target` at all is the author saying what to look at,
-which the shortcut cannot promise to honor since it grades from the criterion
-text rather than the declared target.
 
 ### Grading what the agent asked for
 
@@ -1449,10 +1420,10 @@ workspace tree.
 `unsupported` narrows `pass_rate` to scored results only. `pass_rate` is
 nullable, because a run where nothing could be scored has no pass rate and
 reporting `0.0` reads as a total failure. `excluded` takes an arm-scoped grader
-out of the score in both arms. `ungraded` marks an assertion no mechanical
-pattern recognized and no LLM judge was consulted for; it is neither a pass nor
-a fail, because nothing ever attempted it, and it stays out of `pass_rate` for
-the same reason `unsupported` does. `votes` is present only when a panel of
+out of the score in both arms. `ungraded` marks an assertion no judge was
+consulted for because grading ran under `--grader none`; it is neither a pass
+nor a fail, because nothing ever attempted it, and it stays out of `pass_rate`
+for the same reason `unsupported` does. `votes` is present only when a panel of
 judges decided the result. `weight` is present only when the declaring grader
 gave one; a case whose graders left every weight undeclared reports the same
 `pass_rate` it always has.
@@ -1483,9 +1454,9 @@ gave one; a case whose graders left every weight undeclared reports the same
     {
       "assertion": "the report reads as encouraging to a first-time user",
       "passed": false,
-      "evidence": "no mechanical pattern recognized this assertion and no LLM judge was resolved for this run",
+      "evidence": "grader mode is none, so no judge was consulted",
       "grader": { "kind": "needs_llm" },
-      "ungraded": "no mechanical pattern recognized this assertion and no LLM judge was resolved for this run"
+      "ungraded": "grader mode is none, so no judge was consulted"
     }
   ],
   "summary": {
@@ -1510,7 +1481,7 @@ gave one; a case whose graders left every weight undeclared reports the same
 | `assertion_results[].rationale` | string | Optional judge reasoning |
 | `assertion_results[].unsupported` | string | Present when the runner cannot answer this check. Why it could not be graded |
 | `assertion_results[].excluded` | string | Present when the grader presupposes the skill. Why it is reported rather than scored |
-| `assertion_results[].ungraded` | string | Present when no mechanical pattern recognized the assertion and no LLM judge was consulted. Why nothing attempted it |
+| `assertion_results[].ungraded` | string | Present when grading ran under `--grader none`, so no judge was consulted. Why nothing attempted it |
 | `assertion_results[].votes` | object | Present only under `--grader-votes N` with `N` above 1. `{passed, failed}` opinions behind this result. See [Asking the judge more than once](#asking-the-judge-more-than-once) |
 | `assertion_results[].weight` | number | Present when the grader declared one. Must be greater than zero |
 | `summary.passed` | integer | Must equal the count of scored, passing results |
@@ -1952,12 +1923,11 @@ skill included, so the arms differ in the skill under test alone. See
 
 The staged directory holds the skill under test minus its top-level eval suite
 directory (`evals/` by default, or whatever `--eval-dir` resolved to). The
-suite is the answer key: it carries each case's
-`expected_output`, its natural-language assertions, and its graders' literal
-`contains` text and `regex` patterns. A run that could read it could be scored
-on text it copied rather than work it did, and the with-skill prompt points the
-agent straight at `.skill/`, so the suite is staged in neither
-`--skill-staging copy` nor `--skill-staging symlink`.
+suite is the answer key: it carries each case's `expected_output` and its
+graders' literal `contains` text and `regex` patterns. A run that could read it
+could be scored on text it copied rather than work it did, and the with-skill
+prompt points the agent straight at `.skill/`, so the suite is staged in
+neither `--skill-staging copy` nor `--skill-staging symlink`.
 
 This costs a case nothing. The fixtures a case names in `files` are staged
 separately into the workspace root, and they are the only part of `evals/` a

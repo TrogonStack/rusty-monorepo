@@ -888,13 +888,13 @@ pub(crate) mod testutil {
                         "id": "case-a",
                         "prompt": "prompt a",
                         "expected_output": "output a",
-                        "assertions": ["assert a"]
+                        "graders": [{ "type": "contains", "text": "assert a" }]
                     },
                     {
                         "id": "case-b",
                         "prompt": "prompt b",
                         "expected_output": "output b",
-                        "assertions": ["assert b"]
+                        "graders": [{ "type": "contains", "text": "assert b" }]
                     }
                 ]
             }"#,
@@ -1062,7 +1062,7 @@ mod tests {
                         "id": "case-a",
                         "prompt": "changed prompt",
                         "expected_output": "output a",
-                        "assertions": ["assert a", "assert a2"]
+                        "graders": [{ "type": "contains", "text": "assert a" }, { "type": "contains", "text": "assert a2" }]
                     }
                 ]
             }"#,

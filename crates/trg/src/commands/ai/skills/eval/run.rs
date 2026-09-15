@@ -205,8 +205,12 @@ pub struct RunArgs {
     )]
     pub output_format: OutputFormat,
 
-    #[arg(long, help = "Fail when any eval case has an empty assertions array")]
-    pub require_assertions: bool,
+    #[arg(
+        long,
+        alias = "require-assertions",
+        help = "Fail when any eval case declares no grader"
+    )]
+    pub require_graders: bool,
 
     #[arg(long, help = "Print eval manifest lint warnings to stderr")]
     pub lint_evals: bool,
@@ -289,7 +293,7 @@ impl RunArgs {
             &eval_dir,
             &props.name,
             EvalCheckOptions {
-                require_assertions: self.require_assertions,
+                require_graders: self.require_graders,
                 ..EvalCheckOptions::default()
             },
         ) {
@@ -306,7 +310,7 @@ impl RunArgs {
                             &self.skill_dir,
                             &suite,
                             crate::agentskills::evals::EvalLintOptions {
-                                allow_empty_assertions: self.require_assertions,
+                                allow_empty_graders: self.require_graders,
                                 ..crate::agentskills::evals::EvalLintOptions::default()
                             },
                         ),
@@ -1696,6 +1700,30 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
 
+    /// `--require-assertions` is the pre-rename spelling: suites and CI invocations
+    /// pinned to it must keep working, so it stays as an alias with identical meaning.
+    #[test]
+    fn require_assertions_is_an_alias_for_require_graders() {
+        use clap::Parser;
+
+        #[derive(clap::Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: RunArgs,
+        }
+
+        let by_new_name = Wrapper::try_parse_from(["trg", "--skill-dir", "s", "--out-dir", "o", "--require-graders"])
+            .unwrap()
+            .args;
+        let by_old_name =
+            Wrapper::try_parse_from(["trg", "--skill-dir", "s", "--out-dir", "o", "--require-assertions"])
+                .unwrap()
+                .args;
+
+        assert!(by_new_name.require_graders);
+        assert_eq!(by_new_name.require_graders, by_old_name.require_graders);
+    }
+
     #[test]
     fn a_path_reached_outside_the_workspace_becomes_a_run_warning() {
         let mut transcript = NormalizedTranscript::new("cursor-agent", ToolVisibility::Observed, Vec::new());
@@ -1742,13 +1770,13 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     },
                     {
                         "id": "two",
                         "prompt": "second prompt",
                         "expected_output": "second output",
-                        "assertions": ["checks second"]
+                        "graders": [{ "type": "contains", "text": "checks second" }]
                     }
                 ]
             }"#,
@@ -1783,7 +1811,7 @@ mod tests {
             grade: false,
             benchmark: false,
 
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
 
             no_cache: false,
@@ -1893,7 +1921,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed,
@@ -1987,7 +2015,7 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{{ "type": "contains", "text": "checks first" }}]
                     }}
                 ]
             }}"#
@@ -2024,7 +2052,7 @@ mod tests {
             grade: false,
             benchmark: false,
 
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
 
             no_cache: false,
@@ -2072,7 +2100,7 @@ mod tests {
             grade: false,
             benchmark: false,
 
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
 
             no_cache: false,
@@ -2136,7 +2164,7 @@ mod tests {
             grade: false,
             benchmark: false,
 
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
 
             no_cache: false,
@@ -2174,7 +2202,7 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     }
                 ]
             }"#,
@@ -2249,13 +2277,13 @@ mod tests {
                         "id": "takes-the-operators-model",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     },
                     {
                         "id": "picks-its-own-model",
                         "prompt": "second prompt",
                         "expected_output": "second output",
-                        "assertions": ["checks second"],
+                        "graders": [{ "type": "contains", "text": "checks second" }],
                         "model": "case-chosen-model"
                     }
                 ]
@@ -2285,7 +2313,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: !cached,
             reuse_completed: false,
@@ -2398,7 +2426,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -2454,7 +2482,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -2510,7 +2538,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -2558,7 +2586,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache,
             reuse_completed: false,
@@ -2608,7 +2636,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -2675,7 +2703,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -2843,7 +2871,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: true,
             reuse_completed: false,
@@ -2943,13 +2971,13 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     },
                     {
                         "id": "two",
                         "prompt": "second prompt",
                         "expected_output": "second output",
-                        "assertions": ["checks second"]
+                        "graders": [{ "type": "contains", "text": "checks second" }]
                     }
                 ]
             }"#,
@@ -2976,13 +3004,13 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     },
                     {
                         "id": "resumes",
                         "prompt": "second prompt",
                         "expected_output": "second output",
-                        "assertions": ["checks second"],
+                        "graders": [{ "type": "contains", "text": "checks second" }],
                         "conversation_history": "history/prior-turn.json"
                     }
                 ]
@@ -3010,13 +3038,13 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     },
                     {
                         "id": "steered",
                         "prompt": "second prompt",
                         "expected_output": "second output",
-                        "assertions": ["checks second"],
+                        "graders": [{ "type": "contains", "text": "checks second" }],
                         "append_system_prompt": "Answer in British English."
                     }
                 ]
@@ -3044,13 +3072,13 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     },
                     {
                         "id": "disjoint",
                         "prompt": "second prompt",
                         "expected_output": "second output",
-                        "assertions": ["checks second"],
+                        "graders": [{ "type": "contains", "text": "checks second" }],
                         "allowed_tools": ["Bash"]
                     }
                 ]
@@ -3126,7 +3154,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -3161,7 +3189,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: true,
@@ -3213,7 +3241,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -3248,7 +3276,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: true,
@@ -3297,7 +3325,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: true,
@@ -3340,7 +3368,7 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt long enough",
                         "expected_output": "first output long",
-                        "assertions": ["checks first"]{timeout_field}
+                        "graders": [{{ "type": "contains", "text": "checks first" }}]{timeout_field}
                     }}
                 ]
             }}"#
@@ -3376,7 +3404,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: true,
             reuse_completed: false,
@@ -3413,7 +3441,7 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt long enough",
                         "expected_output": "first output long",
-                        "assertions": ["checks first"],
+                        "graders": [{ "type": "contains", "text": "checks first" }],
                         "expected_output_files": ["report.md", "missing.md"]
                     }
                 ]
@@ -3449,7 +3477,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: true,
             reuse_completed: false,
@@ -3495,7 +3523,7 @@ mod tests {
                         "id": "one",
                         "prompt": "create output",
                         "expected_output": "done",
-                        "assertions": ["file \"out.json\" exists"]
+                        "graders": [{ "type": "file_exists", "path": "out.json" }]
                     }
                 ]
             }"#,
@@ -3521,13 +3549,13 @@ mod tests {
                         "id": "one",
                         "prompt": "create output",
                         "expected_output": "done",
-                        "assertions": ["file \"out.json\" exists"]
+                        "graders": [{ "type": "file_exists", "path": "out.json" }]
                     },
                     {
                         "id": "two",
                         "prompt": "create output again",
                         "expected_output": "done",
-                        "assertions": ["file \"out.json\" exists"]
+                        "graders": [{ "type": "file_exists", "path": "out.json" }]
                     }
                 ]
             }"#,
@@ -3588,7 +3616,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: true,
             benchmark: true,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: true,
             reuse_completed: false,
@@ -3612,7 +3640,28 @@ mod tests {
     #[test]
     fn chained_grade_failure_preserves_report_json() {
         let temp = tempfile::tempdir().unwrap();
-        let skill_dir = write_gradable_skill(temp.path());
+        let skill_dir = temp.path().join("gradable-skill");
+        std::fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: gradable-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("evals/evals.json"),
+            r#"{
+                "skill_name": "gradable-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "create output",
+                        "expected_output": "done",
+                        "graders": [{ "type": "llm", "criterion": "custom check passes" }]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
         let out_dir = temp.path().join("artifacts");
 
         let report_dir = {
@@ -3635,7 +3684,7 @@ mod tests {
                 output_format: OutputFormat::Text,
                 grade: false,
                 benchmark: false,
-                require_assertions: false,
+                require_graders: false,
                 lint_evals: false,
                 no_cache: false,
                 reuse_completed: false,
@@ -3708,7 +3757,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: true,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,
@@ -3760,7 +3809,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: true,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: true,
             reuse_completed: false,
@@ -4259,13 +4308,13 @@ mod tests {
                         "id": "one",
                         "prompt": "first prompt",
                         "expected_output": "first output",
-                        "assertions": ["checks first"]
+                        "graders": [{ "type": "contains", "text": "checks first" }]
                     },
                     {
                         "id": "two",
                         "prompt": "second prompt",
                         "expected_output": "second output",
-                        "assertions": ["checks second"]
+                        "graders": [{ "type": "contains", "text": "checks second" }]
                     }
                 ]
             }"#,
@@ -4293,7 +4342,7 @@ mod tests {
             output_format: OutputFormat::Text,
             grade: false,
             benchmark: false,
-            require_assertions: false,
+            require_graders: false,
             lint_evals: false,
             no_cache: false,
             reuse_completed: false,

@@ -531,7 +531,7 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "case/a", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                    { "id": "case/a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] }
                 ]
             }"#,
         );
@@ -634,7 +634,7 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "one", "prompt": "p", "expected_output": "o", "assertions": ["a"] }
+                    { "id": "one", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] }
                 ]
             }"#,
         );
@@ -717,8 +717,8 @@ mod tests {
             r#"{
                 "skill_name": "demo-skill",
                 "evals": [
-                    { "id": "case/a", "prompt": "p", "expected_output": "o", "assertions": ["a"] },
-                    { "id": "2", "prompt": "p2", "expected_output": "o2", "assertions": ["b"] }
+                    { "id": "case/a", "prompt": "p", "expected_output": "o", "graders": [{ "type": "contains", "text": "a" }] },
+                    { "id": "2", "prompt": "p2", "expected_output": "o2", "graders": [{ "type": "contains", "text": "b" }] }
                 ]
             }"#,
         );

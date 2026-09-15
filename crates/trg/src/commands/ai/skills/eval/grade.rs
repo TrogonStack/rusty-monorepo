@@ -199,7 +199,7 @@ mod tests {
                         "id": "one",
                         "prompt": "create output",
                         "expected_output": "done",
-                        "assertions": ["file \"out.json\" exists"]
+                        "graders": [{ "type": "file_exists", "path": "out.json" }]
                     }
                 ]
             }"#,
@@ -279,7 +279,7 @@ mod tests {
                         "id": "one",
                         "prompt": "create output",
                         "expected_output": "done",
-                        "assertions": ["the summary reads as appropriately cautious"]
+                        "graders": [{ "type": "llm", "criterion": "the summary reads as appropriately cautious" }]
                     }
                 ]
             }"#;
@@ -335,7 +335,25 @@ mod tests {
     #[test]
     fn grade_command_integration_with_script_grader() {
         let temp = tempdir().unwrap();
-        let skill_dir = write_fixture_skill(temp.path());
+        let skill_dir = temp.path().join("fixture-skill");
+        fs::create_dir_all(skill_dir.join("evals")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: fixture-skill\ndescription: fixture\n---\n",
+        )
+        .unwrap();
+        let suite = r#"{
+                "skill_name": "fixture-skill",
+                "evals": [
+                    {
+                        "id": "one",
+                        "prompt": "create output",
+                        "expected_output": "done",
+                        "graders": [{ "type": "llm", "criterion": "custom check passes" }]
+                    }
+                ]
+            }"#;
+        fs::write(skill_dir.join("evals/evals.json"), suite).unwrap();
 
         let script = temp.path().join("grader.sh");
         fs::write(
@@ -354,20 +372,7 @@ echo '{"passed": true, "evidence": "script confirmed custom check", "rationale":
             skill_dir.join("SKILL.md"),
             "---\nname: fixture-skill\ndescription: fixture\n---\n",
         );
-        fs.insert(
-            skill_dir.join("evals/evals.json"),
-            r#"{
-                "skill_name": "fixture-skill",
-                "evals": [
-                    {
-                        "id": "one",
-                        "prompt": "create output",
-                        "expected_output": "done",
-                        "assertions": ["custom check passes"]
-                    }
-                ]
-            }"#,
-        );
+        fs.insert(skill_dir.join("evals/evals.json"), suite);
 
         let bundle = build_report_bundle(
             &fs,

@@ -147,8 +147,8 @@ Bundle verified
 
 - Grade the bundle: `trg ai skills eval grade <report-dir>`, or add `--grade` to
   `eval run` so grading happens in the same invocation.
-- If the suite declares no assertions and no graders, nothing can be graded.
-  Add at least one of the two to each eval case.
+- If the suite declares no graders, nothing can be graded. Add at least
+  one grader to each eval case.
 - To grade out of band instead, write `grading.json` yourself or via a grader
   script (see
   [write-mechanical-grader-scripts.md](./write-mechanical-grader-scripts.md)).

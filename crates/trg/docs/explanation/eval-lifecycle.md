@@ -119,15 +119,15 @@ After all runs, summaries are rebuilt and `report.json` is rewritten in place.
 
 > `eval grade` and `eval run --grade` write
 > `grading.json` per run and merge `assertion_results` into `report.json`.
-> Default `--grader auto` applies mechanical checks; assertions with no
-> mechanical pattern are marked `needs_llm` until re-run with `--grader llm`
-> or `--grader script`.
+> Declarative and typed mechanical graders are checked directly; `llm`
+> graders reach the judge under `--grader auto` and `--grader llm` alike, and
+> are marked `needs_llm` only under `--grader none`.
 
 Flow:
 
 1. For each completed run, graders inspect the workspace against assertions.
-2. Mechanical graders (auto mode), script graders (`--grader script`), and LLM
-   graders (`--grader llm`) produce `grading.json`.
+2. Declarative and mechanical graders, script graders (`--grader script`), and
+   LLM graders (`--grader auto` or `--grader llm`) produce `grading.json`.
 3. Results merge into `report.json` `assertion_results`.
 4. Optional `feedback.json` via `eval feedback init` for human review notes.
 
@@ -203,7 +203,7 @@ report.json          ← session-level index (always written)
 
 Typical skill author loop:
 
-1. **Write eval cases.** Add prompts, fixtures, graders, and assertions to
+1. **Write eval cases.** Add prompts, fixtures, and graders to
    `evals/evals.json`.
 2. **Scaffold.** `eval run` without `--runner` to validate structure cheaply.
 3. **Execute.** `eval run --runner cursor-agent` to get agent outputs.
@@ -241,7 +241,7 @@ index, CLI workflow, and several policy defaults.
 | Runners | Spec-agnostic | Concrete adapters for cursor-agent, claude, codex |
 | Transcript format | Spec-defined | Raw runner stream-json (runner-specific) |
 | Eval ID type | String | String or non-negative integer |
-| Assertion IDs | Spec-defined | `<eval-case-id>:a<index>` pattern |
+| Assertion IDs | Spec-defined | `<eval-case-id>:g<index>` pattern |
 
 These divergences are intentional staging points. As the pipeline converges
 toward spec compatibility, `trg` retains extensions (integrity checks, CI

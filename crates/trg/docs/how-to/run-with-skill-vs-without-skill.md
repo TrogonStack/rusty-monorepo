@@ -7,7 +7,7 @@ assertion pass rates, not just runner completion.
 ## Prerequisites
 
 - A skill directory with `SKILL.md` and `evals/evals.json`
-- Assertions defined for each eval case
+- Graders defined for each eval case
 - (Optional) An agent runner for live execution
 
 ## 1. Run both scenarios

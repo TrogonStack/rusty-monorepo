@@ -7,7 +7,7 @@ and need to know exactly where `trg ai skills eval` differs, and why.
 ## Summary
 
 `trg` follows the agentskills.io **manifest** shape (`evals/evals.json`, scenario
-kinds, assertion strings) and emits **docs-compatible companion files**
+kinds) and emits **docs-compatible companion files**
 (`benchmark.json`, `grading.json`, `timing.json`, `feedback.json`,
 `comparison.json`). The session index `report.json` is a **superset** with
 `trg`-specific metadata. There is no `schema_version` on emitted artifacts;
@@ -173,14 +173,14 @@ signal.
 
 ---
 
-## Assertion shape
+## Check shape
 
-**Today:** `evals/evals.json` assertions are
-plain strings. Mechanical grading matches natural-language patterns; LLM grading
-handles the rest.
+**agentskills.io** describes assertions as plain natural-language strings.
 
-**Future:** Structured assertion objects (kind, target, params) may be added.
-Plain strings will remain valid.
+**`trg`** requires structured, typed `graders` (kind, target, params) instead;
+see [Graders](../reference/ai-skills-eval.md#graders). A grader that needs a
+judgment a machine cannot make declares `{"type": "llm", ...}`, which is
+sent to the judge.
 
 ---
 
@@ -192,10 +192,10 @@ Plain strings will remain valid.
 
 | Mode | Flag | Behavior |
 | ---- | ---- | -------- |
-| Auto (default) | `--grader auto` | Mechanical patterns first; marks remaining assertions `needs_llm` |
-| LLM | `--grader llm` | Built-in LLM grading for assertions mechanical rules cannot resolve |
+| Auto (default) | `--grader auto` | Typed mechanical graders check directly; `llm` graders reach the judge |
+| LLM | `--grader llm` | Same as auto for `llm` graders; typed mechanical graders still check directly |
 | Script | `--grader script --grader-command CMD` | External verifier; JSON stdin/stdout contract |
-| None | `--grader none` | Mechanical only |
+| None | `--grader none` | Typed mechanical graders only; `llm` graders are marked `needs_llm` |
 
 Use `eval grade` after `eval run`. Arbitrary external graders integrate via
 `--grader script` without patching `trg`.

@@ -149,4 +149,4 @@ After `eval run`, the report directory contains:
 ```
 
 After grading, each run may also contain `runs/run-001/grading.json`. See
-[Write assertions](./write-assertions.md#generated-artifacts).
+[Write graders](./write-graders.md#generated-artifacts).

@@ -62,5 +62,5 @@ trg ai skills eval benchmark "$REPORT" --failed-runs exclude
 ## Related docs
 
 - [Run skill evals in CI](./run-in-ci.md)
-- [Write assertions](./write-assertions.md)
+- [Write graders](./write-graders.md)
 - [Write mechanical grader scripts](./write-mechanical-grader-scripts.md)
