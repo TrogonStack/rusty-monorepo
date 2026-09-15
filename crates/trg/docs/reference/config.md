@@ -266,7 +266,7 @@ Speaks the KV v2 HTTP API of an [OpenBao](https://openbao.org) instance.
 | `mount`        | string      | yes      | KV v2 mount, e.g. `secret`.                                               |
 | `path_prefix`  | string      | yes      | Prefix under the mount. May be empty.                                     |
 | `owner`        | string      | yes      | Whose credentials these are. One segment, added after `path_prefix`.      |
-| `machine_id`   | string      | no       | Adds a per-machine segment to credential paths. Omit to share them.       |
+| `machine_id`   | string      | no       | Adds a per-machine segment to credential paths. Omit to share them. Declaring, changing, or removing it never moves an existing credential; see below. |
 | `token_file`   | string      | one of   | Path to the token file. `~` expands against `$HOME`.                      |
 | `token`        | `VarSource` | one of   | The token itself, usually `{ env = "BAO_TOKEN" }`.                        |
 | `ca_cert_file` | string      | no       | PEM bundle. **Replaces** the OS trust store for this backend.             |
@@ -304,6 +304,20 @@ the ACL boundary, so leaving it to a default would mean the first person to log
 in quietly takes `<path_prefix>/mcp/*` for everyone. Nothing is derived, from the
 host or the OS user or anywhere else: a segment appears in a path only because it
 was written in the config.
+
+Adding, changing, or removing `machine_id` relocates which path a login
+writes to, but it never relocates a credential already sitting under the old
+path. `trg` only ever reads a credential from the path it lives at; when the
+machine-scoped path is empty, it falls back to reading the shared,
+pre-`machine_id` path and reports that it did, rather than copying or moving
+what it found there. Copying would leave both paths readable, so every
+machine sharing the old path would go on refreshing the same grant after one
+of them was meant to have its own, which is the exact replay `machine_id`
+exists to prevent; moving it would break every machine that had not yet
+logged in again under the new layout. Re-authorizing with `trg mcp auth
+login` is what actually writes the machine-scoped credential; the old one is
+left in place until it is removed directly against the backend, since `trg`
+has no command of its own for that.
 
 Exactly one of `token_file` or `token` must be declared. Declaring neither or
 both fails at load time.
@@ -442,6 +456,11 @@ keeps these keys out of the way of whatever else lives on the mount.
 covers everything `trg` stores for them, not just MCP credentials. Declaring
 `machine_id` inserts its segment inside that subtree, giving each machine its
 own entry to authorize separately.
+
+A read against the `machine_id` form falls back to the bare form when the
+former is empty, so turning `machine_id` on or off does not orphan whatever
+was already stored. See "`machine_id` is which holder may refresh a
+credential" above for what that fallback does and does not do.
 
 A server stored in OpenBao must be named with `[A-Za-z0-9._-]`, since the name
 becomes a path segment. The Keychain accepts any name.

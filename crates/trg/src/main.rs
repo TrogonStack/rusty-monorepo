@@ -44,9 +44,10 @@ async fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
         .for_server(&server_name, pending.server_secrets())
         .map_err(WireError::from)?;
     let cred_path = backend.credential_path(&server_name).map_err(WireError::from)?;
+    let fallback = backend.shared_credential_path(&server_name).map_err(WireError::from)?;
 
     if !command.needs_endpoint() {
-        return Ok(McpContext::credentials_only(server_name, backend, cred_path));
+        return Ok(McpContext::credentials_only(server_name, backend, cred_path, fallback));
     }
 
     let fetched = vars::fetch(&registry, &pending.secret_vars())
@@ -58,6 +59,7 @@ async fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
         server_name,
         backend,
         cred_path,
+        fallback,
         loaded.server,
     ))
 }

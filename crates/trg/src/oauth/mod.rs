@@ -66,6 +66,7 @@ pub async fn ensure_credentials_for(
     server_name: &str,
     backend: &Backend,
     cred_path: &SecretPath,
+    fallback: Option<&SecretPath>,
 ) -> Result<EnsureOutcome, EnsureError> {
     if profile.http_headers.contains_key(&AUTHORIZATION) {
         return Ok(EnsureOutcome::NoAuthRequired);
@@ -89,7 +90,7 @@ pub async fn ensure_credentials_for(
     }
 
     manager.set_metadata(resolution.metadata);
-    let store = OAuthCredentialStore::new(backend.clone(), cred_path.clone(), server_name);
+    let store = OAuthCredentialStore::new(backend.clone(), cred_path.clone(), server_name, fallback.cloned());
     let failure = store.failure();
     manager.set_credential_store(store);
 
@@ -104,7 +105,7 @@ pub async fn ensure_credentials_for(
     let _ = run_authorization(manager, server_name, &[], FlowConfig::default()).await?;
 
     let mut manager = AuthorizationManager::new(url).await?;
-    let store = OAuthCredentialStore::new(backend.clone(), cred_path.clone(), server_name);
+    let store = OAuthCredentialStore::new(backend.clone(), cred_path.clone(), server_name, fallback.cloned());
     let failure = store.failure();
     manager.set_credential_store(store);
     if !manager
