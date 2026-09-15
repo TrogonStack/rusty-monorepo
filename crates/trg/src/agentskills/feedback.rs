@@ -17,7 +17,6 @@ use thiserror::Error;
 
 use super::evals::EvalError;
 use super::report::ScenarioKind;
-use super::schema_version::SchemaVersion;
 
 pub const FEEDBACK_FILE_NAME: &str = "feedback.json";
 
@@ -75,8 +74,6 @@ pub struct FeedbackNote {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDocument {
-    #[serde(default)]
-    pub schema_version: SchemaVersion,
     pub reviewer: String,
     pub reviewed_at: String,
     pub notes: Vec<FeedbackNote>,
@@ -187,7 +184,6 @@ pub fn init_feedback(report_dir: &Path, reviewer_override: Option<&str>) -> Resu
     let reviewer = resolve_reviewer(reviewer_override)?;
     let reviewed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let template = FeedbackDocument {
-        schema_version: SchemaVersion::current(),
         reviewer,
         reviewed_at,
         notes: Vec::new(),
@@ -571,7 +567,6 @@ mod tests {
             scenario_id: ScenarioKind::WithSkill,
             source_path: "runs/run-001/feedback.json".to_string(),
             feedback: FeedbackDocument {
-                schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
                 reviewer: "human@example.com".to_string(),
                 reviewed_at: "2026-05-26T12:00:00Z".to_string(),
                 notes: vec![
@@ -608,7 +603,6 @@ mod tests {
                 scenario_id: ScenarioKind::WithSkill,
                 source_path: "runs/run-001/feedback.json".to_string(),
                 feedback: FeedbackDocument {
-                    schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
                     reviewer: "human@example.com".to_string(),
                     reviewed_at: "2026-05-26T12:00:00Z".to_string(),
                     notes: vec![],
@@ -620,7 +614,6 @@ mod tests {
                 scenario_id: ScenarioKind::WithSkill,
                 source_path: "runs/run-002/feedback.json".to_string(),
                 feedback: FeedbackDocument {
-                    schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
                     reviewer: "human@example.com".to_string(),
                     reviewed_at: "2026-05-26T12:00:00Z".to_string(),
                     notes: vec![FeedbackNote {

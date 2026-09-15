@@ -14,7 +14,6 @@ use super::Runner;
 use crate::agentskills::case_env::CaseEnv;
 use crate::agentskills::redact::is_secret_env_key;
 use crate::agentskills::report::EnvironmentPolicy;
-use crate::agentskills::schema_version::SchemaVersion;
 
 /// Directory, relative to a run directory, used as `HOME` under
 /// [`EnvironmentPolicy::Isolated`].
@@ -184,8 +183,6 @@ impl JsonSchema for RecordedConfigHome {
 /// The document written to a run's `env.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RecordedEnvironment {
-    #[serde(default)]
-    pub schema_version: SchemaVersion,
     pub vars: BTreeMap<String, String>,
     /// Absent only when the host gave a run neither the harness's override variable nor
     /// a `HOME` to resolve a config home against.
@@ -409,7 +406,6 @@ impl RunEnvironment {
     /// The document to write to this run's `env.json`.
     pub fn record(&self) -> RecordedEnvironment {
         RecordedEnvironment {
-            schema_version: SchemaVersion::current(),
             vars: self.recorded_vars(),
             config_home: self.config_home.clone(),
         }

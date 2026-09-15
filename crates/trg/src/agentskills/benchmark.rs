@@ -15,7 +15,6 @@ use super::evals::{EvalError, Result};
 use super::iteration_summary::detect_previous_report_dir;
 use super::proportion::{self, Interval, Proportion};
 use super::report::ScenarioKind;
-use super::schema_version::SchemaVersion;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -36,8 +35,6 @@ pub struct BenchmarkOptions {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(title = "trg skills eval benchmark")]
 pub struct BenchmarkDocument {
-    #[serde(default)]
-    pub schema_version: SchemaVersion,
     pub report_id: String,
     pub generated_at: String,
     pub failed_runs_mode: FailedRunsMode,
@@ -369,7 +366,7 @@ struct GradingFileInput {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[allow(dead_code)]
 struct AssertionResultInput {
-    #[serde(default, alias = "text")]
+    #[serde(default)]
     assertion: String,
     #[serde(default)]
     passed: bool,
@@ -490,7 +487,6 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
     )?;
 
     Ok(BenchmarkDocument {
-        schema_version: SchemaVersion::current(),
         report_id: report.report.id,
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         failed_runs_mode: failed_runs,
@@ -1497,8 +1493,8 @@ mod tests {
             Some(
                 r#"{
   "assertion_results": [
-    { "text": "a", "passed": true, "evidence": "ok" },
-    { "text": "b", "passed": false, "evidence": "missing" }
+    { "assertion": "a", "passed": true, "evidence": "ok" },
+    { "assertion": "b", "passed": false, "evidence": "missing" }
   ],
   "summary": { "passed": 1, "failed": 1, "total": 2, "pass_rate": 0.5 }
 }"#,

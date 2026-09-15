@@ -57,7 +57,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--allow-scaffold` | bool | `false` | Run the `scaffold` a case declares. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 | `--trust-skill` | bool | `false` | Run a skill directory from outside this working tree without being asked about it. See [Running a skill from outside your working tree](#running-a-skill-from-outside-your-working-tree) |
-| `--require-graders` (alias `--require-assertions`) | bool | `false` | Fail when an eval case declares no grader |
+| `--require-graders` | bool | `false` | Fail when an eval case declares no grader |
 | `--lint-evals` | bool | `false` | Print the suite lint's warnings to stderr. Off by default, so a run that does not ask for them prints none, and they change no exit code either way |
 
 ### Runner values
@@ -191,7 +191,7 @@ the grading for that run.
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: hold every artifact against its schema, require at least one `grading.json`, and fail on failed assertions. Refused outright on a build compiled without the `schema-validation` feature. See [What strict mode needs from the build](#what-strict-mode-needs-from-the-build) |
-| `--require-graders` (alias `--require-assertions`) | bool | `false` | Fail when an eval case declares no grader |
+| `--require-graders` | bool | `false` | Fail when an eval case declares no grader |
 | `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
 | `--eval-dir` | name | `evals` | Directory under `--skill-dir` the eval suite is resolved from |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
@@ -666,7 +666,6 @@ Validated before `run` executes. Unknown fields are rejected.
 
 | Field | Type | Required | Notes |
 | ----- | ---- | -------- | ----- |
-| `schema_version` | integer | no | Accepted for backward compatibility; has no effect on parsing |
 | `skill_name` | string | yes | Must match the `name` in `SKILL.md` frontmatter |
 | `eval_dir` | string | no | A single path segment, no `/`, `\`, `.`, or `..`. Not a way to relocate the suite: the directory it is found in (`--eval-dir` or its default) already had to be settled to find this manifest at all. Declaring it here is checked only for agreement with that value, and a mismatch is rejected rather than silently overridden, so a manifest cannot claim to live somewhere other than where it was found |
 | `evals` | array | yes | At least one eval case; IDs must be unique |
@@ -698,7 +697,7 @@ Validated before `run` executes. Unknown fields are rejected.
 
 A case is not required to declare a `grader`, but a suite where none of them do
 is warned by the suite lint (see below), and `--require-graders` turns that
-into a load-time error. `--require-assertions` still works, as an alias.
+into a load-time error.
 
 `graders` is the only supported way to state what a case checks; see
 [Graders](#graders) for the typed vocabulary. A case that declares no grader is
@@ -1538,7 +1537,7 @@ gave one; a case whose graders left every weight undeclared reports the same
 
 | Field | Type | Notes |
 | ----- | ---- | ----- |
-| `assertion_results[].assertion` | string | Non-empty. Accepts `text` as an alias. For a typed grader, its rendered description |
+| `assertion_results[].assertion` | string | Non-empty. For a typed grader, its rendered description |
 | `assertion_results[].passed` | bool | Pass/fail for this assertion. Always `false` when `unsupported` or `ungraded` is present. An indicator rather than a score when `excluded` is present |
 | `assertion_results[].evidence` | string | Non-empty. A passing result must not merely restate its assertion |
 | `assertion_results[].grader.kind` | enum | `mechanical`, `declarative`, `llm`, `script`, `needs_llm`, or `none` |

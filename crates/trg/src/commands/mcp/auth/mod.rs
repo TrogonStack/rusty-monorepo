@@ -483,7 +483,7 @@ mod tests {
     use secrecy::SecretString;
 
     use super::*;
-    use crate::oauth::store::CREDENTIALS_KEY_V2;
+    use crate::oauth::store::CREDENTIALS_KEY;
     use crate::secrets::{fake::FakeBackend, openbao, Backend, FakeFailure, SecretKey, SecretMap};
 
     fn stored() -> StoredCredentials {
@@ -515,7 +515,7 @@ mod tests {
         ))
         .expect("encode");
         let mut map = SecretMap::new();
-        map.insert(SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(), SecretString::from(json));
+        map.insert(SecretKey::parse(CREDENTIALS_KEY).unwrap(), SecretString::from(json));
         backend.set(path, &map).await.expect("seed");
     }
 

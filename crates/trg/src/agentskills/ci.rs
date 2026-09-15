@@ -664,7 +664,6 @@ struct GradingForAnnotations {
 
 #[derive(Debug, serde::Deserialize)]
 struct AssertionForAnnotations {
-    #[serde(alias = "text")]
     assertion: String,
     passed: bool,
     #[serde(default)]
@@ -1194,7 +1193,6 @@ mod tests {
         .unwrap();
 
         let document = ReportDocument {
-            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             report: ReportSection {
                 id: "report-test".to_string(),
                 generated_at: "2026-05-26T00:00:00Z".to_string(),

@@ -91,11 +91,7 @@ pub struct VerifyArgs {
     #[arg(long, value_enum, default_value_t = VerifyMode::Lenient)]
     pub mode: VerifyMode,
 
-    #[arg(
-        long,
-        alias = "require-assertions",
-        help = "Fail when any eval case declares no grader"
-    )]
+    #[arg(long, help = "Fail when any eval case declares no grader")]
     pub require_graders: bool,
 
     #[arg(
@@ -295,25 +291,6 @@ impl VerifyArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `--require-assertions` is the pre-rename spelling: suites and CI invocations
-    /// pinned to it must keep working, so it stays as an alias with identical meaning.
-    #[test]
-    fn require_assertions_is_an_alias_for_require_graders() {
-        use clap::Parser;
-
-        #[derive(clap::Parser)]
-        struct Wrapper {
-            #[command(flatten)]
-            args: VerifyArgs,
-        }
-
-        let by_new_name = Wrapper::try_parse_from(["trg", "--require-graders"]).unwrap().args;
-        let by_old_name = Wrapper::try_parse_from(["trg", "--require-assertions"]).unwrap().args;
-
-        assert!(by_new_name.require_graders);
-        assert_eq!(by_new_name.require_graders, by_old_name.require_graders);
-    }
 
     /// A validator that cannot say it is not validating is worse than none: strict mode
     /// would exit clean on a bundle nothing had read, and the operator would take that

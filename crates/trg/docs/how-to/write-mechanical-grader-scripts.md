@@ -135,7 +135,7 @@ Bundle verified
 | Rule | Detail |
 | ---- | ------ |
 | Location | `grading.json` inside the workspace (or a nested subdirectory) |
-| `assertion_results` | At least one entry; each needs a non-empty `assertion` (`text` is accepted as an alias) and `evidence` |
+| `assertion_results` | At least one entry; each needs a non-empty `assertion` and `evidence` |
 | `summary` | `passed`, `failed`, `total`, and `unsupported` must match the results array |
 | `pass_rate` | `passed / (total - unsupported)`, or `null` when nothing was scored |
 

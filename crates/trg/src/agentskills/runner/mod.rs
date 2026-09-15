@@ -39,7 +39,6 @@ use super::transcript::{
     write_normalized_transcript, StagedSkill, StagedSkillName, TranscriptFormat, WorkspaceBoundary,
 };
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
-use crate::agentskills::schema_version::SchemaVersion;
 use environment::{RecordedEnvironment, RunEnvironment};
 use usage::HarnessTokenUsage;
 
@@ -981,7 +980,6 @@ pub fn write_runner_invocation_metadata(
 
 #[derive(Debug, Clone, Default)]
 pub struct TimingFile {
-    pub schema_version: SchemaVersion,
     pub duration_ms: u64,
     pub exit_code: Option<i32>,
     pub total_tokens: Option<u64>,
@@ -1002,8 +1000,6 @@ pub struct TimingFile {
 #[serde(deny_unknown_fields)]
 #[schemars(rename = "TimingFile")]
 struct SerializedTimingFile<'a> {
-    #[serde(default)]
-    schema_version: SchemaVersion,
     duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
@@ -1029,7 +1025,6 @@ struct SerializedTimingFile<'a> {
 impl<'a> From<&'a TimingFile> for SerializedTimingFile<'a> {
     fn from(timing: &'a TimingFile) -> Self {
         Self {
-            schema_version: timing.schema_version,
             duration_ms: timing.duration_ms,
             exit_code: timing.exit_code,
             total_tokens: timing.total_tokens,
@@ -1061,8 +1056,6 @@ impl JsonSchema for TimingFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeclaredTimingFile {
-    #[serde(default)]
-    schema_version: SchemaVersion,
     duration_ms: u64,
     #[serde(default)]
     exit_code: Option<i32>,
@@ -1087,7 +1080,6 @@ impl<'de> Deserialize<'de> for TimingFile {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let declared = DeclaredTimingFile::deserialize(deserializer)?;
         Ok(Self {
-            schema_version: declared.schema_version,
             duration_ms: declared.duration_ms,
             exit_code: declared.exit_code,
             total_tokens: declared.total_tokens,
@@ -1106,7 +1098,6 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
         std::fs::create_dir_all(parent)?;
     }
     let body = TimingFile {
-        schema_version: SchemaVersion::current(),
         duration_ms: outcome.duration_ms,
         exit_code: outcome.exit_code,
         total_tokens: outcome.tokens.total_tokens(),
@@ -2630,7 +2621,6 @@ mod workspace_tests {
             &run_dir,
             redact_command_args("codex", &["exec", "--api-key", github, "--model", "gpt-4"]),
             RecordedEnvironment {
-                schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
                 vars: redact_env(),
                 config_home: None,
             },

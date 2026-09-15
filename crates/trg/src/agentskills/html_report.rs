@@ -796,7 +796,6 @@ mod tests {
 
     fn minimal_document() -> ReportDocument {
         ReportDocument {
-            schema_version: crate::agentskills::schema_version::SchemaVersion::current(),
             report: ReportSection {
                 id: "report-1".to_string(),
                 generated_at: "2026-01-01T00:00:00Z".to_string(),

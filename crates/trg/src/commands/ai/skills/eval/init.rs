@@ -148,7 +148,6 @@ mod tests {
         assert_eq!(suite.evals[0].id.as_str(), "produces-a-summary");
         assert!(!suite.evals[0].graders.is_empty());
         assert_eq!(suite.evals[1].id.as_str(), "triggers-the-skill");
-        assert_eq!(suite.schema_version, 1);
     }
 
     #[test]

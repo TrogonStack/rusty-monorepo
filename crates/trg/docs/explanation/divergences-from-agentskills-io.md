@@ -19,7 +19,7 @@ this is a pre-1.0 contract and consumers should test for the field they need.
 | Session index | Spec report | `report.json` superset |
 | Old skill scenario | `with_old_skill` (implied) | `old_skill` |
 | CLI workflow | Implied pipeline | Explicit subcommands: `run`, `grade`, `benchmark`, `verify`, `init`, `feedback`, `compare` |
-| Schema stability | Spec versioning | Pre-1.0 contract, no `schema_version`; snapshot tests in repo |
+| Schema stability | Spec versioning | Pre-1.0 contract, no `schema_version`; schema-validation tests in repo |
 
 ---
 
@@ -105,20 +105,10 @@ are absent in bundles written before each was introduced. A consumer that
 recomputes a pass rate without subtracting both will not match the rate the file
 reports.
 
-### Backward-compatibility contract
-
-The repo commits frozen `report.json` fixtures under
-`crates/trg/src/agentskills/testdata/reports/` and tests that:
-
-1. Each fixture deserializes into the current `ReportDocument` struct.
-2. Serialize → deserialize round-trip preserves every field present in the fixture.
-3. Both fixtures validate against `schemas/report.json.schema.json`.
-
-If you depend on `report.json` programmatically, treat these tests as the
-compatibility contract. They are what actually holds the shape: the committed
-fixtures were written by a much older build and still deserialize because the
-fields stayed optional. A failing snapshot test means either a bug or a
-deliberate change to the shape.
+The repo commits `report.json` fixtures under
+`crates/trg/src/agentskills/testdata/reports/` and tests that they validate
+against `schemas/report.json.schema.json`, so the published schema stays
+honest about what `trg` actually writes.
 
 ---
 

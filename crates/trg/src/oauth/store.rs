@@ -5,13 +5,9 @@
 //! and it must stay dyn-compatible for them. Everything below it dispatches
 //! statically.
 //!
-//! A whole `StoredCredentials` serializes into one key ([`CREDENTIALS_KEY_V2`])
+//! A whole `StoredCredentials` serializes into one key ([`CREDENTIALS_KEY`])
 //! of the map stored at the server's [`SecretPath`], which keeps the backend
 //! ignorant of OAuth and leaves room for other keys at the same path later.
-//! The key is versioned because this crate, not rmcp, owns the envelope
-//! around that blob: `load` recognizes two older shapes it can still read and
-//! rewrites either one onto [`CREDENTIALS_KEY_V2`] the moment it sees it, so
-//! nothing downstream of here ever has to know they existed.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,28 +19,18 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::secrets::{Backend, SecretKey, SecretMap, SecretPath, SecretsError};
 use crate::shell::quote_for_shell;
 
-/// The legacy, unversioned key. `save` no longer writes it, but `load` still
-/// reads it once, to migrate whatever it finds onto [`CREDENTIALS_KEY_V2`].
+/// The key under which a server's OAuth credentials live in the map stored
+/// at the server's [`SecretPath`].
 pub const CREDENTIALS_KEY: &str = "credentials";
 
-/// The key under which a server's OAuth credentials live today.
-///
-/// Versions this envelope, not rmcp's `StoredCredentials` shape: the value
-/// stored under this key is whatever `serde_json::to_string` produces for
-/// rmcp's type, which is unversioned and out of this crate's control. What
-/// `trg` owns, and versions here, is the choice to keep that blob under one
-/// key at all rather than splitting it across several, so a decode failure
-/// can name which envelope shape it hit.
-pub const CREDENTIALS_KEY_V2: &str = "credentials.v2";
-
-/// Everything `load`'s read ladder can conclude once it has already tried
-/// `credentials.v2`, the unversioned wrapper, and the bare pre-#73 blob.
+/// Everything `load`'s read can conclude once it has already tried
+/// [`CREDENTIALS_KEY`].
 ///
 /// Kept apart from [`SecretsError`], which the backend layer owns and which
 /// therefore stays ignorant of what an OAuth credential looks like.
 #[derive(Debug, thiserror::Error)]
 enum CredentialReadError {
-    /// Every shape `load` knows failed to parse. A `serde_json` decode error
+    /// The stored payload failed to parse. A `serde_json` decode error
     /// would say this too, but with a line and column a person cannot act
     /// on; this names the actual situation and its fix instead.
     #[error(
@@ -52,15 +38,6 @@ enum CredentialReadError {
          shape this trg understands"
     )]
     Corrupt { path: SecretPath },
-
-    /// A key shaped like `credentials.vN`, for an `N` this trg does not
-    /// recognize, is the only credential key present. That is a newer `trg`
-    /// sharing this backend, not a corrupt payload.
-    #[error(
-        "OAuth credentials at `{path}` were written under `{key}`, a version this trg does not \
-         understand yet; upgrade trg to read them"
-    )]
-    NewerVersion { path: SecretPath, key: String },
 }
 
 /// Where the store leaves what it was actually told, on the way past rmcp.
@@ -180,8 +157,7 @@ impl OAuthCredentialStore {
     /// `logout` tell the operator this machine keeps authenticating from a
     /// shared credential that is not there.
     ///
-    /// A payload that is present but will not decode, or that carries a
-    /// `credentials.vN` this trg does not understand, still counts as
+    /// A payload that is present but will not decode still counts as
     /// reachable rather than clean, and deliberately does not propagate the
     /// decoder error: `logout` calls this only after `clear` has already
     /// deleted the machine-scoped path, so failing here would leave the
@@ -203,10 +179,6 @@ impl OAuthCredentialStore {
 
     fn key() -> SecretKey {
         SecretKey::parse(CREDENTIALS_KEY).expect("CREDENTIALS_KEY is a valid secret key")
-    }
-
-    fn key_v2() -> SecretKey {
-        SecretKey::parse(CREDENTIALS_KEY_V2).expect("CREDENTIALS_KEY_V2 is a valid secret key")
     }
 }
 
@@ -237,14 +209,13 @@ impl CredentialStore for OAuthCredentialStore {
                 self.read_from.record(None);
                 self.load_from_map(map).await
             }
-            // The outer map itself would not decode: what a payload written
-            // before credentials lived in a keyed map looks like. `raw` is
-            // only `Some` when the backend that hit this had the exact text
-            // on hand to retry under that older shape. The primary path holds
-            // a payload either way, so the same reasoning applies.
-            Err(SecretsError::Malformed { raw, .. }) => {
+            // The outer map itself would not decode. The primary path holds
+            // a payload either way, so it cannot be reported as absent.
+            Err(SecretsError::Malformed { .. }) => {
                 self.read_from.record(None);
-                self.load_legacy_v1(raw).await
+                Err(self.credential_read_error(CredentialReadError::Corrupt {
+                    path: self.path.clone(),
+                }))
             }
             // Transient: leaves `read_from` untouched on purpose.
             Err(err) => Err(self.to_auth_error(err)),
@@ -278,17 +249,14 @@ impl CredentialStore for OAuthCredentialStore {
         let mut map = match self.backend.get(&target).await {
             Ok(existing) => existing.unwrap_or_default(),
             // An outer payload that will not decode leaves nothing structured
-            // behind it, whether that is a pre-#73 raw `StoredCredentials`
-            // blob (see `load`) or some other shape this trg cannot parse a
-            // map from. Either way there are no sibling keys to lose by
-            // starting fresh.
+            // behind it: this trg cannot parse a map from it, so there are no
+            // sibling keys to lose by starting fresh.
             Err(SecretsError::Malformed { .. }) => SecretMap::new(),
             // Anything else is transient. Writing through it would replace the
             // whole map with just this key and take any siblings with it.
             Err(e) => return Err(self.to_auth_error(e)),
         };
-        map.remove(&Self::key());
-        map.insert(Self::key_v2(), SecretString::from(json));
+        map.insert(Self::key(), SecretString::from(json));
 
         self.backend.set(&target, &map).await.map_err(|e| self.to_auth_error(e))
     }
@@ -319,7 +287,6 @@ impl CredentialStore for OAuthCredentialStore {
         };
         let result = if let Some(mut map) = existing {
             map.remove(&Self::key());
-            map.remove(&Self::key_v2());
             if map.is_empty() {
                 self.backend.delete(&self.path).await.map_err(|e| self.to_auth_error(e))
             } else {
@@ -357,12 +324,6 @@ impl OAuthCredentialStore {
     /// credential is still sitting at the pre-`machine_id` shared path: it is
     /// safe to read from there, but never to copy, move, or delete, so a hit
     /// here is reported rather than acted on.
-    ///
-    /// Deliberately does not reuse [`Self::load_from_map`]: that method
-    /// migrates an unversioned key by writing `credentials.v2` back to
-    /// `self.path`, and doing that from a fallback read would silently copy
-    /// the shared credential onto the machine-scoped path, exactly what the
-    /// read-only rule forbids.
     async fn load_from_fallback(&self) -> Result<Option<StoredCredentials>, AuthError> {
         let Some(fallback) = self.fallback.clone() else {
             self.read_from.record(None);
@@ -418,102 +379,33 @@ impl OAuthCredentialStore {
     }
 
     /// Decode whatever credential value a fallback read turned up, without
-    /// writing anything back: the fallback path stays exactly as found,
-    /// migrated key shape and all.
+    /// writing anything back: the fallback path stays exactly as found.
     ///
-    /// Applies the same corruption and newer-version handling
-    /// [`Self::load_from_map`] applies to the primary path: a fallback that
-    /// holds something this trg cannot read is not the same as a fallback
-    /// that holds nothing, and reporting it as absent would send `load` on
-    /// to open a fresh authorization flow against a path that in fact has a
-    /// credential on it. A genuinely empty fallback still answers `Ok(None)`.
+    /// Applies the same corruption handling [`Self::load_from_map`] applies
+    /// to the primary path: a fallback that holds something this trg cannot
+    /// read is not the same as a fallback that holds nothing, and reporting
+    /// it as absent would send `load` on to open a fresh authorization flow
+    /// against a path that in fact has a credential on it. A genuinely empty
+    /// fallback still answers `Ok(None)`.
     fn decode_from_fallback_map(
         &self,
         path: &SecretPath,
         map: &SecretMap,
     ) -> Result<Option<StoredCredentials>, AuthError> {
-        if let Some(value) = map.get(&Self::key_v2()) {
-            return self.decode_or_corrupt_at(path, value.expose_secret()).map(Some);
-        }
-        if let Some(value) = map.get(&Self::key()) {
-            return self.decode_or_corrupt_at(path, value.expose_secret()).map(Some);
-        }
-        if let Some(key) = newer_version_key(map) {
-            return Err(self.credential_read_error(CredentialReadError::NewerVersion {
-                path: path.clone(),
-                key,
-            }));
-        }
-        Ok(None)
-    }
-
-    /// Case 2: the outer map decoded. `credentials.v2` wins when present
-    /// (today's shape); otherwise the unversioned `credentials` is read and
-    /// migrated; otherwise an unrecognized `credentials.vN` is reported as
-    /// needing an upgrade; otherwise the path simply holds none of our keys.
-    async fn load_from_map(&self, map: SecretMap) -> Result<Option<StoredCredentials>, AuthError> {
-        if let Some(value) = map.get(&Self::key_v2()) {
-            let raw = value.expose_secret().to_string();
-            return self.decode_or_corrupt(&raw).map(Some);
-        }
-
-        if let Some(value) = map.get(&Self::key()) {
-            let raw = value.expose_secret().to_string();
-            let credentials = self.decode_or_corrupt(&raw)?;
-            self.migrate_unversioned(map, raw).await;
-            return Ok(Some(credentials));
-        }
-
-        if let Some(key) = newer_version_key(&map) {
-            return Err(self.credential_read_error(CredentialReadError::NewerVersion {
-                path: self.path.clone(),
-                key,
-            }));
-        }
-
-        Ok(None)
-    }
-
-    /// Case 3: the outer map would not decode at all. `raw` carries the
-    /// backend's exact bytes when it has them, which only the Keychain does:
-    /// it is the one backend that stored credentials before #73 moved them
-    /// into a keyed map. Every other backend answers `None` and this goes
-    /// straight to reporting corruption.
-    async fn load_legacy_v1(&self, raw: Option<SecretString>) -> Result<Option<StoredCredentials>, AuthError> {
-        let Some(raw) = raw else {
-            return Err(self.credential_read_error(CredentialReadError::Corrupt {
-                path: self.path.clone(),
-            }));
+        let Some(value) = map.get(&Self::key()) else {
+            return Ok(None);
         };
-        let credentials = self.decode_or_corrupt(raw.expose_secret())?;
-
-        let mut map = SecretMap::new();
-        map.insert(Self::key_v2(), raw);
-        if let Err(err) = self.backend.set(&self.path, &map).await {
-            tracing::warn!(
-                path = %self.path,
-                error = %err,
-                "could not migrate a legacy OAuth credential to `credentials.v2`; will retry on the next load"
-            );
-        }
-        Ok(Some(credentials))
+        self.decode_or_corrupt_at(path, value.expose_secret()).map(Some)
     }
 
-    /// Case 2b's migration: rewrite the same bytes under `credentials.v2`,
-    /// dropping the unversioned key, and leave every sibling key untouched.
-    /// A failed write is logged and ignored: the credentials just parsed are
-    /// valid and usable, and a self-healing migration should retry on the
-    /// next load rather than break auth over a storage hiccup.
-    async fn migrate_unversioned(&self, mut map: SecretMap, raw: String) {
-        map.remove(&Self::key());
-        map.insert(Self::key_v2(), SecretString::from(raw));
-        if let Err(err) = self.backend.set(&self.path, &map).await {
-            tracing::warn!(
-                path = %self.path,
-                error = %err,
-                "could not migrate OAuth credentials to `credentials.v2`; will retry on the next load"
-            );
-        }
+    /// The outer map decoded. Reads [`CREDENTIALS_KEY`] if present; otherwise
+    /// the path simply holds none of our keys.
+    async fn load_from_map(&self, map: SecretMap) -> Result<Option<StoredCredentials>, AuthError> {
+        let Some(value) = map.get(&Self::key()) else {
+            return Ok(None);
+        };
+        let raw = value.expose_secret().to_string();
+        self.decode_or_corrupt(&raw).map(Some)
     }
 
     /// Parse `raw` as `StoredCredentials`, discarding the `serde_json` error
@@ -544,12 +436,7 @@ impl OAuthCredentialStore {
     }
 
     fn credential_read_error(&self, err: CredentialReadError) -> AuthError {
-        let message = match &err {
-            CredentialReadError::Corrupt { .. } => format!("{err}. {}", self.recovery_advice()),
-            // Logging out would not help: the payload is fine, this trg is
-            // simply too old to read it.
-            CredentialReadError::NewerVersion { .. } => err.to_string(),
-        };
+        let message = format!("{err}. {}", self.recovery_advice());
         self.failure.record(&message);
         AuthError::InternalError(message)
     }
@@ -564,35 +451,8 @@ impl OAuthCredentialStore {
     }
 }
 
-/// The full key name of an unrecognized `credentials.vN` entry with `N`
-/// greater than the version this trg understands, if the map holds one.
-///
-/// Anything shaped like this key but not exactly `credentials.v2` was
-/// written by a `trg` that speaks a version this one does not; surfacing
-/// that is what lets `load` tell "upgrade trg" apart from "these credentials
-/// are simply gone".
-fn newer_version_key(map: &SecretMap) -> Option<String> {
-    const VERSIONED_PREFIX: &str = "credentials.v";
-    map.sorted_keys().into_iter().find_map(|key| {
-        let raw = key.as_str();
-        let version: u64 = raw.strip_prefix(VERSIONED_PREFIX)?.parse().ok()?;
-        (version > 2).then(|| raw.to_string())
-    })
-}
-
-/// A pre-#73 payload as it actually reads in the wild: `token_response`
-/// populated rather than `null`, `granted_scopes` non-empty, and `issuer`
-/// missing entirely rather than present and `null`, since that field did not
-/// exist yet when this shape was written. Token values are obviously fake.
-/// Shared by the unit tests below and by `legacy_payload_tests`, the latter
-/// of which seeds a real keychain item with it.
-#[cfg(test)]
-const LEGACY_RAW_PAYLOAD: &str = r#"{"client_id":"legacy-client","token_response":{"access_token":"fake-access-token","token_type":"bearer","expires_in":3600,"refresh_token":"fake-refresh-token","scope":"read write"},"granted_scopes":["read","write"],"token_received_at":1700000000}"#;
-
 #[cfg(test)]
 mod tests {
-    use oauth2::TokenResponse;
-
     use super::*;
     use crate::secrets::{fake::FakeBackend, FakeFailure};
 
@@ -680,25 +540,7 @@ mod tests {
                 .map(|v| v.expose_secret()),
             Some("keep-me")
         );
-        assert!(map.contains_key(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap()));
-    }
-
-    #[tokio::test]
-    async fn save_writes_v2_and_drops_a_stale_unversioned_key() {
-        let (backend, store) = store();
-        let path = SecretPath::parse("github").expect("parse");
-        let mut seed = SecretMap::new();
-        seed.insert(
-            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
-            SecretString::from("stale".to_string()),
-        );
-        backend.set(&path, &seed).await.expect("seed");
-
-        store.save(credentials("abc")).await.expect("save");
-
-        let map = backend.get(&path).await.expect("get").expect("some");
-        assert!(!map.contains_key(&SecretKey::parse(CREDENTIALS_KEY).unwrap()));
-        assert!(map.contains_key(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap()));
+        assert!(map.contains_key(&SecretKey::parse(CREDENTIALS_KEY).unwrap()));
     }
 
     #[tokio::test]
@@ -876,7 +718,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json.clone()),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -891,7 +733,7 @@ mod tests {
         let shared_after = backend.get(&shared).await.expect("get").expect("still there");
         assert_eq!(
             shared_after
-                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
                 .map(|v| v.expose_secret()),
             Some(shared_json.as_str()),
             "clear must never delete the shared path itself, only stop this store from reading it"
@@ -910,7 +752,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -924,12 +766,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_reads_the_v2_key_directly() {
+    async fn load_reads_the_credentials_key_directly() {
         let (backend, store) = store();
         let path = SecretPath::parse("github").expect("parse");
         let json = serde_json::to_string(&credentials("direct")).expect("encode");
         let mut map = SecretMap::new();
-        map.insert(SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(), SecretString::from(json));
+        map.insert(SecretKey::parse(CREDENTIALS_KEY).unwrap(), SecretString::from(json));
         backend.set(&path, &map).await.expect("seed");
 
         let loaded = store.load().await.expect("load").expect("some");
@@ -949,7 +791,7 @@ mod tests {
 
         let json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
         let mut map = SecretMap::new();
-        map.insert(SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(), SecretString::from(json));
+        map.insert(SecretKey::parse(CREDENTIALS_KEY).unwrap(), SecretString::from(json));
         backend.set(&shared, &map).await.expect("seed the shared path");
 
         let loaded = store.load().await.expect("load").expect("some");
@@ -979,7 +821,7 @@ mod tests {
 
         let json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
         let mut map = SecretMap::new();
-        map.insert(SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(), SecretString::from(json));
+        map.insert(SecretKey::parse(CREDENTIALS_KEY).unwrap(), SecretString::from(json));
         backend.set(&shared, &map).await.expect("seed the shared path");
 
         let path = SecretPath::parse("github").expect("parse");
@@ -1005,7 +847,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json.clone()),
         );
         backend
@@ -1020,8 +862,8 @@ mod tests {
 
         let primary = backend.get(&path).await.expect("get").expect("some");
         let raw = primary
-            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
-            .expect("v2 key");
+            .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
+            .expect("credentials key");
         let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
         assert_eq!(
             decoded.client_id, "fresh-cred",
@@ -1035,7 +877,7 @@ mod tests {
             .expect("still there");
         assert_eq!(
             would_be_fallback_after
-                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
                 .map(|v| v.expose_secret()),
             Some(shared_json.as_str()),
             "a store with no fallback must never touch the would-be fallback path"
@@ -1070,7 +912,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json.clone()),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -1080,7 +922,7 @@ mod tests {
         let shared_after = backend.get(&shared).await.expect("get").expect("still there");
         assert_eq!(
             shared_after
-                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
                 .map(|v| v.expose_secret()),
             Some(shared_json.as_str()),
             "a save with no recorded fallback origin must never touch the shared payload"
@@ -1102,7 +944,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -1121,8 +963,8 @@ mod tests {
 
         let shared_after = backend.get(&shared).await.expect("get").expect("still there");
         let raw = shared_after
-            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
-            .expect("v2 key");
+            .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
+            .expect("credentials key");
         let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
         assert_eq!(decoded.client_id, "refreshed-cred");
     }
@@ -1143,7 +985,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json.clone()),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -1154,7 +996,7 @@ mod tests {
         let shared_after = backend.get(&shared).await.expect("get").expect("still there");
         assert_eq!(
             shared_after
-                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
                 .map(|v| v.expose_secret()),
             Some(shared_json.as_str()),
             "a token-less save must never touch a fallback-origin shared payload"
@@ -1163,8 +1005,8 @@ mod tests {
         let primary = SecretPath::parse("github").expect("parse");
         let primary_after = backend.get(&primary).await.expect("get").expect("some");
         let raw = primary_after
-            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
-            .expect("v2 key");
+            .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
+            .expect("credentials key");
         let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
         assert_eq!(
             decoded.client_id, "discarded-cred",
@@ -1201,7 +1043,7 @@ mod tests {
 
         let mut map = SecretMap::new();
         map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from("not json".to_string()),
         );
         backend.set(&shared, &map).await.expect("seed");
@@ -1221,129 +1063,13 @@ mod tests {
         );
     }
 
-    /// Same as the primary path: an unrecognized `credentials.vN` at the
-    /// fallback is a newer `trg` sharing the backend, not a missing
-    /// credential.
     #[tokio::test]
-    async fn a_newer_version_fallback_payload_is_reported_not_treated_as_absent() {
-        let shared = SecretPath::parse("mcp/github").expect("parse");
-        let (backend, store) = store_with_fallback(shared.clone());
-
-        let mut map = SecretMap::new();
-        map.insert(
-            SecretKey::parse("credentials.v7").unwrap(),
-            SecretString::from("whatever a newer trg wrote".to_string()),
-        );
-        backend.set(&shared, &map).await.expect("seed");
-
-        let rendered = store
-            .load()
-            .await
-            .expect_err("an unknown newer version at the fallback should not decode as ours")
-            .to_string();
-        assert!(
-            rendered.contains("at `mcp/github`"),
-            "must name the fallback path: {rendered}"
-        );
-        assert!(
-            !rendered.contains("at `github`"),
-            "must not name the primary path, which was never read: {rendered}"
-        );
-        assert!(rendered.contains("credentials.v7"), "{rendered}");
-        assert!(rendered.to_lowercase().contains("upgrade"), "{rendered}");
-    }
-
-    /// Case 2b: today's live shape, a `StoredCredentials` blob wrapped under
-    /// the unversioned key. `load` has to migrate this silently, or every
-    /// deployment that has ever authorized an MCP server would hit the same
-    /// rewrite on its very next read.
-    #[tokio::test]
-    async fn load_migrates_the_unversioned_key_to_v2_and_keeps_siblings() {
+    async fn load_reports_a_value_that_is_not_stored_credentials_as_corrupt_without_serde_noise() {
         let (backend, store) = store();
         let path = SecretPath::parse("github").expect("parse");
-        let json = serde_json::to_string(&credentials("abc")).expect("encode");
-        let mut seed = SecretMap::new();
-        seed.insert(SecretKey::parse("api_key").unwrap(), SecretString::from("keep-me"));
-        seed.insert(
+        let mut map = SecretMap::new();
+        map.insert(
             SecretKey::parse(CREDENTIALS_KEY).unwrap(),
-            SecretString::from(json.clone()),
-        );
-        backend.set(&path, &seed).await.expect("seed");
-
-        let loaded = store.load().await.expect("load").expect("some");
-        assert_eq!(loaded.client_id, "abc");
-
-        let map = backend.get(&path).await.expect("get").expect("some");
-        assert!(!map.contains_key(&SecretKey::parse(CREDENTIALS_KEY).unwrap()));
-        assert_eq!(
-            map.get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
-                .map(|v| v.expose_secret()),
-            Some(json.as_str())
-        );
-        assert_eq!(
-            map.get(&SecretKey::parse("api_key").unwrap())
-                .map(|v| v.expose_secret()),
-            Some("keep-me")
-        );
-    }
-
-    /// Case 3: the pre-#73 shape, a bare `StoredCredentials` blob with no
-    /// wrapping map at all. Real items like this still exist in the wild,
-    /// with a populated `token_response` and a non-empty `granted_scopes`
-    /// rather than the placeholder values a hand-written fixture would reach
-    /// for; `issuer` is genuinely absent on one, since it predates that field.
-    #[tokio::test]
-    async fn load_migrates_a_raw_pre_versioning_legacy_payload_to_v2() {
-        let (backend, store) = store();
-        let path = SecretPath::parse("github").expect("parse");
-        let legacy_raw = LEGACY_RAW_PAYLOAD.to_string();
-        fake(&backend).set_get_failure(Some(FakeFailure::MalformedWithRaw(legacy_raw.clone())));
-
-        let loaded = store.load().await.expect("load").expect("some");
-        assert_eq!(loaded.client_id, "legacy-client");
-        assert_eq!(
-            loaded.token_response.expect("token_response").access_token().secret(),
-            "fake-access-token"
-        );
-
-        fake(&backend).set_get_failure(None);
-        let map = backend.get(&path).await.expect("get").expect("migrated");
-        assert_eq!(
-            map.get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
-                .map(|v| v.expose_secret()),
-            Some(legacy_raw.as_str())
-        );
-        assert!(!map.contains_key(&SecretKey::parse(CREDENTIALS_KEY).unwrap()));
-    }
-
-    #[tokio::test]
-    async fn load_reports_an_unrecognized_newer_version_key_as_an_upgrade_prompt() {
-        let (backend, store) = store();
-        let path = SecretPath::parse("github").expect("parse");
-        let mut map = SecretMap::new();
-        map.insert(
-            SecretKey::parse("credentials.v7").unwrap(),
-            SecretString::from("whatever a newer trg wrote".to_string()),
-        );
-        backend.set(&path, &map).await.expect("seed");
-
-        let rendered = store
-            .load()
-            .await
-            .expect_err("an unknown newer version should not decode as ours")
-            .to_string();
-        assert!(rendered.contains("credentials.v7"), "{rendered}");
-        assert!(rendered.to_lowercase().contains("upgrade"), "{rendered}");
-        assert!(!rendered.contains("trg mcp auth logout"), "{rendered}");
-    }
-
-    #[tokio::test]
-    async fn load_reports_a_v2_value_that_is_not_stored_credentials_as_corrupt_without_serde_noise() {
-        let (backend, store) = store();
-        let path = SecretPath::parse("github").expect("parse");
-        let mut map = SecretMap::new();
-        map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
             SecretString::from(r#"{"not":"credentials"}"#.to_string()),
         );
         backend.set(&path, &map).await.expect("seed");
@@ -1351,7 +1077,7 @@ mod tests {
         let rendered = store
             .load()
             .await
-            .expect_err("an unparseable v2 value should not decode")
+            .expect_err("an unparseable value should not decode")
             .to_string();
         assert!(!rendered.contains("line"), "{rendered}");
         assert!(!rendered.contains("column"), "{rendered}");
@@ -1363,72 +1089,14 @@ mod tests {
         let (backend, store) = store();
         fake(&backend).set_get_failure(Some(FakeFailure::MalformedWithRaw("not json at all".to_string())));
 
-        let rendered = store
-            .load()
-            .await
-            .expect_err("garbage should not parse as a legacy payload")
-            .to_string();
+        let rendered = store.load().await.expect_err("garbage should not parse").to_string();
         assert!(!rendered.contains("line"), "{rendered}");
         assert!(!rendered.contains("column"), "{rendered}");
         assert!(rendered.contains("trg mcp auth logout"), "{rendered}");
     }
 
     #[tokio::test]
-    async fn load_returns_credentials_even_when_the_unversioned_migration_write_fails() {
-        let (backend, store) = store();
-        let path = SecretPath::parse("github").expect("parse");
-        let json = serde_json::to_string(&credentials("abc")).expect("encode");
-        let mut seed = SecretMap::new();
-        seed.insert(SecretKey::parse(CREDENTIALS_KEY).unwrap(), SecretString::from(json));
-        backend.set(&path, &seed).await.expect("seed");
-
-        fake(&backend).set_set_failure(true);
-        let loaded = store
-            .load()
-            .await
-            .expect("a failed migration write should not fail the read")
-            .expect("some");
-        assert_eq!(loaded.client_id, "abc");
-        fake(&backend).set_set_failure(false);
-    }
-
-    #[tokio::test]
-    async fn load_returns_credentials_even_when_the_raw_legacy_migration_write_fails() {
-        let (backend, store) = store();
-        let legacy_raw = r#"{"client_id":"legacy","token_response":null,"granted_scopes":[]}"#.to_string();
-        fake(&backend).set_get_failure(Some(FakeFailure::MalformedWithRaw(legacy_raw)));
-        fake(&backend).set_set_failure(true);
-
-        let loaded = store
-            .load()
-            .await
-            .expect("a failed migration write should not fail the read")
-            .expect("some");
-        assert_eq!(loaded.client_id, "legacy");
-
-        fake(&backend).set_get_failure(None);
-        fake(&backend).set_set_failure(false);
-    }
-
-    #[tokio::test]
-    async fn clear_removes_an_unversioned_legacy_key() {
-        let (backend, store) = store();
-        let path = SecretPath::parse("github").expect("parse");
-        let json = serde_json::to_string(&credentials("abc")).expect("encode");
-        let mut seed = SecretMap::new();
-        seed.insert(SecretKey::parse("api_key").unwrap(), SecretString::from("keep-me"));
-        seed.insert(SecretKey::parse(CREDENTIALS_KEY).unwrap(), SecretString::from(json));
-        backend.set(&path, &seed).await.expect("seed");
-
-        store.clear().await.expect("clear");
-
-        let map = backend.get(&path).await.expect("get").expect("siblings remain");
-        assert!(!map.contains_key(&SecretKey::parse(CREDENTIALS_KEY).unwrap()));
-        assert!(map.contains_key(&SecretKey::parse("api_key").unwrap()));
-    }
-
-    #[tokio::test]
-    async fn clear_deletes_the_whole_path_for_an_unreadable_raw_legacy_payload() {
+    async fn clear_deletes_the_whole_path_for_an_unreadable_payload() {
         let (backend, store) = store();
         let path = SecretPath::parse("github").expect("parse");
         let mut seed = SecretMap::new();
@@ -1461,7 +1129,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -1497,8 +1165,8 @@ mod tests {
 
         let shared_after = backend.get(&shared).await.expect("get").expect("still there");
         let raw = shared_after
-            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
-            .expect("v2 key");
+            .get(&SecretKey::parse(CREDENTIALS_KEY).unwrap())
+            .expect("credentials key");
         let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
         assert_eq!(
             decoded.client_id, "refreshed-cred",
@@ -1521,7 +1189,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -1571,7 +1239,7 @@ mod tests {
         let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
         let mut shared_map = SecretMap::new();
         shared_map.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from(shared_json),
         );
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
@@ -1589,7 +1257,7 @@ mod tests {
 
         let mut corrupt = SecretMap::new();
         corrupt.insert(
-            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretKey::parse(CREDENTIALS_KEY).unwrap(),
             SecretString::from("{not json"),
         );
         backend.set(&shared, &corrupt).await.expect("seed the shared path");
@@ -1599,61 +1267,5 @@ mod tests {
             Some(shared),
             "erring toward telling the operator something is there is the safe direction"
         );
-    }
-}
-
-/// Recovery path for an item written before credentials moved into a keyed
-/// map. `clear` must still be able to remove it, or the error message telling
-/// the user to run `logout` then `login` would be a dead end.
-#[cfg(all(test, target_os = "macos"))]
-mod legacy_payload_tests {
-    use super::*;
-    use crate::secrets::KeychainBackend;
-
-    fn test_path(ns: u32) -> SecretPath {
-        SecretPath::parse(&format!("trg-test-legacy-{}-{ns}", std::process::id())).expect("parse")
-    }
-
-    fn seed_legacy(service: &str, path: &SecretPath) {
-        let status = std::process::Command::new("/usr/bin/security")
-            .args([
-                "add-generic-password",
-                "-U",
-                "-A",
-                "-s",
-                service,
-                "-a",
-                path.as_str(),
-                "-w",
-                LEGACY_RAW_PAYLOAD,
-            ])
-            .status()
-            .expect("spawn security");
-        assert!(status.success(), "seed the legacy item");
-    }
-
-    #[tokio::test]
-    #[ignore = "writes to the developer's real login keychain"]
-    async fn load_migrates_a_legacy_payload_and_clear_still_removes_it() {
-        let keychain = KeychainBackend::with_default_service();
-        let path = test_path(1);
-        seed_legacy(keychain.service(), &path);
-
-        let backend = Backend::Keychain(keychain.clone());
-        let store = OAuthCredentialStore::new(backend, path.clone(), path.as_str(), None);
-
-        let loaded = store
-            .load()
-            .await
-            .expect("a legacy payload should migrate silently")
-            .expect("some");
-        assert_eq!(loaded.client_id, "legacy-client");
-
-        let map = keychain.get(&path).await.expect("get").expect("migrated");
-        assert!(map.contains_key(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap()));
-        assert!(!map.contains_key(&SecretKey::parse(CREDENTIALS_KEY).unwrap()));
-
-        store.clear().await.expect("clear");
-        assert!(keychain.get(&path).await.expect("get").is_none());
     }
 }

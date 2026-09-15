@@ -83,12 +83,6 @@
         "b"
       ],
       "type": "object"
-    },
-    "SchemaVersion": {
-      "description": "Which shape of this artifact the document was written to. Absent means it predates stamping, which is shape 1.",
-      "maximum": 4294967295,
-      "minimum": 1,
-      "type": "integer"
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/comparison.json.schema.json",
@@ -114,14 +108,6 @@
         "type": "string"
       },
       "type": "array"
-    },
-    "schema_version": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/SchemaVersion"
-        }
-      ],
-      "default": 1
     },
     "winner": {
       "$ref": "#/$defs/ComparisonWinner"
