@@ -13,6 +13,7 @@
 //! rewrites either one onto [`CREDENTIALS_KEY_V2`] the moment it sees it, so
 //! nothing downstream of here ever has to know they existed.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -129,6 +130,14 @@ pub struct OAuthCredentialStore {
     server: String,
     failure: StorageFailure,
     read_from: FallbackRead,
+    /// Set the first time `clear` invalidates a credential this store itself
+    /// read from the fallback. `clear` never deletes the shared path, so
+    /// without this a `load` right afterward would serve that same
+    /// credential straight back; once set, `load` stops trying the fallback
+    /// for the rest of this store's life. Private to this store, unlike
+    /// [`StorageFailure`] and [`FallbackRead`]: nothing outside needs to
+    /// observe it.
+    fallback_disabled: AtomicBool,
 }
 
 impl OAuthCredentialStore {
@@ -140,6 +149,7 @@ impl OAuthCredentialStore {
             server: server.into(),
             failure: StorageFailure::default(),
             read_from: FallbackRead::default(),
+            fallback_disabled: AtomicBool::new(false),
         }
     }
 
@@ -193,6 +203,9 @@ impl CredentialStore for OAuthCredentialStore {
         // reports the previous call's fallback hit as this one's.
         self.read_from.record(None);
         match self.backend.get(&self.path).await {
+            // Once `clear` has invalidated a fallback-origin credential, this
+            // store must not turn around and read it straight back.
+            Ok(None) if self.fallback_disabled.load(Ordering::Relaxed) => Ok(None),
             Ok(None) => self.load_from_fallback().await,
             Ok(Some(map)) => self.load_from_map(map).await,
             // The outer map itself would not decode: what a payload written
@@ -211,10 +224,22 @@ impl CredentialStore for OAuthCredentialStore {
     /// unconditionally would copy a fallback-origin credential onto the
     /// machine-scoped path on its first refresh, leaving two paths
     /// refreshing the same grant, the replay `machine_id` exists to prevent.
+    ///
+    /// That write-back-to-origin rule is only for a refresh, which always
+    /// carries tokens. rmcp also calls `save` to discard a grant, stripped
+    /// of tokens, when it notices the authorization server's issuer changed
+    /// but the client ID is portable (CIMD) and worth keeping; that is not a
+    /// rotation, it is one machine invalidating a credential, and a
+    /// fallback-origin credential is not this machine's to invalidate. A
+    /// save with no tokens always targets `self.path`, never the fallback.
     async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
         let json = serde_json::to_string(&credentials)
             .map_err(|e| AuthError::InternalError(format!("encode credentials: {e}")))?;
-        let target = self.read_from.get().unwrap_or_else(|| self.path.clone());
+        let target = if credentials.token_response.is_some() {
+            self.read_from.get().unwrap_or_else(|| self.path.clone())
+        } else {
+            self.path.clone()
+        };
 
         let mut map = match self.backend.get(&target).await {
             Ok(existing) => existing.unwrap_or_default(),
@@ -240,6 +265,16 @@ impl CredentialStore for OAuthCredentialStore {
     /// signed in afterward (because the fallback still holds a credential)
     /// has to check with a subsequent `load`; `clear` itself does not report
     /// it.
+    ///
+    /// If the credential this invalidates was itself read from the fallback
+    /// (`self.read_from` records that), the shared path survives untouched,
+    /// so the caller's belief that it discarded a credential would otherwise
+    /// be wrong: the very next `load` on this store would serve the same
+    /// fallback credential straight back. `self.fallback_disabled` closes
+    /// that gap by stopping this store, for the rest of its life, from
+    /// reading the fallback at all; a `tracing::warn!` names what is still
+    /// out there and how to actually remove it, since this store has no way
+    /// to remove it itself.
     async fn clear(&self) -> Result<(), AuthError> {
         let existing = match self.backend.get(&self.path).await {
             Ok(existing) => existing,
@@ -248,19 +283,38 @@ impl CredentialStore for OAuthCredentialStore {
             Err(SecretsError::Malformed { .. }) => None,
             Err(e) => return Err(self.to_auth_error(e)),
         };
-        let Some(mut map) = existing else {
-            return self.backend.delete(&self.path).await.map_err(|e| self.to_auth_error(e));
-        };
-        map.remove(&Self::key());
-        map.remove(&Self::key_v2());
-        if map.is_empty() {
-            self.backend.delete(&self.path).await.map_err(|e| self.to_auth_error(e))
+        let result = if let Some(mut map) = existing {
+            map.remove(&Self::key());
+            map.remove(&Self::key_v2());
+            if map.is_empty() {
+                self.backend.delete(&self.path).await.map_err(|e| self.to_auth_error(e))
+            } else {
+                self.backend
+                    .set(&self.path, &map)
+                    .await
+                    .map_err(|e| self.to_auth_error(e))
+            }
         } else {
-            self.backend
-                .set(&self.path, &map)
-                .await
-                .map_err(|e| self.to_auth_error(e))
+            self.backend.delete(&self.path).await.map_err(|e| self.to_auth_error(e))
+        };
+
+        if let Some(shared) = self.read_from.get() {
+            self.fallback_disabled.store(true, Ordering::Relaxed);
+            let removal = match self.backend.removal_command(&shared) {
+                Some(command) => format!("remove it with `{command}`"),
+                None => "remove it directly against the backend".to_string(),
+            };
+            tracing::warn!(
+                server = %self.server,
+                path = %shared,
+                "credentials for `{}` are still sitting at the shared path `{shared}`, bound to the \
+                 authorization server they were just invalidated against; every machine reading that \
+                 path is affected; {removal} to sign out every machine using it",
+                self.server
+            );
         }
+
+        result
     }
 }
 
@@ -516,6 +570,18 @@ mod tests {
         StoredCredentials::new(client_id.to_string(), None, vec!["scope".to_string()], Some(42))
     }
 
+    /// Like [`credentials`], but with a real `token_response`, the way an
+    /// actual token refresh always looks. `credentials` deliberately leaves
+    /// it `None`, which after the fix in this module means a call built from
+    /// it always targets the primary path; a test standing in for a refresh
+    /// needs this one instead.
+    fn credentials_with_token(client_id: &str) -> StoredCredentials {
+        let raw = format!(
+            r#"{{"client_id":"{client_id}","token_response":{{"access_token":"fake-access-token","token_type":"bearer","expires_in":3600,"refresh_token":"fake-refresh-token","scope":"read write"}},"granted_scopes":["scope"],"token_received_at":42}}"#
+        );
+        serde_json::from_str(&raw).expect("decode")
+    }
+
     fn fake(backend: &Backend) -> &FakeBackend {
         let Backend::Fake(fake) = backend else {
             unreachable!("store() builds a fake")
@@ -744,6 +810,69 @@ mod tests {
         store.clear().await.expect("clear again");
     }
 
+    /// The hole this covers: `clear` only ever deletes `self.path`, which on
+    /// a fallback-origin load is already empty, so a `clear` that is meant to
+    /// invalidate a fallback-origin credential (rmcp does exactly this on an
+    /// issuer change it does not treat as CIMD-portable) used to be a no-op
+    /// the caller believed had worked, and the very next `load` on the same
+    /// store served the same shared credential straight back. Once `clear`
+    /// has run against a fallback-origin credential, this store must stop
+    /// reading the fallback at all.
+    #[tokio::test]
+    async fn load_after_clear_on_a_fallback_origin_store_never_serves_the_shared_credential_again() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json.clone()),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        store.load().await.expect("load").expect("some");
+        store.clear().await.expect("clear");
+
+        assert!(
+            store.load().await.expect("load").is_none(),
+            "a load right after clear must not serve the credential clear just invalidated"
+        );
+        let shared_after = backend.get(&shared).await.expect("get").expect("still there");
+        assert_eq!(
+            shared_after
+                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .map(|v| v.expose_secret()),
+            Some(shared_json.as_str()),
+            "clear must never delete the shared path itself, only stop this store from reading it"
+        );
+    }
+
+    /// A `clear` with nothing to invalidate (no prior `load`, or a `load`
+    /// that hit the primary path) has no fallback-origin credential to worry
+    /// about, so it must not disable the fallback for a later load that
+    /// legitimately wants it.
+    #[tokio::test]
+    async fn clear_with_no_prior_fallback_load_leaves_the_fallback_usable() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        store.clear().await.expect("clear with nothing loaded yet");
+
+        assert!(
+            store.load().await.expect("load").is_some(),
+            "a clear that never touched a fallback-origin credential must not disable the fallback"
+        );
+    }
+
     #[tokio::test]
     async fn load_reads_the_v2_key_directly() {
         let (backend, store) = store();
@@ -929,7 +1058,10 @@ mod tests {
         backend.set(&shared, &shared_map).await.expect("seed the shared path");
 
         store.load().await.expect("load").expect("some");
-        store.save(credentials("refreshed-cred")).await.expect("save");
+        store
+            .save(credentials_with_token("refreshed-cred"))
+            .await
+            .expect("save");
 
         let primary = SecretPath::parse("github").expect("parse");
         assert!(
@@ -943,6 +1075,51 @@ mod tests {
             .expect("v2 key");
         let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
         assert_eq!(decoded.client_id, "refreshed-cred");
+    }
+
+    /// The hole this covers: rmcp also calls `save` to discard a grant,
+    /// tokens stripped, when it notices an issuer change but keeps a
+    /// portable CIMD client ID. Before the fix, `save`'s write-back-to-origin
+    /// rule sent that token-less record to the shared path exactly like a
+    /// refresh would, wiping the tokens every other machine reading that
+    /// path was using. A save with nothing left to refresh is never this
+    /// machine's call to make on a credential it does not own, so it must
+    /// land on the primary path and leave the shared payload untouched.
+    #[tokio::test]
+    async fn a_token_less_save_after_a_fallback_load_never_touches_the_shared_path() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials_with_token("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json.clone()),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        store.load().await.expect("load").expect("some");
+        store.save(credentials("discarded-cred")).await.expect("save");
+
+        let shared_after = backend.get(&shared).await.expect("get").expect("still there");
+        assert_eq!(
+            shared_after
+                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .map(|v| v.expose_secret()),
+            Some(shared_json.as_str()),
+            "a token-less save must never touch a fallback-origin shared payload"
+        );
+
+        let primary = SecretPath::parse("github").expect("parse");
+        let primary_after = backend.get(&primary).await.expect("get").expect("some");
+        let raw = primary_after
+            .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+            .expect("v2 key");
+        let decoded: StoredCredentials = serde_json::from_str(raw.expose_secret()).expect("decode");
+        assert_eq!(
+            decoded.client_id, "discarded-cred",
+            "a token-less save must still land somewhere: the primary path, not the shared one"
+        );
     }
 
     #[tokio::test]
