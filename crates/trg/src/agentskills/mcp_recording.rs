@@ -44,12 +44,6 @@ pub enum RecordingError {
     Write { command: String, source: io::Error },
     #[error("waiting for '{command}' to exit failed: {source}")]
     Wait { command: String, source: io::Error },
-    #[error("'{command}' answered {method} with text that is not valid JSON-RPC: {detail}")]
-    Protocol {
-        command: String,
-        method: String,
-        detail: String,
-    },
     #[error("'{command}' answered {method} with a JSON-RPC error {code}: {message}")]
     ServerError {
         command: String,
@@ -229,6 +223,23 @@ impl RealMcpServerSession {
             })
     }
 
+    /// Answer a request the server sent us mid-session, so it is never left waiting on one:
+    /// `ping` is the one method every MCP client is expected to answer regardless of the
+    /// capabilities it declared, and anything else is refused with the standard JSON-RPC
+    /// "method not found" so the server's own wait ends rather than hangs.
+    fn answer_server_request(&mut self, server_method: &str, request_id: Value) -> Result<(), RecordingError> {
+        let response = if server_method == "ping" {
+            json!({"jsonrpc": "2.0", "id": request_id, "result": {}})
+        } else {
+            json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32601, "message": "method not found"},
+            })
+        };
+        self.send(&response)
+    }
+
     fn await_response(&mut self, id: i64, method: &str, timeout: Duration) -> Result<Value, RecordingError> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -260,11 +271,19 @@ impl RealMcpServerSession {
             if trimmed.is_empty() {
                 continue;
             }
-            let value: Value = serde_json::from_str(trimmed).map_err(|e| RecordingError::Protocol {
-                command: self.command_label.clone(),
-                method: method.to_string(),
-                detail: e.to_string(),
-            })?;
+            let value: Value = match serde_json::from_str(trimmed) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            // The client and server id spaces are independent: a server-to-client request
+            // can carry the same id we happen to be waiting on, so a message is a response
+            // to it only by having no `method`, never by id alone.
+            if let Some(server_method) = value.get("method").and_then(Value::as_str) {
+                if let Some(request_id) = value.get("id") {
+                    self.answer_server_request(server_method, request_id.clone())?;
+                }
+                continue;
+            }
             if value.get("id").and_then(Value::as_i64) != Some(id) {
                 continue;
             }
@@ -587,11 +606,79 @@ done
 "#;
 
     fn fixture_server(dir: &std::path::Path) -> RealServerCommand {
+        custom_fixture_server(dir, FIXTURE_SERVER)
+    }
+
+    fn custom_fixture_server(dir: &std::path::Path, script: &str) -> RealServerCommand {
         let path = dir.join("fixture-mcp-server.sh");
-        fs::write(&path, FIXTURE_SERVER).unwrap();
+        fs::write(&path, script).unwrap();
         fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
         RealServerCommand::new(path.display().to_string(), vec![])
     }
+
+    const FIXTURE_ID_COLLISION_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"0"}}}\n' "$id"
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"name":"echo"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"method":"sampling/createMessage","params":{}}\n' "$id"
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"echo: collided"}],"isError":false}}\n' "$id"
+      ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+
+    const FIXTURE_PING_SERVER: &str = r#"#!/bin/sh
+call_id=""
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"0"}}}\n' "$id"
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"name":"echo"'*)
+      call_id=$id
+      printf '{"jsonrpc":"2.0","id":999,"method":"ping"}\n'
+      ;;
+    *'"id":999'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"echo: after ping"}],"isError":false}}\n' "$call_id"
+      ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+
+    const FIXTURE_BANNER_SERVER: &str = r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"0"}}}\n' "$id"
+      ;;
+    *'"method":"notifications/initialized"'*)
+      ;;
+    *'"name":"echo"'*)
+      printf 'fixture server starting up...\n'
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"echo: after banner"}],"isError":false}}\n' "$id"
+      ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      ;;
+  esac
+done
+"#;
 
     #[test]
     fn recording_against_a_fixture_server_writes_a_fixed_mock_file() {
@@ -776,5 +863,56 @@ wait
                 "expected key {original:?} to survive the round trip, got {keys:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_server_request_sharing_our_in_flight_id_is_not_mistaken_for_the_response() {
+        let temp = tempdir().unwrap();
+        let command = custom_fixture_server(temp.path(), FIXTURE_ID_COLLISION_SERVER);
+        let mut session = RealMcpServerSession::spawn(&command).unwrap();
+        session.initialize(Duration::from_secs(5)).unwrap();
+
+        let tool = ToolName::from("echo");
+        let answer = session
+            .call_tool(&tool, &json!({"message": "hi"}), Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(answer.text, "echo: collided");
+        assert!(!answer.is_error);
+
+        session.finish(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn a_ping_from_the_server_is_answered_and_recording_continues() {
+        let temp = tempdir().unwrap();
+        let command = custom_fixture_server(temp.path(), FIXTURE_PING_SERVER);
+        let mut session = RealMcpServerSession::spawn(&command).unwrap();
+        session.initialize(Duration::from_secs(5)).unwrap();
+
+        let tool = ToolName::from("echo");
+        let answer = session
+            .call_tool(&tool, &json!({"message": "hi"}), Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(answer.text, "echo: after ping");
+        assert!(!answer.is_error);
+
+        session.finish(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn a_non_json_banner_line_before_the_response_does_not_fail_the_recording() {
+        let temp = tempdir().unwrap();
+        let command = custom_fixture_server(temp.path(), FIXTURE_BANNER_SERVER);
+        let mut session = RealMcpServerSession::spawn(&command).unwrap();
+        session.initialize(Duration::from_secs(5)).unwrap();
+
+        let tool = ToolName::from("echo");
+        let answer = session
+            .call_tool(&tool, &json!({"message": "hi"}), Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(answer.text, "echo: after banner");
+        assert!(!answer.is_error);
+
+        session.finish(Duration::from_secs(5)).unwrap();
     }
 }
