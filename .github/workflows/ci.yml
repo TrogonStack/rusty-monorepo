@@ -181,6 +181,82 @@ jobs:
       - name: Fail on drift
         run: git diff --exit-code crates/trg/schemas/
 
+  openbao:
+    name: OpenBao Wire Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.9.1
+          install_args: rust
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      # Started by hand rather than as a `services:` container because the
+      # suite needs `server -dev`, and a service block cannot override the
+      # image command.
+      - name: Start OpenBao
+        run: |
+          docker run -d --name openbao \
+            --cap-add=IPC_LOCK \
+            -p 8200:8200 \
+            -e BAO_DEV_ROOT_TOKEN_ID=trg-ci-root \
+            -e BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
+            openbao/openbao@sha256:597f62847dd382382056a1d6704d50465908c2040038c4611832a23269a67112 \
+            server -dev -dev-no-store-token
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "OpenBao did not come up" >&2
+          docker logs openbao >&2
+          exit 1
+
+      # The suite reads the config `trg` itself reads, so CI declares one
+      # rather than the suite inventing an instance on its own.
+      - name: Declare the backend
+        run: |
+          cat > "${RUNNER_TEMP}/bao-config.toml" <<'EOF'
+          [secrets.backends.ci]
+          kind = "openbao"
+          addr = "http://127.0.0.1:8200"
+          mount = "secret"
+          path_prefix = "trg-ci"
+          owner = "ci"
+          token = "trg-ci-root"
+          EOF
+
+      - name: Run OpenBao wire tests
+        env:
+          BAO_CONFIG: ${{ runner.temp }}/bao-config.toml
+        run: cargo test -p trg --test openbao_live -- --ignored
+
+      - name: OpenBao logs
+        if: failure()
+        run: docker logs openbao
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest
