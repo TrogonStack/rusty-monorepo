@@ -9,6 +9,7 @@ mod iteration_summary;
 mod mock_server;
 mod next_iteration;
 mod output;
+mod record_mcp;
 mod run;
 mod verify;
 
@@ -35,6 +36,7 @@ pub use init::InitArgs;
 pub use iteration_summary::IterationSummaryArgs;
 pub use mock_server::MockServerArgs;
 pub use next_iteration::NextIterationArgs;
+pub use record_mcp::RecordMcpArgs;
 pub use run::RunArgs;
 pub use verify::VerifyArgs;
 
@@ -72,6 +74,8 @@ pub enum EvalCommands {
     MockServer(MockServerArgs),
     /// Render a local-only, self-contained HTML report over a report bundle
     HtmlReport(HtmlReportArgs),
+    /// Start a real, operator-declared MCP server and record its answers as fixed mocks
+    RecordMcp(RecordMcpArgs),
 }
 
 impl EvalArgs {
@@ -88,6 +92,7 @@ impl EvalArgs {
             EvalCommands::NextIteration(args) => args.handle(fs),
             EvalCommands::MockServer(args) => args.handle(),
             EvalCommands::HtmlReport(args) => args.handle(fs),
+            EvalCommands::RecordMcp(args) => args.handle(fs),
         }
     }
 }

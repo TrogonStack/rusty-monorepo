@@ -565,6 +565,71 @@ type by hand.
 
 ---
 
+## `eval record-mcp`
+
+Start a real, operator-declared MCP server, call it with the inputs you give,
+and write each answer out as an ordinary [`fixed` mock](#mock-declaration-format)
+under a `mocks/` directory, in the exact shape `eval run` already resolves. Use
+it once, when a suite needs to mock a tool but nobody has typed out what the
+tool actually answers with yet; the file it writes is then checked in and read
+like any hand-written mock from then on.
+
+```text
+trg ai skills eval record-mcp --server <NAME> --command <PROGRAM> [OPTIONS]
+```
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--server` | string | required | The server name a suite's mocks will be resolved under |
+| `--command` | string | required | The real MCP server to start |
+| `--arg` | string, repeatable | none | One argument to pass `--command`; repeat for each, in order |
+| `--call` | `TOOL=JSON`, repeatable | required | One tool to call and record; repeat for each tool a suite needs a mock for |
+| `--mocks-dir` | path | required | Directory to write `<server>/<tool>.md` into, e.g. a suite's `evals/mocks` |
+| `--allow-real-mcp-server` | flag | off | Required to start the command at all |
+| `--timeout-secs` | integer | `10` | How long to wait for the server to answer a single request |
+| `--output-format` | enum | `text` | `text` lists each recorded tool and the file it was written to; `json` prints a machine-readable document |
+
+### `--allow-real-mcp-server` is required
+
+A real MCP server is not a mock: it is an arbitrary command that runs as the
+operator, with whatever reach the operator has, and it answers with whatever
+its author wrote rather than with anything a suite confines. Starting one is a
+trust decision, the same as running a case's [workspace
+scaffold](#--allow-scaffold-is-required) is, so recording refuses to start the
+command at all without `--allow-real-mcp-server`, naming the command and the
+flag in the refusal.
+
+Nothing about this reaches `eval run` or a suite manifest: no case or suite
+file can name a command for `record-mcp` to start, since only this
+subcommand's own flags can. Checking out a suite and running its evals never
+starts a real server on the strength of anything the suite declares.
+
+### Example
+
+```shell
+$ trg ai skills eval record-mcp \
+    --server github --command ./mcp-servers/github --arg --stdio \
+    --call 'create_issue={"repo":"acme/widgets","title":"hi"}' \
+    --mocks-dir ./my-skill/evals/mocks \
+    --allow-real-mcp-server
+Recorded github against ./mcp-servers/github (1 arg):
+  create_issue [ok] -> ./my-skill/evals/mocks/github/create_issue.md
+```
+
+The `expect` map a recorded mock is given constrains each field of the call's
+input to the JSON type it held when recorded (`string`, `number`, `boolean`,
+`object`, or `array`), not to the exact value: a single recording is a sample
+of one call, and pinning the value it happened to carry would fail the very
+next call that varies it. A field whose name contains a `.`, at any nesting
+depth, is left unconstrained instead: `expect` paths are themselves dotted,
+so a literal `.` in a field name cannot be told apart from a level of
+nesting. Widen or replace individual constraints in the written file by
+hand, the same as any other mock.
+
+---
+
 ## `eval html-report`
 
 Render a local-only, self-contained HTML report over a report bundle.

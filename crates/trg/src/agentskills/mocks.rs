@@ -1054,6 +1054,43 @@ mod tests {
         assert!(matches!(err, MocksError::FileReferenceNotFound { .. }));
     }
 
+    /// `nonexistent.json` is deliberate: `resolve_file_references` runs only over the parsed
+    /// body, never over `error:`, so this must parse and answer without ever touching disk
+    /// for that name. If `resolve_file_references` is ever made to cover `error:` too, this
+    /// fails loudly with `FileReferenceNotFound` instead of silently passing.
+    #[test]
+    fn a_file_placeholder_in_the_error_field_is_never_resolved() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        let suite_mocks = skill.join("evals/mocks");
+        write_mock(
+            &suite_mocks,
+            "github",
+            "create_issue",
+            "---\ntype: fixed\nerror: \"{{file:nonexistent.json}}\"\n---\n",
+        );
+        fs::create_dir_all(skill.join("evals/one")).unwrap();
+
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
+        let declaration = set
+            .tools_for(&ServerName::from("github"))
+            .unwrap()
+            .get(&ToolName::from("create_issue"))
+            .unwrap();
+        let server = ServerName::from("github");
+        let tool = ToolName::from("create_issue");
+
+        let outcome = resolve_call(declaration, &server, &tool, &serde_json::json!({}));
+
+        assert_eq!(
+            outcome.answer,
+            MockCallAnswer::Answered {
+                text: "{{file:nonexistent.json}}".to_string(),
+                is_error: true
+            }
+        );
+    }
+
     #[test]
     fn content_hash_changes_when_a_mock_body_changes() {
         let temp = tempdir().unwrap();
