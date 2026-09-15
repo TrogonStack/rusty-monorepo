@@ -504,7 +504,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
         let ctx = run_context(report_dir, run, &skill_path);
         let mut assertion_results = Vec::with_capacity(case.graders.len() + run.mock_violations.len());
 
-        let declarative = DeclarativeContext::load(&ctx);
+        let declarative = DeclarativeContext::load(&ctx)?;
         for grader in &case.graders {
             assertion_results.push(grade_declaratively(grader, case, &declarative, &ctx, &session)?);
         }
@@ -620,6 +620,23 @@ fn build_grading_strategy(options: &GradeOptions, judge: Option<&JudgeModel>) ->
     }
 }
 
+/// An artifact the run never wrote is itself a finding: the agent produced no
+/// final answer, and empty content is what the graders should be shown. An
+/// artifact that exists but cannot be read is not that finding. Collapsing the
+/// two grades every declared check against empty content and reports the case
+/// as one where the agent wrote nothing, which sends whoever reads the report
+/// looking at the skill instead of at the file nothing could read.
+fn read_artifact(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(EvalError::Io(std::io::Error::new(
+            err.kind(),
+            format!("{}: {err}", path.display()),
+        ))),
+    }
+}
+
 /// The run artifacts a declarative grader reads, loaded once per run.
 struct DeclarativeContext {
     final_text: String,
@@ -628,12 +645,12 @@ struct DeclarativeContext {
 }
 
 impl DeclarativeContext {
-    fn load(ctx: &RunContext) -> Self {
-        Self {
-            final_text: std::fs::read_to_string(ctx.outputs_dir.join(FINAL_MD)).unwrap_or_default(),
-            raw_transcript: std::fs::read_to_string(&ctx.transcript_path).unwrap_or_default(),
+    fn load(ctx: &RunContext) -> Result<Self> {
+        Ok(Self {
+            final_text: read_artifact(&ctx.outputs_dir.join(FINAL_MD))?,
+            raw_transcript: read_artifact(&ctx.transcript_path)?,
             transcript: read_normalized_transcript(&ctx.transcript_path).ok(),
-        }
+        })
     }
 
     fn input<'a>(&'a self, ctx: &'a RunContext) -> GradeInput<'a> {
@@ -3766,6 +3783,38 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_final_answer_is_read_as_the_absence_it_is() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+
+        let declarative = DeclarativeContext::load(&ctx).unwrap();
+
+        assert!(declarative.final_text.is_empty());
+        assert!(declarative.raw_transcript.is_empty());
+    }
+
+    #[test]
+    fn a_final_answer_that_cannot_be_read_is_not_reported_as_one_that_was_never_written() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        fs::write(ctx.outputs_dir.join(FINAL_MD), [0xff, 0xfe, 0x00]).unwrap();
+
+        let err = match DeclarativeContext::load(&ctx) {
+            Err(err) => err,
+            Ok(_) => panic!("an unreadable final answer was read as if it had been written"),
+        };
+
+        assert_eq!(
+            err.reported_as(),
+            crate::agentskills::exit_code::ExitCode::InfrastructureFailure
+        );
+        assert!(
+            err.to_string().contains(FINAL_MD),
+            "the report has to name the file nothing could read, got: {err}"
+        );
+    }
+
+    #[test]
     fn evidence_is_trivial_rejects_restatement() {
         assert!(evidence_is_trivial(
             "The output includes a summary",
@@ -3896,7 +3945,7 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             &GradeTarget::File(serde_json::from_value(serde_json::json!("missing.json")).unwrap()),
             &reference,
             &baseline_case(),
-            &DeclarativeContext::load(&ctx),
+            &DeclarativeContext::load(&ctx).unwrap(),
             &ctx,
             &session,
         )
@@ -3927,7 +3976,7 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             &GradeTarget::FinalText,
             &reference,
             &baseline_case(),
-            &DeclarativeContext::load(&ctx),
+            &DeclarativeContext::load(&ctx).unwrap(),
             &ctx,
             &session,
         )
