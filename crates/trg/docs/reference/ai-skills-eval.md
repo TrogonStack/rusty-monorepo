@@ -622,8 +622,11 @@ The `expect` map a recorded mock is given constrains each field of the call's
 input to the JSON type it held when recorded (`string`, `number`, `boolean`,
 `object`, or `array`), not to the exact value: a single recording is a sample
 of one call, and pinning the value it happened to carry would fail the very
-next call that varies it. Widen or replace individual constraints in the
-written file by hand, the same as any other mock.
+next call that varies it. A field whose name contains a `.`, at any nesting
+depth, is left unconstrained instead: `expect` paths are themselves dotted,
+so a literal `.` in a field name cannot be told apart from a level of
+nesting. Widen or replace individual constraints in the written file by
+hand, the same as any other mock.
 
 ---
 

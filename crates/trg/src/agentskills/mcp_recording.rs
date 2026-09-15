@@ -340,9 +340,15 @@ impl RecordedToolAnswer {
 /// Object values are flattened into dotted paths so a nested field gets its own constraint,
 /// the same way a hand-written `expect: repo.owner: string` would; arrays are left as leaf
 /// `array` constraints rather than descended into, since an element's own path has no stable
-/// name to hang a constraint on. A `null` leaf is skipped rather than constrained: nothing
-/// in `ExpectConstraint` represents "was null", and treating it as absent is what
-/// `check_expectations` already does for a path a call's input does not carry.
+/// name to hang a constraint on. A `null` leaf is skipped rather than constrained: nothing in
+/// `ExpectConstraint` represents "was null", and emitting a type constraint for it would fail
+/// the very next call whose value at that path legitimately is `null`.
+///
+/// A key containing a `.`, at any nesting depth, is skipped rather than flattened: `ExpectPath`
+/// has no escaping, so the dotted path a literal `.` in a key would produce is indistinguishable
+/// from the nested-object path the same characters would build, and `lookup_path` would resolve
+/// it as the latter. Skipping the field leaves it unconstrained rather than writing a constraint
+/// that can never match its own recording.
 pub fn derive_expect(input: &Value) -> BTreeMap<ExpectPath, ExpectConstraint> {
     let mut expect = BTreeMap::new();
     if let Value::Object(map) = input {
@@ -357,6 +363,9 @@ fn collect_expect(
     out: &mut BTreeMap<ExpectPath, ExpectConstraint>,
 ) {
     for (key, value) in map {
+        if key.contains('.') {
+            continue;
+        }
         let path = if prefix.is_empty() {
             key.clone()
         } else {
@@ -833,9 +842,12 @@ wait
         let server = ServerName::from("probeserver");
         let tool = ToolName::from("probe");
         // "0755", "+5" and "0x2a" are YAML plain scalars that resolve to an integer, whose
-        // canonical decimal spelling differs from the source text; "true"/"1.5"/"on"/"yes"/
-        // "null" all round-trip identically already and are included here only as a check
-        // that quoting every key does not itself introduce a regression for them.
+        // canonical decimal spelling differs from the source text; "true"/"on"/"yes"/"null"
+        // all round-trip identically already and are included here only as a check that
+        // quoting every key does not itself introduce a regression for them. "1.5" is left
+        // out of the survivors: it contains a literal `.`, so it collides with `ExpectPath`'s
+        // own delimiter the same way a field like "user.name" would, and is covered instead
+        // by the dotted-key test below.
         let input = json!({
             "0755": "a",
             "+5": "b",
@@ -857,12 +869,42 @@ wait
         let declaration = set.tools_for(&server).unwrap().get(&tool).unwrap();
         let keys: std::collections::BTreeSet<&str> = declaration.expect.keys().map(ExpectPath::as_str).collect();
 
-        for original in ["0755", "+5", "0x2a", "true", "1.5", "on", "yes", "null"] {
+        assert!(!keys.contains("1.5"), "keys:{keys:?}");
+        for original in ["0755", "+5", "0x2a", "true", "on", "yes", "null"] {
             assert!(
                 keys.contains(original),
                 "expected key {original:?} to survive the round trip, got {keys:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_field_name_containing_a_dot_is_skipped_so_the_recorded_call_replays_clean() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        let mocks_dir = skill.join("evals/mocks");
+        let server = ServerName::from("probeserver");
+        let tool = ToolName::from("probe");
+        let input = json!({
+            "user.name": "alice",
+            "repo": {"owner.id": 7, "owner": "acme"},
+        });
+        let answer = RecordedToolAnswer {
+            text: "ok".to_string(),
+            is_error: false,
+        };
+        write_recorded_mock(&mocks_dir, &server, &tool, &input, &answer).unwrap();
+        fs::create_dir_all(skill.join("evals/one")).unwrap();
+
+        let set = resolve_mock_set(&skill, &EvalDirName::default(), "one").unwrap();
+        let declaration = set.tools_for(&server).unwrap().get(&tool).unwrap();
+        let keys: std::collections::BTreeSet<&str> = declaration.expect.keys().map(ExpectPath::as_str).collect();
+        assert!(!keys.contains("user.name"), "keys:{keys:?}");
+        assert!(!keys.contains("repo.owner.id"), "keys:{keys:?}");
+        assert!(keys.contains("repo.owner"), "keys:{keys:?}");
+
+        let violations = declaration.check_expectations(&server, &tool, &input);
+        assert!(violations.is_empty(), "violations:{violations:?}");
     }
 
     #[test]
