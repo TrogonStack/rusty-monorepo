@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::commands::mcp::McpContext;
 use crate::oauth::{ensure_credentials_for, store::OAuthCredentialStore, EnsureError, EnsureOutcome};
 use crate::output::{print_json, OutputFormat};
+use crate::secrets::SecretPath;
 use crate::term;
 
 /// Display view over an `OAuthTokenResponse`.
@@ -50,6 +51,11 @@ impl TokenSummary {
 struct StoredCredentialsView<'a> {
     client_id: &'a str,
     granted_scopes: &'a [String],
+    /// Present only when the load fell through to the pre-`machine_id` shared
+    /// path. A consumer that assumes the configured path is where these live
+    /// would otherwise be as wrong as the text output used to be.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    read_from_shared_path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     token_received_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,10 +79,15 @@ struct TokenResponseView<'a> {
 }
 
 impl<'a> StoredCredentialsView<'a> {
-    fn from(stored: &'a StoredCredentials, summary: Option<&'a TokenSummary>) -> Self {
+    fn from(
+        stored: &'a StoredCredentials,
+        summary: Option<&'a TokenSummary>,
+        read_from: Option<&'a SecretPath>,
+    ) -> Self {
         Self {
             client_id: &stored.client_id,
             granted_scopes: &stored.granted_scopes,
+            read_from_shared_path: read_from.map(SecretPath::as_str),
             token_received_at: stored.token_received_at,
             token_response: summary.map(|s| TokenResponseView {
                 token_type: &s.token_type,
@@ -192,7 +203,14 @@ fn emit<E: std::fmt::Display>(e: E) -> i32 {
 async fn login(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError> {
     let server = ctx.server_name.as_str();
     let where_stored = ctx.backend.describe();
-    let outcome = ensure_credentials_for(ctx.endpoint()?, server, &ctx.backend, &ctx.cred_path).await?;
+    let outcome = ensure_credentials_for(
+        ctx.endpoint()?,
+        server,
+        &ctx.backend,
+        &ctx.cred_path,
+        ctx.fallback.as_ref(),
+    )
+    .await?;
 
     if format.is_json() {
         let document = json!({
@@ -238,7 +256,13 @@ async fn login(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError>
 
 async fn status(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError> {
     let server = ctx.server_name.as_str();
-    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone(), &ctx.server_name);
+    let store = OAuthCredentialStore::new(
+        ctx.backend.clone(),
+        ctx.cred_path.clone(),
+        &ctx.server_name,
+        ctx.fallback.clone(),
+    );
+    let read_from = store.read_from();
 
     let Some(stored) = store.load().await? else {
         if format.is_json() {
@@ -249,19 +273,37 @@ async fn status(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError
     };
 
     let summary = stored.token_response.as_ref().map(TokenSummary::from_token);
+    let read_from = read_from.get();
 
     if format.is_json() {
-        return Ok(print_json(&StoredCredentialsView::from(&stored, summary.as_ref()), 0));
+        return Ok(print_json(
+            &StoredCredentialsView::from(&stored, summary.as_ref(), read_from.as_ref()),
+            0,
+        ));
     }
 
-    print_summary(ctx, &stored, summary.as_ref());
+    print_summary(ctx, &stored, summary.as_ref(), read_from.as_ref());
     Ok(0)
 }
 
-fn print_summary(ctx: &McpContext, stored: &StoredCredentials, summary: Option<&TokenSummary>) {
+fn print_summary(
+    ctx: &McpContext,
+    stored: &StoredCredentials,
+    summary: Option<&TokenSummary>,
+    read_from: Option<&SecretPath>,
+) {
     println!("Server:       {}", ctx.server_name);
     println!("Backend:      {}", ctx.backend.describe());
-    println!("Path:         {}", ctx.cred_path);
+    match read_from {
+        // The load fell through to the pre-machine_id shared path: printing
+        // `ctx.cred_path` here would claim credentials live somewhere they
+        // don't yet.
+        Some(shared) => println!(
+            "Path:         {shared} (shared; the machine-scoped path `{}` is empty until you re-authorize)",
+            ctx.cred_path
+        ),
+        None => println!("Path:         {}", ctx.cred_path),
+    }
     println!("Client ID:    {}", stored.client_id);
 
     if stored.granted_scopes.is_empty() || (stored.granted_scopes.len() == 1 && stored.granted_scopes[0].is_empty()) {
@@ -348,7 +390,12 @@ fn format_duration(secs: u64) -> String {
 }
 
 async fn logout(ctx: &McpContext) -> Result<(), AuthError> {
-    let store = OAuthCredentialStore::new(ctx.backend.clone(), ctx.cred_path.clone(), &ctx.server_name);
+    let store = OAuthCredentialStore::new(
+        ctx.backend.clone(),
+        ctx.cred_path.clone(),
+        &ctx.server_name,
+        ctx.fallback.clone(),
+    );
     store.clear().await?;
     Ok(())
 }
@@ -361,4 +408,41 @@ fn cleared(format: OutputFormat, ctx: &McpContext) -> i32 {
 
     println!("OAuth credentials cleared for `{}`.", ctx.server_name);
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::transport::auth::StoredCredentials;
+
+    fn stored() -> StoredCredentials {
+        StoredCredentials::new("client".to_string(), None, vec!["scope".to_string()], Some(42))
+    }
+
+    /// The text output says when a credential was read from the shared path.
+    /// Anything reading the JSON instead is making the same decision off the
+    /// same load, so leaving the field out would hand it the configured path
+    /// as if that were where the credential lives.
+    #[test]
+    fn json_status_names_the_shared_path_a_credential_was_actually_read_from() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let stored = stored();
+
+        let document =
+            serde_json::to_value(StoredCredentialsView::from(&stored, None, Some(&shared))).expect("serialize");
+
+        assert_eq!(document["read_from_shared_path"], "mcp/github");
+    }
+
+    #[test]
+    fn json_status_says_nothing_about_a_shared_path_when_the_primary_answered() {
+        let stored = stored();
+
+        let document = serde_json::to_value(StoredCredentialsView::from(&stored, None, None)).expect("serialize");
+
+        assert!(
+            document.get("read_from_shared_path").is_none(),
+            "a primary hit must not imply a fallback happened"
+        );
+    }
 }

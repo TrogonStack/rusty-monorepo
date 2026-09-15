@@ -59,7 +59,15 @@ pub async fn run_mcp_daemon(ctx: &McpContext) -> Result<(), ProxyError> {
 
     let http_conf = streamable_http_config(resolved)?;
 
-    let outcome = match ensure_credentials_for(resolved, server_name, &ctx.backend, &ctx.cred_path).await {
+    let outcome = match ensure_credentials_for(
+        resolved,
+        server_name,
+        &ctx.backend,
+        &ctx.cred_path,
+        ctx.fallback.as_ref(),
+    )
+    .await
+    {
         Ok(o) => o,
         Err(e) => {
             error!(server = server_name, error = %e, "ensure_credentials failed");

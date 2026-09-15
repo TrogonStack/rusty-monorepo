@@ -23,6 +23,10 @@ pub struct McpContext {
     pub server_name: String,
     pub backend: Backend,
     pub cred_path: SecretPath,
+    /// The pre-`machine_id` shared path, for the OAuth credential store to
+    /// fall back onto when `cred_path` is empty. `None` when the backend has
+    /// no such second layout to fall back to.
+    pub fallback: Option<SecretPath>,
     /// Absent for the commands that only touch stored credentials. Resolving
     /// one can mean reading a secrets backend, and `auth logout` is the
     /// documented way out of a broken credential, so it must not depend on a
@@ -35,21 +39,29 @@ impl McpContext {
         server_name: String,
         backend: Backend,
         cred_path: SecretPath,
+        fallback: Option<SecretPath>,
         profile: ResolvedMcpServer,
     ) -> Self {
         Self {
             server_name,
             backend,
             cred_path,
+            fallback,
             profile: Some(profile),
         }
     }
 
-    pub fn credentials_only(server_name: String, backend: Backend, cred_path: SecretPath) -> Self {
+    pub fn credentials_only(
+        server_name: String,
+        backend: Backend,
+        cred_path: SecretPath,
+        fallback: Option<SecretPath>,
+    ) -> Self {
         Self {
             server_name,
             backend,
             cred_path,
+            fallback,
             profile: None,
         }
     }
@@ -178,14 +190,14 @@ mod tests {
 
     #[test]
     fn a_credentials_only_context_names_the_server_it_has_no_endpoint_for() {
-        let ctx = McpContext::credentials_only("x".to_string(), backend(), path());
+        let ctx = McpContext::credentials_only("x".to_string(), backend(), path(), None);
         let err = ctx.endpoint().expect_err("no endpoint");
         assert!(err.to_string().contains('x'), "{err}");
     }
 
     #[test]
     fn an_endpoint_context_hands_its_endpoint_back() {
-        let ctx = McpContext::with_endpoint("x".to_string(), backend(), path(), profile());
+        let ctx = McpContext::with_endpoint("x".to_string(), backend(), path(), None, profile());
         assert!(ctx.endpoint().is_ok());
     }
 }

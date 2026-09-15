@@ -87,29 +87,67 @@ impl StorageFailure {
     }
 }
 
+/// Where the most recent `load` actually found credentials, when that was
+/// not `path`.
+///
+/// Modelled on [`StorageFailure`] for the same reason: the store is moved
+/// into rmcp and never seen again, so this is the only way a caller learns a
+/// load fell through to the pre-`machine_id` shared path rather than the
+/// machine-scoped one it asked for.
+#[derive(Clone, Default)]
+pub struct FallbackRead(Arc<Mutex<Option<SecretPath>>>);
+
+impl FallbackRead {
+    fn record(&self, path: Option<SecretPath>) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = path;
+        }
+    }
+
+    /// The shared path the most recent `load` actually read from, if it fell
+    /// back to one.
+    pub fn get(&self) -> Option<SecretPath> {
+        self.0.lock().ok().and_then(|slot| slot.clone())
+    }
+}
+
 pub struct OAuthCredentialStore {
     backend: Backend,
     path: SecretPath,
+    /// The pre-`machine_id` shared path to read when `path` is empty. Read
+    /// only: `load` never copies, moves, or deletes what it finds here, since
+    /// doing so would leave both the shared and machine-scoped payloads
+    /// refreshing the same grant, which is the replay `machine_id` exists to
+    /// prevent.
+    fallback: Option<SecretPath>,
     /// The `--server` name recovery advice has to quote. Not recoverable from
     /// `path`: only the Keychain stores a server under its bare name, and
     /// OpenBao stores it under `mcp/<machine_id>/<server>`.
     server: String,
     failure: StorageFailure,
+    read_from: FallbackRead,
 }
 
 impl OAuthCredentialStore {
-    pub fn new(backend: Backend, path: SecretPath, server: impl Into<String>) -> Self {
+    pub fn new(backend: Backend, path: SecretPath, server: impl Into<String>, fallback: Option<SecretPath>) -> Self {
         Self {
             backend,
             path,
+            fallback,
             server: server.into(),
             failure: StorageFailure::default(),
+            read_from: FallbackRead::default(),
         }
     }
 
     /// A handle on the slot, to be kept before the store is handed to rmcp.
     pub fn failure(&self) -> StorageFailure {
         self.failure.clone()
+    }
+
+    /// A handle on the slot, to be kept before the store is handed to rmcp.
+    pub fn read_from(&self) -> FallbackRead {
+        self.read_from.clone()
     }
 
     fn key() -> SecretKey {
@@ -124,8 +162,11 @@ impl OAuthCredentialStore {
 #[async_trait]
 impl CredentialStore for OAuthCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
+        // Reset up front so a store reused across more than one `load` never
+        // reports the previous call's fallback hit as this one's.
+        self.read_from.record(None);
         match self.backend.get(&self.path).await {
-            Ok(None) => Ok(None),
+            Ok(None) => self.load_from_fallback().await,
             Ok(Some(map)) => self.load_from_map(map).await,
             // The outer map itself would not decode: what a payload written
             // before credentials lived in a keyed map looks like. `raw` is
@@ -186,6 +227,72 @@ impl CredentialStore for OAuthCredentialStore {
 }
 
 impl OAuthCredentialStore {
+    /// `path` holds nothing. Before answering `None`, check whether the
+    /// credential is still sitting at the pre-`machine_id` shared path: it is
+    /// safe to read from there, but never to copy, move, or delete, so a hit
+    /// here is reported rather than acted on.
+    ///
+    /// Deliberately does not reuse [`Self::load_from_map`]: that method
+    /// migrates an unversioned key by writing `credentials.v2` back to
+    /// `self.path`, and doing that from a fallback read would silently copy
+    /// the shared credential onto the machine-scoped path, exactly what the
+    /// read-only rule forbids.
+    async fn load_from_fallback(&self) -> Result<Option<StoredCredentials>, AuthError> {
+        let Some(fallback) = self.fallback.clone() else {
+            return Ok(None);
+        };
+
+        let map = match self.backend.get(&fallback).await {
+            Ok(Some(map)) => map,
+            Ok(None) => return Ok(None),
+            // A read error at the fallback is not a reason to refuse a login
+            // that would otherwise proceed normally against an empty primary
+            // path: the fallback is a courtesy, not a dependency.
+            Err(e) => {
+                tracing::debug!(
+                    path = %fallback,
+                    error = %e,
+                    "could not read the shared OAuth credential fallback path"
+                );
+                return Ok(None);
+            }
+        };
+
+        let Some(credentials) = self.decode_from_fallback_map(&fallback, &map) else {
+            return Ok(None);
+        };
+
+        self.read_from.record(Some(fallback.clone()));
+        tracing::warn!(
+            server = %self.server,
+            primary = %self.path,
+            fallback = %fallback,
+            "read OAuth credentials for `{}` from the pre-machine_id shared path `{}`; they are \
+             still stored there and still readable by any other machine sharing it. Run `trg mcp \
+             auth login --server {}` to write them to the machine-scoped path `{}`.",
+            self.server, fallback, self.server, self.path
+        );
+        Ok(Some(credentials))
+    }
+
+    /// Decode whatever credential value a fallback read turned up, without
+    /// writing anything back: the fallback path stays exactly as found,
+    /// migrated key shape and all.
+    fn decode_from_fallback_map(&self, path: &SecretPath, map: &SecretMap) -> Option<StoredCredentials> {
+        let raw = map.get(&Self::key_v2()).or_else(|| map.get(&Self::key()))?;
+        match serde_json::from_str(raw.expose_secret()) {
+            Ok(credentials) => Some(credentials),
+            Err(e) => {
+                tracing::debug!(
+                    path = %path,
+                    error = %e,
+                    "the shared OAuth credential fallback path did not decode"
+                );
+                None
+            }
+        }
+    }
+
     /// Case 2: the outer map decoded. `credentials.v2` wins when present
     /// (today's shape); otherwise the unversioned `credentials` is read and
     /// migrated; otherwise an unrecognized `credentials.vN` is reported as
@@ -332,7 +439,21 @@ mod tests {
     fn store() -> (Backend, OAuthCredentialStore) {
         let backend = Backend::Fake(FakeBackend::new());
         let path = SecretPath::parse("github").expect("parse");
-        (backend.clone(), OAuthCredentialStore::new(backend, path, "github"))
+        (
+            backend.clone(),
+            OAuthCredentialStore::new(backend, path, "github", None),
+        )
+    }
+
+    /// Like [`store`], but with an explicit fallback path on the same
+    /// backend, for exercising the pre-`machine_id` read-through.
+    fn store_with_fallback(fallback: SecretPath) -> (Backend, OAuthCredentialStore) {
+        let backend = Backend::Fake(FakeBackend::new());
+        let path = SecretPath::parse("github").expect("parse");
+        (
+            backend.clone(),
+            OAuthCredentialStore::new(backend, path, "github", Some(fallback)),
+        )
     }
 
     fn credentials(client_id: &str) -> StoredCredentials {
@@ -533,7 +654,7 @@ mod tests {
     async fn malformed_recovery_command_is_copy_pasteable_for_any_server_name() {
         let backend = Backend::Fake(FakeBackend::new());
         let path = SecretPath::parse("my server").expect("parse");
-        let store = OAuthCredentialStore::new(backend.clone(), path, "my server");
+        let store = OAuthCredentialStore::new(backend.clone(), path, "my server", None);
 
         fake(&backend).set_get_failure(Some(FakeFailure::Malformed));
 
@@ -551,7 +672,7 @@ mod tests {
     async fn malformed_recovery_command_names_the_server_not_its_storage_path() {
         let backend = Backend::Fake(FakeBackend::new());
         let path = SecretPath::parse("mcp/laptop/github").expect("parse");
-        let store = OAuthCredentialStore::new(backend.clone(), path, "github");
+        let store = OAuthCredentialStore::new(backend.clone(), path, "github", None);
 
         fake(&backend).set_get_failure(Some(FakeFailure::Malformed));
 
@@ -578,6 +699,93 @@ mod tests {
 
         let loaded = store.load().await.expect("load").expect("some");
         assert_eq!(loaded.client_id, "direct");
+    }
+
+    /// The load-bearing guarantee this fallback exists for: a credential
+    /// left at the pre-`machine_id` shared path is still readable, its
+    /// origin is reported, and it is never copied onto the primary path.
+    #[tokio::test]
+    async fn a_shared_credential_is_read_but_never_moved() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+        let read_from = store.read_from();
+
+        let json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
+        let mut map = SecretMap::new();
+        map.insert(SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(), SecretString::from(json));
+        backend.set(&shared, &map).await.expect("seed the shared path");
+
+        let loaded = store.load().await.expect("load").expect("some");
+        assert_eq!(loaded.client_id, "shared-cred");
+        assert_eq!(read_from.get(), Some(shared.clone()));
+
+        let primary = SecretPath::parse("github").expect("parse");
+        assert!(
+            backend.get(&primary).await.expect("get").is_none(),
+            "the fallback hit must not have written anything to the primary path"
+        );
+        assert!(
+            backend.get(&shared).await.expect("get").is_some(),
+            "the shared payload must still be sitting where it was found"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_primary_hit_never_reads_the_fallback() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+        let read_from = store.read_from();
+
+        // A fallback that would error if ever touched, so a read reaching it
+        // fails the test loudly instead of the assertion below going unmet
+        // for the wrong reason.
+        fake(&backend).set_get_failure_at(shared, FakeFailure::Transport);
+        store.save(credentials("primary-cred")).await.expect("save");
+
+        let loaded = store.load().await.expect("load").expect("some");
+        assert_eq!(loaded.client_id, "primary-cred");
+        assert_eq!(read_from.get(), None);
+    }
+
+    #[tokio::test]
+    async fn save_writes_only_the_primary_path_leaving_the_shared_payload_untouched() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+
+        let shared_json = serde_json::to_string(&credentials("shared-cred")).expect("encode");
+        let mut shared_map = SecretMap::new();
+        shared_map.insert(
+            SecretKey::parse(CREDENTIALS_KEY_V2).unwrap(),
+            SecretString::from(shared_json.clone()),
+        );
+        backend.set(&shared, &shared_map).await.expect("seed the shared path");
+
+        store.save(credentials("primary-cred")).await.expect("save");
+
+        let shared_after = backend.get(&shared).await.expect("get").expect("still there");
+        assert_eq!(
+            shared_after
+                .get(&SecretKey::parse(CREDENTIALS_KEY_V2).unwrap())
+                .map(|v| v.expose_secret()),
+            Some(shared_json.as_str()),
+            "save must never write, move, or delete the shared fallback payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fallback_read_error_is_a_miss_not_a_failure() {
+        let shared = SecretPath::parse("mcp/github").expect("parse");
+        let (backend, store) = store_with_fallback(shared.clone());
+        let read_from = store.read_from();
+
+        fake(&backend).set_get_failure_at(shared, FakeFailure::Transport);
+
+        let loaded = store
+            .load()
+            .await
+            .expect("a fallback read error must not fail the load");
+        assert!(loaded.is_none());
+        assert_eq!(read_from.get(), None);
     }
 
     /// Case 2b: today's live shape, a `StoredCredentials` blob wrapped under
@@ -811,7 +1019,7 @@ mod legacy_payload_tests {
         seed_legacy(keychain.service(), &path);
 
         let backend = Backend::Keychain(keychain.clone());
-        let store = OAuthCredentialStore::new(backend, path.clone(), path.as_str());
+        let store = OAuthCredentialStore::new(backend, path.clone(), path.as_str(), None);
 
         let loaded = store
             .load()

@@ -485,6 +485,31 @@ impl Backend {
         }
     }
 
+    /// Where this backend's pre-`machine_id` shared credential for one server
+    /// would live, if this backend has two reachable layouts at all.
+    ///
+    /// Only OpenBao does: the Keychain and 1Password have never had a
+    /// `machine_id`-scoped layout to fall back from, so they answer `None`.
+    pub fn shared_credential_path(&self, server: &str) -> Result<Option<SecretPath>, CredentialPathError> {
+        match self {
+            Self::OpenBao(b) => {
+                b.check_server_name(server)
+                    .map_err(|reason| CredentialPathError::Name {
+                        name: server.to_string(),
+                        kind: "openbao",
+                        reason,
+                    })?;
+                Ok(match b.shared_credential_path(server) {
+                    Some(path) => Some(SecretPath::parse(&path)?),
+                    None => None,
+                })
+            }
+            Self::Keychain(_) | Self::OnePassword(_) => Ok(None),
+            #[cfg(test)]
+            Self::Fake(_) => Ok(None),
+        }
+    }
+
     /// Read one 1Password item, the unit that backend answers in.
     ///
     /// Deliberately not folded into [`Self::get`]: no other backend has
@@ -580,6 +605,25 @@ pub mod fake {
         MalformedWithRaw(String),
     }
 
+    /// What a [`FakeFailure`] turns into on the wire, for the path that hit
+    /// it. Shared by the blanket failure and the per-path one below it, so
+    /// the two injection points cannot drift into answering differently.
+    fn fake_failure_error(path: &SecretPath, failure: &FakeFailure) -> SecretsError {
+        match failure {
+            FakeFailure::Transport => SecretsError::Transport("injected".to_string()),
+            FakeFailure::Malformed => SecretsError::Malformed {
+                path: path.clone(),
+                cause: "injected".to_string(),
+                raw: None,
+            },
+            FakeFailure::MalformedWithRaw(raw) => SecretsError::Malformed {
+                path: path.clone(),
+                cause: "injected".to_string(),
+                raw: Some(SecretString::from(raw.clone())),
+            },
+        }
+    }
+
     /// In-memory backend for unit tests.
     ///
     /// `#[cfg(test)]`, so it costs nothing in a release build. Integration
@@ -589,6 +633,10 @@ pub mod fake {
     pub struct FakeBackend {
         entries: Arc<Mutex<HashMap<SecretPath, SecretMap>>>,
         get_failure: Arc<Mutex<Option<FakeFailure>>>,
+        /// Failures scoped to one path, checked before the blanket one, for a
+        /// caller that reads two paths in the same operation and has to tell
+        /// "the other path errored" from "the other path just isn't there".
+        get_failure_at: Arc<Mutex<HashMap<SecretPath, FakeFailure>>>,
         set_failure: Arc<Mutex<bool>>,
         gets: Arc<Mutex<usize>>,
     }
@@ -609,6 +657,16 @@ pub mod fake {
             *self.get_failure.lock().expect("fake backend lock") = failure;
         }
 
+        /// Make `get` fail at exactly `path`, leaving every other path
+        /// (including the blanket failure set by [`Self::set_get_failure`])
+        /// unaffected.
+        pub fn set_get_failure_at(&self, path: SecretPath, failure: FakeFailure) {
+            self.get_failure_at
+                .lock()
+                .expect("fake backend lock")
+                .insert(path, failure);
+        }
+
         /// Make every subsequent `set` fail until cleared, for exercising a
         /// caller that must tolerate a write it issued along the way (such as
         /// a migration) failing without failing the call that triggered it.
@@ -618,23 +676,11 @@ pub mod fake {
 
         pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
             *self.gets.lock().expect("fake backend lock") += 1;
-            match &*self.get_failure.lock().expect("fake backend lock") {
-                Some(FakeFailure::Transport) => return Err(SecretsError::Transport("injected".to_string())),
-                Some(FakeFailure::Malformed) => {
-                    return Err(SecretsError::Malformed {
-                        path: path.clone(),
-                        cause: "injected".to_string(),
-                        raw: None,
-                    })
-                }
-                Some(FakeFailure::MalformedWithRaw(raw)) => {
-                    return Err(SecretsError::Malformed {
-                        path: path.clone(),
-                        cause: "injected".to_string(),
-                        raw: Some(SecretString::from(raw.clone())),
-                    })
-                }
-                None => {}
+            if let Some(failure) = self.get_failure_at.lock().expect("fake backend lock").get(path) {
+                return Err(fake_failure_error(path, failure));
+            }
+            if let Some(failure) = &*self.get_failure.lock().expect("fake backend lock") {
+                return Err(fake_failure_error(path, failure));
             }
             Ok(self.entries.lock().expect("fake backend lock").get(path).cloned())
         }
@@ -819,6 +865,44 @@ mod tests {
         );
 
         let err = backend.credential_path("my server").expect_err("should refuse");
+        assert!(err.to_string().contains("openbao"), "{err}");
+    }
+
+    fn openbao_backend(machine_id: Option<&str>) -> Backend {
+        Backend::OpenBao(
+            openbao::OpenBaoBackend::new(openbao::OpenBaoSettings {
+                addr: "https://bao.example.com:8200".to_string(),
+                mount: "secret".to_string(),
+                path_prefix: "trg".to_string(),
+                owner: "yordis".to_string(),
+                machine_id: machine_id.map(str::to_string),
+                token: openbao::TokenSource::Var(crate::config::VarSource::Literal("t".to_string())),
+                ca_cert_file: None,
+                timeout: std::time::Duration::from_secs(5),
+            })
+            .expect("build"),
+        )
+    }
+
+    #[test]
+    fn an_openbao_backend_with_a_machine_id_offers_the_shared_path_as_a_fallback() {
+        let backend = openbao_backend(Some("laptop"));
+        assert_eq!(
+            backend.shared_credential_path("github").expect("path"),
+            Some(SecretPath::parse("mcp/github").expect("parse"))
+        );
+    }
+
+    #[test]
+    fn an_openbao_backend_without_a_machine_id_has_no_fallback_to_offer() {
+        let backend = openbao_backend(None);
+        assert_eq!(backend.shared_credential_path("github").expect("path"), None);
+    }
+
+    #[test]
+    fn an_unaddressable_server_name_is_refused_the_same_way_for_the_shared_path() {
+        let backend = openbao_backend(Some("laptop"));
+        let err = backend.shared_credential_path("my server").expect_err("should refuse");
         assert!(err.to_string().contains("openbao"), "{err}");
     }
 
