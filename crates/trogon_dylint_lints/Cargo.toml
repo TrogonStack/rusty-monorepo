@@ -1,0 +1,40 @@
+[package]
+name = "trogon_dylint_lints"
+version = "0.0.1"
+description = "Dylint library of Rust policy lints for Trogon"
+edition = "2024"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/TrogonStack/rusty-monorepo"
+homepage = "https://github.com/TrogonStack/rusty-monorepo/tree/main/crates/trogon_dylint_lints"
+keywords = ["dylint", "lint", "clippy", "static-analysis"]
+categories = ["development-tools"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints.rust]
+warnings = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage)'] }
+
+[lints.clippy]
+all = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+clippy_utils = "=0.1.97"
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+opentelemetry = "0.31"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[workspace]

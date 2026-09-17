@@ -257,6 +257,44 @@ jobs:
         if: failure()
         run: docker logs openbao
 
+  lints:
+    name: Policy Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install tools
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          version: 2026.9.1
+          install_args: rust cargo:dylint-link
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('crates/trogon_dylint_lints/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: crates/trogon_dylint_lints/target
+          key: ${{ runner.os }}-trogon-dylint-lints-target-${{ hashFiles('crates/trogon_dylint_lints/Cargo.lock') }}
+
+      - name: Install the pinned lint toolchain
+        run: mise run lints:toolchain
+
+      - name: Check formatting
+        working-directory: crates/trogon_dylint_lints
+        run: cargo fmt --all -- --check
+
+      - name: Run the ui tests
+        run: mise run lints:test
+
+      - name: Verify the crates.io package
+        run: mise run lints:package
+
   security:
     name: Security Audit
     runs-on: ubuntu-latest

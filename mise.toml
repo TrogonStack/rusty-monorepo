@@ -2,6 +2,8 @@
 rust = { version = "stable", components = ["rustfmt", "clippy"] }
 "cargo:cargo-audit" = { version = "0.22.2", locked = true }
 "cargo:cargo-tarpaulin" = { version = "0.37.2", locked = true }
+"cargo:cargo-dylint" = { version = "6.0.1", locked = true }
+"cargo:dylint-link" = { version = "6.0.1", locked = true }
 
 [tasks."schemas:generate"]
 description = "Generate JSON schemas from Rust structs (crates/trg/schemas/)"
@@ -13,3 +15,51 @@ run = [
   "cargo run -p trg --bin generate-schemas",
   "git diff --exit-code crates/trg/schemas/",
 ]
+
+[tasks."lints:toolchain"]
+description = "Install the nightly toolchain that crates/trogon_dylint_lints pins"
+dir = "crates/trogon_dylint_lints"
+run = '''
+channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+rustup toolchain install "$channel" --profile minimal --component rustc-dev --component rust-src --component llvm-tools-preview
+'''
+
+[tasks."lints:test"]
+description = "Run the trogon_dylint_lints ui tests"
+depends = ["lints:toolchain"]
+dir = "crates/trogon_dylint_lints"
+# `rustup run` rather than plain `cargo`: mise pins this repo to stable through
+# RUSTUP_TOOLCHAIN, which outranks the crate's own rust-toolchain.toml.
+run = '''
+channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+rustup run "$channel" cargo test
+'''
+
+[tasks."lints:build"]
+description = "Build the trogon_dylint_lints Dylint library"
+depends = ["lints:toolchain"]
+dir = "crates/trogon_dylint_lints"
+run = '''
+channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+rustup run "$channel" cargo build --release
+'''
+
+[tasks."lints:package"]
+description = "Dry-run the crates.io package for trogon_dylint_lints"
+depends = ["lints:toolchain"]
+dir = "crates/trogon_dylint_lints"
+run = '''
+channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+rustup run "$channel" cargo package --locked
+'''
+
+[tasks."lints:run"]
+description = "Run the trogon_dylint_lints rules over this workspace"
+depends = ["lints:build"]
+# `--lib-path` rather than `--path`: cargo reads `.cargo/config.toml` relative to
+# its working directory, so the `dylint-link` linker the library needs is only
+# selected when the build runs from the library directory, which `lints:build` does.
+run = '''
+lib="$(ls crates/trogon_dylint_lints/target/release/libtrogon_dylint_lints@* | head -1)"
+cargo dylint --lib-path "$lib" --workspace --no-deps -- --all-features
+'''

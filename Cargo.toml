@@ -1,7 +1,5 @@
 [workspace]
-members = [
-    "crates/trg",
-]
+members = ["crates/trg"]
 resolver = "2"
 
 [workspace.dependencies]

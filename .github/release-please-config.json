@@ -13,15 +13,12 @@
     }
   ],
   "packages": {
-    "crates/trg": {}
+    "crates/trg": {},
+    "crates/trogon_dylint_lints": {}
   },
   "plugins": [
     {
       "type": "sentence-case"
-    },
-    {
-      "type": "cargo-workspace",
-      "merge": false
     }
   ],
   "tag-separator": "@",
