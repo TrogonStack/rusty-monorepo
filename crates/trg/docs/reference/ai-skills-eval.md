@@ -1396,8 +1396,8 @@ This file is a **superset** of the
 agentskills.io report model; companion artifacts (`benchmark.json`,
 `grading.json`, etc.) follow the docs shape. See
 [Divergences from agentskills.io](../explanation/divergences-from-agentskills-io.md)
-for intentional differences and the backward-compatibility contract (fixture
-snapshot tests under `crates/trg/src/agentskills/testdata/reports/`).
+for intentional differences, and for why the published schemas rather than a
+version field are the statement of the current shape.
 
 ### Top-level fields
 
