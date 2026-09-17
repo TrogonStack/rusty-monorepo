@@ -3,7 +3,7 @@
 Rust policy lints for Trogon, packaged as a [Dylint](https://github.com/trailofbits/dylint)
 library.
 
-This crate is a Cargo workspace of its own, excluded from the repository
+This crate is a Cargo workspace of its own, not a member of the repository
 workspace, and pins its compiler in `rust-toolchain.toml`. The nightly toolchain
 is only for building the rustc-integrated lint library; the rest of the
 repository keeps using stable. Dylint also resolves a library from the library

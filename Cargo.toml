@@ -1,9 +1,5 @@
 [workspace]
-# Globbed rather than listed so release-please's cargo-workspace plugin
-# discovers every crate; `exclude` is what keeps the Dylint library, which
-# needs its own nightly toolchain, out of the stable workspace builds.
-members = ["crates/*"]
-exclude = ["crates/trogon_dylint_lints"]
+members = ["crates/trg"]
 resolver = "2"
 
 [workspace.dependencies]
