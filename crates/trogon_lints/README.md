@@ -296,3 +296,7 @@ which arrived at the same policies independently and first: `acyclic_modules`,
 all have counterparts there, and the names are taken from it. The implementations
 here are our own, written against a different matching strategy, but the choice of
 what to enforce owes that crate the credit.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).
