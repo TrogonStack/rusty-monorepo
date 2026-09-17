@@ -3,7 +3,7 @@ use rustc_hir::{Expr, ExprKind};
 use rustc_lint::LateContext;
 
 use crate::TELEMETRY_METRIC_NAME_LITERAL;
-use crate::telemetry_literal::{INSTRUMENT_BUILDERS, receiver_is_type, string_literal_span};
+use crate::telemetry_literal::{INSTRUMENT_BUILDERS, in_test_file, receiver_is_type, string_literal_span};
 
 #[derive(Default)]
 pub(crate) struct TelemetryMetricNameLiteral;
@@ -23,6 +23,9 @@ impl TelemetryMetricNameLiteral {
             return;
         };
         if !receiver_is_type(cx, receiver, "opentelemetry", "Meter") {
+            return;
+        }
+        if in_test_file(cx, name_span) {
             return;
         }
 

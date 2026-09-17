@@ -3,7 +3,7 @@ use rustc_hir::{Expr, ExprKind};
 use rustc_lint::LateContext;
 
 use crate::TELEMETRY_ATTRIBUTE_LITERAL;
-use crate::telemetry_literal::{receiver_is_type, string_literal_span};
+use crate::telemetry_literal::{in_test_file, receiver_is_type, string_literal_span};
 
 #[derive(Default)]
 pub(crate) struct TelemetryAttributeLiteral;
@@ -23,6 +23,9 @@ impl TelemetryAttributeLiteral {
             return;
         };
         if !receiver_is_type(cx, receiver, "tracing", "Span") {
+            return;
+        }
+        if in_test_file(cx, key_span) {
             return;
         }
 

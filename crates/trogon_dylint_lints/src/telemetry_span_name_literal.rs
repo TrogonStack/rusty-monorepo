@@ -3,7 +3,7 @@ use rustc_hir::{Expr, ExprKind};
 use rustc_lint::LateContext;
 
 use crate::TELEMETRY_SPAN_NAME_LITERAL;
-use crate::telemetry_literal::string_literal_span;
+use crate::telemetry_literal::{in_test_file, string_literal_span};
 use crate::tracing_metadata::metadata_new_kind;
 
 #[derive(Default)]
@@ -29,6 +29,9 @@ impl TelemetrySpanNameLiteral {
             return;
         };
         if kind.as_str() != "SPAN" {
+            return;
+        }
+        if in_test_file(cx, name_span) {
             return;
         }
 
