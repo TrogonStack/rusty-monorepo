@@ -292,9 +292,6 @@ jobs:
       - name: Run the ui tests
         run: mise run lints:test
 
-      - name: Verify the crates.io package
-        run: mise run lints:package
-
   security:
     name: Security Audit
     runs-on: ubuntu-latest

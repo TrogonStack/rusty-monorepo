@@ -1,14 +1,13 @@
 [package]
 name = "trogon_dylint_lints"
 version = "0.0.1"
+publish = false
 description = "Dylint library of Rust policy lints for Trogon"
 edition = "2024"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/TrogonStack/rusty-monorepo"
 homepage = "https://github.com/TrogonStack/rusty-monorepo/tree/main/crates/trogon_dylint_lints"
-keywords = ["dylint", "lint", "clippy", "static-analysis"]
-categories = ["development-tools"]
 
 [lib]
 crate-type = ["cdylib"]
