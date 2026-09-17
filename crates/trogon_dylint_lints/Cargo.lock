@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "trogon_dylint_lints"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "clippy_utils",
  "dylint_linting",
