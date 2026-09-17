@@ -80,26 +80,6 @@ Every rule carries its own default level, so there are no flags to pass. Add
 `--all-targets` to also lint test code such as `#[cfg(test)] mod tests { ... }`,
 which a late (HIR) pass only sees once the test target is compiled.
 
-## Develop
-
-This crate is a Cargo workspace of its own, not a member of the repository
-workspace, and pins its compiler in `rust-toolchain.toml`. The nightly toolchain
-is only for building the rustc-integrated lint library; the rest of the
-repository keeps using stable. Dylint also resolves a library from the library
-package's own `target/release`, which a shared workspace target directory would
-not produce.
-
-```bash
-mise run lints:test      # ui tests
-mise run lints:run       # the rules over this repository
-```
-
-`lints:run` builds from this directory rather than the repository root, because
-that is what selects the `dylint-link` linker in `.cargo/config.toml`; building
-from the root produces a library dylint cannot find. This repository's own
-crates are not yet clean under these rules, so the run reports findings. CI
-enforces the ui tests in this crate, not the rules over `crates/trg`.
-
 ## Credits
 
 `unstructured_log_fields`, `acyclic_modules`, `fallible_new`,
