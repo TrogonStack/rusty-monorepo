@@ -8,6 +8,7 @@ use rustc_lint::LateContext;
 use rustc_span::{FileName, SourceFile};
 
 use crate::CONSTANT_OUTSIDE_CONSTANTS_MODULE;
+use crate::test_context::{is_test_module_name, is_test_or_bench_source};
 
 pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
     if item.span.from_expansion() {
@@ -51,7 +52,7 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
     // are not crate configuration, so they are exempt too, whether that shows up
     // as the file path or an enclosing inline `tests`/`benches` module.
     if is_constants_file(path)
-        || is_test_or_bench_source(path)
+        || is_test_or_bench_source(cx, item.span)
         || is_inside_test_or_bench_module(cx, item.owner_id.def_id)
     {
         return;
@@ -74,39 +75,6 @@ fn is_constants_file(path: &Path) -> bool {
     file_stem(path) == Some("constants")
 }
 
-/// Test module files (`tests.rs`, `*_tests.rs`, the names `test_module_naming`
-/// enforces) and files in a Cargo `tests/` or `benches/` target directory.
-fn is_test_or_bench_source(path: &Path) -> bool {
-    let test_stem = matches!(
-        file_stem(path),
-        Some(stem) if stem == "tests" || stem.ends_with("_tests")
-    );
-
-    test_stem || is_in_test_or_bench_dir(path)
-}
-
-/// Cargo integration-test and benchmark targets sit directly in the crate's
-/// `tests/`/`benches/` directory, or one subdirectory deep (`tests/foo/main.rs`
-/// and that target's modules). Only those two positions count, so an unrelated
-/// ancestor that happens to be named `tests` (e.g. the checkout path) does not
-/// exempt the whole crate.
-fn is_in_test_or_bench_dir(path: &Path) -> bool {
-    let mut dir = path.parent();
-    for _ in 0..2 {
-        let Some(current) = dir else {
-            break;
-        };
-        if matches!(
-            current.file_name().and_then(|name| name.to_str()),
-            Some("tests" | "benches")
-        ) {
-            return true;
-        }
-        dir = current.parent();
-    }
-    false
-}
-
 fn file_stem(path: &Path) -> Option<&str> {
     path.file_stem().and_then(|stem| stem.to_str())
 }
@@ -122,30 +90,13 @@ fn is_inside_test_or_bench_module(cx: &LateContext<'_>, def_id: LocalDefId) -> b
             && cx
                 .tcx
                 .opt_item_name(parent)
-                .is_some_and(|name| is_test_or_bench_module_name(name.as_str()))
+                .is_some_and(|name| is_test_module_name(name.as_str()))
         {
             return true;
         }
         current = parent;
     }
     false
-}
-
-fn is_test_or_bench_module_name(name: &str) -> bool {
-    name == "tests"
-        || name.ends_with("_tests")
-        || name == "benches"
-        || name.ends_with("_benches")
-        // The crate's not-for-prod test-support module family, all gated behind
-        // `#[cfg(test)]`/`feature = "test-support"`: `test_support` (fixtures/fakes),
-        // `mocks`/`fixtures`/`testkit` (the names `test_module_naming` recognizes as
-        // test support), and `*_harness` (in-process test harnesses). Their
-        // constants are scaffolding, not crate configuration.
-        || name == "test_support"
-        || name == "mocks"
-        || name == "fixtures"
-        || name == "testkit"
-        || name.ends_with("_harness")
 }
 
 fn is_generated(file: &SourceFile) -> bool {
