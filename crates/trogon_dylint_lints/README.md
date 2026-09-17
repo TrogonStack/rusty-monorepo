@@ -60,6 +60,50 @@ per-invocation flags.
 | `unstructured_log_fields` | deny | log values to be recorded as `tracing` fields, not format arguments in the message |
 | `weakened_write_precondition` | deny | an unconditional `WritePrecondition::Any` append to name the invariant it depends on |
 
+## Use
+
+Dylint resolves a library from a `git` or `path` source, never from a registry,
+so a consuming workspace names the published tag:
+
+```toml
+[workspace.metadata.dylint]
+libraries = [
+  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.0.1", pattern = "crates/trogon_dylint_lints" },
+]
+```
+
+```bash
+cargo dylint --all --workspace --no-deps -- --all-features
+```
+
+Every rule carries its own default level, so there are no flags to pass. Add
+`--all-targets` to also lint test code such as `#[cfg(test)] mod tests { ... }`,
+which a late (HIR) pass only sees once the test target is compiled.
+
+The crates.io release of the same code exists for provenance and discovery; the
+dylint wiring above is what runs it.
+
+## Develop
+
+This crate is a Cargo workspace of its own, not a member of the repository
+workspace, and pins its compiler in `rust-toolchain.toml`. The nightly toolchain
+is only for building the rustc-integrated lint library; the rest of the
+repository keeps using stable. Dylint also resolves a library from the library
+package's own `target/release`, which a shared workspace target directory would
+not produce.
+
+```bash
+mise run lints:test      # ui tests
+mise run lints:run       # the rules over this repository
+mise run lints:package   # crates.io packaging dry run
+```
+
+`lints:run` builds from this directory rather than the repository root, because
+that is what selects the `dylint-link` linker in `.cargo/config.toml`; building
+from the root produces a library dylint cannot find. This repository's own
+crates are not yet clean under these rules, so the run reports findings. CI
+enforces the ui tests in this crate, not the rules over `crates/trg`.
+
 ## Credits
 
 `unstructured_log_fields`, `acyclic_modules`, `fallible_new`,
@@ -118,61 +162,3 @@ exposes an `additional_paths` configuration flag for naming further
 constructors; this port has no configuration and carries the full set it
 recognises in the lint crate, extended beyond upstream's list with
 `futures::channel::mpsc::unbounded` and `async_channel::unbounded`.
-
-## Use
-
-Dylint resolves a library from a `git` or `path` source, never from a registry,
-so a consuming workspace names the published tag:
-
-```toml
-[workspace.metadata.dylint]
-libraries = [
-  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.0.1", pattern = "crates/trogon_dylint_lints" },
-]
-```
-
-```bash
-cargo dylint --all --workspace --no-deps -- --all-features
-```
-
-The crates.io release of the same code exists for provenance and discovery; the
-dylint wiring above is what runs it.
-
-## Run
-
-In this repository (the `deny` rules are enforced by their declared default
-level, no flags needed):
-
-```bash
-mise run lints:run
-```
-
-That builds the library from this directory first, which is what selects the
-`dylint-link` linker in `.cargo/config.toml`, and then hands dylint the built
-library. `cargo dylint --path crates/trogon_dylint_lints` from the repository root
-skips that config and produces a library dylint cannot find. The repository's
-own crates are not yet clean under these rules, so the run reports findings; CI
-enforces the ui tests in this crate rather than the rules over `crates/trg`.
-
-To also lint test targets such as `#[cfg(test)] mod tests { ... }`, which a late
-(HIR) pass only sees when the test target is compiled, add `--all-targets` to the
-dylint invocation:
-
-```bash
-cargo dylint --lib-path "$(ls crates/trogon_dylint_lints/target/release/libtrogon_dylint_lints@*)" \
-  --workspace --no-deps -- --all-features --all-targets
-```
-
-## Develop
-
-This crate is a Cargo workspace of its own, not a member of the repository
-workspace, and pins its compiler in `rust-toolchain.toml`. The nightly toolchain
-is only for building the rustc-integrated lint library; the rest of the
-repository keeps using stable. Dylint also resolves a library from the library
-package's own `target/release`, which a shared workspace target directory would
-not produce.
-
-```bash
-mise run lints:test      # ui tests
-mise run lints:package   # crates.io packaging dry run
-```
