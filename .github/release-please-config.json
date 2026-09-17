@@ -14,7 +14,7 @@
   ],
   "packages": {
     "crates/trg": {},
-    "crates/trogon_lints": {}
+    "crates/trogon_dylint_lints": {}
   },
   "plugins": [
     {

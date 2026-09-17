@@ -274,19 +274,19 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('crates/trogon_lints/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('crates/trogon_dylint_lints/Cargo.lock') }}
 
       - name: Cache cargo build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: crates/trogon_lints/target
-          key: ${{ runner.os }}-trogon-lints-target-${{ hashFiles('crates/trogon_lints/Cargo.lock') }}
+          path: crates/trogon_dylint_lints/target
+          key: ${{ runner.os }}-trogon-dylint-lints-target-${{ hashFiles('crates/trogon_dylint_lints/Cargo.lock') }}
 
       - name: Install the pinned lint toolchain
         run: mise run lints:toolchain
 
       - name: Check formatting
-        working-directory: crates/trogon_lints
+        working-directory: crates/trogon_dylint_lints
         run: cargo fmt --all -- --check
 
       - name: Run the ui tests

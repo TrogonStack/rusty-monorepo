@@ -3,7 +3,7 @@
 # discovers every crate; `exclude` is what keeps the Dylint library, which
 # needs its own nightly toolchain, out of the stable workspace builds.
 members = ["crates/*"]
-exclude = ["crates/trogon_lints"]
+exclude = ["crates/trogon_dylint_lints"]
 resolver = "2"
 
 [workspace.dependencies]

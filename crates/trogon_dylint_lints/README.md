@@ -1,4 +1,4 @@
-# trogon_lints
+# trogon_dylint_lints
 
 Rust policy lints for Trogon, packaged as a [Dylint](https://github.com/trailofbits/dylint)
 library.
@@ -33,7 +33,7 @@ lint crate rather than in per-invocation flags.
   test-support module family (`tests`, `benches`, `test_support`, `mocks`,
   `fixtures`, `testkit`, `*_harness`)), which reaches across the tree by design.
   A deliberate coupling opts out on the module that owns both siblings with
-  `#[cfg_attr(dylint_lib = "trogon_lints", expect(acyclic_modules, reason = "..."))]`,
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(acyclic_modules, reason = "..."))]`,
   where `expect` reports itself once the cycle is gone so the exemption cannot
   outlive its reason.
 - `assertions_on_fixed_literals` (`deny`): rejects always-true `assert!` and
@@ -61,7 +61,7 @@ lint crate rather than in per-invocation flags.
   (`test_support`, `mocks`, `fixtures`, `testkit`, `*_harness`)) carry fixtures
   rather than crate configuration and are exempt, as are generated files (those carrying an `@generated` marker near
   the top, e.g. proto codegen); suppress a justified exception with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(constant_outside_constants_module))]`
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(constant_outside_constants_module))]`
   at the site.
 - `debug_remnants` (`deny`): requires diagnostics to be recorded as `tracing`
   events rather than written to the process's own stdout or stderr with
@@ -79,7 +79,7 @@ lint crate rather than in per-invocation flags.
   where printing is how a failing case explains itself. A write that is
   genuinely the program's own output (a CLI printing its result, a process
   reporting a fatal error before a subscriber exists) opts out at the site with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(debug_remnants, reason = "..."))]`.
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(debug_remnants, reason = "..."))]`.
 - `error_string_comparison` (`deny`): prevents semantic checks against strings
   derived from `std::error::Error::to_string`.
 - `fallible_new` (`deny`): requires a constructor named `new` (or a `new_*`
@@ -96,14 +96,14 @@ lint crate rather than in per-invocation flags.
   benchmark source, where a panic fails the test that caused it rather than
   surprising a caller. A panic that is an invariant the caller cannot break opts
   out at the site with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(fallible_new, reason = "..."))]`.
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(fallible_new, reason = "..."))]`.
 - `function_local_use` (`deny`): requires `use` imports to live at module level
   rather than inside a function body or block. A function-local import is never
   required (every name is reachable by full path or a module-level `use`, with
   `as` for collisions) and it hides a module's dependency surface inside its
   functions. Macro-generated imports (from expansion) and `@generated` files
   (proto codegen, etc.) are exempt; suppress a justified exception with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(function_local_use))]` at the
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(function_local_use))]` at the
   site.
 - `manual_error_impl` (`deny`): requires deriving `std::error::Error` with
   `thiserror` instead of hand-writing the impl.
@@ -111,7 +111,7 @@ lint crate rather than in per-invocation flags.
   (`mod foo;`) instead of inline blocks (`mod foo { ... }`). Macro-generated
   modules and `@generated` files (proto codegen, etc.) are exempt; suppress a
   justified exception with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(inline_module_block))]` at the
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(inline_module_block))]` at the
   site. As a late (HIR) pass it sees `#[cfg(test)] mod tests { ... }` only when
   the test target is compiled, i.e. when linting with `--all-targets`.
 - `serde_json_macro` (`deny`): requires JSON payloads to be built from a named
@@ -127,7 +127,7 @@ lint crate rather than in per-invocation flags.
   as are generated files (those carrying an `@generated` marker near the top);
   a genuinely dynamic shape (an upstream document passed through verbatim, a
   payload whose keys are decided at runtime) opts out at the site with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(serde_json_macro, reason = "..."))]`,
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(serde_json_macro, reason = "..."))]`,
   where the `reason` records the technical justification and is required by
   `serde_json_macro_allow_without_reason`. As a late (HIR) pass it sees
   `#[cfg(test)] mod tests { ... }` only when the test target is compiled, i.e.
@@ -146,7 +146,7 @@ lint crate rather than in per-invocation flags.
   process-global state that cannot be supplied deterministically in a test.
   `trogon-std`'s own `SystemEnv` is the one allowed caller and is exempt;
   suppress a justified exception with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(std_env_access))]` at the site.
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(std_env_access))]` at the site.
 - `unbounded_channel` (`deny`): requires a channel to be created with an
   explicit capacity: `std::sync::mpsc::sync_channel`,
   `tokio::sync::mpsc::channel`, `futures::channel::mpsc::channel`,
@@ -162,7 +162,7 @@ lint crate rather than in per-invocation flags.
   which an unbounded channel leaves as a property of the workload. Test and
   benchmark sources are exempt, where a test drives both ends of its channel;
   a queue bounded by something other than its capacity opts out at the site with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(unbounded_channel, reason = "..."))]`.
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(unbounded_channel, reason = "..."))]`.
 - `unstructured_log_fields` (`deny`): requires a `tracing` event macro (`info!`,
   `warn!`, `error!`, `debug!`, `trace!`, `event!`) to record its values as
   structured fields rather than interpolate them all into the message. A field
@@ -175,7 +175,7 @@ lint crate rather than in per-invocation flags.
   text. `target:` and `parent:` are directives rather than fields and do not
   count as structuring. Test sources (`tests.rs`, `*_tests.rs`) are exempt;
   suppress a justified exception with
-  `#[cfg_attr(dylint_lib = "trogon_lints", allow(unstructured_log_fields))]` at
+  `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(unstructured_log_fields))]` at
   the site.
 
 ## Credits
@@ -245,7 +245,7 @@ so a consuming workspace names the published tag:
 ```toml
 [workspace.metadata.dylint]
 libraries = [
-  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_lints@v0.1.0", pattern = "crates/trogon_lints" },
+  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.1.0", pattern = "crates/trogon_dylint_lints" },
 ]
 ```
 
@@ -267,7 +267,7 @@ mise run lints:run
 
 That builds the library from this directory first, which is what selects the
 `dylint-link` linker in `.cargo/config.toml`, and then hands dylint the built
-library. `cargo dylint --path crates/trogon_lints` from the repository root
+library. `cargo dylint --path crates/trogon_dylint_lints` from the repository root
 skips that config and produces a library dylint cannot find. The repository's
 own crates are not yet clean under these rules, so the run reports findings; CI
 enforces the ui tests in this crate rather than the rules over `crates/trg`.
@@ -277,7 +277,7 @@ To also lint test targets such as `#[cfg(test)] mod tests { ... }`, which a late
 dylint invocation:
 
 ```bash
-cargo dylint --lib-path "$(ls crates/trogon_lints/target/release/libtrogon_lints@*)" \
+cargo dylint --lib-path "$(ls crates/trogon_dylint_lints/target/release/libtrogon_dylint_lints@*)" \
   --workspace --no-deps -- --all-features --all-targets
 ```
 
