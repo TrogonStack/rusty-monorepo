@@ -1,6 +1,6 @@
 [package]
 name = "trogon_dylint_lints"
-version = "0.0.1"
+version = "0.1.0"
 publish = false
 description = "Dylint library of Rust policy lints for Trogon"
 edition = "2024"
