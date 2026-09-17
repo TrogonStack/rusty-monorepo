@@ -44,15 +44,6 @@ channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
 rustup run "$channel" cargo build --release
 '''
 
-[tasks."lints:package"]
-description = "Dry-run the crates.io package for trogon_dylint_lints"
-depends = ["lints:toolchain"]
-dir = "crates/trogon_dylint_lints"
-run = '''
-channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
-rustup run "$channel" cargo package --locked
-'''
-
 [tasks."lints:run"]
 description = "Run the trogon_dylint_lints rules over this workspace"
 depends = ["lints:build"]
