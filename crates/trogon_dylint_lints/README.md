@@ -1,14 +1,30 @@
 # trogon_dylint_lints
 
-Rust policy lints for Trogon, packaged as a [Dylint](https://github.com/trailofbits/dylint)
-library.
+**The conventions your code review keeps asking for, enforced by the compiler.**
+This is a [Dylint](https://github.com/trailofbits/dylint) library of Rust lints
+that encode structural and operational policy, not style.
 
-This crate is a Cargo workspace of its own, not a member of the repository
-workspace, and pins its compiler in `rust-toolchain.toml`. The nightly toolchain
-is only for building the rustc-integrated lint library; the rest of the
-repository keeps using stable. Dylint also resolves a library from the library
-package's own `target/release`, which a shared workspace target directory would
-not produce.
+**Each rule inspects the crate through the same HIR and type information rustc
+uses, so it judges what the code means rather than how it is spelled.** The
+rules cover module layering, constructor fallibility, error handling,
+observability, configuration access, and channel backpressure. Every rule ships
+with its default level declared in the library, so a workspace adopts the policy
+by naming the library rather than by curating flags.
+
+**Conventions that live only in a review checklist are enforced unevenly and
+decay silently.** A reviewer catches an inline module or an unbounded channel on
+a good day and misses it on a busy one, the exception is never written down, and
+by the time the pattern is widespread it is too expensive to reverse. Moving the
+convention into a lint makes it fail the build the first time instead of the
+hundredth, and makes every deliberate exception an `expect` attribute that
+carries a reason and reports itself once it is no longer needed.
+
+**It is useful to Rust teams that have already agreed on how their code should
+be shaped and want that agreement mechanically enforced.** Clippy covers
+correctness and idiom that apply to all Rust; these rules cover the decisions a
+particular codebase has made, which no general-purpose linter can know about.
+Teams that disagree with a given rule can adopt the rest, since every rule is
+independently levelled.
 
 ## Rules
 
@@ -282,6 +298,13 @@ cargo dylint --lib-path "$(ls crates/trogon_dylint_lints/target/release/libtrogo
 ```
 
 ## Develop
+
+This crate is a Cargo workspace of its own, not a member of the repository
+workspace, and pins its compiler in `rust-toolchain.toml`. The nightly toolchain
+is only for building the rustc-integrated lint library; the rest of the
+repository keeps using stable. Dylint also resolves a library from the library
+package's own `target/release`, which a shared workspace target directory would
+not produce.
 
 ```bash
 mise run lints:test      # ui tests
