@@ -83,9 +83,9 @@ pub(crate) fn check_expr<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
     let Some(constructor) = UNBOUNDED_CONSTRUCTORS.iter().find(|candidate| {
         cx.tcx.crate_name(def_id.krate).as_str() == candidate.krate
             && cx.tcx.item_name(def_id).as_str() == candidate.function
-            && candidate.module.is_none_or(|module| {
-                cx.tcx.item_name(cx.tcx.parent(def_id)).as_str() == module
-            })
+            && candidate
+                .module
+                .is_none_or(|module| cx.tcx.item_name(cx.tcx.parent(def_id)).as_str() == module)
     }) else {
         return;
     };

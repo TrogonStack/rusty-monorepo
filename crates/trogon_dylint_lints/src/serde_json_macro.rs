@@ -196,14 +196,8 @@ mod tests {
 
     #[test]
     fn exempts_test_file_names() {
-        assert!(is_test_source(
-            "crates/api/src/tests.rs",
-            "crates/api/src/lib.rs"
-        ));
-        assert!(is_test_source(
-            "crates/api/src/parse_tests.rs",
-            "crates/api/src/lib.rs"
-        ));
+        assert!(is_test_source("crates/api/src/tests.rs", "crates/api/src/lib.rs"));
+        assert!(is_test_source("crates/api/src/parse_tests.rs", "crates/api/src/lib.rs"));
     }
 
     #[test]

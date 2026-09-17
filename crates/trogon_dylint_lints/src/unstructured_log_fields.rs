@@ -88,11 +88,7 @@ impl UnstructuredLogFields {
 /// The structured fields it may also declare do not excuse a value the message
 /// interpolates: a field beside the message covers whatever it names, not the
 /// separate value spliced into the text.
-fn is_message_event<'tcx>(
-    cx: &LateContext<'tcx>,
-    callee: &'tcx Expr<'tcx>,
-    args: &'tcx [Expr<'tcx>],
-) -> bool {
+fn is_message_event<'tcx>(cx: &LateContext<'tcx>, callee: &'tcx Expr<'tcx>, args: &'tcx [Expr<'tcx>]) -> bool {
     let Some(kind) = metadata_new_kind(cx, callee, args) else {
         return false;
     };
@@ -159,9 +155,7 @@ fn field_name(cx: &LateContext<'_>, entry: &Expr<'_>) -> Option<Symbol> {
             let StmtKind::Item(item_id) = stmt.kind else {
                 return None;
             };
-            let ItemKind::Const(_, _, _, ConstItemRhs::Body(body_id)) =
-                cx.tcx.hir_item(item_id).kind
-            else {
+            let ItemKind::Const(_, _, _, ConstItemRhs::Body(body_id)) = cx.tcx.hir_item(item_id).kind else {
                 return None;
             };
             let ExprKind::Call(_, args) = cx.tcx.hir_body(body_id).value.kind else {

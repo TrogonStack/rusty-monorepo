@@ -65,6 +65,5 @@ fn callee_is_key_value_new<'tcx>(cx: &LateContext<'tcx>, callee: &'tcx Expr<'tcx
         return false;
     };
     let did = adt.did();
-    cx.tcx.crate_name(did.krate).as_str() == "opentelemetry"
-        && cx.tcx.item_name(did).as_str() == "KeyValue"
+    cx.tcx.crate_name(did.krate).as_str() == "opentelemetry" && cx.tcx.item_name(did).as_str() == "KeyValue"
 }

@@ -57,9 +57,7 @@ pub(crate) fn check_fn<'tcx>(
         cx,
         FALLIBLE_NEW,
         ident.span,
-        format!(
-            "constructor `{name}` can panic, and its signature gives the caller no failure to handle"
-        ),
+        format!("constructor `{name}` can panic, and its signature gives the caller no failure to handle"),
         |diag| {
             diag.span_note(
                 operation.span,
@@ -102,11 +100,7 @@ fn is_trait_impl_item(cx: &LateContext<'_>, def_id: LocalDefId) -> bool {
 
 /// Whether the signature already tells the caller construction can fail, which
 /// is one of the two fixes the lint asks for and so needs no report.
-fn admits_failure<'tcx>(
-    cx: &LateContext<'tcx>,
-    body: &'tcx Body<'tcx>,
-    def_id: LocalDefId,
-) -> bool {
+fn admits_failure<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'tcx>, def_id: LocalDefId) -> bool {
     let output = output_ty(cx, body, def_id);
     output.is_diag_item(cx, sym::Result) || output.is_diag_item(cx, sym::Option)
 }
@@ -122,11 +116,7 @@ fn output_ty<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'tcx>, def_id: Local
         return cx.typeck_results().expr_ty(awaited);
     }
 
-    cx.tcx
-        .fn_sig(def_id)
-        .instantiate_identity()
-        .output()
-        .skip_binder()
+    cx.tcx.fn_sig(def_id).instantiate_identity().output().skip_binder()
 }
 
 /// The first operation in the body that aborts rather than returns. One report
@@ -137,29 +127,20 @@ fn output_ty<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'tcx>, def_id: Local
 /// they are the constructor's own code however the panic is scheduled, and
 /// stops at nested items, which are separate functions with their own
 /// contract.
-fn first_panicking_operation<'tcx>(
-    cx: &LateContext<'tcx>,
-    body: &'tcx Body<'tcx>,
-) -> Option<PanickingOperation> {
+fn first_panicking_operation<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'tcx>) -> Option<PanickingOperation> {
     for_each_expr(cx, body.value, |expr| match panicking_operation(cx, expr) {
         Some(operation) => ControlFlow::Break(operation),
         None => ControlFlow::Continue(()),
     })
 }
 
-fn panicking_operation<'tcx>(
-    cx: &LateContext<'tcx>,
-    expr: &'tcx Expr<'tcx>,
-) -> Option<PanickingOperation> {
+fn panicking_operation<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> Option<PanickingOperation> {
     if let Some(macro_call) = root_macro_call_first_node(cx, expr) {
         // `todo!` and `unimplemented!` are left to rustc's own lints, which
         // already report unfinished code wherever it sits.
         let spelling = if is_panic(cx, macro_call.def_id) {
             "panic!"
-        } else if cx
-            .tcx
-            .is_diagnostic_item(sym::unreachable_macro, macro_call.def_id)
-        {
+        } else if cx.tcx.is_diagnostic_item(sym::unreachable_macro, macro_call.def_id) {
             "unreachable!"
         } else {
             return None;

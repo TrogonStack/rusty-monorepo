@@ -20,8 +20,17 @@ impl EarlyLintPass for RedundantModulePath {
         // A file-backed module (`mod foo;`) is `Loaded` with `Inline::No`; the
         // body span covers the separate file it was read from. Inline `mod foo
         // { ... }` and modules that failed to parse are not our concern.
-        let ItemKind::Mod(_, ident, ModKind::Loaded(_, Inline::No { had_parse_error: Ok(()) }, spans)) =
-            &item.kind
+        let ItemKind::Mod(
+            _,
+            ident,
+            ModKind::Loaded(
+                _,
+                Inline::No {
+                    had_parse_error: Ok(()),
+                },
+                spans,
+            ),
+        ) = &item.kind
         else {
             return;
         };
@@ -34,9 +43,7 @@ impl EarlyLintPass for RedundantModulePath {
         let decl_file = source_map.lookup_char_pos(item.span.lo()).file;
         let body_file = source_map.lookup_char_pos(spans.inner_span.lo()).file;
 
-        let (Some(decl_path), Some(body_path)) =
-            (real_path(&decl_file.name), real_path(&body_file.name))
-        else {
+        let (Some(decl_path), Some(body_path)) = (real_path(&decl_file.name), real_path(&body_file.name)) else {
             return;
         };
 
@@ -51,8 +58,7 @@ impl EarlyLintPass for RedundantModulePath {
         // The attribute is only redundant when the file it points at is exactly
         // the one `mod foo;` would have resolved to on its own. A `#[path]`
         // aimed anywhere else is load-bearing and must stay.
-        let Some(defaults) = default_module_paths(&decl_path, ident.as_str(), decl_is_crate_root)
-        else {
+        let Some(defaults) = default_module_paths(&decl_path, ident.as_str(), decl_is_crate_root) else {
             return;
         };
         if !defaults.contains(&body_path) {
@@ -85,11 +91,7 @@ fn real_path(name: &FileName) -> Option<PathBuf> {
 /// the declaring file owns. A directory-owning file (the crate root, or a
 /// `mod.rs`/`lib.rs`/`main.rs`) owns its own directory; any other file `foo.rs`
 /// owns `foo/`.
-fn default_module_paths(
-    decl_path: &Path,
-    module: &str,
-    decl_is_crate_root: bool,
-) -> Option<[PathBuf; 2]> {
+fn default_module_paths(decl_path: &Path, module: &str, decl_is_crate_root: bool) -> Option<[PathBuf; 2]> {
     let dir = decl_path.parent()?;
     let stem = decl_path.file_stem()?.to_str()?;
     let owner_dir = if decl_is_crate_root || matches!(stem, "mod" | "lib" | "main") {

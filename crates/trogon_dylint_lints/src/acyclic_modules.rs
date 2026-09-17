@@ -118,11 +118,7 @@ impl AcyclicModules {
             return;
         }
 
-        self.references.push(ModuleReference {
-            source,
-            target,
-            span,
-        });
+        self.references.push(ModuleReference { source, target, span });
     }
 }
 
@@ -135,10 +131,7 @@ impl AcyclicModules {
 /// diverges, so parent-child edges (a parent declaring or re-exporting its
 /// child, a child reaching up through `super::`) are excluded by construction
 /// rather than by a special case.
-fn build_sibling_graphs(
-    tcx: TyCtxt<'_>,
-    references: &[ModuleReference],
-) -> HashMap<DefId, Vec<SiblingEdge>> {
+fn build_sibling_graphs(tcx: TyCtxt<'_>, references: &[ModuleReference]) -> HashMap<DefId, Vec<SiblingEdge>> {
     let mut graphs: HashMap<DefId, Vec<SiblingEdge>> = HashMap::new();
 
     for reference in references {
@@ -225,11 +218,7 @@ fn detect_cycles<N>(nodes: &[N], adjacency: &HashMap<N, Vec<N>>) -> Vec<Vec<N>>
 where
     N: Copy + Eq + Hash,
 {
-    let order: HashMap<N, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| (*node, index))
-        .collect();
+    let order: HashMap<N, usize> = nodes.iter().enumerate().map(|(index, node)| (*node, index)).collect();
 
     let mut state: HashMap<N, Color> = HashMap::new();
     let mut path: Vec<N> = Vec::new();
@@ -241,10 +230,7 @@ where
         }
     }
 
-    let mut normalized: Vec<Vec<N>> = cycles
-        .iter()
-        .map(|cycle| normalize_cycle(cycle, &order))
-        .collect();
+    let mut normalized: Vec<Vec<N>> = cycles.iter().map(|cycle| normalize_cycle(cycle, &order)).collect();
     normalized.sort_by_cached_key(|cycle| cycle_key(cycle, &order));
     normalized.dedup_by_key(|cycle| cycle_key(cycle, &order));
     normalized
@@ -294,13 +280,7 @@ where
         .min_by_key(|(_, node)| order.get(node).copied().unwrap_or(usize::MAX))
         .map_or(0, |(index, _)| index);
 
-    cycle
-        .iter()
-        .cycle()
-        .skip(start)
-        .take(cycle.len())
-        .copied()
-        .collect()
+    cycle.iter().cycle().skip(start).take(cycle.len()).copied().collect()
 }
 
 fn cycle_key<N>(cycle: &[N], order: &HashMap<N, usize>) -> Vec<usize>
@@ -313,12 +293,7 @@ where
         .collect()
 }
 
-fn emit_cycle(
-    cx: &LateContext<'_>,
-    parent: DefId,
-    cycle: &[DefId],
-    witnesses: &HashMap<(DefId, DefId), Span>,
-) {
+fn emit_cycle(cx: &LateContext<'_>, parent: DefId, cycle: &[DefId], witnesses: &HashMap<(DefId, DefId), Span>) {
     let names: Vec<String> = cycle.iter().map(|node| module_name(cx.tcx, *node)).collect();
     let Some(first) = names.first() else {
         return;
@@ -351,9 +326,7 @@ fn emit_cycle(
     // wherever the individual references happen to sit.
     let attribution = parent
         .as_local()
-        .map_or(rustc_hir::CRATE_HIR_ID, |local| {
-            cx.tcx.local_def_id_to_hir_id(local)
-        });
+        .map_or(rustc_hir::CRATE_HIR_ID, |local| cx.tcx.local_def_id_to_hir_id(local));
 
     let parent_path = module_path(cx.tcx, parent);
 
@@ -515,13 +488,7 @@ mod tests {
 
     #[test]
     fn accepts_a_one_directional_dependency() {
-        assert!(
-            cycles(
-                &["consumer", "utils"],
-                &[("consumer", "utils"), ("consumer", "utils")]
-            )
-            .is_empty()
-        );
+        assert!(cycles(&["consumer", "utils"], &[("consumer", "utils"), ("consumer", "utils")]).is_empty());
     }
 
     #[test]
@@ -529,12 +496,7 @@ mod tests {
         assert!(
             cycles(
                 &["base", "left", "right", "top"],
-                &[
-                    ("top", "left"),
-                    ("top", "right"),
-                    ("left", "base"),
-                    ("right", "base"),
-                ]
+                &[("top", "left"), ("top", "right"), ("left", "base"), ("right", "base"),]
             )
             .is_empty()
         );
@@ -543,10 +505,7 @@ mod tests {
     #[test]
     fn reports_each_disjoint_cycle_once() {
         assert_eq!(
-            cycles(
-                &["a", "b", "c", "d"],
-                &[("a", "b"), ("b", "a"), ("c", "d"), ("d", "c")]
-            ),
+            cycles(&["a", "b", "c", "d"], &[("a", "b"), ("b", "a"), ("c", "d"), ("d", "c")]),
             vec![vec!["a", "b"], vec!["c", "d"]]
         );
     }

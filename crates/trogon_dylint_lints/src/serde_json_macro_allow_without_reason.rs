@@ -45,10 +45,7 @@ impl EarlyLintPass for SerdeJsonMacroAllowWithoutReason {
 }
 
 fn is_serde_json_macro(item: &MetaItemInner) -> bool {
-    item.is_word()
-        && item
-            .name()
-            .is_some_and(|name| name.as_str() == "serde_json_macro")
+    item.is_word() && item.name().is_some_and(|name| name.as_str() == "serde_json_macro")
 }
 
 /// A `reason` that says nothing is not a justification, so an empty string is

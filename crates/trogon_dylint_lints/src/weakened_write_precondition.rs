@@ -44,7 +44,9 @@ pub(crate) fn check_impl_item<'tcx>(cx: &LateContext<'tcx>, impl_item: &'tcx Imp
             impl_item.span,
             message(),
             |diag| {
-                diag.help("the `allow` silencing this carries no `reason`, so the choice is turned off rather than argued");
+                diag.help(
+                    "the `allow` silencing this carries no `reason`, so the choice is turned off rather than argued",
+                );
                 diag.help(ESCAPE_HATCH);
             },
         );
@@ -69,7 +71,9 @@ fn message() -> String {
 /// Read off the lint level rather than the attribute list, so `allow` and
 /// `expect` and every spelling of them are one case.
 fn allowed_at<'tcx>(cx: &LateContext<'tcx>, impl_item: &'tcx ImplItem<'tcx>) -> Option<bool> {
-    let level = cx.tcx.lint_level_at_node(WEAKENED_WRITE_PRECONDITION, impl_item.hir_id());
+    let level = cx
+        .tcx
+        .lint_level_at_node(WEAKENED_WRITE_PRECONDITION, impl_item.hir_id());
     let LintLevelSource::Node { reason, .. } = level.src else {
         return None;
     };

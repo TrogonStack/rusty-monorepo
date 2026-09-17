@@ -39,9 +39,7 @@ pub(crate) fn metadata_new_kind<'tcx>(
         return None;
     };
     let adt_did = adt.did();
-    if cx.tcx.crate_name(adt_did.krate).as_str() != "tracing_core"
-        || cx.tcx.item_name(adt_did).as_str() != "Metadata"
-    {
+    if cx.tcx.crate_name(adt_did.krate).as_str() != "tracing_core" || cx.tcx.item_name(adt_did).as_str() != "Metadata" {
         return None;
     }
     args.last().and_then(path_last_segment)

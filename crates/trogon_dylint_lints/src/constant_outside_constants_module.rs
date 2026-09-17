@@ -24,10 +24,7 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
     // parent is the enclosing item, not a module, so it is left alone.
     // Associated consts live in `impl`/`trait` blocks and are `ImplItem`s /
     // `TraitItem`s, so they never reach `check_item` at all.
-    if !matches!(
-        cx.tcx.def_kind(cx.tcx.local_parent(item.owner_id.def_id)),
-        DefKind::Mod
-    ) {
+    if !matches!(cx.tcx.def_kind(cx.tcx.local_parent(item.owner_id.def_id)), DefKind::Mod) {
         return;
     }
 
