@@ -421,8 +421,12 @@ fn suite_comparison(current: &ReportForSummary, previous: &ReportForSummary) -> 
 
 /// `keep` when the test split improved, `revert` when it regressed (even if train also
 /// improved, since a regression on held-out cases is reason enough on its own), and
-/// `suspected_overfitting` when train improved but test did not clear the bar to say
-/// either way. Everything else is `inconclusive`.
+/// `suspected_overfitting` when train improved but a *measured* test split did not clear
+/// the bar to say either way. A test split that never ran (`NoRuns`) is silence, not a
+/// measurement: it must not be read as the flat test split that makes a train-only gain
+/// suspicious, or a suite with no held-out set would report overfitting on every train
+/// improvement and fail `--fail-on overfitting` for a reason it has no way to fix.
+/// Everything else is `inconclusive`.
 fn derive_recommendation(by_split: &BTreeMap<EvalSplit, SplitVerdict>) -> Recommendation {
     let test = by_split.get(&EvalSplit::Test);
     let train = by_split.get(&EvalSplit::Train);
@@ -433,7 +437,7 @@ fn derive_recommendation(by_split: &BTreeMap<EvalSplit, SplitVerdict>) -> Recomm
     if matches!(test, Some(SplitVerdict::Regressed(_))) {
         return Recommendation::Revert;
     }
-    if matches!(train, Some(SplitVerdict::Improved(_))) {
+    if matches!(test, Some(SplitVerdict::Indistinguishable(_))) && matches!(train, Some(SplitVerdict::Improved(_))) {
         return Recommendation::SuspectedOverfitting;
     }
     Recommendation::Inconclusive
@@ -2159,6 +2163,39 @@ mod tests {
             Some(&SplitVerdict::NoRuns)
         );
         assert_eq!(keep_or_revert.recommendation, Recommendation::Inconclusive);
+    }
+
+    /// A train-only suite (no `test`-split cases declared at all) is silence about
+    /// generalization, not a finding of overfitting: nothing measured the held-out split
+    /// because it does not exist, unlike `train_improving_while_test_stays_flat_is_suspected_overfitting`
+    /// where a measured, flat test split is what makes the train gain suspicious.
+    #[test]
+    fn train_improving_with_no_test_runs_at_all_stays_inconclusive_not_overfitting() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev-train", "case-b", "train", 0, 40);
+        let current_runs = write_with_skill_runs(&current_dir, "cur-train", "case-b", "train", 40, 0);
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert_eq!(
+            keep_or_revert.by_split.get(&EvalSplit::Test),
+            Some(&SplitVerdict::NoRuns),
+            "no test-split runs exist in either iteration"
+        );
+        assert!(matches!(
+            keep_or_revert.by_split.get(&EvalSplit::Train),
+            Some(SplitVerdict::Improved(_))
+        ));
+        assert_eq!(
+            keep_or_revert.recommendation,
+            Recommendation::Inconclusive,
+            "a suite with no held-out set cannot support suspected_overfitting"
+        );
     }
 
     #[test]
