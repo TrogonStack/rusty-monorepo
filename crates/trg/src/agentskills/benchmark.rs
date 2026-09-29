@@ -12,6 +12,7 @@ use super::eval_suite_drift::{
     parse_report_iteration, EvalSuiteDriftWarning,
 };
 use super::evals::{EvalError, EvalSplit, Result};
+use super::headroom::{evaluate_headroom, HeadroomThreshold, HeadroomWarning};
 use super::iteration_summary::detect_previous_report_dir;
 use super::proportion::{self, Interval, Proportion};
 use super::report::{RunRecord, ScenarioKind};
@@ -30,6 +31,7 @@ pub struct BenchmarkOptions {
     pub failed_runs: FailedRunsMode,
     pub allow_eval_suite_drift: bool,
     pub previous_report_dir: Option<PathBuf>,
+    pub headroom_threshold: HeadroomThreshold,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -44,6 +46,10 @@ pub struct BenchmarkDocument {
     /// flat test result sit side by side with the overall numbers above rather than
     /// requiring a second run of this command per split.
     pub by_split: BTreeMap<EvalSplit, SplitBenchmark>,
+    /// Set when the with_skill arm's assertion pass rate has cleared its headroom
+    /// threshold overall, so a change to the skill has no room left to show up in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headroom: Option<HeadroomWarning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iteration_comparison: Option<IterationComparison>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -305,6 +311,11 @@ pub struct ArmObservations {
 pub struct SplitBenchmark {
     pub scenarios: BTreeMap<String, ScenarioBenchmark>,
     pub deltas: ScenarioDeltas,
+    /// Set when this split's with_skill assertion pass rate has cleared its headroom
+    /// threshold, which matters most on the test split: the keep-or-revert verdict can
+    /// never read `improved` there once it has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headroom: Option<HeadroomWarning>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -495,13 +506,21 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
                 report.runs.iter().filter(|run| run.split == split),
                 options.failed_runs,
             );
-            (split, SplitBenchmark { scenarios, deltas })
+            (
+                split,
+                SplitBenchmark {
+                    scenarios,
+                    deltas,
+                    headroom: None,
+                },
+            )
         })
         .collect();
 
     let failed_runs = options.failed_runs;
     let allow_eval_suite_drift = options.allow_eval_suite_drift;
     let previous_report_dir = options.previous_report_dir.clone();
+    let headroom_threshold = options.headroom_threshold;
     let iteration_comparison = build_iteration_comparison(report_dir, &report, failed_runs);
     let (by_eval_scenario, flaky_assertions) = build_by_eval_scenario(report_dir, &report.runs, failed_runs);
     let iteration_summary = build_iteration_summary(report_dir, &report.runs, flaky_assertions, failed_runs);
@@ -511,8 +530,35 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
             failed_runs,
             allow_eval_suite_drift,
             previous_report_dir,
+            headroom_threshold,
         },
     )?;
+
+    let case_splits: BTreeMap<String, EvalSplit> = report
+        .runs
+        .iter()
+        .map(|run| (run.eval_case_id.clone(), run.split))
+        .collect();
+    let headroom = build_headroom(headroom_threshold, &scenario_map, &by_eval_scenario, &case_splits, None);
+    let by_split: BTreeMap<EvalSplit, SplitBenchmark> = by_split
+        .into_iter()
+        .map(|(split, split_benchmark)| {
+            let headroom = build_headroom(
+                headroom_threshold,
+                &split_benchmark.scenarios,
+                &by_eval_scenario,
+                &case_splits,
+                Some(split),
+            );
+            (
+                split,
+                SplitBenchmark {
+                    headroom,
+                    ..split_benchmark
+                },
+            )
+        })
+        .collect();
 
     Ok(BenchmarkDocument {
         report_id: report.report.id,
@@ -521,6 +567,7 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
         scenarios: scenario_map,
         deltas,
         by_split,
+        headroom,
         iteration_comparison,
         by_eval_scenario,
         iteration_summary,
@@ -1081,6 +1128,41 @@ fn aggregate_runs_for_iteration(
         .collect()
 }
 
+/// Whether the with_skill arm named by `scenarios` has any headroom left, and which cases
+/// (already scored via `by_eval_scenario`) individually passed every assertion they were
+/// drawn against.
+///
+/// `split` narrows the saturated case ids to that split; `None` reports across all of them,
+/// matching the scope `scenarios` itself was aggregated at.
+fn build_headroom(
+    threshold: HeadroomThreshold,
+    scenarios: &BTreeMap<String, ScenarioBenchmark>,
+    by_eval_scenario: &[EvalScenarioAttemptRow],
+    case_splits: &BTreeMap<String, EvalSplit>,
+    split: Option<EvalSplit>,
+) -> Option<HeadroomWarning> {
+    let with_skill = ScenarioKind::WithSkill.as_str();
+    let assertions = scenarios.get(with_skill).and_then(|scenario| {
+        Proportion::observed(
+            scenario.completed.assertions.passed,
+            scenario.completed.assertions.failed,
+        )
+    });
+
+    let saturated_case_ids = by_eval_scenario
+        .iter()
+        .filter(|row| row.scenario_id == with_skill)
+        .filter(|row| row.pass_rate.min == 1.0)
+        .filter(|row| match split {
+            Some(split) => case_splits.get(&row.eval_case_id) == Some(&split),
+            None => true,
+        })
+        .map(|row| row.eval_case_id.clone())
+        .collect();
+
+    evaluate_headroom(threshold, assertions, saturated_case_ids)
+}
+
 fn build_by_eval_scenario(
     report_dir: &Path,
     runs: &[RunForBenchmark],
@@ -1449,6 +1531,126 @@ mod tests {
             run["iteration_id"] = serde_json::json!(iteration_id);
         }
         run
+    }
+
+    fn with_skill_run(id: &str, eval_case_id: &str, split: &str, attempt: u32) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "eval_case_id": eval_case_id,
+            "split": split,
+            "scenario_id": "with_skill",
+            "model_config_id": "ci-default",
+            "skill_revision_id": "current",
+            "attempt": attempt,
+            "status": "completed",
+            "paths": { "workspace": format!("runs/{id}/workspace") },
+            "artifacts": [],
+            "metrics": {}
+        })
+    }
+
+    #[test]
+    fn build_benchmark_reports_headroom_and_names_saturated_cases_per_split() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runs = Vec::new();
+        for attempt in 1..=40 {
+            runs.push(with_skill_run(&format!("case-a-{attempt}"), "case-a", "test", attempt));
+            runs.push(with_skill_run(&format!("case-b-{attempt}"), "case-b", "train", attempt));
+        }
+        write_report(temp.path(), serde_json::Value::Array(runs), None);
+        for attempt in 1..=40 {
+            for case in ["case-a", "case-b"] {
+                write_run_artifacts(
+                    temp.path(),
+                    &format!("{case}-{attempt}"),
+                    Some(r#"{"assertion_results":[{"assertion":"a","passed":true}]}"#),
+                    None,
+                );
+            }
+        }
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+
+        let headroom = benchmark
+            .headroom
+            .expect("a fully saturated with_skill arm should warn");
+        assert!(headroom.lower_bound >= HeadroomThreshold::default().value());
+        assert_eq!(
+            headroom.saturated_case_ids,
+            vec!["case-a".to_string(), "case-b".to_string()]
+        );
+
+        let test_headroom = benchmark.by_split[&EvalSplit::Test]
+            .headroom
+            .as_ref()
+            .expect("the test split alone is also saturated");
+        assert_eq!(test_headroom.saturated_case_ids, vec!["case-a".to_string()]);
+
+        let train_headroom = benchmark.by_split[&EvalSplit::Train]
+            .headroom
+            .as_ref()
+            .expect("the train split alone is also saturated");
+        assert_eq!(train_headroom.saturated_case_ids, vec!["case-b".to_string()]);
+    }
+
+    #[test]
+    fn build_benchmark_reports_no_headroom_warning_when_the_with_skill_arm_still_has_room() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runs = Vec::new();
+        for attempt in 1..=10 {
+            runs.push(with_skill_run(&format!("case-a-{attempt}"), "case-a", "test", attempt));
+        }
+        write_report(temp.path(), serde_json::Value::Array(runs), None);
+        for attempt in 1..=10 {
+            let passed = attempt <= 5;
+            write_run_artifacts(
+                temp.path(),
+                &format!("case-a-{attempt}"),
+                Some(&format!(
+                    r#"{{"assertion_results":[{{"assertion":"a","passed":{passed}}}]}}"#
+                )),
+                None,
+            );
+        }
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+
+        assert!(benchmark.headroom.is_none());
+        assert!(benchmark.by_split[&EvalSplit::Test].headroom.is_none());
+    }
+
+    #[test]
+    fn build_benchmark_headroom_threshold_is_configurable() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runs = Vec::new();
+        for attempt in 1..=5 {
+            runs.push(with_skill_run(&format!("case-a-{attempt}"), "case-a", "test", attempt));
+        }
+        write_report(temp.path(), serde_json::Value::Array(runs), None);
+        for attempt in 1..=5 {
+            write_run_artifacts(
+                temp.path(),
+                &format!("case-a-{attempt}"),
+                Some(r#"{"assertion_results":[{"assertion":"a","passed":true}]}"#),
+                None,
+            );
+        }
+
+        let default_threshold = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        assert!(
+            default_threshold.headroom.is_none(),
+            "5/5 does not clear the default 0.9 floor"
+        );
+
+        let lenient = build_benchmark(
+            temp.path(),
+            BenchmarkOptions {
+                headroom_threshold: HeadroomThreshold::parse(0.5).unwrap(),
+                ..BenchmarkOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(lenient.headroom.is_some(), "the same arm clears a lower threshold");
     }
 
     #[test]

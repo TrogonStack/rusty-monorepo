@@ -182,6 +182,12 @@ the skill next, reporting only how many cases were withheld and their
 aggregate pass rate. A held-out case that leaked into the bundle would stop
 being held out.
 
+Pick held-out cases a human judged hard, not ones today's model happens to
+fail. A case chosen for today's failure stops being useful the moment it is
+fixed: its `with_skill` arm starts passing everything, and step 8's headroom
+warning fires, meaning no later revision can register as an improvement there
+no matter how good it is.
+
 ## Step 6: check the suite before spending a run
 
 Runs cost money and wall clock. Everything that can be caught statically should
@@ -288,6 +294,17 @@ between the two reports. Add `--fail-on revert,overfitting` in CI to turn that
 recommendation into an exit code rather than a line someone has to notice. See
 [Reference: keep-or-revert
 verdict](../../docs/reference/ai-skills-eval.md#keep-or-revert-verdict).
+
+Both commands also warn when the `with_skill` arm has no headroom left: its
+95% lower bound has cleared `--headroom-threshold` (a proportion in `(0, 1]`,
+default `0.9`), so no revision can show up as an improvement there regardless
+of what changed. The warning names the saturated cases and never changes the
+exit code. When it fires on the test split, `keep_or_revert.capped_by_saturation`
+is set to `test_split_saturated`, which is the signal that an `inconclusive` or
+even a clean `keep` here is capped by the suite's own ceiling rather than an
+ordinary result. Treat it as a prompt to harden the held-out cases (step 5),
+not to raise the threshold. See [Reference: headroom
+warning](../../docs/reference/ai-skills-eval.md#headroom-warning).
 
 ## Step 9: repair what measured nothing
 

@@ -236,6 +236,17 @@ recommendation: keep, revert, suspected overfitting, or inconclusive. See
 verdict](../reference/ai-skills-eval.md#keep-or-revert-verdict) and [How-to:
 gate a hillclimb in CI](../how-to/run-in-ci.md#keep-or-revert-gate).
 
+A verdict is only as good as the room left to draw it in. Once the test
+split's `with_skill` arm has passed nearly everything, its 95% lower bound sits
+above the headroom threshold and no revision can push it higher: `improved`
+becomes unreachable for reasons that have nothing to do with the change under
+review. `eval benchmark` and `eval iteration-summary` both warn when this
+happens, name the cases that individually passed everything, and, on
+`iteration-summary`, flag the keep-or-revert verdict itself as
+`capped_by_saturation` so an `inconclusive` from a saturated test split is not
+mistaken for an ordinary one. See [Reference: headroom
+warning](../reference/ai-skills-eval.md#headroom-warning).
+
 ---
 
 ## Divergences from agentskills.io

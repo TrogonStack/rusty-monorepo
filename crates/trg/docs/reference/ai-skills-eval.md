@@ -318,6 +318,7 @@ trg ai skills eval benchmark <REPORT_DIR> [OPTIONS]
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket` (report failed runs as a separate bucket, apart from completed runs), `exclude` (drop failed and timed-out runs from aggregation), `zero` (fold them into the completed bucket, scored as zero) |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
 | `--output-format` | enum | `text` | `text` prints the report directory path; `json` prints the `benchmark.json` document on stdout |
+| `--headroom-threshold` | proportion | `0.9` | The `with_skill` arm's Wilson lower bound is reported as saturated (see [Headroom warning](#headroom-warning)) at or above this proportion in `(0, 1]` |
 
 `benchmark.json` reports `scenarios` and `deltas` for the whole report, and again per
 split under `by_split.train` and `by_split.test`, each the same scenario stats and
@@ -325,6 +326,32 @@ with-skill-vs-without-skill deltas narrowed to the runs whose case declared that
 A gain visible only under `by_split.train` is the suite fitting itself to what it was
 measured on, not the skill. See [Assign each case to train or
 test](author-an-eval-suite.md#5-assign-each-case-to-train-or-test).
+
+### Headroom warning
+
+`benchmark.json` reports a `headroom` field, and again per split under
+`by_split.train.headroom` and `by_split.test.headroom`, whenever the `with_skill` arm's
+pooled assertion pass rate has cleared `--headroom-threshold`: the Wilson 95% lower bound
+on that pass rate sits at or above the threshold, meaning the arm has not shown a draw
+worse than that floor. A suite in that state cannot register an improvement no matter how
+good a change is, since there is no room left above the floor for a better skill to reach.
+This matters most on the test split, since the keep-or-revert verdict `iteration-summary`
+builds can never read `improved` there once it has.
+
+The default of `0.9` was picked because a `with_skill` arm whose worst-case pass rate has
+already cleared nine in ten leaves at most one case in ten of room to improve, and running
+more attempts only tightens that floor further. A suite that trips the warning at `0.9`
+needs harder cases, not more draws; see [keeping cases hard](author-an-eval-suite.md#5-assign-each-case-to-train-or-test).
+
+Each warning names the cases whose `with_skill` attempts passed every scored assertion
+across every draw, under `saturated_case_ids`. `benchmark.json` and
+`iteration-summary.json` are the author's own measurement surfaces and already list every
+case id elsewhere in the same document, so naming ids here is fine; only the improvement
+bundle `next-iteration` produces withholds test-split ids from its wider audience, and
+continues to do so regardless of this warning.
+
+The text summary prints the warning above the report directory line. It never changes the
+exit code: a saturated suite is a measurement limit, not a failed gate.
 
 ### Example
 
@@ -358,9 +385,13 @@ trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
 | `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these. Comma-separated. Values: `revert`, `overfitting`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
+| `--headroom-threshold` | proportion | `0.9` | The `with_skill` arm's Wilson lower bound is reported as saturated (see [Headroom warning](#headroom-warning)) at or above this proportion in `(0, 1]` |
 
 `iteration-summary.json` reports `always_pass`, `always_fail`, and `helped_by_skill` for
-the whole report, and again per split under `by_split.train` and `by_split.test`.
+the whole report, and again per split under `by_split.train` and `by_split.test`. It also
+reports a `headroom` field, and again per split under `by_split.train.headroom` and
+`by_split.test.headroom`, the same shape and threshold [`eval benchmark`
+reports](#headroom-warning).
 
 ### Keep-or-revert verdict
 
@@ -384,6 +415,11 @@ into a verdict rather than left for the reader to eyeball:
   (checked before overfitting, since a held-out regression is reason enough on its own),
   `suspected_overfitting` when train improved while test did not, and `inconclusive`
   otherwise.
+- `capped_by_saturation` is set to `test_split_saturated` when the test split's
+  `with_skill` arm has cleared `--headroom-threshold`, so `recommendation` is not misread
+  as an ordinary `inconclusive` or a clean `keep`: the split the verdict depends on most
+  could not have read `improved` here no matter what the change did. See [Headroom
+  warning](#headroom-warning).
 
 Absent entirely on a first iteration, since there is no previous run to compare against.
 
