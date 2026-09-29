@@ -100,10 +100,20 @@ fn recorded_declared_case_ids(value: &serde_json::Value) -> Option<BTreeSet<Stri
         .pointer("/suite/case_selection/declared")?
         .as_array()?
         .iter()
-        .filter_map(|id| id.as_str())
-        .map(str::to_string)
+        .filter_map(declared_case_id)
         .collect();
     (!declared.is_empty()).then_some(declared)
+}
+
+/// Reads a `case_selection.declared` entry's id whether it is the current `{id, split}` object
+/// or a legacy bare string, so a narrowed report written by either build still contributes its
+/// full declared set instead of silently dropping every entry and falling back to only the
+/// cases this run covered.
+fn declared_case_id(entry: &serde_json::Value) -> Option<String> {
+    entry
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| entry.get("id").and_then(|id| id.as_str()).map(str::to_string))
 }
 
 fn dimension_case_ids(value: &serde_json::Value) -> BTreeSet<String> {
@@ -484,6 +494,35 @@ mod tests {
         assert_eq!(
             snapshot.declared_eval_case_ids,
             BTreeSet::from(["case-a".to_string(), "case-b".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_snapshot_reads_declared_case_objects_the_same_as_legacy_declared_strings() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = serde_json::json!({
+            "report": { "iteration": 2 },
+            "suite": {
+                "evals_hash": "sha256:abc",
+                "case_selection": {
+                    "cases": ["case-a"],
+                    "covered": 1,
+                    "declared": [
+                        { "id": "case-a", "split": "train" },
+                        { "id": "case-b", "split": "test" }
+                    ]
+                }
+            },
+            "dimensions": { "eval_cases": [{ "id": "case-a" }] }
+        });
+        std::fs::write(temp.path().join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
+
+        let snapshot = load_report_drift_snapshot(temp.path()).unwrap();
+        assert_eq!(
+            snapshot.declared_eval_case_ids,
+            BTreeSet::from(["case-a".to_string(), "case-b".to_string()]),
+            "an object-shaped declared entry must not be dropped and fall back to only the \
+             covered dimensions, which would report the held-out case-b as drift"
         );
     }
 
