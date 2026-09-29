@@ -12,7 +12,9 @@ use super::benchmark::{
     aggregate_scenarios_for_records, FailedRunsMode, PassFailSummary, ScenarioBenchmark, ScenarioDelta, ScenarioDeltas,
 };
 use super::case_directories::{resolve_eval_suite, EvalSource};
-use super::eval_suite_drift::{detect_eval_suite_drift_vs_skill, maybe_emit_eval_suite_drift_warning};
+use super::eval_suite_drift::{
+    declared_eval_case_splits, detect_eval_suite_drift_vs_skill, maybe_emit_eval_suite_drift_warning,
+};
 use super::evals::{EvalDirName, EvalError, EvalSplit, Result, EVAL_SUITE_MANIFEST_NAME};
 use super::feedback::{load_run_feedback_entries, FeedbackNote};
 use super::grading::{GradingCounts, GradingFile};
@@ -227,6 +229,11 @@ impl From<&ScenarioDeltas> for HeldOutDeltas {
 pub enum HeldOutSection {
     /// The suite declares no `test`-split cases, so nothing was withheld from this bundle.
     NoTestCases,
+    /// The suite declares `test`-split cases, but this run's selection (`--split train`,
+    /// `--case`) did not cover any of them, so there is nothing to aggregate. Distinct from
+    /// [`Self::NoTestCases`]: the suite is not missing a held-out set, this run just did not
+    /// exercise it.
+    DeclaredNotRun { declared_test_case_count: usize },
     Withheld {
         test_case_count: usize,
         test_run_count: usize,
@@ -335,7 +342,17 @@ pub fn build_improvement_bundle(
 fn build_held_out_section(report_dir: &Path, report: &ReportDocument) -> HeldOutSection {
     let test_runs: Vec<&RunRecord> = report.runs.iter().filter(|run| run.split == EvalSplit::Test).collect();
     if test_runs.is_empty() {
-        return HeldOutSection::NoTestCases;
+        let declared_test_case_count = declared_eval_case_splits(report)
+            .values()
+            .filter(|split| **split == EvalSplit::Test)
+            .count();
+        return if declared_test_case_count == 0 {
+            HeldOutSection::NoTestCases
+        } else {
+            HeldOutSection::DeclaredNotRun {
+                declared_test_case_count,
+            }
+        };
     }
 
     let test_case_count = test_runs
@@ -413,11 +430,10 @@ fn eval_suite_drift_from_report(
                     .collect()
             })
             .unwrap_or_default();
-        let previous_split_by_id: HashMap<&str, EvalSplit> = report
-            .runs
-            .iter()
-            .map(|run| (run.eval_case_id.as_str(), run.split))
-            .collect();
+        // Not `report.runs`: a case a narrowed selection excluded (`--split train`,
+        // `--case`) never produced a run, so looking its split up there would silently
+        // default it to train and let a held-out case leak into `removed_eval_ids`.
+        let previous_split_by_id = declared_eval_case_splits(report);
 
         let added_eval_ids = drift
             .added_eval_ids
@@ -877,6 +893,16 @@ pub fn render_improvement_bundle_markdown(document: &ImprovementBundleDocument) 
                  Declare at least one case with `\"split\": \"test\"` so a later bundle can \
                  report a score this skill was not tuned against._\n\n",
             );
+        }
+        HeldOutSection::DeclaredNotRun {
+            declared_test_case_count,
+        } => {
+            md.push_str(&format!(
+                "_This suite declares {declared_test_case_count} `test`-split case(s), but \
+                 this run's selection did not cover any of them, so there is no aggregate to \
+                 report. Run without `--split train` or `--case` to exercise the held-out \
+                 set._\n\n",
+            ));
         }
         HeldOutSection::Withheld {
             test_case_count,
@@ -1524,7 +1550,7 @@ mod tests {
                 assert_eq!(*test_run_count, 2);
                 assert!(!scenarios.is_empty());
             }
-            HeldOutSection::NoTestCases => panic!("expected a withheld test case"),
+            other => panic!("expected a withheld test case, got {other:?}"),
         }
         assert!(markdown.contains("Held-Out Test Cases"));
         assert!(markdown.contains("withheld"));
@@ -1602,5 +1628,151 @@ mod tests {
         let markdown = render_improvement_bundle_markdown(&document);
         assert!(markdown.contains("Held-Out Test Cases"));
         assert!(markdown.contains("Declare at least one case"));
+    }
+
+    /// Builds a report narrowed to the `train` split of a two-case suite (one `train`, one
+    /// `test`), so the `test`-split case is declared but never run, the shape `--split
+    /// train` produces on a real suite.
+    fn train_only_report_with_a_declared_held_out_case(temp: &tempfile::TempDir, skill_root: &Path) -> PathBuf {
+        let fs = crate::fs::testutil::MemFS::new();
+        let skill_path = Path::new("demo-skill");
+        fs.insert(
+            skill_path.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: d\n---\n",
+        );
+        fs.insert(
+            skill_path.join("evals/evals.json"),
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [
+                    {
+                        "id": "case-a",
+                        "prompt": "prompt a",
+                        "expected_output": "output a",
+                        "graders": [{ "type": "contains", "text": "assert a" }]
+                    },
+                    {
+                        "id": "case-b-held-out",
+                        "prompt": "prompt b",
+                        "expected_output": "output b",
+                        "graders": [{ "type": "contains", "text": "assert b" }],
+                        "split": "test"
+                    }
+                ]
+            }"#,
+        );
+
+        let bundle = crate::agentskills::report::build_report_bundle(
+            &fs,
+            skill_path,
+            skill_path,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            crate::agentskills::report::BuildReportOptions {
+                report_id: Some("report-iter-1".to_string()),
+                generated_at: Some("2026-05-26T12:00:00Z".to_string()),
+                iteration: Some(1),
+                cases: crate::agentskills::case_selection::CaseSelection::parse(&[], &[], Some(EvalSplit::Train))
+                    .unwrap(),
+                ..crate::agentskills::report::BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+        let report_dir = crate::agentskills::report::write_report_bundle(
+            temp.path(),
+            &bundle,
+            crate::agentskills::report::WriteReportOptions::default(),
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(skill_root.join("evals")).unwrap();
+        std::fs::write(
+            skill_root.join("evals/evals.json"),
+            fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            skill_root.join("SKILL.md"),
+            fs.read_to_string(&skill_path.join("SKILL.md")).unwrap(),
+        )
+        .unwrap();
+
+        report_dir
+    }
+
+    #[test]
+    fn a_narrowed_run_does_not_leak_a_never_run_held_out_case_as_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_root = temp.path().join("current-skill");
+        let report_dir = train_only_report_with_a_declared_held_out_case(&temp, &skill_root);
+
+        // The current suite on disk drops the held-out case entirely, so its id can only be
+        // told apart from a real removal by consulting what the prior run declared, not what
+        // it ran.
+        std::fs::write(
+            skill_root.join("evals/evals.json"),
+            r#"{
+                "skill_name": "demo-skill",
+                "evals": [
+                    {
+                        "id": "case-a",
+                        "prompt": "prompt a, reworded",
+                        "expected_output": "output a",
+                        "graders": [{ "type": "contains", "text": "assert a" }]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let document = build_improvement_bundle(
+            &report_dir,
+            NextIterationOptions {
+                skill_dir: Some(skill_root),
+                ..NextIterationOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(document.eval_suite_drift.detected);
+        assert!(
+            !document
+                .eval_suite_drift
+                .removed_eval_ids
+                .iter()
+                .any(|id| id == "case-b-held-out"),
+            "a held-out case excluded by --split train must not leak into the improvement \
+             bundle: {:?}",
+            document.eval_suite_drift.removed_eval_ids
+        );
+    }
+
+    #[test]
+    fn held_out_section_tells_a_narrowed_selection_from_a_suite_with_no_test_cases() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_root = temp.path().join("current-skill");
+        let report_dir = train_only_report_with_a_declared_held_out_case(&temp, &skill_root);
+
+        let document = build_improvement_bundle(
+            &report_dir,
+            NextIterationOptions {
+                skill_dir: Some(skill_root),
+                ..NextIterationOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            document.held_out,
+            HeldOutSection::DeclaredNotRun {
+                declared_test_case_count: 1
+            },
+            "the suite declares a held-out case, this run just did not cover it"
+        );
+
+        let markdown = render_improvement_bundle_markdown(&document);
+        assert!(markdown.contains("declares 1 `test`-split case"));
+        assert!(!markdown.contains("declares no `test`-split cases"));
     }
 }

@@ -120,9 +120,9 @@
           "type": "integer"
         },
         "declared": {
-          "description": "Every case ID the suite declared, covered by this run or not.",
+          "description": "Every case the suite declared, covered by this run or not.",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/DeclaredEvalCase"
           },
           "type": "array"
         },
@@ -193,6 +193,22 @@
       },
       "required": [
         "provider"
+      ],
+      "type": "object"
+    },
+    "DeclaredEvalCase": {
+      "description": "A case the suite declared, with the split it belongs to.\n\nA run narrowed by `--split train` never produces a run for a `test`-split case it\nexcludes, so this is the only record of that case's split a later reader (drift\ndetection, the held-out section) can consult without re-reading the suite off disk,\nwhich may no longer have the case at all.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "split": {
+          "$ref": "#/$defs/EvalSplit"
+        }
+      },
+      "required": [
+        "id",
+        "split"
       ],
       "type": "object"
     },

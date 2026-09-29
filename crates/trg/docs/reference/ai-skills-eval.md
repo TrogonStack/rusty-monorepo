@@ -762,9 +762,13 @@ scenario, with the same Wilson and Newcombe intervals `benchmark` reports, so
 a reviser knows the score without seeing what produced it. A suite that
 declares no `test` case gets `held_out.status: "no_test_cases"` instead, and
 `improvement.md` nudges toward declaring one, since every later overfitting
-check depends on a held-out set existing. Suite drift detection still
-compares hashes for a `test`-split case, but the bundle never lists that
-case's id among the added or removed ones.
+check depends on a held-out set existing. A suite that does declare `test`
+cases but whose selection (`--split train`, `--case`) did not run any of them
+gets `held_out.status: "declared_not_run"` with `declared_test_case_count`,
+instead of being reported as if the suite had no held-out set at all. Suite
+drift detection still compares hashes for a `test`-split case, but the bundle
+never lists that case's id among the added or removed ones, whether or not
+this run's selection covered it.
 
 ---
 

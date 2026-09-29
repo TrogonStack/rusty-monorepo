@@ -340,6 +340,25 @@
           "type": "object"
         },
         {
+          "description": "The suite declares `test`-split cases, but this run's selection (`--split train`,\n`--case`) did not cover any of them, so there is nothing to aggregate. Distinct from\n[`Self::NoTestCases`]: the suite is not missing a held-out set, this run just did not\nexercise it.",
+          "properties": {
+            "declared_test_case_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "declared_not_run",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "declared_test_case_count"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "deltas": {
               "$ref": "#/$defs/HeldOutDeltas"

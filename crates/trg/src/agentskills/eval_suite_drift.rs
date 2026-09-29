@@ -1,9 +1,9 @@
 //! Detect when the eval suite (`evals/evals.json`) changed between iterations.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use super::evals::{EvalDirName, EvalError, Result};
+use super::evals::{EvalDirName, EvalError, EvalSplit, Result};
 use super::report::ReportDocument;
 use crate::fs::FileSystem;
 use schemars::JsonSchema;
@@ -149,12 +149,38 @@ pub fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
 /// the suite lost, and report it as added again the next time a run selects it.
 pub fn declared_eval_case_ids(report: &ReportDocument) -> BTreeSet<String> {
     match &report.suite.case_selection {
-        Some(selection) if !selection.declared.is_empty() => selection.declared.iter().cloned().collect(),
+        Some(selection) if !selection.declared.is_empty() => {
+            selection.declared.iter().map(|case| case.id.clone()).collect()
+        }
         _ => report
             .dimensions
             .eval_cases
             .iter()
             .map(|eval_case| eval_case.id.clone())
+            .collect(),
+    }
+}
+
+/// The split every declared case belongs to, covered by this run or not.
+///
+/// A run narrowed to one split never produces a run for a case the other split declares, so
+/// looking up a declared-but-unrun case's split from [`ReportDocument::runs`] silently
+/// defaults it (see [`EvalSplit::default`]), which is indistinguishable from a case that
+/// really is on the default split. `case_selection.declared` carries the split for every
+/// case the suite declared, run or not, so it is consulted first; a full run has no such
+/// record because there is nothing narrowed to explain, and every declared case in that
+/// case did run, so its split is read off the runs that produced it instead.
+pub fn declared_eval_case_splits(report: &ReportDocument) -> HashMap<&str, EvalSplit> {
+    match &report.suite.case_selection {
+        Some(selection) if !selection.declared.is_empty() => selection
+            .declared
+            .iter()
+            .map(|case| (case.id.as_str(), case.split))
+            .collect(),
+        _ => report
+            .runs
+            .iter()
+            .map(|run| (run.eval_case_id.as_str(), run.split))
             .collect(),
     }
 }
