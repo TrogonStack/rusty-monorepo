@@ -271,6 +271,24 @@ came from three draws or thirty.
 narrowed to each split. A gain that only shows up under `by_split.train` is the
 suite fitting itself to what it was measured on, not the skill.
 
+Once there is a previous iteration to compare against, pass it explicitly or
+let it auto-detect, and read `keep_or_revert` instead of the two intervals by
+eye:
+
+```shell
+$ trg ai skills eval iteration-summary ./artifacts/my-skill/20260914T130000Z-efgh5678 \
+    --previous ./artifacts/my-skill/20260914T120000Z-abcd1234
+```
+
+`keep_or_revert.recommendation` is `keep` when the test split improved,
+`revert` when it regressed, `suspected_overfitting` when train improved while
+test did not, and `inconclusive` otherwise; `keep_or_revert.suites` says
+`different_suites` instead of comparing when the eval suite itself changed
+between the two reports. Add `--fail-on revert,overfitting` in CI to turn that
+recommendation into an exit code rather than a line someone has to notice. See
+[Reference: keep-or-revert
+verdict](../../docs/reference/ai-skills-eval.md#keep-or-revert-verdict).
+
 ## Step 9: repair what measured nothing
 
 For every check in `always_pass`, choose one:

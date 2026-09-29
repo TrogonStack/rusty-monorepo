@@ -3,13 +3,37 @@ use std::path::PathBuf;
 use crate::agentskills::benchmark::FailedRunsMode;
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::iteration_summary::{
-    build_iteration_summary_document, print_human_summary, write_iteration_summary, IterationSummaryOptions,
+    build_iteration_summary_document, print_human_summary, recommendation_label, write_iteration_summary,
+    IterationSummaryOptions, Recommendation,
 };
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use super::print_report_dir;
+
+/// A keep-or-revert recommendation that should fail the command for CI.
+///
+/// Unset gates on nothing: a first iteration with no `--previous` to compare against has no
+/// recommendation to match, so it always exits successfully regardless of `--fail-on`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+pub enum FailOn {
+    /// The test split regressed against `--previous`.
+    Revert,
+    /// The train split improved while the test split did not, which is what a skill that
+    /// learned the suite instead of the task looks like.
+    Overfitting,
+}
+
+impl FailOn {
+    fn matches(self, recommendation: Recommendation) -> bool {
+        match self {
+            Self::Revert => recommendation == Recommendation::Revert,
+            Self::Overfitting => recommendation == Recommendation::SuspectedOverfitting,
+        }
+    }
+}
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -20,6 +44,8 @@ Examples:
   $ trg ai skills eval iteration-summary ./report --previous ./artifacts/my-skill/prior-report
 
   $ trg ai skills eval iteration-summary ./report --output-format json --failed-runs exclude
+
+  $ trg ai skills eval iteration-summary ./report --fail-on revert,overfitting
 ")]
 pub struct IterationSummaryArgs {
     #[arg(help = "Path to the report directory containing report.json")]
@@ -47,6 +73,15 @@ pub struct IterationSummaryArgs {
         help = "Render the result as a human-readable table or as the iteration-summary.json document on stdout"
     )]
     pub output_format: OutputFormat,
+
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        value_name = "VERDICT",
+        help = "Exit with a gate failure when the keep-or-revert recommendation is one of these: revert, overfitting. Comma-separated; unset never gates"
+    )]
+    pub fail_on: Vec<FailOn>,
 }
 
 impl IterationSummaryArgs {
@@ -82,6 +117,17 @@ impl IterationSummaryArgs {
             print_report_dir(&self.report_dir);
         }
 
-        ExitCode::Success
+        let recommendation = document.keep_or_revert.as_ref().map(|section| section.recommendation);
+        let gated = recommendation
+            .is_some_and(|recommendation| self.fail_on.iter().any(|fail_on| fail_on.matches(recommendation)));
+
+        if gated {
+            eprintln!(
+                "iteration-summary: recommendation is {}, which --fail-on was told to fail on",
+                recommendation_label(recommendation.expect("gated implies a recommendation was present"))
+            );
+        }
+
+        ExitCode::from_gate(!gated)
     }
 }

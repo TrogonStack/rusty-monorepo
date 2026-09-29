@@ -10,6 +10,7 @@ use super::dispersion::{self, FlakinessLedger, FlakyAssertionRecord, MetricSampl
 use super::eval_suite_drift;
 use super::evals::{EvalError, EvalSplit, Result};
 use super::layout;
+use super::proportion::{self, Interval, Proportion};
 use super::report::ScenarioKind;
 
 pub const OUTPUT_FILE_NAME: &str = "iteration-summary.json";
@@ -38,6 +39,81 @@ pub struct IterationSummaryDocument {
     /// each split, so a train gain and a flat test result sit side by side with the
     /// overall numbers above.
     pub by_split: BTreeMap<EvalSplit, SplitSummary>,
+    /// Whether this iteration's `with_skill` arm beat the previous iteration's on each
+    /// split, and what that says about keeping or reverting the change. Absent when there
+    /// is no previous iteration to compare against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_or_revert: Option<KeepOrRevertSection>,
+}
+
+/// Whether the eval suite is the same one the previous iteration ran, which the
+/// keep-or-revert verdict below depends on: a pass-rate change against a suite that
+/// gained or lost cases is not a change in the skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SuiteComparison {
+    SameSuite,
+    DifferentSuites {
+        current_suite_hash: String,
+        previous_suite_hash: String,
+    },
+}
+
+/// The `with_skill` assertion and run pass-rate change between this iteration and the
+/// previous one, and the 95% intervals around each. The assertion pass rate drives the
+/// verdict this rides alongside: it pools every scored assertion rather than collapsing a
+/// case with three assertions and one with one assertion to the same single vote a run
+/// pass rate would give them, so it moves on the same evidence the reviewer's bundle does.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct SplitDelta {
+    pub assertion_pass_rate_delta: f64,
+    pub assertion_pass_rate_delta_interval: Interval,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_pass_rate_delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_pass_rate_delta_interval: Option<Interval>,
+}
+
+/// The verdict for one split's `with_skill` delta against the previous iteration, derived
+/// from whether `assertion_pass_rate_delta_interval` excludes zero.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SplitVerdict {
+    /// The interval sits entirely above zero: this split's `with_skill` arm did better.
+    Improved(SplitDelta),
+    /// The interval sits entirely below zero: this split's `with_skill` arm did worse.
+    Regressed(SplitDelta),
+    /// The interval straddles zero: the change has not beaten this split's own noise.
+    Indistinguishable(SplitDelta),
+    /// Neither iteration scored a `with_skill` run on this split, so there is nothing to
+    /// compare. Never treated as `Indistinguishable`: silence about a split is not a
+    /// finding about it.
+    NoRuns,
+}
+
+/// What the two verdicts above say to do with the change under review.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Recommendation {
+    /// The held-out split improved: the change generalized past the cases it was tuned on.
+    Keep,
+    /// The held-out split regressed: the change made the skill worse where it counts.
+    Revert,
+    /// Train improved while test did not, which is what a skill that learned the suite
+    /// instead of the task looks like.
+    SuspectedOverfitting,
+    /// Neither split moved far enough to say either way, or the suites being compared are
+    /// not the same suite.
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct KeepOrRevertSection {
+    pub suites: SuiteComparison,
+    /// Empty when `suites` is `different_suites`, since a verdict across two different
+    /// suites is not a verdict about the change.
+    pub by_split: BTreeMap<EvalSplit, SplitVerdict>,
+    pub recommendation: Recommendation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -118,6 +194,8 @@ pub struct CrossIterationSection {
 #[derive(Debug, Clone, Deserialize)]
 struct ReportForSummary {
     report: ReportMeta,
+    #[serde(default)]
+    suite: SuiteForSummary,
     runs: Vec<RunForSummary>,
 }
 
@@ -125,6 +203,12 @@ struct ReportForSummary {
 struct ReportMeta {
     id: String,
     iteration: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct SuiteForSummary {
+    #[serde(default)]
+    evals_hash: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,13 +293,24 @@ pub fn build_iteration_summary_document(
     let report = load_report(report_dir)?;
     let current = analyze_report(report_dir, &report, options.failed_runs);
 
-    let cross_iteration = resolve_previous_report_for_summary(
+    let previous = resolve_previous_report_for_summary(
         report_dir,
         report.report.iteration,
         options.previous_report_dir.as_deref(),
-    )
-    .and_then(|(previous_dir, previous_report)| {
+    );
+
+    let cross_iteration = previous.clone().and_then(|(previous_dir, previous_report)| {
         build_cross_iteration_section(&previous_dir, previous_report, &current, options.failed_runs)
+    });
+
+    let keep_or_revert = previous.map(|(previous_dir, previous_report)| {
+        build_keep_or_revert_section(
+            report_dir,
+            &report,
+            &previous_dir,
+            &previous_report,
+            options.failed_runs,
+        )
     });
 
     let (always_pass, always_fail) =
@@ -236,7 +331,183 @@ pub fn build_iteration_summary_document(
         token_outliers: current.token_outliers,
         cross_iteration,
         by_split,
+        keep_or_revert,
     })
+}
+
+/// The keep-or-revert verdict: whether this iteration's `with_skill` arm beat the previous
+/// iteration's on the held-out split, the same question asked of the train split for
+/// comparison, and the recommendation the two answers add up to.
+fn build_keep_or_revert_section(
+    report_dir: &Path,
+    report: &ReportForSummary,
+    previous_dir: &Path,
+    previous_report: &ReportForSummary,
+    mode: FailedRunsMode,
+) -> KeepOrRevertSection {
+    let suites = suite_comparison(report, previous_report);
+
+    let by_split = match &suites {
+        SuiteComparison::DifferentSuites { .. } => BTreeMap::new(),
+        SuiteComparison::SameSuite => EvalSplit::ALL
+            .into_iter()
+            .map(|split| {
+                let verdict = compute_split_verdict(report_dir, report, previous_dir, previous_report, split, mode);
+                (split, verdict)
+            })
+            .collect(),
+    };
+
+    let recommendation = derive_recommendation(&by_split);
+
+    KeepOrRevertSection {
+        suites,
+        by_split,
+        recommendation,
+    }
+}
+
+fn suite_comparison(current: &ReportForSummary, previous: &ReportForSummary) -> SuiteComparison {
+    if current.suite.evals_hash == previous.suite.evals_hash {
+        SuiteComparison::SameSuite
+    } else {
+        SuiteComparison::DifferentSuites {
+            current_suite_hash: current.suite.evals_hash.clone(),
+            previous_suite_hash: previous.suite.evals_hash.clone(),
+        }
+    }
+}
+
+/// `keep` when the test split improved, `revert` when it regressed (even if train also
+/// improved, since a regression on held-out cases is reason enough on its own), and
+/// `suspected_overfitting` when train improved but test did not clear the bar to say
+/// either way. Everything else is `inconclusive`.
+fn derive_recommendation(by_split: &BTreeMap<EvalSplit, SplitVerdict>) -> Recommendation {
+    let test = by_split.get(&EvalSplit::Test);
+    let train = by_split.get(&EvalSplit::Train);
+
+    if matches!(test, Some(SplitVerdict::Improved(_))) {
+        return Recommendation::Keep;
+    }
+    if matches!(test, Some(SplitVerdict::Regressed(_))) {
+        return Recommendation::Revert;
+    }
+    if matches!(train, Some(SplitVerdict::Improved(_))) {
+        return Recommendation::SuspectedOverfitting;
+    }
+    Recommendation::Inconclusive
+}
+
+#[derive(Debug, Default)]
+struct ScenarioTally {
+    assertion_passed: u32,
+    assertion_failed: u32,
+    run_passed: u32,
+    run_failed: u32,
+}
+
+impl ScenarioTally {
+    fn assertion_proportion(&self) -> Option<Proportion> {
+        Proportion::observed(self.assertion_passed as usize, self.assertion_failed as usize)
+    }
+
+    fn run_proportion(&self) -> Option<Proportion> {
+        Proportion::observed(self.run_passed as usize, self.run_failed as usize)
+    }
+}
+
+/// Pool every scored assertion (and every scored run) the `with_skill` scenario drew on
+/// one split, the same reduction `analyze_report` applies per case and assertion, but
+/// summed across all of them so a split with three assertions in one case and one in
+/// another still reports a single pass rate to compare across iterations.
+fn tally_with_skill(
+    report_dir: &Path,
+    report: &ReportForSummary,
+    split: EvalSplit,
+    mode: FailedRunsMode,
+) -> ScenarioTally {
+    let mut tally = ScenarioTally::default();
+
+    for run in &report.runs {
+        if run.split != split || run.scenario_id != ScenarioKind::WithSkill {
+            continue;
+        }
+        if !matches!(classify_run(run, mode), RunDisposition::Completed) {
+            continue;
+        }
+
+        let sample = load_run_sample(report_dir, &run.paths.workspace);
+        let Some(grading) = &sample.grading else {
+            continue;
+        };
+
+        let scored: Vec<&AssertionResultInput> = grading
+            .assertion_results
+            .iter()
+            .filter(|result| result.is_scored())
+            .collect();
+        if scored.is_empty() {
+            continue;
+        }
+
+        let passed = scored.iter().filter(|result| result.passed).count() as u32;
+        let failed = scored.len() as u32 - passed;
+        tally.assertion_passed += passed;
+        tally.assertion_failed += failed;
+        if failed == 0 {
+            tally.run_passed += 1;
+        } else {
+            tally.run_failed += 1;
+        }
+    }
+
+    tally
+}
+
+fn compute_split_verdict(
+    report_dir: &Path,
+    report: &ReportForSummary,
+    previous_dir: &Path,
+    previous_report: &ReportForSummary,
+    split: EvalSplit,
+    mode: FailedRunsMode,
+) -> SplitVerdict {
+    let current_tally = tally_with_skill(report_dir, report, split, mode);
+    let previous_tally = tally_with_skill(previous_dir, previous_report, split, mode);
+
+    let (Some(current_assertions), Some(previous_assertions)) = (
+        current_tally.assertion_proportion(),
+        previous_tally.assertion_proportion(),
+    ) else {
+        return SplitVerdict::NoRuns;
+    };
+
+    let assertion_pass_rate_delta_interval = proportion::difference(current_assertions, previous_assertions);
+    let assertion_pass_rate_delta = current_assertions.rate() - previous_assertions.rate();
+
+    let (run_pass_rate_delta, run_pass_rate_delta_interval) =
+        match (current_tally.run_proportion(), previous_tally.run_proportion()) {
+            (Some(current_runs), Some(previous_runs)) => (
+                Some(current_runs.rate() - previous_runs.rate()),
+                Some(proportion::difference(current_runs, previous_runs)),
+            ),
+            _ => (None, None),
+        };
+
+    let delta = SplitDelta {
+        assertion_pass_rate_delta,
+        assertion_pass_rate_delta_interval,
+        run_pass_rate_delta,
+        run_pass_rate_delta_interval,
+    };
+
+    if assertion_pass_rate_delta_interval.low() > 0.0 {
+        SplitVerdict::Improved(delta)
+    } else if assertion_pass_rate_delta_interval.high() < 0.0 {
+        SplitVerdict::Regressed(delta)
+    } else {
+        SplitVerdict::Indistinguishable(delta)
+    }
 }
 
 /// The report's own analysis, reused once per split rather than reimplemented, so a
@@ -252,6 +523,7 @@ fn split_summaries(
         .map(|split| {
             let narrowed = ReportForSummary {
                 report: report.report.clone(),
+                suite: report.suite.clone(),
                 runs: report.runs.iter().filter(|run| run.split == split).cloned().collect(),
             };
             let analysis = analyze_report(report_dir, &narrowed, mode);
@@ -397,6 +669,59 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
                 .map(|record| format!("{} | {}", record.eval_case_id, record.assertion)),
         );
     }
+
+    if let Some(keep_or_revert) = &document.keep_or_revert {
+        println!();
+        println!(
+            "Keep or revert: {}",
+            recommendation_label(keep_or_revert.recommendation)
+        );
+        match &keep_or_revert.suites {
+            SuiteComparison::DifferentSuites {
+                current_suite_hash,
+                previous_suite_hash,
+            } => {
+                println!(
+                    "  eval suite changed since the previous iteration (previous {previous_suite_hash}, current {current_suite_hash}); no split verdict was computed"
+                );
+            }
+            SuiteComparison::SameSuite => {
+                for split in EvalSplit::ALL {
+                    let Some(verdict) = keep_or_revert.by_split.get(&split) else {
+                        continue;
+                    };
+                    println!("  {} split: {}", split.as_str(), split_verdict_line(verdict));
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn recommendation_label(recommendation: Recommendation) -> &'static str {
+    match recommendation {
+        Recommendation::Keep => "keep",
+        Recommendation::Revert => "revert",
+        Recommendation::SuspectedOverfitting => "suspected overfitting",
+        Recommendation::Inconclusive => "inconclusive",
+    }
+}
+
+fn split_verdict_line(verdict: &SplitVerdict) -> String {
+    match verdict {
+        SplitVerdict::Improved(delta) => format!("improved ({})", format_split_delta(delta)),
+        SplitVerdict::Regressed(delta) => format!("regressed ({})", format_split_delta(delta)),
+        SplitVerdict::Indistinguishable(delta) => format!("indistinguishable ({})", format_split_delta(delta)),
+        SplitVerdict::NoRuns => "no with_skill runs on this split in one or both iterations".to_string(),
+    }
+}
+
+fn format_split_delta(delta: &SplitDelta) -> String {
+    format!(
+        "assertion pass rate {:+.1}pp, 95% CI [{:+.1}pp, {:+.1}pp]",
+        delta.assertion_pass_rate_delta * 100.0,
+        delta.assertion_pass_rate_delta_interval.low() * 100.0,
+        delta.assertion_pass_rate_delta_interval.high() * 100.0
+    )
 }
 
 fn delta_suffix(delta: Option<CrossIterationDelta>) -> String {
@@ -886,6 +1211,16 @@ mod tests {
     use std::fs;
 
     fn write_report(report_dir: &Path, runs: serde_json::Value, iteration: u32, report_id: &str) {
+        write_report_with_hash(report_dir, runs, iteration, report_id, "sha256:def");
+    }
+
+    fn write_report_with_hash(
+        report_dir: &Path,
+        runs: serde_json::Value,
+        iteration: u32,
+        report_id: &str,
+        evals_hash: &str,
+    ) {
         fs::create_dir_all(report_dir).unwrap();
         let report = serde_json::json!({
             "report": {
@@ -899,7 +1234,7 @@ mod tests {
                 "skill_path": "demo",
                 "skill_hash": "sha256:abc",
                 "evals_path": "demo/evals/evals.json",
-                "evals_hash": "sha256:def"
+                "evals_hash": evals_hash
             },
             "dimensions": {
                 "eval_cases": [],
@@ -934,9 +1269,21 @@ mod tests {
     }
 
     fn sample_run(id: &str, eval_case_id: &str, scenario: &str, attempt: u32, status: &str) -> serde_json::Value {
+        sample_run_with_split(id, eval_case_id, scenario, attempt, status, "train")
+    }
+
+    fn sample_run_with_split(
+        id: &str,
+        eval_case_id: &str,
+        scenario: &str,
+        attempt: u32,
+        status: &str,
+        split: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "id": id,
             "eval_case_id": eval_case_id,
+            "split": split,
             "scenario_id": scenario,
             "model_config_id": "ci-default",
             "skill_revision_id": "current",
@@ -1472,6 +1819,274 @@ mod tests {
         );
 
         let mut summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
+        summary.generated_at = "2026-05-26T12:00:00Z".to_string();
+
+        let json = serde_json::to_value(&summary).unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/iteration-summary.json.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<_> = validator.iter_errors(&json).map(|error| error.to_string()).collect();
+        assert!(errors.is_empty(), "schema errors: {errors:?}");
+    }
+
+    fn write_with_skill_runs(
+        report_dir: &Path,
+        id_prefix: &str,
+        eval_case_id: &str,
+        split: &str,
+        passed_count: usize,
+        failed_count: usize,
+    ) -> Vec<serde_json::Value> {
+        let mut runs = Vec::new();
+        let mut attempt = 1u32;
+        for i in 0..passed_count {
+            let id = format!("{id_prefix}-pass-{i}");
+            runs.push(sample_run_with_split(
+                &id,
+                eval_case_id,
+                "with_skill",
+                attempt,
+                "completed",
+                split,
+            ));
+            write_run_artifacts(
+                report_dir,
+                &id,
+                Some(r#"{"assertion_results":[{"assertion":"a","passed":true}]}"#),
+                None,
+            );
+            attempt += 1;
+        }
+        for i in 0..failed_count {
+            let id = format!("{id_prefix}-fail-{i}");
+            runs.push(sample_run_with_split(
+                &id,
+                eval_case_id,
+                "with_skill",
+                attempt,
+                "completed",
+                split,
+            ));
+            write_run_artifacts(
+                report_dir,
+                &id,
+                Some(r#"{"assertion_results":[{"assertion":"a","passed":false}]}"#),
+                None,
+            );
+            attempt += 1;
+        }
+        runs
+    }
+
+    fn build_summary_against_previous(
+        previous_dir: &Path,
+        previous_runs: Vec<serde_json::Value>,
+        current_dir: &Path,
+        current_runs: Vec<serde_json::Value>,
+    ) -> IterationSummaryDocument {
+        write_report(
+            previous_dir,
+            serde_json::Value::Array(previous_runs),
+            1,
+            "report-iter-1",
+        );
+        write_report(current_dir, serde_json::Value::Array(current_runs), 2, "report-iter-2");
+
+        build_iteration_summary_document(
+            current_dir,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous_dir.to_path_buf()),
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_test_split_improvement_recommends_keep() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev", "case-a", "test", 0, 40);
+        let current_runs = write_with_skill_runs(&current_dir, "cur", "case-a", "test", 40, 0);
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert_eq!(keep_or_revert.suites, SuiteComparison::SameSuite);
+        assert!(matches!(
+            keep_or_revert.by_split.get(&EvalSplit::Test),
+            Some(SplitVerdict::Improved(_))
+        ));
+        assert_eq!(keep_or_revert.recommendation, Recommendation::Keep);
+    }
+
+    #[test]
+    fn a_test_split_regression_recommends_revert_even_if_train_also_improved() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let mut previous_runs = write_with_skill_runs(&previous_dir, "prev-test", "case-a", "test", 40, 0);
+        previous_runs.extend(write_with_skill_runs(
+            &previous_dir,
+            "prev-train",
+            "case-b",
+            "train",
+            0,
+            40,
+        ));
+        let mut current_runs = write_with_skill_runs(&current_dir, "cur-test", "case-a", "test", 0, 40);
+        current_runs.extend(write_with_skill_runs(
+            &current_dir,
+            "cur-train",
+            "case-b",
+            "train",
+            40,
+            0,
+        ));
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert!(matches!(
+            keep_or_revert.by_split.get(&EvalSplit::Test),
+            Some(SplitVerdict::Regressed(_))
+        ));
+        assert!(matches!(
+            keep_or_revert.by_split.get(&EvalSplit::Train),
+            Some(SplitVerdict::Improved(_))
+        ));
+        assert_eq!(
+            keep_or_revert.recommendation,
+            Recommendation::Revert,
+            "a held-out regression is reason enough to revert on its own"
+        );
+    }
+
+    #[test]
+    fn train_improving_while_test_stays_flat_is_suspected_overfitting() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let mut previous_runs = write_with_skill_runs(&previous_dir, "prev-test", "case-a", "test", 5, 5);
+        previous_runs.extend(write_with_skill_runs(
+            &previous_dir,
+            "prev-train",
+            "case-b",
+            "train",
+            0,
+            40,
+        ));
+        let mut current_runs = write_with_skill_runs(&current_dir, "cur-test", "case-a", "test", 5, 5);
+        current_runs.extend(write_with_skill_runs(
+            &current_dir,
+            "cur-train",
+            "case-b",
+            "train",
+            40,
+            0,
+        ));
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert!(matches!(
+            keep_or_revert.by_split.get(&EvalSplit::Test),
+            Some(SplitVerdict::Indistinguishable(_))
+        ));
+        assert!(matches!(
+            keep_or_revert.by_split.get(&EvalSplit::Train),
+            Some(SplitVerdict::Improved(_))
+        ));
+        assert_eq!(keep_or_revert.recommendation, Recommendation::SuspectedOverfitting);
+    }
+
+    #[test]
+    fn a_suite_with_no_test_runs_in_either_iteration_reports_no_runs_and_stays_inconclusive() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev-train", "case-b", "train", 5, 5);
+        let current_runs = write_with_skill_runs(&current_dir, "cur-train", "case-b", "train", 5, 5);
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert_eq!(
+            keep_or_revert.by_split.get(&EvalSplit::Test),
+            Some(&SplitVerdict::NoRuns)
+        );
+        assert_eq!(keep_or_revert.recommendation, Recommendation::Inconclusive);
+    }
+
+    #[test]
+    fn a_changed_eval_suite_reports_different_suites_instead_of_comparing() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev-test", "case-a", "test", 0, 40);
+        let current_runs = write_with_skill_runs(&current_dir, "cur-test", "case-a", "test", 40, 0);
+
+        write_report_with_hash(
+            &previous_dir,
+            serde_json::Value::Array(previous_runs),
+            1,
+            "report-iter-1",
+            "sha256:before",
+        );
+        write_report_with_hash(
+            &current_dir,
+            serde_json::Value::Array(current_runs),
+            2,
+            "report-iter-2",
+            "sha256:after",
+        );
+
+        let summary = build_iteration_summary_document(
+            &current_dir,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous_dir),
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert_eq!(
+            keep_or_revert.suites,
+            SuiteComparison::DifferentSuites {
+                current_suite_hash: "sha256:after".to_string(),
+                previous_suite_hash: "sha256:before".to_string(),
+            }
+        );
+        assert!(
+            keep_or_revert.by_split.is_empty(),
+            "a verdict across two different suites is not a verdict about the change"
+        );
+        assert_eq!(keep_or_revert.recommendation, Recommendation::Inconclusive);
+    }
+
+    #[test]
+    fn keep_or_revert_json_matches_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev", "case-a", "test", 0, 40);
+        let current_runs = write_with_skill_runs(&current_dir, "cur", "case-a", "test", 40, 0);
+
+        let mut summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
         summary.generated_at = "2026-05-26T12:00:00Z".to_string();
 
         let json = serde_json::to_value(&summary).unwrap();

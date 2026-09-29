@@ -18,6 +18,7 @@ skill regressions on every pull request.
 | Fail on one case's own score | yes | `--min-case-score`, gates each case independently of the bundle average |
 | Fail on regression against a baseline | yes | `--baseline` plus the `--fail-on-*` flags |
 | Compare scenarios qualitatively | yes | `eval compare --judge llm` or `--judge script` |
+| Fail on a held-out regression or suspected overfitting | yes | `eval iteration-summary --previous --fail-on` |
 
 ## Minimal CI job (validation only)
 
@@ -203,6 +204,26 @@ it with `eval run --benchmark`, or aggregate an existing bundle afterwards:
 ```shell
 $ trg ai skills eval benchmark ./artifacts/csv-analyzer/2026-01-15/report-001
 ```
+
+## Keep-or-revert gate
+
+Once a suite declares a `test` split (see
+[Covering part of a suite](../reference/ai-skills-eval.md#covering-part-of-a-suite)), gate a
+hillclimb round on whether the change generalized rather than reading the intervals by eye:
+
+```yaml
+- name: Gate on the previous iteration
+  run: |
+    trg ai skills eval iteration-summary "$REPORT_DIR" \
+      --previous "$PREVIOUS_REPORT_DIR" \
+      --fail-on revert,overfitting
+```
+
+`--fail-on` takes a comma-separated list of recommendations to fail on: `revert` (the test
+split regressed) and `overfitting` (train improved while test did not). It is opt-in and
+gates on nothing by itself, so a first iteration with no `--previous` to compare against
+always exits `0`. See [Keep-or-revert verdict](../reference/ai-skills-eval.md#keep-or-revert-verdict)
+for the exact rule each recommendation follows.
 
 ## Tips
 
