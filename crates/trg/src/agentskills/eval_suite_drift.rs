@@ -364,7 +364,8 @@ mod tests {
             &[ScenarioKind::WithSkill],
             BuildReportOptions {
                 iteration: Some(iteration),
-                cases: crate::agentskills::case_selection::CaseSelection::parse(&[pattern.to_string()], &[]).unwrap(),
+                cases: crate::agentskills::case_selection::CaseSelection::parse(&[pattern.to_string()], &[], None)
+                    .unwrap(),
                 ..BuildReportOptions::default()
             },
         )

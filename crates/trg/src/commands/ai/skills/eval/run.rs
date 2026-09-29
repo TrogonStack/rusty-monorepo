@@ -8,7 +8,7 @@ use crate::agentskills::cache::{
     apply_cache_hit, compute_fixture_hash, record_completion, runner_kind_label, try_resolve_cache, CacheKey,
     CacheKeyInput, CacheOptions, ReuseKeyInput, PROMPT_CONTRACT_VERSION,
 };
-use crate::agentskills::case_selection::CaseSelection;
+use crate::agentskills::case_selection::{CaseSelection, SplitArg};
 use crate::agentskills::concurrency::RunConcurrency;
 use crate::agentskills::evals::{
     effective_model, effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalDirName,
@@ -105,6 +105,14 @@ pub struct RunArgs {
         help = "Cover only the cases carrying this tag (repeatable). Combined with --case it narrows further: named and tagged"
     )]
     pub tags: Vec<String>,
+
+    #[arg(
+        long = "split",
+        value_enum,
+        default_value_t = SplitArg::All,
+        help = "Cover only the cases declaring this split. Combined with --case and --tag it narrows further"
+    )]
+    pub split: SplitArg,
 
     #[arg(
         long,
@@ -388,7 +396,7 @@ impl RunArgs {
             None => None,
         };
 
-        let cases = match CaseSelection::parse(&self.cases, &self.tags) {
+        let cases = match CaseSelection::parse(&self.cases, &self.tags, self.split.narrowing()) {
             Ok(cases) => cases,
             Err(error) => {
                 eprintln!("{error}");
@@ -1796,6 +1804,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs {
                 strict_ci: false,
@@ -1905,6 +1914,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -2037,6 +2047,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -2085,6 +2096,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -2149,6 +2161,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -2297,6 +2310,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -2410,6 +2424,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
@@ -2466,6 +2481,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
@@ -2522,6 +2538,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
@@ -2570,6 +2587,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
@@ -2620,6 +2638,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };
@@ -2687,6 +2706,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }));
@@ -2853,6 +2873,7 @@ mod tests {
             allowed_tools: Vec::new(),
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -3138,6 +3159,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -3173,6 +3195,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -3225,6 +3248,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -3260,6 +3284,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -3309,6 +3334,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -3387,6 +3413,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -3459,6 +3486,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -3598,6 +3626,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -3666,6 +3695,7 @@ mod tests {
                 trust_skill: true,
                 cases: Vec::new(),
                 tags: Vec::new(),
+                split: SplitArg::All,
                 max_cost_usd: None,
                 ci: EvalCiArgs::default(),
             }
@@ -3739,6 +3769,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         }
@@ -3791,6 +3822,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         });
@@ -4324,6 +4356,7 @@ mod tests {
             trust_skill: true,
             cases: Vec::new(),
             tags: Vec::new(),
+            split: SplitArg::All,
             max_cost_usd: None,
             ci: EvalCiArgs::default(),
         };

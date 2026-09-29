@@ -13,7 +13,7 @@ use super::budget::{PassSpend, RunCost, FAILURE_KIND_BUDGET};
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::case_selection::{CaseSelection, CaseSelectionRecord};
-use super::evals::{effective_attempts, EvalDirName, EvalError, EvalPriority, EvalSuite, Result};
+use super::evals::{effective_attempts, EvalDirName, EvalError, EvalPriority, EvalSplit, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
     FeedbackDocument, HumanFeedbackSummary, ImprovementFeedbackRecord,
@@ -500,6 +500,11 @@ pub struct RunRecord {
     pub id: String,
     pub eval_case_id: String,
     pub eval_slug: String,
+    /// The case's train/test split, read back from the bundle rather than the manifest,
+    /// so a downstream command sees the split a run was actually recorded under even if
+    /// the suite has since been edited.
+    #[serde(default)]
+    pub split: EvalSplit,
     pub scenario_id: ScenarioKind,
     pub iteration: u32,
     pub model_config_id: String,
@@ -1306,6 +1311,7 @@ fn build_runs(
                     id: run_id,
                     eval_case_id: eval_case.id.to_string(),
                     eval_slug: eval_slug.clone(),
+                    split: eval_case.split,
                     scenario_id: *scenario,
                     iteration,
                     model_config_id: model_config_label.to_string(),
@@ -1981,7 +1987,7 @@ mod tests {
             &[ScenarioKind::WithSkill],
             BuildReportOptions {
                 iteration: Some(1),
-                cases: CaseSelection::parse(&["parse-*".to_string()], &[]).unwrap(),
+                cases: CaseSelection::parse(&["parse-*".to_string()], &[], None).unwrap(),
                 ..BuildReportOptions::default()
             },
         )

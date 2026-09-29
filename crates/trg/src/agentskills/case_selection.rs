@@ -4,13 +4,36 @@
 //! attempt. Running one case while iterating on it, or only the cases a change could have
 //! affected, is the difference between an eval that gets run and one that does not.
 
+use clap::ValueEnum;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::evals::{EvalCase, EvalError, Result};
+use super::evals::{EvalCase, EvalError, EvalSplit, Result};
 
 use super::validation::ValidationError;
+
+/// The `--split` flag's own alphabet, which adds `all` to `EvalSplit`'s two values
+/// because "narrow to nothing in particular" has to be sayable and `EvalSplit` itself
+/// has no such case: a case in a manifest is always train or test, never both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum)]
+pub enum SplitArg {
+    Train,
+    Test,
+    #[default]
+    All,
+}
+
+impl SplitArg {
+    /// What this flag value narrows the selection to, or `None` for no narrowing.
+    pub fn narrowing(self) -> Option<EvalSplit> {
+        match self {
+            Self::Train => Some(EvalSplit::Train),
+            Self::Test => Some(EvalSplit::Test),
+            Self::All => None,
+        }
+    }
+}
 
 /// A pattern a case's id is matched against, in full.
 ///
@@ -91,27 +114,30 @@ pub enum CaseSelection {
     Narrowed {
         patterns: Vec<CasePattern>,
         tags: Vec<CaseTag>,
+        split: Option<EvalSplit>,
     },
 }
 
 impl CaseSelection {
-    pub fn parse(patterns: &[String], tags: &[String]) -> Result<Self> {
-        if patterns.is_empty() && tags.is_empty() {
+    pub fn parse(patterns: &[String], tags: &[String], split: Option<EvalSplit>) -> Result<Self> {
+        if patterns.is_empty() && tags.is_empty() && split.is_none() {
             return Ok(Self::WholeSuite);
         }
         Ok(Self::Narrowed {
             patterns: patterns.iter().map(|p| CasePattern::parse(p)).collect::<Result<_>>()?,
             tags: tags.iter().map(|t| CaseTag::parse(t)).collect::<Result<_>>()?,
+            split,
         })
     }
 
     pub fn covers(&self, case: &EvalCase) -> bool {
-        let Self::Narrowed { patterns, tags } = self else {
+        let Self::Narrowed { patterns, tags, split } = self else {
             return true;
         };
         let named = patterns.is_empty() || patterns.iter().any(|pattern| pattern.matches(case.id.as_str()));
         let tagged = tags.is_empty() || tags.iter().any(|tag| tag.carried_by(case));
-        named && tagged
+        let split_matches = split.is_none_or(|split| split == case.split);
+        named && tagged && split_matches
     }
 
     /// Narrow a suite's cases, refusing a selection that covers none of them.
@@ -147,7 +173,7 @@ impl CaseSelection {
     /// what tells a narrowed report from a full one, and one present on a full run says a
     /// narrowing happened that did not.
     pub fn record(&self, covered: usize, declared: Vec<String>) -> Option<CaseSelectionRecord> {
-        let Self::Narrowed { patterns, tags } = self else {
+        let Self::Narrowed { patterns, tags, split } = self else {
             return None;
         };
         if covered == declared.len() {
@@ -156,13 +182,14 @@ impl CaseSelection {
         Some(CaseSelectionRecord {
             cases: patterns.iter().map(|pattern| pattern.as_str().to_string()).collect(),
             tags: tags.iter().map(|tag| tag.as_str().to_string()).collect(),
+            split: *split,
             covered,
             declared,
         })
     }
 
     fn describe_narrowing(&self) -> String {
-        let Self::Narrowed { patterns, tags } = self else {
+        let Self::Narrowed { patterns, tags, split } = self else {
             return "the whole suite".to_string();
         };
         let mut parts = Vec::new();
@@ -182,6 +209,9 @@ impl CaseSelection {
                 tags.iter().map(CaseTag::as_str).collect::<Vec<_>>().join(", --tag ")
             ));
         }
+        if let Some(split) = split {
+            parts.push(format!("--split {}", split.as_str()));
+        }
         parts.join(" with ")
     }
 }
@@ -194,6 +224,8 @@ pub struct CaseSelectionRecord {
     pub cases: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split: Option<EvalSplit>,
     pub covered: usize,
     /// Every case ID the suite declared, covered by this run or not.
     pub declared: Vec<String>,
@@ -217,16 +249,26 @@ mod tests {
         .unwrap()
     }
 
+    fn case_with_split(id: &str, split: EvalSplit) -> EvalCase {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "prompt": "Do the thing.",
+            "expected_output": "The thing, done.",
+            "split": split.as_str(),
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn no_flags_covers_the_whole_suite() {
-        let selection = CaseSelection::parse(&[], &[]).unwrap();
+        let selection = CaseSelection::parse(&[], &[], None).unwrap();
         assert!(selection.covers(&case("anything", &[])));
         assert!(selection.record(1, vec!["anything".to_string()]).is_none());
     }
 
     #[test]
     fn a_pattern_matches_a_case_id_in_full() {
-        let selection = CaseSelection::parse(&["analyze-sales".to_string()], &[]).unwrap();
+        let selection = CaseSelection::parse(&["analyze-sales".to_string()], &[], None).unwrap();
         assert!(selection.covers(&case("analyze-sales", &[])));
         assert!(
             !selection.covers(&case("analyze-sales-by-region", &[])),
@@ -236,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_glob_stands_for_the_part_of_an_id_that_varies() {
-        let selection = CaseSelection::parse(&["analyze-*".to_string()], &[]).unwrap();
+        let selection = CaseSelection::parse(&["analyze-*".to_string()], &[], None).unwrap();
         assert!(selection.covers(&case("analyze-sales", &[])));
         assert!(selection.covers(&case("analyze-", &[])));
         assert!(!selection.covers(&case("summarize-sales", &[])));
@@ -244,7 +286,7 @@ mod tests {
 
     #[test]
     fn a_regular_expression_is_read_as_the_literal_id_it_is_not() {
-        let selection = CaseSelection::parse(&["analyze.sales".to_string()], &[]).unwrap();
+        let selection = CaseSelection::parse(&["analyze.sales".to_string()], &[], None).unwrap();
         assert!(selection.covers(&case("analyze.sales", &[])));
         assert!(!selection.covers(&case("analyze-sales", &[])));
     }
@@ -254,6 +296,7 @@ mod tests {
         let selection = CaseSelection::parse(
             &["analyze-*".to_string()],
             &["smoke".to_string(), "regression".to_string()],
+            None,
         )
         .unwrap();
 
@@ -264,7 +307,7 @@ mod tests {
 
     #[test]
     fn an_untagged_case_carries_no_tag_to_select_it_by() {
-        let selection = CaseSelection::parse(&[], &["smoke".to_string()]).unwrap();
+        let selection = CaseSelection::parse(&[], &["smoke".to_string()], None).unwrap();
         let untagged: EvalCase = serde_json::from_value(serde_json::json!({
             "id": "analyze-sales",
             "prompt": "Do the thing.",
@@ -277,7 +320,7 @@ mod tests {
 
     #[test]
     fn a_selection_that_covers_nothing_is_refused() {
-        let selection = CaseSelection::parse(&["typo-*".to_string()], &[]).unwrap();
+        let selection = CaseSelection::parse(&["typo-*".to_string()], &[], None).unwrap();
         let error = selection.apply(vec![case("analyze-sales", &[])]).unwrap_err();
 
         let message = error.to_string();
@@ -287,15 +330,15 @@ mod tests {
 
     #[test]
     fn an_empty_pattern_is_refused_rather_than_matching_nothing() {
-        assert!(CaseSelection::parse(&["   ".to_string()], &[]).is_err());
-        assert!(CaseSelection::parse(&[], &["".to_string()]).is_err());
+        assert!(CaseSelection::parse(&["   ".to_string()], &[], None).is_err());
+        assert!(CaseSelection::parse(&[], &["".to_string()], None).is_err());
     }
 
     /// The field is what tells a narrowed report from a full one, so a pattern that
     /// happens to match every case the suite declares has no narrowing to record.
     #[test]
     fn a_selection_that_matched_every_case_records_no_narrowing() {
-        let selection = CaseSelection::parse(&["analyze-*".to_string()], &[]).unwrap();
+        let selection = CaseSelection::parse(&["analyze-*".to_string()], &[], None).unwrap();
         let declared = vec!["analyze-sales".to_string(), "analyze-refunds".to_string()];
 
         assert!(selection.record(declared.len(), declared).is_none());
@@ -303,13 +346,49 @@ mod tests {
 
     #[test]
     fn a_narrowed_run_records_the_suite_it_selected_from() {
-        let selection = CaseSelection::parse(&["analyze-*".to_string()], &["smoke".to_string()]).unwrap();
+        let selection = CaseSelection::parse(&["analyze-*".to_string()], &["smoke".to_string()], None).unwrap();
         let declared = vec!["analyze-sales".to_string(), "typo-check".to_string()];
         let record = selection.record(1, declared.clone()).unwrap();
 
         assert_eq!(record.cases, vec!["analyze-*"]);
         assert_eq!(record.tags, vec!["smoke"]);
+        assert_eq!(record.split, None);
         assert_eq!(record.covered, 1);
         assert_eq!(record.declared, declared);
+    }
+
+    #[test]
+    fn split_narrows_the_same_way_case_and_tag_do() {
+        let selection = CaseSelection::parse(&[], &[], Some(EvalSplit::Test)).unwrap();
+
+        assert!(selection.covers(&case_with_split("analyze-sales", EvalSplit::Test)));
+        assert!(!selection.covers(&case_with_split("analyze-sales", EvalSplit::Train)));
+    }
+
+    #[test]
+    fn split_composes_with_case_and_tag_as_a_third_narrowing_dimension() {
+        let selection = CaseSelection::parse(
+            &["analyze-*".to_string()],
+            &["smoke".to_string()],
+            Some(EvalSplit::Test),
+        )
+        .unwrap();
+
+        let mut matching = case_with_split("analyze-sales", EvalSplit::Test);
+        matching.tags = Some(vec!["smoke".to_string()]);
+        assert!(selection.covers(&matching));
+
+        let mut wrong_split = matching.clone();
+        wrong_split.split = EvalSplit::Train;
+        assert!(!selection.covers(&wrong_split));
+    }
+
+    #[test]
+    fn a_narrowed_run_records_the_split_it_selected_by() {
+        let selection = CaseSelection::parse(&[], &[], Some(EvalSplit::Test)).unwrap();
+        let declared = vec!["analyze-sales".to_string(), "analyze-refunds".to_string()];
+        let record = selection.record(1, declared).unwrap();
+
+        assert_eq!(record.split, Some(EvalSplit::Test));
     }
 }

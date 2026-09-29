@@ -126,6 +126,16 @@
           },
           "type": "array"
         },
+        "split": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvalSplit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "tags": {
           "items": {
             "type": "string"
@@ -327,6 +337,14 @@
         "normal",
         "high",
         "critical"
+      ],
+      "type": "string"
+    },
+    "EvalSplit": {
+      "description": "Which side of the train/test boundary a case belongs to.\n\nA suite that never withholds a case from training cannot tell a skill that got\nbetter from one that learned the suite, and every overfitting check depends on a\nsplit existing. A case declares its side as a typed field rather than a tag\nconvention, so nothing downstream has to trust that a tag was spelled consistently.",
+      "enum": [
+        "train",
+        "test"
       ],
       "type": "string"
     },
@@ -1243,6 +1261,15 @@
         },
         "skill_revision_id": {
           "type": "string"
+        },
+        "split": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/EvalSplit"
+            }
+          ],
+          "default": "train",
+          "description": "The case's train/test split, read back from the bundle rather than the manifest,\nso a downstream command sees the split a run was actually recorded under even if\nthe suite has since been edited."
         },
         "status": {
           "type": "string"

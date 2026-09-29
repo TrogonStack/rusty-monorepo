@@ -784,7 +784,7 @@ ul.artifacts { padding-left: 1.2rem; }\n\
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agentskills::evals::EvalDirName;
+    use crate::agentskills::evals::{EvalDirName, EvalSplit};
     use crate::agentskills::grading::{GraderInfo, GraderKind};
     use crate::agentskills::report::{
         CiSection, DimensionsSection, ProducerSection, ReportSection, RunMetrics, RunPaths, SuiteSection,
@@ -836,6 +836,7 @@ mod tests {
                 id: "run-001".to_string(),
                 eval_case_id: SCRIPT_PAYLOAD.to_string(),
                 eval_slug: "case".to_string(),
+                split: EvalSplit::Train,
                 scenario_id: ScenarioKind::WithSkill,
                 iteration: 1,
                 model_config_id: "default".to_string(),
@@ -976,6 +977,7 @@ mod tests {
             id: "run-001".to_string(),
             eval_case_id: "case".to_string(),
             eval_slug: "case".to_string(),
+            split: EvalSplit::Train,
             scenario_id: ScenarioKind::WithSkill,
             iteration: 1,
             model_config_id: "default".to_string(),

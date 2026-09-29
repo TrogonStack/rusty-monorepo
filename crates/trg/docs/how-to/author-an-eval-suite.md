@@ -94,7 +94,36 @@ Declare `"skill_disclosure": "unannounced"` so the run answers it:
 `skill_used` is settled by whether the skill was staged, so it is reported in
 both arms and scored in neither. Read it on its own; it is not the delta.
 
-## 5. Check the suite before spending a run
+## 5. Assign each case to train or test
+
+A suite that never withholds a case from training cannot tell a skill that got
+better from one that learned the suite. Declare `"split": "test"` on at least
+one case per claim you care about generalizing, and leave the rest on the
+default `"split": "train"`:
+
+```json
+{
+  "id": "totals-by-month-different-fixture",
+  "prompt": "Read evals/files/q3_sales.csv and write outputs/summary.md with a markdown table giving each month's revenue total.",
+  "expected_output": "outputs/summary.md holds a markdown table with one row per month in the fixture.",
+  "files": ["evals/files/q3_sales.csv"],
+  "split": "test",
+  "graders": [
+    { "type": "file_exists", "path": "summary.md" },
+    { "type": "contains", "text": "9500", "target": { "file": "summary.md" } }
+  ]
+}
+```
+
+A held-out case earns its keep by differing from the train cases in something
+the skill's guidance does not special-case: a different fixture, a differently
+worded prompt for the same claim. A copy of a train case with a new id checks
+nothing that case did not already check.
+
+`eval verify` warns when a suite declares no `test` case, since every
+overfitting check below depends on one existing.
+
+## 6. Check the suite before spending a run
 
 ```shell
 $ trg ai skills eval verify --skill-dir ./skills/my-skill --mode strict
@@ -103,12 +132,13 @@ $ trg ai skills eval verify --skill-dir ./skills/my-skill --mode strict
 `--mode strict` requires each case to declare at least one grader,
 and the same invocation prints the lint warnings: vague prompts, generic
 `expected_output`, duplicate fixture paths, fixtures the prompt never mentions,
-and a case that checks skill engagement from a prompt that announces the skill.
+a case that checks skill engagement from a prompt that announces the skill,
+and a suite with no case declaring `"split": "test"`.
 
 `--lint-evals` on `eval run` prints the same warnings, but only once the pass is
 already running.
 
-## 6. Run both arms
+## 7. Run both arms
 
 ```shell
 $ trg ai skills eval run \
@@ -127,7 +157,7 @@ copied. See
 [Run with a skill vs without a skill](run-with-skill-vs-without-skill.md) for
 what each scenario stages.
 
-## 7. Read the delta
+## 8. Read the delta
 
 `benchmark.json` answers the bar in three places:
 
@@ -141,20 +171,25 @@ what each scenario stages.
   large the subtraction looks. At three draws an arm that is the ordinary
   result.
 
+`by_split.train` and `by_split.test` hold the same three answers narrowed to
+each split. A gain that shows up under `by_split.train` but flattens under
+`by_split.test` is the suite fitting itself to the cases it was measured on,
+not the skill.
+
 For per-assertion rates with the attempt counts behind them:
 
 ```shell
 $ trg ai skills eval iteration-summary ./artifacts/my-skill/20260914T120000Z-abcd1234
 ```
 
-## 8. Repair what measured nothing
+## 9. Repair what measured nothing
 
 For each check in `always_pass`, either tighten it to something the guidance
 actually changes, or drop the case because the claim is not real. For each check
 in `always_fail`, suspect the case before the skill: read one run's transcript
 and `grading.json` first.
 
-Then return to step 5. The suite is finished when every case you kept appears in
+Then return to step 6. The suite is finished when every case you kept appears in
 `helped_by_skill`.
 
 ## What this workflow does not automate

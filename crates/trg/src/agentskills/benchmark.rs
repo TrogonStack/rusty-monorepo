@@ -11,7 +11,7 @@ use super::eval_suite_drift::{
     detect_eval_suite_drift_snapshots, load_report_drift_snapshot, maybe_emit_eval_suite_drift_warning,
     parse_report_iteration, EvalSuiteDriftWarning,
 };
-use super::evals::{EvalError, Result};
+use super::evals::{EvalError, EvalSplit, Result};
 use super::iteration_summary::detect_previous_report_dir;
 use super::proportion::{self, Interval, Proportion};
 use super::report::ScenarioKind;
@@ -40,6 +40,10 @@ pub struct BenchmarkDocument {
     pub failed_runs_mode: FailedRunsMode,
     pub scenarios: BTreeMap<String, ScenarioBenchmark>,
     pub deltas: ScenarioDeltas,
+    /// The same scenario stats and deltas, narrowed to each split, so a train gain and a
+    /// flat test result sit side by side with the overall numbers above rather than
+    /// requiring a second run of this command per split.
+    pub by_split: BTreeMap<EvalSplit, SplitBenchmark>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iteration_comparison: Option<IterationComparison>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -298,6 +302,12 @@ pub struct ArmObservations {
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SplitBenchmark {
+    pub scenarios: BTreeMap<String, ScenarioBenchmark>,
+    pub deltas: ScenarioDeltas,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct IterationComparison {
     pub current_iteration_id: String,
     pub previous_iteration_id: String,
@@ -342,6 +352,8 @@ struct IterationMeta {
 struct RunForBenchmark {
     id: String,
     eval_case_id: String,
+    #[serde(default)]
+    split: EvalSplit,
     scenario_id: ScenarioKind,
     attempt: u32,
     status: String,
@@ -444,33 +456,20 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
     let content = std::fs::read_to_string(&report_path)?;
     let report: ReportForBenchmark = serde_json::from_str(&content)?;
 
-    let mut by_scenario: HashMap<ScenarioKind, ScenarioAccumulator> = HashMap::new();
-    for run in &report.runs {
-        let entry = by_scenario.entry(run.scenario_id).or_default();
-        let sample = load_run_sample(report_dir, &run.paths.workspace);
+    let (scenario_map, deltas) = aggregate_scenarios(report_dir, report.runs.iter(), options.failed_runs);
 
-        match classify_run(run, options.failed_runs) {
-            RunDisposition::Completed => entry.completed.push(sample),
-            RunDisposition::Failed => entry.failed.push(sample),
-            RunDisposition::Skipped => entry.skipped += 1,
-            RunDisposition::Excluded => {}
-        }
-    }
-
-    let scenarios: Vec<(ScenarioKind, ScenarioBenchmark)> = ScenarioKind::ALL
-        .iter()
-        .map(|scenario| {
-            let accumulator = by_scenario.remove(scenario).unwrap_or_default();
-            (*scenario, finalize_scenario(accumulator, options.failed_runs))
+    let by_split: BTreeMap<EvalSplit, SplitBenchmark> = EvalSplit::ALL
+        .into_iter()
+        .map(|split| {
+            let (scenarios, deltas) = aggregate_scenarios(
+                report_dir,
+                report.runs.iter().filter(|run| run.split == split),
+                options.failed_runs,
+            );
+            (split, SplitBenchmark { scenarios, deltas })
         })
         .collect();
 
-    let scenario_map: BTreeMap<String, ScenarioBenchmark> = scenarios
-        .iter()
-        .map(|(kind, bench)| (kind.as_str().to_string(), bench.clone()))
-        .collect();
-
-    let deltas = compute_scenario_deltas(&scenarios);
     let failed_runs = options.failed_runs;
     let allow_eval_suite_drift = options.allow_eval_suite_drift;
     let previous_report_dir = options.previous_report_dir.clone();
@@ -492,6 +491,7 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
         failed_runs_mode: failed_runs,
         scenarios: scenario_map,
         deltas,
+        by_split,
         iteration_comparison,
         by_eval_scenario,
         iteration_summary,
@@ -557,6 +557,45 @@ pub fn sync_iteration_summary_to_report(report_dir: &Path, summary: &IterationSu
     document["iteration_summary"] = serde_json::to_value(summary)?;
     std::fs::write(report_path, serde_json::to_string_pretty(&document)?)?;
     Ok(())
+}
+
+/// Group a set of runs by scenario and reduce each scenario to its stats and the deltas
+/// between arms, the same reduction `build_benchmark` applies to the whole report and
+/// `by_split` applies once per split, so a split's numbers are never a second, drifting
+/// implementation of what the overall numbers already compute.
+fn aggregate_scenarios<'a>(
+    report_dir: &Path,
+    runs: impl Iterator<Item = &'a RunForBenchmark>,
+    mode: FailedRunsMode,
+) -> (BTreeMap<String, ScenarioBenchmark>, ScenarioDeltas) {
+    let mut by_scenario: HashMap<ScenarioKind, ScenarioAccumulator> = HashMap::new();
+    for run in runs {
+        let entry = by_scenario.entry(run.scenario_id).or_default();
+        let sample = load_run_sample(report_dir, &run.paths.workspace);
+
+        match classify_run(run, mode) {
+            RunDisposition::Completed => entry.completed.push(sample),
+            RunDisposition::Failed => entry.failed.push(sample),
+            RunDisposition::Skipped => entry.skipped += 1,
+            RunDisposition::Excluded => {}
+        }
+    }
+
+    let scenarios: Vec<(ScenarioKind, ScenarioBenchmark)> = ScenarioKind::ALL
+        .iter()
+        .map(|scenario| {
+            let accumulator = by_scenario.remove(scenario).unwrap_or_default();
+            (*scenario, finalize_scenario(accumulator, mode))
+        })
+        .collect();
+
+    let scenario_map: BTreeMap<String, ScenarioBenchmark> = scenarios
+        .iter()
+        .map(|(kind, bench)| (kind.as_str().to_string(), bench.clone()))
+        .collect();
+
+    let deltas = compute_scenario_deltas(&scenarios);
+    (scenario_map, deltas)
 }
 
 enum RunDisposition {

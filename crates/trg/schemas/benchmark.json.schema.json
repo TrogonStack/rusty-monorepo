@@ -640,6 +640,24 @@
       ],
       "type": "object"
     },
+    "SplitBenchmark": {
+      "properties": {
+        "deltas": {
+          "$ref": "#/$defs/ScenarioDeltas"
+        },
+        "scenarios": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ScenarioBenchmark"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "scenarios",
+        "deltas"
+      ],
+      "type": "object"
+    },
     "TokenStats": {
       "description": "The shape a bucket's tokens are written in, which is the shape every earlier release\nstill reads. `cost_usd` was that release's whole vocabulary for cost, and it was read\nas the bucket's cost, so it is published for exactly the buckets whose total is that:\na partial total under that name is the reading this field was changed to stop.",
       "properties": {
@@ -698,6 +716,19 @@
       },
       "type": "array"
     },
+    "by_split": {
+      "additionalProperties": false,
+      "description": "The same scenario stats and deltas, narrowed to each split, so a train gain and a\nflat test result sit side by side with the overall numbers above rather than\nrequiring a second run of this command per split.",
+      "properties": {
+        "test": {
+          "$ref": "#/$defs/SplitBenchmark"
+        },
+        "train": {
+          "$ref": "#/$defs/SplitBenchmark"
+        }
+      },
+      "type": "object"
+    },
     "deltas": {
       "$ref": "#/$defs/ScenarioDeltas"
     },
@@ -742,6 +773,7 @@
     "failed_runs_mode",
     "scenarios",
     "deltas",
+    "by_split",
     "iteration_summary"
   ],
   "title": "trg skills eval benchmark",
