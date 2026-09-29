@@ -7,7 +7,7 @@
 //! not separated the arms looks like one.
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The two-sided normal deviate for 95% coverage.
 const DEVIATE: f64 = 1.959_963_985;
@@ -71,7 +71,7 @@ impl Proportion {
 }
 
 /// The range a measurement is consistent with.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Interval {
     low: f64,
     high: f64,

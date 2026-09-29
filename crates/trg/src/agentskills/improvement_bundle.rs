@@ -8,11 +8,15 @@ use chrono::{SecondsFormat, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::benchmark::{
+    aggregate_scenarios_for_records, FailedRunsMode, PassFailSummary, ScenarioBenchmark, ScenarioDelta, ScenarioDeltas,
+};
 use super::case_directories::{resolve_eval_suite, EvalSource};
 use super::eval_suite_drift::{detect_eval_suite_drift_vs_skill, maybe_emit_eval_suite_drift_warning};
-use super::evals::{EvalDirName, EvalError, Result, EVAL_SUITE_MANIFEST_NAME};
+use super::evals::{EvalDirName, EvalError, EvalSplit, Result, EVAL_SUITE_MANIFEST_NAME};
 use super::feedback::{load_run_feedback_entries, FeedbackNote};
 use super::grading::{GradingCounts, GradingFile};
+use super::proportion::Interval;
 use super::report::{ReportDocument, RunRecord, ScenarioKind};
 
 pub const BUNDLE_MD_NAME: &str = "improvement-bundle.md";
@@ -131,7 +135,107 @@ pub struct TranscriptExcerpt {
     pub tail: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+/// A summary of assertion and run pass rates, with none of the case content behind them.
+///
+/// Mirrors [`PassFailSummary`] rather than reusing it directly, so the held-out section
+/// never has to widen to whatever else a `ScenarioBenchmark` publishes (durations, tokens,
+/// cost) just to round-trip through JSON.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
+pub struct HeldOutPassFailSummary {
+    pub passed: usize,
+    pub failed: usize,
+    pub total: usize,
+    pub pass_rate: f64,
+}
+
+impl From<&PassFailSummary> for HeldOutPassFailSummary {
+    fn from(summary: &PassFailSummary) -> Self {
+        Self {
+            passed: summary.passed,
+            failed: summary.failed,
+            total: summary.total,
+            pass_rate: summary.pass_rate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct HeldOutScenarioStats {
+    pub run_count: usize,
+    pub assertions: HeldOutPassFailSummary,
+    pub runs: HeldOutPassFailSummary,
+}
+
+impl From<&ScenarioBenchmark> for HeldOutScenarioStats {
+    fn from(bench: &ScenarioBenchmark) -> Self {
+        Self {
+            run_count: bench.completed.run_count,
+            assertions: HeldOutPassFailSummary::from(&bench.completed.assertions),
+            runs: HeldOutPassFailSummary::from(&bench.completed.runs),
+        }
+    }
+}
+
+/// The same subtraction [`ScenarioDelta`] publishes, narrowed to the pass rates and their
+/// intervals, so the held-out section can say a skill helped on withheld cases without
+/// carrying the duration, token, or cost fields a delta over case content has no bearing on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct HeldOutDelta {
+    pub assertion_pass_rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertion_pass_rate_interval: Option<Interval>,
+    pub run_pass_rate: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_pass_rate_interval: Option<Interval>,
+}
+
+impl From<&ScenarioDelta> for HeldOutDelta {
+    fn from(delta: &ScenarioDelta) -> Self {
+        Self {
+            assertion_pass_rate: delta.assertion_pass_rate,
+            assertion_pass_rate_interval: delta.assertion_pass_rate_interval,
+            run_pass_rate: delta.run_pass_rate,
+            run_pass_rate_interval: delta.run_pass_rate_interval,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
+pub struct HeldOutDeltas {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_skill_vs_without_skill: Option<HeldOutDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub with_skill_vs_old_skill: Option<HeldOutDelta>,
+}
+
+impl From<&ScenarioDeltas> for HeldOutDeltas {
+    fn from(deltas: &ScenarioDeltas) -> Self {
+        Self {
+            with_skill_vs_without_skill: deltas.with_skill_vs_without_skill.as_ref().map(HeldOutDelta::from),
+            with_skill_vs_old_skill: deltas.with_skill_vs_old_skill.as_ref().map(HeldOutDelta::from),
+        }
+    }
+}
+
+/// What the bundle says about the suite's `test`-split cases, instead of showing them.
+///
+/// A missing field would read as an oversight; a variant that names the empty case as
+/// explicitly as the populated one is what lets the markdown nudge toward declaring test
+/// cases rather than silently omitting a section.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HeldOutSection {
+    /// The suite declares no `test`-split cases, so nothing was withheld from this bundle.
+    NoTestCases,
+    Withheld {
+        test_case_count: usize,
+        test_run_count: usize,
+        scenarios: BTreeMap<String, HeldOutScenarioStats>,
+        deltas: HeldOutDeltas,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct ImprovementBundleDocument {
     pub generated_at: String,
     pub source_report_dir: String,
@@ -142,10 +246,11 @@ pub struct ImprovementBundleDocument {
     pub human_feedback: Vec<HumanFeedbackGroup>,
     pub human_feedback_summary: HumanFeedbackSectionSummary,
     pub transcript_excerpts: Vec<TranscriptExcerpt>,
+    pub held_out: HeldOutSection,
     pub suggested_focus: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImprovementBundleOutput {
     pub output_dir: PathBuf,
     pub markdown_path: PathBuf,
@@ -199,7 +304,7 @@ pub fn build_improvement_bundle(
     let eval_suite_drift = eval_suite_drift_from_report(&report, &skill_path, &eval_dir, drift_report)?;
 
     let failed_assertions = collect_failed_assertion_groups(from_report_dir, &report)?;
-    let (feedback_by_run, human_feedback_summary) = index_run_feedback(from_report_dir)?;
+    let (feedback_by_run, human_feedback_summary) = index_run_feedback(from_report_dir, &report)?;
     let failed_assertions = attach_feedback_to_failures(failed_assertions, &feedback_by_run);
     let human_feedback = collect_human_feedback_groups(&report, &feedback_by_run);
     let failed_run_ids = failed_run_ids(from_report_dir, &report, &failed_assertions);
@@ -207,6 +312,7 @@ pub fn build_improvement_bundle(
     let transcript_excerpts = collect_transcript_excerpts(from_report_dir, &report, &failed_run_ids, excerpt_lines);
     let suggested_focus = derive_suggested_focus(from_report_dir, &report, &failed_assertions);
     let summary = build_summary(&report, from_report_dir)?;
+    let held_out = build_held_out_section(from_report_dir, &report);
 
     Ok(ImprovementBundleDocument {
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
@@ -218,8 +324,40 @@ pub fn build_improvement_bundle(
         human_feedback,
         human_feedback_summary,
         transcript_excerpts,
+        held_out,
         suggested_focus,
     })
+}
+
+/// The withheld test-split runs' aggregate pass rates, computed with the same reduction
+/// [`build_benchmark`](super::benchmark::build_benchmark) applies to a whole report, so this
+/// number is never a second, drifting implementation of what a benchmark already computes.
+fn build_held_out_section(report_dir: &Path, report: &ReportDocument) -> HeldOutSection {
+    let test_runs: Vec<&RunRecord> = report.runs.iter().filter(|run| run.split == EvalSplit::Test).collect();
+    if test_runs.is_empty() {
+        return HeldOutSection::NoTestCases;
+    }
+
+    let test_case_count = test_runs
+        .iter()
+        .map(|run| run.eval_case_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let test_run_count = test_runs.len();
+
+    let (scenarios, deltas) =
+        aggregate_scenarios_for_records(report_dir, test_runs.into_iter(), FailedRunsMode::default());
+    let scenarios: BTreeMap<String, HeldOutScenarioStats> = scenarios
+        .iter()
+        .map(|(kind, bench)| (kind.clone(), HeldOutScenarioStats::from(bench)))
+        .collect();
+
+    HeldOutSection::Withheld {
+        test_case_count,
+        test_run_count,
+        scenarios,
+        deltas: HeldOutDeltas::from(&deltas),
+    }
 }
 
 pub fn write_improvement_bundle(
@@ -250,17 +388,49 @@ fn eval_suite_drift_from_report(
     eval_dir: &EvalDirName,
     drift_report: Option<super::eval_suite_drift::EvalSuiteDriftReport>,
 ) -> Result<EvalSuiteDrift> {
-    let evals_path = match resolve_eval_suite(&crate::fs::RealFS, skill_path, eval_dir) {
-        Ok(compiled) => match compiled.source {
-            EvalSource::Manifest { path } => path,
-            EvalSource::CaseDirectories { root } => root,
+    let compiled = resolve_eval_suite(&crate::fs::RealFS, skill_path, eval_dir).ok();
+    let evals_path = match &compiled {
+        Some(compiled) => match &compiled.source {
+            EvalSource::Manifest { path } => path.clone(),
+            EvalSource::CaseDirectories { root } => root.clone(),
         },
-        Err(_) => skill_path.join(eval_dir.as_str()).join(EVAL_SUITE_MANIFEST_NAME),
+        None => skill_path.join(eval_dir.as_str()).join(EVAL_SUITE_MANIFEST_NAME),
     };
     let previous_hash = report.suite.evals_hash.clone();
     let detected = drift_report.is_some();
     let (current_hash, added_eval_ids, removed_eval_ids) = if let Some(drift) = drift_report {
-        (Some(drift.current_hash), drift.added_eval_ids, drift.removed_eval_ids)
+        // An added id only exists in the current suite, read fresh off disk; a removed id
+        // only exists in the report being improved on. Neither list may name a test-split
+        // case, so each is filtered against the split record that actually covers it.
+        let current_split_by_id: HashMap<&str, EvalSplit> = compiled
+            .as_ref()
+            .map(|compiled| {
+                compiled
+                    .suite
+                    .evals
+                    .iter()
+                    .map(|eval| (eval.id.as_str(), eval.split))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let previous_split_by_id: HashMap<&str, EvalSplit> = report
+            .runs
+            .iter()
+            .map(|run| (run.eval_case_id.as_str(), run.split))
+            .collect();
+
+        let added_eval_ids = drift
+            .added_eval_ids
+            .into_iter()
+            .filter(|id| current_split_by_id.get(id.as_str()).copied().unwrap_or_default() != EvalSplit::Test)
+            .collect();
+        let removed_eval_ids = drift
+            .removed_eval_ids
+            .into_iter()
+            .filter(|id| previous_split_by_id.get(id.as_str()).copied().unwrap_or_default() != EvalSplit::Test)
+            .collect();
+
+        (Some(drift.current_hash), added_eval_ids, removed_eval_ids)
     } else {
         (None, Vec::new(), Vec::new())
     };
@@ -285,14 +455,18 @@ fn eval_suite_drift_from_report(
     })
 }
 
+/// Only the train-split runs, so the summary describes what the reviser can act on. The
+/// withheld test-split runs get their own aggregate in [`build_held_out_section`].
 fn build_summary(report: &ReportDocument, report_dir: &Path) -> Result<BundleSummary> {
     let mut passed_assertions = 0usize;
     let mut failed_assertions = 0usize;
     let mut completed_runs = 0usize;
     let mut failed_runs = 0usize;
     let mut skipped_runs = 0usize;
+    let mut total_runs = 0usize;
 
-    for run in &report.runs {
+    for run in report.runs.iter().filter(|run| run.split != EvalSplit::Test) {
+        total_runs += 1;
         match run.status.as_str() {
             "failed" => failed_runs += 1,
             "skipped" => skipped_runs += 1,
@@ -321,7 +495,7 @@ fn build_summary(report: &ReportDocument, report_dir: &Path) -> Result<BundleSum
         skill_name: report.suite.skill_name.clone(),
         skill_hash: report.suite.skill_hash.clone(),
         evals_hash: report.suite.evals_hash.clone(),
-        total_runs: report.runs.len(),
+        total_runs,
         passed_assertions,
         failed_assertions,
         completed_runs,
@@ -330,6 +504,8 @@ fn build_summary(report: &ReportDocument, report_dir: &Path) -> Result<BundleSum
     })
 }
 
+/// Excludes test-split runs: a failed assertion carries the assertion text and grader
+/// evidence, both case-specific content the held-out score must not leak.
 fn collect_failed_assertion_groups(report_dir: &Path, report: &ReportDocument) -> Result<Vec<FailedAssertionGroup>> {
     let slug_by_case: HashMap<&str, &str> = report
         .dimensions
@@ -340,7 +516,7 @@ fn collect_failed_assertion_groups(report_dir: &Path, report: &ReportDocument) -
 
     let mut groups: BTreeMap<String, FailedAssertionGroup> = BTreeMap::new();
 
-    for run in &report.runs {
+    for run in report.runs.iter().filter(|run| run.split != EvalSplit::Test) {
         let grading_path = grading_path_for_run(report_dir, run);
         if !grading_path.is_file() {
             continue;
@@ -376,14 +552,29 @@ fn collect_failed_assertion_groups(report_dir: &Path, report: &ReportDocument) -
     Ok(groups.into_values().collect())
 }
 
+/// Excludes feedback recorded against test-split runs entirely: a feedback note is a
+/// reviewer's free-form text about a specific case, and even an empty one identifies which
+/// run it was reviewed against.
 fn index_run_feedback(
     report_dir: &Path,
+    report: &ReportDocument,
 ) -> Result<(HashMap<String, HumanFeedbackAttachment>, HumanFeedbackSectionSummary)> {
+    let test_run_ids: HashSet<&str> = report
+        .runs
+        .iter()
+        .filter(|run| run.split == EvalSplit::Test)
+        .map(|run| run.id.as_str())
+        .collect();
+
     let entries = load_run_feedback_entries(report_dir)?;
     let mut feedback_by_run = HashMap::new();
     let mut reviewed_no_issues_runs = 0usize;
 
     for entry in entries {
+        if test_run_ids.contains(entry.run_id.as_str()) {
+            continue;
+        }
+
         if entry.feedback.notes.is_empty() {
             reviewed_no_issues_runs += 1;
             continue;
@@ -433,7 +624,7 @@ fn collect_human_feedback_groups(
 
     let mut groups: BTreeMap<(String, ScenarioKind), HumanFeedbackGroup> = BTreeMap::new();
 
-    for run in &report.runs {
+    for run in report.runs.iter().filter(|run| run.split != EvalSplit::Test) {
         let Some(feedback) = feedback_by_run.get(&run.id) else {
             continue;
         };
@@ -462,7 +653,7 @@ fn failed_run_ids(report_dir: &Path, report: &ReportDocument, groups: &[FailedAs
         .flat_map(|group| group.failures.iter().map(|failure| failure.run_id.clone()))
         .collect();
 
-    for run in &report.runs {
+    for run in report.runs.iter().filter(|run| run.split != EvalSplit::Test) {
         if run.status == "failed" {
             ids.insert(run.id.clone());
         }
@@ -500,7 +691,7 @@ fn collect_transcript_excerpts(
     let mut excerpts = Vec::new();
 
     for run in &report.runs {
-        if !failed_run_ids.contains(&run.id) {
+        if run.split == EvalSplit::Test || !failed_run_ids.contains(&run.id) {
             continue;
         }
 
@@ -570,10 +761,12 @@ fn derive_suggested_focus(report_dir: &Path, report: &ReportDocument, groups: &[
     focus
 }
 
+/// Excludes test-split runs: the focus string this emits names the eval case ID outright.
 fn underperforming_with_skill_focus(report_dir: &Path, report: &ReportDocument) -> Vec<String> {
     let mut by_case_scenario: HashMap<(String, ScenarioKind), (usize, usize)> = HashMap::new();
+    let train_runs: Vec<&RunRecord> = report.runs.iter().filter(|run| run.split != EvalSplit::Test).collect();
 
-    for run in &report.runs {
+    for run in train_runs.iter().copied() {
         let grading_path = grading_path_for_run(report_dir, run);
         if !grading_path.is_file() {
             continue;
@@ -593,7 +786,7 @@ fn underperforming_with_skill_focus(report_dir: &Path, report: &ReportDocument) 
         entry.1 += counts.failed;
     }
 
-    let eval_cases: HashSet<String> = report.runs.iter().map(|run| run.eval_case_id.clone()).collect();
+    let eval_cases: HashSet<String> = train_runs.iter().map(|run| run.eval_case_id.clone()).collect();
     let mut focus = Vec::new();
 
     for eval_case_id in eval_cases {
@@ -675,6 +868,50 @@ pub fn render_improvement_bundle_markdown(document: &ImprovementBundleDocument) 
         }
     }
     md.push('\n');
+
+    md.push_str("## Held-Out Test Cases\n\n");
+    match &document.held_out {
+        HeldOutSection::NoTestCases => {
+            md.push_str(
+                "_This suite declares no `test`-split cases, so nothing was held out. \
+                 Declare at least one case with `\"split\": \"test\"` so a later bundle can \
+                 report a score this skill was not tuned against._\n\n",
+            );
+        }
+        HeldOutSection::Withheld {
+            test_case_count,
+            test_run_count,
+            scenarios,
+            deltas,
+        } => {
+            md.push_str(&format!(
+                "_{test_case_count} test-split case(s) ({test_run_count} run(s)) were withheld \
+                 from this bundle. Their prompts, transcripts, and failed assertions are not \
+                 shown here; only their aggregate pass rates are, so a revision made from this \
+                 bundle is not tuned against the score below._\n\n",
+            ));
+            for (scenario, stats) in scenarios {
+                md.push_str(&format!(
+                    "- {scenario}: {} run(s), assertions {}/{} passed ({:.0}%), runs {}/{} passed ({:.0}%)\n",
+                    stats.run_count,
+                    stats.assertions.passed,
+                    stats.assertions.total,
+                    stats.assertions.pass_rate * 100.0,
+                    stats.runs.passed,
+                    stats.runs.total,
+                    stats.runs.pass_rate * 100.0,
+                ));
+            }
+            if let Some(delta) = &deltas.with_skill_vs_without_skill {
+                md.push_str(&format!(
+                    "- with_skill vs without_skill: assertion pass rate delta {:.1}%, run pass rate delta {:.1}%\n",
+                    delta.assertion_pass_rate * 100.0,
+                    delta.run_pass_rate * 100.0,
+                ));
+            }
+            md.push('\n');
+        }
+    }
 
     md.push_str("## Failed Assertions\n\n");
     if document.failed_assertions.is_empty() {
@@ -888,6 +1125,13 @@ pub(crate) mod testutil {
                         "prompt": "prompt b",
                         "expected_output": "output b",
                         "graders": [{ "type": "contains", "text": "assert b" }]
+                    },
+                    {
+                        "id": "case-c-held-out",
+                        "prompt": "TESTLEAK-PROMPT-C",
+                        "expected_output": "output c",
+                        "graders": [{ "type": "contains", "text": "assert c" }],
+                        "split": "test"
                     }
                 ]
             }"#,
@@ -943,6 +1187,21 @@ pub(crate) mod testutil {
         write_transcript(&report_dir.join("runs/run-001"), 450);
         write_transcript(&report_dir.join("runs/run-003"), 10);
 
+        write_grading(
+            &report_dir.join("runs/run-005"),
+            "assert c",
+            false,
+            "TESTLEAK-EVIDENCE-C",
+        );
+        write_grading(&report_dir.join("runs/run-006"), "assert c", true, "found assert c");
+        write_feedback(&report_dir.join("runs/run-005"), "TESTLEAK-FEEDBACK-NOTE");
+        std::fs::create_dir_all(report_dir.join("runs/run-005")).unwrap();
+        std::fs::write(
+            report_dir.join("runs/run-005/transcript.jsonl"),
+            "TESTLEAK-TRANSCRIPT-MARKER\n",
+        )
+        .unwrap();
+
         std::fs::create_dir_all(skill_root.join("evals")).unwrap();
         std::fs::write(
             skill_root.join("evals/evals.json"),
@@ -965,6 +1224,7 @@ mod tests {
 
     use super::*;
     use crate::agentskills::report::ScenarioKind;
+    use crate::fs::FileSystem;
 
     fn prior_report(temp: &tempfile::TempDir) -> ReportDocument {
         let skill_root = temp.path().join("current-skill");
@@ -1216,5 +1476,129 @@ mod tests {
         let markdown = render_improvement_bundle_markdown(&document);
         assert!(markdown.contains("reviewed with no issues"));
         assert!(!markdown.contains("run-002"));
+    }
+
+    #[test]
+    fn bundle_withholds_test_split_content_and_reports_only_its_pass_rate() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill_root = temp.path().join("current-skill");
+        let report_dir = sample_prior_iteration_fixture(&temp, &skill_root);
+
+        let document = build_improvement_bundle(
+            &report_dir,
+            NextIterationOptions {
+                skill_dir: Some(skill_root),
+                ..NextIterationOptions::default()
+            },
+        )
+        .unwrap();
+        let json = serde_json::to_string_pretty(&document).unwrap();
+        let markdown = render_improvement_bundle_markdown(&document);
+
+        for leak in [
+            "TESTLEAK-PROMPT-C",
+            "TESTLEAK-EVIDENCE-C",
+            "TESTLEAK-FEEDBACK-NOTE",
+            "TESTLEAK-TRANSCRIPT-MARKER",
+            "case-c-held-out",
+            "run-005",
+            "run-006",
+        ] {
+            assert!(!json.contains(leak), "bundle JSON leaked held-out content: {leak}");
+            assert!(
+                !markdown.contains(leak),
+                "bundle markdown leaked held-out content: {leak}"
+            );
+        }
+
+        match &document.held_out {
+            HeldOutSection::Withheld {
+                test_case_count,
+                test_run_count,
+                scenarios,
+                ..
+            } => {
+                assert_eq!(*test_case_count, 1);
+                assert_eq!(*test_run_count, 2);
+                assert!(!scenarios.is_empty());
+            }
+            HeldOutSection::NoTestCases => panic!("expected a withheld test case"),
+        }
+        assert!(markdown.contains("Held-Out Test Cases"));
+        assert!(markdown.contains("withheld"));
+    }
+
+    #[test]
+    fn bundle_nudges_toward_declaring_test_cases_when_none_exist() {
+        let temp = tempfile::tempdir().unwrap();
+        let fs = crate::fs::testutil::MemFS::new();
+        let skill_path = Path::new("no-test-skill");
+        fs.insert(
+            skill_path.join("SKILL.md"),
+            "---\nname: no-test-skill\ndescription: d\n---\n",
+        );
+        fs.insert(
+            skill_path.join("evals/evals.json"),
+            r#"{
+                "skill_name": "no-test-skill",
+                "evals": [
+                    {
+                        "id": "only-case",
+                        "prompt": "prompt",
+                        "expected_output": "output",
+                        "graders": [{ "type": "contains", "text": "assert" }]
+                    }
+                ]
+            }"#,
+        );
+
+        let bundle = crate::agentskills::report::build_report_bundle(
+            &fs,
+            skill_path,
+            skill_path,
+            "no-test-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            crate::agentskills::report::BuildReportOptions {
+                report_id: Some("report-iter-1".to_string()),
+                generated_at: Some("2026-05-26T12:00:00Z".to_string()),
+                iteration: Some(1),
+                ..crate::agentskills::report::BuildReportOptions::default()
+            },
+        )
+        .unwrap();
+        let report_dir = crate::agentskills::report::write_report_bundle(
+            temp.path(),
+            &bundle,
+            crate::agentskills::report::WriteReportOptions::default(),
+        )
+        .unwrap();
+
+        let skill_root = temp.path().join("current-skill");
+        std::fs::create_dir_all(skill_root.join("evals")).unwrap();
+        std::fs::write(
+            skill_root.join("evals/evals.json"),
+            fs.read_to_string(&skill_path.join("evals/evals.json")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            skill_root.join("SKILL.md"),
+            fs.read_to_string(&skill_path.join("SKILL.md")).unwrap(),
+        )
+        .unwrap();
+
+        let document = build_improvement_bundle(
+            &report_dir,
+            NextIterationOptions {
+                skill_dir: Some(skill_root),
+                ..NextIterationOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(document.held_out, HeldOutSection::NoTestCases);
+        let markdown = render_improvement_bundle_markdown(&document);
+        assert!(markdown.contains("Held-Out Test Cases"));
+        assert!(markdown.contains("Declare at least one case"));
     }
 }

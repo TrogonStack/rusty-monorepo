@@ -176,6 +176,12 @@ worded prompt for the same claim. A copy of a train case with a new id checks
 nothing that case did not already check. The linter warns when a suite
 declares no `test` case.
 
+`eval next-iteration` keeps every `test`-split case's prompt, transcript, and
+failed assertion text out of the improvement bundle it hands whoever revises
+the skill next, reporting only how many cases were withheld and their
+aggregate pass rate. A held-out case that leaked into the bundle would stop
+being held out.
+
 ## Step 6: check the suite before spending a run
 
 Runs cost money and wall clock. Everything that can be caught statically should
