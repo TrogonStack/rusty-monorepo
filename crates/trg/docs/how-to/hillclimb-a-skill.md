@@ -18,6 +18,8 @@ split's verdict is `keep`; revert on `revert`, `suspected_overfitting`, or
 `inconclusive`. Never read a test-split run's transcript, prompt, or grading
 detail while deciding what to do next; only its aggregate pass rate, through
 `keep_or_revert` or an improvement bundle's `held_out` field, is fair game.
+Pass `--withhold-test-detail` to `iteration-summary` so that rule is enforced
+by the command's own output rather than by what you choose not to look at.
 
 ## Prerequisites
 
@@ -72,13 +74,17 @@ same iteration number and break that auto-detection on the next round.
 ## 4. Read the train split while you decide
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id>
+$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+    --withhold-test-detail
 ```
 
 `by_split.train`, its transcripts, and `grading.json` are fair game: read
 them to see whether the change did anything before spending a verdict on it.
-Leave `by_split.test` alone at this stage beyond noting whether it has data
-at all; its detail is not for reading here.
+`--withhold-test-detail` drops every held-out case id and assertion the
+document would otherwise carry, in the top-level stability lists as well as
+`by_split.test`, so there is nothing left to read there even by accident;
+its aggregate counts and headroom warning still show whether it has data at
+all.
 
 ## 5. Check for saturation
 
@@ -95,7 +101,8 @@ and [Reference: headroom warning](../reference/ai-skills-eval.md#headroom-warnin
 ## 6. Get the verdict
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id>
+$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+    --withhold-test-detail
 ```
 
 Once a previous round exists, `--previous` auto-detects it and the output

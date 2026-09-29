@@ -21,6 +21,12 @@ pub struct IterationSummaryOptions {
     pub failed_runs: FailedRunsMode,
     pub previous_report_dir: Option<PathBuf>,
     pub headroom_threshold: HeadroomThreshold,
+    /// Drop every test-split eval case id and assertion text this document would otherwise
+    /// carry, keeping only the aggregate counts, deltas and intervals a keep-or-revert call
+    /// needs. For a workflow whose reviewer must not let the held-out split shape a
+    /// decision, this is what makes this command's own output safe to read in full, rather
+    /// than relying on the reviewer to know which fields to leave alone.
+    pub withhold_test_detail: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -351,8 +357,8 @@ pub fn build_iteration_summary_document(
     );
     let by_split = split_summaries(report_dir, &report, options.failed_runs, options.headroom_threshold);
 
-    Ok(IterationSummaryDocument {
-        report_id: report.report.id,
+    let mut document = IterationSummaryDocument {
+        report_id: report.report.id.clone(),
         iteration: report.report.iteration,
         generated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         failed_runs_mode: options.failed_runs,
@@ -366,7 +372,74 @@ pub fn build_iteration_summary_document(
         by_split,
         headroom,
         keep_or_revert,
-    })
+    };
+
+    if options.withhold_test_detail {
+        withhold_test_split_detail(&mut document, &report);
+    }
+
+    Ok(document)
+}
+
+/// Strips every test-split eval case id and assertion text `build_iteration_summary_document`
+/// would otherwise have put in `document`, leaving only aggregate counts, deltas and
+/// intervals behind. Case ids are looked up by split membership at the point of use rather
+/// than filtered once into a narrowed report, because the records this touches come from
+/// several different computations (`analyze_report`, `compute_headroom`, `split_summaries`)
+/// that each already ran against the full, unfiltered report.
+fn withhold_test_split_detail(document: &mut IterationSummaryDocument, report: &ReportForSummary) {
+    let test_case_ids: HashSet<String> = report
+        .runs
+        .iter()
+        .filter(|run| run.split == EvalSplit::Test)
+        .map(|run| run.eval_case_id.clone())
+        .collect();
+    let is_held_out = |eval_case_id: &String| test_case_ids.contains(eval_case_id);
+
+    document.always_pass.retain(|record| !is_held_out(&record.eval_case_id));
+    document.always_fail.retain(|record| !is_held_out(&record.eval_case_id));
+    document
+        .helped_by_skill
+        .retain(|record| !is_held_out(&record.eval_case_id));
+    document
+        .flaky_assertions
+        .retain(|record| !is_held_out(&record.eval_case_id));
+    document
+        .timing_outliers
+        .retain(|record| !is_held_out(&record.eval_case_id));
+    document
+        .token_outliers
+        .retain(|record| !is_held_out(&record.eval_case_id));
+
+    if let Some(cross_iteration) = document.cross_iteration.as_mut() {
+        cross_iteration
+            .newly_always_pass
+            .retain(|record| !is_held_out(&record.eval_case_id));
+        cross_iteration
+            .no_longer_always_pass
+            .retain(|record| !is_held_out(&record.eval_case_id));
+        cross_iteration
+            .newly_always_fail
+            .retain(|record| !is_held_out(&record.eval_case_id));
+        cross_iteration
+            .no_longer_always_fail
+            .retain(|record| !is_held_out(&record.eval_case_id));
+    }
+
+    if let Some(headroom) = document.headroom.as_mut() {
+        headroom
+            .saturated_case_ids
+            .retain(|eval_case_id| !is_held_out(eval_case_id));
+    }
+
+    if let Some(test_summary) = document.by_split.get_mut(&EvalSplit::Test) {
+        test_summary.always_pass.clear();
+        test_summary.always_fail.clear();
+        test_summary.helped_by_skill.clear();
+        if let Some(headroom) = test_summary.headroom.as_mut() {
+            headroom.saturated_case_ids.clear();
+        }
+    }
 }
 
 /// The keep-or-revert verdict: whether this iteration's `with_skill` arm beat the previous
@@ -2340,6 +2413,74 @@ mod tests {
             .as_ref()
             .expect("the train split alone is also saturated");
         assert_eq!(train_headroom.saturated_case_ids, vec!["case-b".to_string()]);
+    }
+
+    /// A caller that asks for `withhold_test_detail` gets no test-split eval case id or
+    /// assertion text anywhere in the document, not just in the fields obviously scoped to
+    /// the test split: the same case saturates both the per-split and the pooled headroom
+    /// warning, and both have to drop it. The train split and the aggregate verdicts it
+    /// still needs (counts, deltas, intervals) are untouched either way.
+    #[test]
+    fn withhold_test_detail_drops_test_split_case_ids_everywhere_but_leaves_train_and_verdicts_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
+        let mut runs = write_with_skill_runs(&report_dir, "test", "case-a", "test", 40, 0);
+        runs.extend(write_with_skill_runs(&report_dir, "train", "case-b", "train", 40, 0));
+        write_report(&report_dir, serde_json::Value::Array(runs), 1, "report-a");
+
+        let leaky = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
+        assert!(
+            leaky.always_pass.iter().any(|record| record.eval_case_id == "case-a"),
+            "sanity check: without withhold_test_detail the test-split case must appear, or this test proves nothing"
+        );
+
+        let summary = build_iteration_summary_document(
+            &report_dir,
+            IterationSummaryOptions {
+                withhold_test_detail: true,
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            summary.always_pass.iter().all(|record| record.eval_case_id != "case-a"),
+            "the test-split case must not appear in the top-level always_pass list"
+        );
+        assert!(
+            summary.always_pass.iter().any(|record| record.eval_case_id == "case-b"),
+            "the train-split case must still appear in the top-level always_pass list"
+        );
+
+        let test_summary = &summary.by_split[&EvalSplit::Test];
+        assert!(test_summary.always_pass.is_empty());
+        assert!(test_summary.always_fail.is_empty());
+        assert!(test_summary.helped_by_skill.is_empty());
+        assert_eq!(
+            test_summary
+                .headroom
+                .as_ref()
+                .expect("the test split is still saturated")
+                .saturated_case_ids,
+            Vec::<String>::new(),
+            "the test split's own headroom warning must not name which case saturated it"
+        );
+
+        let train_summary = &summary.by_split[&EvalSplit::Train];
+        assert!(
+            !train_summary.always_pass.is_empty(),
+            "the train split keeps its own detail"
+        );
+        assert_eq!(
+            train_summary.headroom.as_ref().unwrap().saturated_case_ids,
+            vec!["case-b".to_string()]
+        );
+
+        assert_eq!(
+            summary.headroom.as_ref().unwrap().saturated_case_ids,
+            vec!["case-b".to_string()],
+            "the pooled headroom warning must drop the test-split case id but keep the train-split one"
+        );
     }
 
     #[test]

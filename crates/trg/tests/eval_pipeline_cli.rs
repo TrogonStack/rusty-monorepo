@@ -539,6 +539,54 @@ fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     );
 }
 
+/// `--withhold-test-detail` is what makes it safe for a caller like the hillclimb loop to
+/// read this command's full JSON output: without it, the held-out case id shows up in
+/// several places (the top-level stability lists, the test split's own summary, the test
+/// split's headroom warning), and the flag has to clear every one of them while leaving the
+/// train-split case and the aggregate counts alone.
+#[test]
+fn withhold_test_detail_removes_the_held_out_case_id_from_the_json_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let report_dir = temp.path().join("report-iter-1");
+
+    let mut runs: Vec<(String, &str, &str, bool)> = (0..4)
+        .map(|i| (format!("held-out-{i}"), "case-held-out", "test", true))
+        .collect();
+    runs.extend((0..4).map(|i| (format!("train-{i}"), "case-train", "train", true)));
+    write_iteration_report(&report_dir, 1, "report-iter-1", &runs);
+
+    let leaky = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&report_dir)
+        .args(["--output-format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(leaky.status.code(), Some(0), "got {}", stderr_of(&leaky));
+    let leaky_stdout = String::from_utf8_lossy(&leaky.stdout);
+    assert!(
+        leaky_stdout.contains("case-held-out"),
+        "sanity check: without the flag the held-out case must appear, or this test proves nothing"
+    );
+
+    let withheld = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&report_dir)
+        .args(["--output-format", "json"])
+        .arg("--withhold-test-detail")
+        .output()
+        .unwrap();
+    assert_eq!(withheld.status.code(), Some(0), "got {}", stderr_of(&withheld));
+    let withheld_stdout = String::from_utf8_lossy(&withheld.stdout);
+    assert!(
+        !withheld_stdout.contains("case-held-out"),
+        "the held-out case id must not appear anywhere in the output, got: {withheld_stdout}"
+    );
+    assert!(
+        withheld_stdout.contains("case-train"),
+        "the train-split case id must still appear, got: {withheld_stdout}"
+    );
+}
+
 /// A scaffolded suite declares no `test` case, so the improvement bundle it produces has
 /// nothing to withhold. The bundle says so explicitly rather than reporting an empty
 /// `held_out` field, and the markdown nudges toward declaring one, since every later

@@ -91,6 +91,12 @@ pub struct IterationSummaryArgs {
         help = "The with_skill arm's Wilson lower bound is reported as saturated at or above this proportion in (0, 1]"
     )]
     pub headroom_threshold: HeadroomThreshold,
+
+    #[arg(
+        long,
+        help = "Drop test-split eval case ids and assertion text from the output, keeping only aggregate counts, deltas and intervals; for a caller whose keep-or-revert decision must not be shaped by the held-out split"
+    )]
+    pub withhold_test_detail: bool,
 }
 
 impl IterationSummaryArgs {
@@ -99,6 +105,7 @@ impl IterationSummaryArgs {
             failed_runs: self.failed_runs,
             previous_report_dir: self.previous,
             headroom_threshold: self.headroom_threshold,
+            withhold_test_detail: self.withhold_test_detail,
         };
 
         let document = match build_iteration_summary_document(&self.report_dir, options) {

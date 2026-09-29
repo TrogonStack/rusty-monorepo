@@ -388,12 +388,21 @@ trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
 | `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these. Comma-separated. Values: `revert`, `overfitting`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
 | `--headroom-threshold` | proportion | `0.9` | The `with_skill` arm's Wilson lower bound is reported as saturated (see [Headroom warning](#headroom-warning)) at or above this proportion in `(0, 1]` |
+| `--withhold-test-detail` | flag | off | Drop test-split eval case ids and assertion text from the document, keeping only its aggregate counts, deltas, and intervals |
 
 `iteration-summary.json` reports `always_pass`, `always_fail`, and `helped_by_skill` for
 the whole report, and again per split under `by_split.train` and `by_split.test`. It also
 reports a `headroom` field, and again per split under `by_split.train.headroom` and
 `by_split.test.headroom`, the same shape and threshold [`eval benchmark`
 reports](#headroom-warning).
+
+`--withhold-test-detail` strips held-out case ids and assertion text from every list that
+would otherwise carry them: the top-level stability lists (`always_pass`, `always_fail`,
+`helped_by_skill`, `flaky_assertions`, timing and token outliers), `cross_iteration`, and
+`by_split.test` itself. Aggregate counts, pass rates, deltas, intervals, and the
+`keep_or_revert` verdict are unaffected, since a hillclimb round only ever needs those to
+decide whether to keep or revert a change. See [Hillclimb a
+skill](../how-to/hillclimb-a-skill.md#the-rule).
 
 ### Keep-or-revert verdict
 

@@ -81,7 +81,8 @@ a reason to run it twice.
 ## Step 4: read the train split, and only the train split, while you are still deciding
 
 ```shell
-trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id>
+trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+  --withhold-test-detail
 ```
 
 `by_split.train` and its transcripts are fair game: read them, read
@@ -91,9 +92,13 @@ change did anything at all before you spend a verdict on it.
 **Do not open a test-split run's transcript, workspace, or grading detail at
 any point in this loop.** The held-out split's job is to catch a change that
 learned the suite instead of the task, and it can only do that if nothing
-about a round's decisions was shaped by looking at it. If a number from
-`by_split.test` is not enough, that itself is information (see saturation,
-next), not a reason to look closer.
+about a round's decisions was shaped by looking at it. `--withhold-test-detail`
+is what makes that a rule the tool enforces rather than one you have to
+remember: without it, a held-out case id or assertion shows up in several
+places in the full document (the top-level stability lists, `by_split.test`,
+its headroom warning) even though you only meant to read the train split. If
+a number from `by_split.test` is not enough, that itself is information (see
+saturation, next), not a reason to drop the flag and look closer.
 
 ## Step 5: check for saturation before reading the verdict as ordinary
 
@@ -117,7 +122,8 @@ Continuing to tune the skill against a saturated test split only produces
 ## Step 6: get the verdict
 
 ```shell
-trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id>
+trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+  --withhold-test-detail
 ```
 
 Once there is a previous round to compare against, `--previous` auto-detects
