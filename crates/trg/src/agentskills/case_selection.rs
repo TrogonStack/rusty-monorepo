@@ -224,10 +224,35 @@ impl CaseSelection {
 /// excludes, so this is the only record of that case's split a later reader (drift
 /// detection, the held-out section) can consult without re-reading the suite off disk,
 /// which may no longer have the case at all.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// `split` is `None` when reading a `report.json` an older build wrote as a bare list of
+/// case ids, before a declared case recorded its split at all. Such a case must never be
+/// counted as train or test: guessing wrong here is indistinguishable from a real answer,
+/// so callers that need to know whether a case is safe to reveal treat an unknown split the
+/// same as a test split, and callers that count test cases do not count it as one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct DeclaredEvalCase {
     pub id: String,
-    pub split: EvalSplit,
+    pub split: Option<EvalSplit>,
+}
+
+impl<'de> Deserialize<'de> for DeclaredEvalCase {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            LegacyId(String),
+            Current { id: String, split: EvalSplit },
+        }
+
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::LegacyId(id) => DeclaredEvalCase { id, split: None },
+            Repr::Current { id, split } => DeclaredEvalCase { id, split: Some(split) },
+        })
+    }
 }
 
 /// The selection a report was produced under, so a reader is not shown partial coverage
@@ -276,7 +301,7 @@ mod tests {
     fn declared(id: &str, split: EvalSplit) -> DeclaredEvalCase {
         DeclaredEvalCase {
             id: id.to_string(),
-            split,
+            split: Some(split),
         }
     }
 
@@ -422,5 +447,30 @@ mod tests {
         let record = selection.record(1, declared_cases).unwrap();
 
         assert_eq!(record.split, Some(EvalSplit::Test));
+    }
+
+    #[test]
+    fn an_older_reports_legacy_string_declared_list_deserializes_with_an_unknown_split() {
+        let record: CaseSelectionRecord = serde_json::from_value(serde_json::json!({
+            "covered": 1,
+            "declared": ["analyze-sales", "analyze-refunds"]
+        }))
+        .expect("a legacy bare-string declared list must still deserialize");
+
+        assert_eq!(
+            record.declared,
+            vec![
+                DeclaredEvalCase {
+                    id: "analyze-sales".to_string(),
+                    split: None,
+                },
+                DeclaredEvalCase {
+                    id: "analyze-refunds".to_string(),
+                    split: None,
+                },
+            ],
+            "a legacy entry carries no split of its own, so it must deserialize as unknown \
+             rather than being guessed as train or test"
+        );
     }
 }

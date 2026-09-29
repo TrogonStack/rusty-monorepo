@@ -344,7 +344,7 @@ fn build_held_out_section(report_dir: &Path, report: &ReportDocument) -> HeldOut
     if test_runs.is_empty() {
         let declared_test_case_count = declared_eval_case_splits(report)
             .values()
-            .filter(|split| **split == EvalSplit::Test)
+            .filter(|split| **split == Some(EvalSplit::Test))
             .count();
         return if declared_test_case_count == 0 {
             HeldOutSection::NoTestCases
@@ -440,10 +440,19 @@ fn eval_suite_drift_from_report(
             .into_iter()
             .filter(|id| current_split_by_id.get(id.as_str()).copied().unwrap_or_default() != EvalSplit::Test)
             .collect();
+        // An id absent from the map is a case the suite selection never mentioned at all, so
+        // it keeps the old default of train. An id present but recorded with an unknown
+        // split (a legacy declared entry) must be treated the same as a known test split,
+        // since guessing it is train is exactly the mistake that would leak a held-out case.
         let removed_eval_ids = drift
             .removed_eval_ids
             .into_iter()
-            .filter(|id| previous_split_by_id.get(id.as_str()).copied().unwrap_or_default() != EvalSplit::Test)
+            .filter(|id| {
+                !matches!(
+                    previous_split_by_id.get(id.as_str()),
+                    Some(Some(EvalSplit::Test)) | Some(None)
+                )
+            })
             .collect();
 
         (Some(drift.current_hash), added_eval_ids, removed_eval_ids)

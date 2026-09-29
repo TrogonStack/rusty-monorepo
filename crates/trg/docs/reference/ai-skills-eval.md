@@ -2166,7 +2166,11 @@ A narrowed run records what it covered under `suite.case_selection` in `report.j
       "tags": ["smoke"],
       "split": "test",
       "covered": 2,
-      "declared": ["analyze-refunds", "analyze-sales", "summarize-quarter"]
+      "declared": [
+        { "id": "analyze-refunds", "split": "test" },
+        { "id": "analyze-sales", "split": "test" },
+        { "id": "summarize-quarter", "split": "train" }
+      ]
     }
   }
 }
@@ -2181,9 +2185,13 @@ when the run covered every case the suite declares, however the selection was wr
 pattern that happens to match the whole suite narrowed nothing.
 
 `declared` names the whole suite the selection was taken from, since `dimensions.eval_cases`
-lists only what the run covered. Suite drift is diffed against `declared`, so a case a run
-skipped is not reported as one the suite lost, nor as one it gained the next time a run
-covers it.
+lists only what the run covered. Each entry also carries the split that case belongs to, so
+a case a narrowed run excluded still has a split to be judged by. Suite drift is diffed
+against `declared`, so a case a run skipped is not reported as one the suite lost, nor as
+one it gained the next time a run covers it. A `report.json` an older build wrote may still
+have `declared` as a bare list of case ids; that form is still read, with every case in it
+treated as having an unknown split rather than guessed as train or test, but it is never
+written by a current build.
 
 ## Measuring triggering
 

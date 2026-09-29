@@ -180,7 +180,11 @@ pub fn declared_eval_case_ids(report: &ReportDocument) -> BTreeSet<String> {
 /// case the suite declared, run or not, so it is consulted first; a full run has no such
 /// record because there is nothing narrowed to explain, and every declared case in that
 /// case did run, so its split is read off the runs that produced it instead.
-pub fn declared_eval_case_splits(report: &ReportDocument) -> HashMap<&str, EvalSplit> {
+///
+/// A declared case's split is `None` when it came from a `report.json` an older build wrote
+/// before a declared case recorded its split at all; a caller must not treat that the same
+/// as a known train split.
+pub fn declared_eval_case_splits(report: &ReportDocument) -> HashMap<&str, Option<EvalSplit>> {
     match &report.suite.case_selection {
         Some(selection) if !selection.declared.is_empty() => selection
             .declared
@@ -190,7 +194,7 @@ pub fn declared_eval_case_splits(report: &ReportDocument) -> HashMap<&str, EvalS
         _ => report
             .runs
             .iter()
-            .map(|run| (run.eval_case_id.as_str(), run.split))
+            .map(|run| (run.eval_case_id.as_str(), Some(run.split)))
             .collect(),
     }
 }

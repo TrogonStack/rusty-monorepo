@@ -1034,7 +1034,7 @@ pub fn build_report_bundle(
         .iter()
         .map(|case| DeclaredEvalCase {
             id: case.id.to_string(),
-            split: case.split,
+            split: Some(case.split),
         })
         .collect();
     suite.evals = options.cases.apply(suite.evals)?;
@@ -2174,15 +2174,15 @@ mod tests {
             vec![
                 DeclaredEvalCase {
                     id: "parse-csv".to_string(),
-                    split: EvalSplit::Train
+                    split: Some(EvalSplit::Train)
                 },
                 DeclaredEvalCase {
                     id: "parse-json".to_string(),
-                    split: EvalSplit::Train
+                    split: Some(EvalSplit::Train)
                 },
                 DeclaredEvalCase {
                     id: "render-chart".to_string(),
-                    split: EvalSplit::Train
+                    split: Some(EvalSplit::Train)
                 },
             ]
         );
