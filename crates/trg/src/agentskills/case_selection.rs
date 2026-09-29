@@ -245,12 +245,16 @@ impl<'de> Deserialize<'de> for DeclaredEvalCase {
         #[serde(untagged)]
         enum Repr {
             LegacyId(String),
-            Current { id: String, split: EvalSplit },
+            Current {
+                id: String,
+                #[serde(default)]
+                split: Option<EvalSplit>,
+            },
         }
 
         Ok(match Repr::deserialize(deserializer)? {
             Repr::LegacyId(id) => DeclaredEvalCase { id, split: None },
-            Repr::Current { id, split } => DeclaredEvalCase { id, split: Some(split) },
+            Repr::Current { id, split } => DeclaredEvalCase { id, split },
         })
     }
 }
@@ -472,5 +476,20 @@ mod tests {
             "a legacy entry carries no split of its own, so it must deserialize as unknown \
              rather than being guessed as train or test"
         );
+    }
+
+    #[test]
+    fn a_rewritten_legacy_declared_list_still_deserializes_with_an_unknown_split() {
+        let legacy: CaseSelectionRecord = serde_json::from_value(serde_json::json!({
+            "covered": 1,
+            "declared": ["analyze-sales"]
+        }))
+        .unwrap();
+
+        let rewritten = serde_json::to_value(&legacy).unwrap();
+        let reread: CaseSelectionRecord = serde_json::from_value(rewritten)
+            .expect("a report rewritten after loading a legacy declared list must stay readable");
+
+        assert_eq!(reread, legacy);
     }
 }
