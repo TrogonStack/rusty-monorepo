@@ -77,6 +77,25 @@ impl JsonSchema for ModelName {
     }
 }
 
+/// Where a run's resolved model came from, once the case's own choice and the operator's
+/// `--runner-model` are combined by `effective_model`.
+///
+/// Kept alongside the model name itself rather than inferred from it, because two runs can
+/// resolve to the same name for different reasons, and a reader asking "did the case pin
+/// this or did the operator" cannot recover that from the name alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelSource {
+    /// The eval case named a model of its own, overriding whatever the operator asked for.
+    Case,
+    /// The case named no model, so the operator's `--runner-model` decided it.
+    RunnerFlag,
+    /// Neither the case nor the operator named a model, so the harness chose its own
+    /// default. No runner reports that choice back, so which model actually ran stays
+    /// unknown.
+    RunnerDefault,
+}
+
 #[cfg(test)]
 mod schema_agrees_with_the_parser {
     use super::*;

@@ -1664,6 +1664,8 @@ other field forward as declared there, including `name`, `excluded`,
 | `eval_case_id` | string | References an eval case id |
 | `scenario_id` | enum | `with_skill`, `without_skill`, or `old_skill` |
 | `model_config_id` | string | Value of `--model-config` |
+| `runner_model` | string | The model this run actually executed under, once the eval case's own `model` and `--runner-model` are combined by `effective_model`. Absent until the run resolves one, and stays absent when neither the case nor the operator named a model and the harness fell back to its own default |
+| `runner_model_source` | enum | Where `runner_model` came from: `case` (the eval case pinned one), `runner_flag` (`--runner-model` decided it), or `runner_default` (neither named one, so the harness chose; no runner reports that choice back). Absent until the run resolves against a runner |
 | `skill_revision_id` | string | Always `current` today |
 | `attempt` | integer | Which draw of the cell this run is, `1..N` for `--attempts N` |
 | `status` | string | `skipped`, `completed`, or `failed` |
@@ -1677,6 +1679,17 @@ other field forward as declared there, including `name`, `excluded`,
 | `mock_violations` | array | Every logged `expect` mismatch from `mock-calls.jsonl`, read back after the run finished. Empty when the case declares no mocks or violates nothing |
 
 Run ordering: eval cases in manifest order, then scenarios in flag order.
+
+### `dimensions.model_configs[]` record
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `id` | string | Value of `--model-config` |
+| `capture_status` | enum | `complete` once every run scaffolded under this config has resolved a `runner_model`, else `incomplete`. Recomputed after every execution of the bundle's runs, since the scaffold pass that creates this record runs before any run has executed and cannot know yet |
+| `label` | string | Same value as `id` |
+| `parameters` | object | Reserved for parameters a future runner reports back; empty today |
+| `parameter_sources` | object | Reserved alongside `parameters`; empty today |
+| `extra` | object | Reserved for fields not yet modeled; empty today |
 
 ---
 

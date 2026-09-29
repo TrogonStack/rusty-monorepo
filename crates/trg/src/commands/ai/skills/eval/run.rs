@@ -11,8 +11,8 @@ use crate::agentskills::cache::{
 use crate::agentskills::case_selection::{CaseSelection, SplitArg};
 use crate::agentskills::concurrency::RunConcurrency;
 use crate::agentskills::evals::{
-    effective_model, effective_timeout_secs, missing_expected_output_warnings, EvalCase, EvalCheckOptions, EvalDirName,
-    EvalSuite,
+    effective_model, effective_model_source, effective_timeout_secs, missing_expected_output_warnings, EvalCase,
+    EvalCheckOptions, EvalDirName, EvalSuite,
 };
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
@@ -24,8 +24,9 @@ use crate::agentskills::model_name::ModelName;
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::permission_outcome::PermissionOutcome;
 use crate::agentskills::report::{
-    build_report_bundle, write_report_bundle, BudgetReport, BuildReportOptions, EnvironmentPolicy, PermissionGrant,
-    ReportBundle, RunNotStarted, RunRecord, ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
+    build_report_bundle, recompute_model_capture_status, write_report_bundle, BudgetReport, BuildReportOptions,
+    EnvironmentPolicy, PermissionGrant, ReportBundle, RunNotStarted, RunRecord, ScenarioKind, SkillIntegrityReport,
+    SkillStaging, WriteReportOptions,
 };
 use crate::agentskills::runner::capabilities::{ControlSupport, HarnessControl};
 use crate::agentskills::runner::{
@@ -662,6 +663,7 @@ fn execute_runs(
     execution.execute_all(&mut bundle.document.runs, concurrency);
 
     rebuild_summaries(&mut bundle);
+    recompute_model_capture_status(&mut bundle.document);
 
     let runs_skipped = bundle
         .document
@@ -1018,6 +1020,7 @@ impl RunExecution<'_> {
 
         let resolved_model = effective_model(case, self.runner_model);
         run.runner_model = resolved_model.cloned();
+        run.runner_model_source = Some(effective_model_source(case, self.runner_model));
 
         let tool_grant = self.resolved_tool_grant(case);
         // `ToolGrant` never deserializes empty, and an empty grant always gets refused

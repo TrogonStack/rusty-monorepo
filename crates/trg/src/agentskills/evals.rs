@@ -3,7 +3,7 @@ use super::companion_skills::CompanionSkill;
 use super::exit_code::ExitCode;
 use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
-use super::model_name::ModelName;
+use super::model_name::{ModelName, ModelSource};
 use super::outputs::guess_mime_type;
 use super::prompt::StagedSkillDir;
 use super::runner::TimingFile;
@@ -929,6 +929,18 @@ pub fn effective_attempts(case: &EvalCase, operator_attempts: Option<AttemptCoun
 /// operator's `--runner-model` are combined.
 pub fn effective_model<'a>(case: &'a EvalCase, global_model: Option<&'a ModelName>) -> Option<&'a ModelName> {
     case.model.as_ref().or(global_model)
+}
+
+/// Where `effective_model` obtained its answer, for a run to record alongside the model
+/// itself.
+pub fn effective_model_source(case: &EvalCase, global_model: Option<&ModelName>) -> ModelSource {
+    if case.model.is_some() {
+        ModelSource::Case
+    } else if global_model.is_some() {
+        ModelSource::RunnerFlag
+    } else {
+        ModelSource::RunnerDefault
+    }
 }
 
 fn deserialize_evals<'de, D>(deserializer: D) -> std::result::Result<Vec<EvalCase>, D::Error>
@@ -2820,6 +2832,23 @@ mod tests {
             "operator-model"
         );
         assert_eq!(effective_model(&eval, None), None);
+    }
+
+    /// A reader of `runner_model_source` has to be able to tell a case's own pin apart from
+    /// the operator's flag apart from a harness default that no one named, since two runs
+    /// can carry the same model name for different reasons.
+    #[test]
+    fn effective_model_source_names_who_actually_decided() {
+        let mut eval = sample_eval_case("one", "prompt long enough here", "output long");
+        let operator = ModelName::parse("operator-model").unwrap();
+
+        eval.model = Some(ModelName::parse("case-model").unwrap());
+        assert_eq!(effective_model_source(&eval, Some(&operator)), ModelSource::Case);
+        assert_eq!(effective_model_source(&eval, None), ModelSource::Case);
+
+        eval.model = None;
+        assert_eq!(effective_model_source(&eval, Some(&operator)), ModelSource::RunnerFlag);
+        assert_eq!(effective_model_source(&eval, None), ModelSource::RunnerDefault);
     }
 
     /// The manifest is `deny_unknown_fields`, so a suite naming a model only runs if the

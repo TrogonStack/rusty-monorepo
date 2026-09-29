@@ -392,6 +392,7 @@ pub fn apply_cache_hit(
         iteration: _iteration,
         model_config_id: _model_config_id,
         runner_model,
+        runner_model_source,
         skill_revision_id: _skill_revision_id,
         attempt: _attempt,
         status,
@@ -415,6 +416,7 @@ pub fn apply_cache_hit(
     // the model on purpose, so the artifacts below can have been produced under a different
     // one, and reporting the model that was asked for would name a model that never ran.
     run.runner_model = runner_model;
+    run.runner_model_source = runner_model_source;
     run.metrics = metrics;
     run.artifacts = artifacts
         .into_iter()
@@ -729,6 +731,7 @@ mod tests {
     fn sample_run_record(run_id: &str, eval_case_id: &str, scenario: ScenarioKind) -> RunRecord {
         RunRecord {
             runner_model: None,
+            runner_model_source: None,
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -786,6 +789,7 @@ mod tests {
 
         let mut run = RunRecord {
             runner_model: None,
+            runner_model_source: None,
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -874,6 +878,7 @@ mod tests {
 
         let run = RunRecord {
             runner_model: None,
+            runner_model_source: None,
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
@@ -1006,6 +1011,7 @@ mod tests {
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
             runner_model: None,
+            runner_model_source: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
@@ -1073,6 +1079,7 @@ mod tests {
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
             runner_model: None,
+            runner_model_source: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
@@ -1145,6 +1152,7 @@ mod tests {
         fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
         let mut run = RunRecord {
             runner_model: None,
+            runner_model_source: None,
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),

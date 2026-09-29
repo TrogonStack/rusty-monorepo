@@ -804,10 +804,25 @@
       ],
       "type": "object"
     },
+    "ModelCaptureStatus": {
+      "description": "Whether every run recorded against a model config resolved to a known model.\n\nA report scaffolded before any run has executed cannot yet know what its runs will\nresolve to, and a runner default that no runner reports back never becomes known at\nall, so this is recomputed from the runs actually on the bundle rather than assumed at\nscaffold time.",
+      "oneOf": [
+        {
+          "const": "complete",
+          "description": "Every run recorded against this config resolved to a known model.",
+          "type": "string"
+        },
+        {
+          "const": "incomplete",
+          "description": "At least one run recorded against this config has no known model, typically\nbecause no run has executed yet or because one fell back to a runner default.",
+          "type": "string"
+        }
+      ]
+    },
     "ModelConfigDimension": {
       "properties": {
         "capture_status": {
-          "type": "string"
+          "$ref": "#/$defs/ModelCaptureStatus"
         },
         "extra": {
           "additionalProperties": true,
@@ -843,6 +858,26 @@
       "minLength": 1,
       "pattern": "^\\S(.*\\S)?$",
       "type": "string"
+    },
+    "ModelSource": {
+      "description": "Where a run's resolved model came from, once the case's own choice and the operator's\n`--runner-model` are combined by `effective_model`.\n\nKept alongside the model name itself rather than inferred from it, because two runs can\nresolve to the same name for different reasons, and a reader asking \"did the case pin\nthis or did the operator\" cannot recover that from the name alone.",
+      "oneOf": [
+        {
+          "const": "case",
+          "description": "The eval case named a model of its own, overriding whatever the operator asked for.",
+          "type": "string"
+        },
+        {
+          "const": "runner_flag",
+          "description": "The case named no model, so the operator's `--runner-model` decided it.",
+          "type": "string"
+        },
+        {
+          "const": "runner_default",
+          "description": "Neither the case nor the operator named a model, so the harness chose its own\ndefault. No runner reports that choice back, so which model actually ran stays\nunknown.",
+          "type": "string"
+        }
+      ]
     },
     "PassSpend": {
       "description": "What a pass spent, or why nobody can say.\n\nA harness that publishes no price leaves a ledger holding zero, and a zero in a spend\nfield reads as a cheap pass rather than an unanswered question. Only a total someone\nactually priced is ever written as a number.",
@@ -1245,6 +1280,17 @@
             }
           ],
           "description": "The model this run actually executed under, once the case's own choice and the\noperator's `--runner-model` are combined.\n\n`dimensions.model_configs` carries one label for the whole report, so without this a\nreader of a suite where cases pick their own models cannot tell which run used which,\nand would read every run as having used the operator's model."
+        },
+        "runner_model_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where `runner_model` came from, once the case's own choice and the operator's\n`--runner-model` are combined. `None` until the run has been resolved against a\nrunner; `runner_model` being `None` alongside `Some(RunnerDefault)` means the\nharness picked its own default, which no runner reports back."
         },
         "scenario_id": {
           "$ref": "#/$defs/ScenarioKind"

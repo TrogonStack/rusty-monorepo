@@ -265,7 +265,7 @@ index, CLI workflow, and several policy defaults.
 | `benchmark.json` | Defined in spec | Emitted by `eval benchmark` or `eval run --benchmark` |
 | `feedback.json` | Defined in spec | Scaffolded via `eval feedback init`; not auto-written |
 | `comparison.json` | Standalone comparison records | Optional via `eval compare --emit-comparison-json`; `comparisons` also merged into `report.json` |
-| Model config capture | Full parameter capture | `capture_status: "partial"`; label only |
+| Model config capture | Full parameter capture | `capture_status: complete` once every run under a config resolved a model, else `incomplete`; each run also records its model source (`case`, `runner_flag`, `runner_default`) |
 | Skill staging | Spec-defined layout | Copy into `.skill/` (default) or `--skill-staging symlink` |
 | Docs layout aliases | Primary tree under `iteration-N/` | Canonical `runs/run-NNN/` plus symlink mirror and `alias-index.json` |
 | Skill integrity | Not in spec | SHA-256 before/after tamper detection |
