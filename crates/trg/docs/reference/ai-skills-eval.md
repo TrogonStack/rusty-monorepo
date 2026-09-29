@@ -415,8 +415,10 @@ into a verdict rather than left for the reader to eyeball:
   verdict for context.
 - `recommendation` is `keep` when the test split improved, `revert` when it regressed
   (checked before overfitting, since a held-out regression is reason enough on its own),
-  `suspected_overfitting` when train improved while test did not, and `inconclusive`
-  otherwise.
+  `suspected_overfitting` when train improved while a measured (`indistinguishable`) test
+  split did not, and `inconclusive` otherwise. A `no_runs` test split (no held-out cases
+  declared, or none selected) is silence about generalization, not a flat measurement, so it
+  never yields `suspected_overfitting` on its own, however much train improved.
 - `capped_by_saturation` is set to `test_split_saturated` when the test split's
   `with_skill` arm has cleared `--headroom-threshold`, so `recommendation` is not misread
   as an ordinary `inconclusive` or a clean `keep`: the split the verdict depends on most
