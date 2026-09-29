@@ -451,7 +451,15 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             .into(),
         )
     })?;
-    let mut document: ReportDocument = serde_json::from_str(&report_content)?;
+    let mut document: ReportDocument = serde_json::from_str(&report_content).map_err(|e| {
+        EvalError::Validation(
+            ValidationError::for_field(
+                format!("report '{}'", report_path.display()),
+                format!("failed to parse: {e}"),
+            )
+            .into(),
+        )
+    })?;
 
     let skill_path = PathBuf::from(&document.suite.skill_path);
     let suite: EvalSuite =
@@ -3616,6 +3624,55 @@ mod tests {
             counts.pass_rate(),
             None,
             "nothing answered is not the same result as everything failed"
+        );
+    }
+
+    /// A bundle that fails to parse as the current report schema (here, a `model_configs`
+    /// entry with a `capture_status` value no variant, not even a retired one accepted for
+    /// compatibility, recognizes) has the failure name the `report.json` it came from, the
+    /// same way a read failure a few lines above this parse already does: an operator who
+    /// ran `grade` against the wrong bundle, or scripted it over several, cannot otherwise
+    /// tell which report.json is at fault from a bare serde error.
+    #[test]
+    fn an_unreadable_bundle_names_its_own_report_json_in_the_error() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _run_dir) = unobservable_report_dir(&temp);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document["dimensions"]["model_configs"][0]["capture_status"] = serde_json::json!("unknown_status");
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let result = grade_report_bundle(&report_dir, GradeOptions::default());
+
+        let error = result.expect_err("a report.json with an unrecognized capture_status must not parse");
+        let message = error.to_string();
+        assert!(
+            message.contains(&report_path.display().to_string()),
+            "expected the error to name '{}', got: {message}",
+            report_path.display()
+        );
+    }
+
+    /// `capture_status: "partial"` is a retired spelling of `incomplete` that older builds
+    /// wrote; a bundle carrying it has to grade cleanly rather than being reported as
+    /// unreadable.
+    #[test]
+    fn a_bundle_with_the_retired_partial_capture_status_still_grades() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _run_dir) = unobservable_report_dir(&temp);
+
+        let report_path = report_dir.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document["dimensions"]["model_configs"][0]["capture_status"] = serde_json::json!("partial");
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let result = grade_report_bundle(&report_dir, GradeOptions::default());
+
+        assert!(
+            result.is_ok(),
+            "a report.json using the retired 'partial' capture_status must still grade: {:?}",
+            result.err()
         );
     }
 

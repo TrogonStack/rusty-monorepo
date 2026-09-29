@@ -492,6 +492,10 @@ pub enum ModelCaptureStatus {
     Complete,
     /// At least one run recorded against this config has no known model, typically
     /// because no run has executed yet or because one fell back to a runner default.
+    ///
+    /// `partial` is accepted as an alias so a `report.json` an older build wrote still
+    /// loads; the schema and anything this process writes only ever emit `incomplete`.
+    #[serde(alias = "partial")]
     Incomplete,
 }
 
@@ -1497,6 +1501,19 @@ mod tests {
             EnvironmentPolicy::default(),
             EnvironmentPolicy::Isolated,
             "the CLI default moved, and this field deliberately does not track it"
+        );
+    }
+
+    #[test]
+    fn a_capture_status_of_partial_from_before_the_rename_reads_as_incomplete() {
+        let status: ModelCaptureStatus =
+            serde_json::from_str("\"partial\"").expect("the retired 'partial' spelling must still deserialize");
+        assert_eq!(status, ModelCaptureStatus::Incomplete);
+
+        assert_eq!(
+            serde_json::to_string(&ModelCaptureStatus::Incomplete).unwrap(),
+            "\"incomplete\"",
+            "this process must only ever write the current spelling, never the retired alias"
         );
     }
 

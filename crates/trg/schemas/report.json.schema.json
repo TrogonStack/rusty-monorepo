@@ -830,7 +830,7 @@
         },
         {
           "const": "incomplete",
-          "description": "At least one run recorded against this config has no known model, typically\nbecause no run has executed yet or because one fell back to a runner default.",
+          "description": "At least one run recorded against this config has no known model, typically\nbecause no run has executed yet or because one fell back to a runner default.\n\n`partial` is accepted as an alias so a `report.json` an older build wrote still\nloads; the schema and anything this process writes only ever emit `incomplete`.",
           "type": "string"
         }
       ]

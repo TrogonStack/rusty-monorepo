@@ -1059,6 +1059,82 @@ mod tests {
         assert!(report_b.join("runs/run-001/workspace/outputs/final.md").is_file());
     }
 
+    /// `capture_status: "partial"` is a retired spelling of `incomplete` that an older build
+    /// left behind in a source report a cache pointer still names. Reading it back must not
+    /// be a cache miss: it aliases cleanly to `incomplete`, so the hit reuses the run exactly
+    /// as `exact_cache_hit_reuses_completed_run` does for a report the current build wrote.
+    #[test]
+    fn a_cache_hit_against_a_report_with_the_retired_partial_capture_status_still_reuses_the_run() {
+        let temp = tempdir().unwrap();
+        let out_dir = temp.path().join("out");
+        let report_a = out_dir.join("demo/report-a");
+        write_completed_run(&report_a, "run-001", "one", ScenarioKind::WithSkill);
+
+        let report_path = report_a.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&report_path).unwrap()).unwrap();
+        document["dimensions"]["model_configs"] = serde_json::json!([{
+            "id": "ci-default",
+            "capture_status": "partial",
+            "label": "ci-default",
+            "parameters": {},
+            "parameter_sources": {},
+            "extra": {}
+        }]);
+        fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let input = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", FixtureHash::empty().as_str());
+        let key = CacheKey::from_input(&input);
+        record_completion(&out_dir, &key, &input, &report_a, "run-001").unwrap();
+
+        let report_b = out_dir.join("demo/report-b");
+        fs::create_dir_all(report_b.join("runs/run-001/workspace/outputs")).unwrap();
+        let mut run = RunRecord {
+            runner_model: None,
+            runner_model_source: None,
+            id: "run-001".to_string(),
+            eval_case_id: "one".to_string(),
+            eval_slug: "one".to_string(),
+            split: EvalSplit::Train,
+            scenario_id: ScenarioKind::WithSkill,
+            iteration: 2,
+            model_config_id: "ci-default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt: 1,
+            failure_kind: None,
+            runner_invocations: 0,
+            status: "skipped".to_string(),
+            paths: RunPaths {
+                workspace: "runs/run-001/workspace".to_string(),
+                outputs: "runs/run-001/workspace/outputs".to_string(),
+            },
+            mirror_path: "iteration-2/eval-one/with_skill/".to_string(),
+            tool_grant: None,
+            artifacts: Vec::new(),
+            metrics: RunMetrics {
+                duration_ms: None,
+                exit_code: None,
+                total_tokens: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_tokens: None,
+                cost: None,
+            },
+            cache: None,
+            skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
+            warnings: Vec::new(),
+            mock_violations: Vec::new(),
+            case_score: None,
+        };
+
+        let pointer = lookup_exact(&out_dir, &key, &input).expect("the pointer's own key input is still fresh");
+        apply_cache_hit(&mut run, &key, &pointer, &report_b)
+            .expect("a retired 'partial' capture_status must not turn a cache hit into a miss");
+
+        assert_eq!(run.status, "completed");
+        assert!(run.cache.as_ref().unwrap().hit);
+    }
+
     /// A cache hit must not launder a run that failed its mock's `expect` guard into one
     /// that looks clean: grading only ever sees `mock_violations` and `mock-calls.jsonl`,
     /// so if a cache hit drops either, the second run of a suite passes where the first

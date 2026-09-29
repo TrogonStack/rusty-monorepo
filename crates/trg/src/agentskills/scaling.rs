@@ -42,6 +42,14 @@ pub enum ScalingError {
         expected: String,
         actual: String,
     },
+
+    /// A `report_dir` argument's `report.json` could not be read or parsed as the current
+    /// schema. Named separately from [`Self::Io`] and [`Self::Json`], which `?` still reaches
+    /// for elsewhere in this module: those never name which bundle failed, and a comparison
+    /// takes several, so the raw IO or parse error alone leaves the operator checking every
+    /// one of them.
+    #[error("bundle '{report_dir}' could not be read as a report: {reason}")]
+    UnreadableBundle { report_dir: PathBuf, reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, ScalingError>;
@@ -54,8 +62,12 @@ struct LoadedBundle {
 }
 
 fn load_bundle(report_dir: &Path) -> Result<LoadedBundle> {
-    let content = std::fs::read_to_string(report_dir.join("report.json"))?;
-    let document: ReportDocument = serde_json::from_str(&content)?;
+    let unreadable = |reason: String| ScalingError::UnreadableBundle {
+        report_dir: report_dir.to_path_buf(),
+        reason,
+    };
+    let content = std::fs::read_to_string(report_dir.join("report.json")).map_err(|e| unreadable(e.to_string()))?;
+    let document: ReportDocument = serde_json::from_str(&content).map_err(|e| unreadable(e.to_string()))?;
     Ok(LoadedBundle {
         report_dir: report_dir.to_path_buf(),
         document,
@@ -438,6 +450,59 @@ mod tests {
 
         let result = build_scaling_document(&[weaker_dir, stronger_dir], FailedRunsMode::Bucket);
         assert!(matches!(result, Err(ScalingError::SuiteHashMismatch { .. })));
+    }
+
+    /// A bundle that fails to parse as the current report schema (here, a `model_configs`
+    /// entry with a `capture_status` value no variant, not even a retired one accepted for
+    /// compatibility, recognizes) reports it like any other malformed bundle, but with
+    /// several bundles on the command line the raw `serde_json::Error` alone does not say
+    /// which one is at fault. The message has to name the report directory, the same way
+    /// `SuiteHashMismatch` already names both bundles it compares.
+    #[test]
+    fn an_unreadable_bundle_names_its_own_report_dir_in_the_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let weaker_dir = sample_report_dir(&temp, "weaker", "small");
+        let stale_dir = sample_report_dir(&temp, "stronger", "large");
+
+        let report_path = stale_dir.join("report.json");
+        let mut document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+        document["dimensions"]["model_configs"][0]["capture_status"] = serde_json::json!("unknown_status");
+        std::fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let result = build_scaling_document(&[weaker_dir, stale_dir.clone()], FailedRunsMode::Bucket);
+
+        let error = result.expect_err("a report.json with an unrecognized capture_status must not parse");
+        let message = error.to_string();
+        assert!(
+            message.contains(&stale_dir.display().to_string()),
+            "expected the error to name '{}', got: {message}",
+            stale_dir.display()
+        );
+    }
+
+    /// `capture_status: "partial"` is a retired spelling of `incomplete` that older builds
+    /// wrote; a bundle carrying it has to compare cleanly rather than being reported as
+    /// unreadable.
+    #[test]
+    fn a_bundle_with_the_retired_partial_capture_status_still_compares() {
+        let temp = tempfile::tempdir().unwrap();
+        let weaker_dir = sample_report_dir(&temp, "weaker", "small");
+        let stronger_dir = sample_report_dir(&temp, "stronger", "large");
+
+        let report_path = stronger_dir.join("report.json");
+        let mut document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+        document["dimensions"]["model_configs"][0]["capture_status"] = serde_json::json!("partial");
+        std::fs::write(&report_path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        let result = build_scaling_document(&[weaker_dir, stronger_dir], FailedRunsMode::Bucket);
+
+        assert!(
+            result.is_ok(),
+            "a report.json using the retired 'partial' capture_status must still parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
