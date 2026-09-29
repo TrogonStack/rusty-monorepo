@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::agentskills::benchmark::FailedRunsMode;
 use crate::agentskills::exit_code::ExitCode;
+use crate::agentskills::headroom::HeadroomThreshold;
 use crate::agentskills::iteration_summary::{
     build_iteration_summary_document, print_human_summary, recommendation_label, write_iteration_summary,
     IterationSummaryOptions, Recommendation,
@@ -82,6 +83,14 @@ pub struct IterationSummaryArgs {
         help = "Exit with a gate failure when the keep-or-revert recommendation is one of these: revert, overfitting. Comma-separated; unset never gates"
     )]
     pub fail_on: Vec<FailOn>,
+
+    #[arg(
+        long,
+        value_name = "PROPORTION",
+        default_value_t = HeadroomThreshold::default(),
+        help = "The with_skill arm's Wilson lower bound is reported as saturated at or above this proportion in (0, 1]"
+    )]
+    pub headroom_threshold: HeadroomThreshold,
 }
 
 impl IterationSummaryArgs {
@@ -89,6 +98,7 @@ impl IterationSummaryArgs {
         let options = IterationSummaryOptions {
             failed_runs: self.failed_runs,
             previous_report_dir: self.previous,
+            headroom_threshold: self.headroom_threshold,
         };
 
         let document = match build_iteration_summary_document(&self.report_dir, options) {

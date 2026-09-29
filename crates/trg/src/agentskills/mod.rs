@@ -19,6 +19,7 @@ pub mod exit_code;
 pub mod feedback;
 pub mod graders;
 pub mod grading;
+pub mod headroom;
 pub mod html_report;
 pub mod improvement_bundle;
 pub mod iteration_summary;

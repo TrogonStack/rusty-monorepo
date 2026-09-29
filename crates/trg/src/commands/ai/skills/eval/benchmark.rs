@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use crate::agentskills::benchmark::{build_benchmark, write_benchmark, BenchmarkOptions, FailedRunsMode};
+use crate::agentskills::benchmark::{
+    build_benchmark, write_benchmark, BenchmarkDocument, BenchmarkOptions, FailedRunsMode,
+};
+use crate::agentskills::evals::EvalSplit;
 use crate::agentskills::exit_code::ExitCode;
+use crate::agentskills::headroom::{describe_headroom_warning, HeadroomThreshold};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
@@ -52,6 +56,14 @@ pub struct BenchmarkArgs {
         help = "Render the result as a human summary or as the benchmark.json document on stdout"
     )]
     pub output_format: OutputFormat,
+
+    #[arg(
+        long,
+        value_name = "PROPORTION",
+        default_value_t = HeadroomThreshold::default(),
+        help = "The with_skill arm's Wilson lower bound is reported as saturated at or above this proportion in (0, 1]"
+    )]
+    pub headroom_threshold: HeadroomThreshold,
 }
 
 impl BenchmarkArgs {
@@ -60,6 +72,7 @@ impl BenchmarkArgs {
             failed_runs: self.failed_runs,
             allow_eval_suite_drift: self.allow_eval_suite_drift,
             previous_report_dir: self.previous,
+            headroom_threshold: self.headroom_threshold,
         };
 
         let (code, document) = benchmark_report_dir_with_document(&self.report_dir, options);
@@ -78,9 +91,27 @@ impl BenchmarkArgs {
                 }
             }
         } else {
+            if let Some(document) = &document {
+                print_headroom_warnings(document);
+            }
             print_report_dir(&self.report_dir);
         }
         ExitCode::Success
+    }
+}
+
+fn print_headroom_warnings(document: &BenchmarkDocument) {
+    if let Some(headroom) = &document.headroom {
+        println!("{}", describe_headroom_warning("overall", headroom));
+    }
+    for split in EvalSplit::ALL {
+        if let Some(headroom) = document
+            .by_split
+            .get(&split)
+            .and_then(|split_benchmark| split_benchmark.headroom.as_ref())
+        {
+            println!("{}", describe_headroom_warning(split.as_str(), headroom));
+        }
     }
 }
 

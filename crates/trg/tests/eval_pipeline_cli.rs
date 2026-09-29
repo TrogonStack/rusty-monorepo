@@ -527,3 +527,85 @@ fn next_iteration_reports_no_test_cases_and_nudges_toward_declaring_one() {
     assert!(markdown.contains("Held-Out Test Cases"));
     assert!(markdown.contains("Declare at least one case"));
 }
+
+/// A saturated `with_skill` arm is a suite with nothing left to measure from, and the
+/// warning has to reach the operator through both output formats: prominently in the
+/// text summary, and as a typed field in the JSON document a script would parse instead.
+#[test]
+fn benchmark_and_iteration_summary_warn_when_the_with_skill_arm_has_no_headroom_left() {
+    let temp = tempfile::tempdir().unwrap();
+    let report_dir = temp.path().join("report");
+    let runs: Vec<(String, &str, &str, bool)> = (0..40).map(|i| (format!("run-{i}"), "case-a", "test", true)).collect();
+    write_iteration_report(&report_dir, 1, "report-a", &runs);
+
+    let benchmark_text = trg()
+        .args(["ai", "skills", "eval", "benchmark"])
+        .arg(&report_dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        benchmark_text.status.code(),
+        Some(0),
+        "got {}",
+        stderr_of(&benchmark_text)
+    );
+    let stdout = String::from_utf8_lossy(&benchmark_text.stdout);
+    assert!(
+        stdout.contains("WARN") && stdout.contains("no headroom left"),
+        "expected a headroom warning in the text summary, got {stdout}"
+    );
+
+    let benchmark_json = trg()
+        .args(["ai", "skills", "eval", "benchmark"])
+        .arg(&report_dir)
+        .args(["--output-format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        benchmark_json.status.code(),
+        Some(0),
+        "got {}",
+        stderr_of(&benchmark_json)
+    );
+    let document: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&benchmark_json.stdout)).unwrap();
+    assert_eq!(document["headroom"]["saturated_case_ids"][0], "case-a");
+    assert_eq!(
+        document["by_split"]["test"]["headroom"]["saturated_case_ids"][0],
+        "case-a"
+    );
+
+    let summary_text = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&report_dir)
+        .output()
+        .unwrap();
+    assert_eq!(summary_text.status.code(), Some(0), "got {}", stderr_of(&summary_text));
+    let stdout = String::from_utf8_lossy(&summary_text.stdout);
+    assert!(
+        stdout.contains("WARN") && stdout.contains("no headroom left"),
+        "expected a headroom warning in the text summary, got {stdout}"
+    );
+}
+
+/// `--headroom-threshold` moves the floor a with_skill arm is judged saturated against,
+/// so an arm the default would call saturated can be told it still has room.
+#[test]
+fn headroom_threshold_is_configurable_from_the_command_line() {
+    let temp = tempfile::tempdir().unwrap();
+    let report_dir = temp.path().join("report");
+    let runs: Vec<(String, &str, &str, bool)> = (0..40).map(|i| (format!("run-{i}"), "case-a", "test", true)).collect();
+    write_iteration_report(&report_dir, 1, "report-a", &runs);
+
+    let output = trg()
+        .args(["ai", "skills", "eval", "benchmark"])
+        .arg(&report_dir)
+        .args(["--headroom-threshold", "0.999", "--output-format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "got {}", stderr_of(&output));
+    let document: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    assert!(
+        document["headroom"].is_null(),
+        "a stricter threshold than the arm's own floor should not report saturation"
+    );
+}

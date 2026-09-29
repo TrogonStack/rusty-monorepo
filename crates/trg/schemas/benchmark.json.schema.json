@@ -330,6 +330,38 @@
       ],
       "type": "object"
     },
+    "HeadroomThreshold": {
+      "description": "The with_skill arm's Wilson lower bound is treated as saturated at or above this proportion. Greater than 0 and at most 1.",
+      "exclusiveMinimum": 0.0,
+      "maximum": 1.0,
+      "type": "number"
+    },
+    "HeadroomWarning": {
+      "description": "A with_skill arm that has used up its room to show improvement.",
+      "properties": {
+        "lower_bound": {
+          "description": "The Wilson lower bound that met or crossed `threshold`.",
+          "format": "double",
+          "type": "number"
+        },
+        "saturated_case_ids": {
+          "description": "Cases whose with_skill attempts passed every scored assertion across every draw.\n\nNamed by id rather than counted, because `benchmark.json` and\n`iteration-summary.json` are the author's own measurement surfaces and already\nlist every case id elsewhere in the same document; only the improvement bundle\nwithholds test-split ids from a wider audience.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "threshold": {
+          "$ref": "#/$defs/HeadroomThreshold"
+        }
+      },
+      "required": [
+        "lower_bound",
+        "threshold",
+        "saturated_case_ids"
+      ],
+      "type": "object"
+    },
     "Interval": {
       "description": "The range a measurement is consistent with.",
       "properties": {
@@ -645,6 +677,17 @@
         "deltas": {
           "$ref": "#/$defs/ScenarioDeltas"
         },
+        "headroom": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeadroomWarning"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set when this split's with_skill assertion pass rate has cleared its headroom\nthreshold, which matters most on the test split: the keep-or-revert verdict can\nnever read `improved` there once it has."
+        },
         "scenarios": {
           "additionalProperties": {
             "$ref": "#/$defs/ScenarioBenchmark"
@@ -737,6 +780,17 @@
     },
     "generated_at": {
       "type": "string"
+    },
+    "headroom": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HeadroomWarning"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Set when the with_skill arm's assertion pass rate has cleared its headroom\nthreshold overall, so a change to the skill has no room left to show up in."
     },
     "iteration_comparison": {
       "anyOf": [

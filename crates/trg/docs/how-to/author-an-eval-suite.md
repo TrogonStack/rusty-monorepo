@@ -123,6 +123,16 @@ nothing that case did not already check.
 `eval verify` warns when a suite declares no `test` case, since every
 overfitting check below depends on one existing.
 
+Pick held-out cases a human judged hard, not ones today's model happens to
+fail. A case chosen because the current skill trips on it stops being useful
+the moment that trip is fixed: its `with_skill` arm starts passing everything,
+and `eval benchmark` and `eval iteration-summary` will warn that the test
+split has run out of headroom, meaning no later revision can register there as
+an improvement no matter how good it is. A case a reviewer judged genuinely
+hard keeps drawing on the skill's guidance rather than on one model's current
+blind spot, so it stays informative long after this iteration. See
+[Reference: headroom warning](../reference/ai-skills-eval.md#headroom-warning).
+
 ## 6. Check the suite before spending a run
 
 ```shell

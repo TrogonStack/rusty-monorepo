@@ -9,6 +9,7 @@ use super::benchmark::FailedRunsMode;
 use super::dispersion::{self, FlakinessLedger, FlakyAssertionRecord, MetricSample};
 use super::eval_suite_drift;
 use super::evals::{EvalError, EvalSplit, Result};
+use super::headroom::{describe_headroom_warning, evaluate_headroom, HeadroomThreshold, HeadroomWarning};
 use super::layout;
 use super::proportion::{self, Interval, Proportion};
 use super::report::ScenarioKind;
@@ -19,6 +20,7 @@ pub const OUTPUT_FILE_NAME: &str = "iteration-summary.json";
 pub struct IterationSummaryOptions {
     pub failed_runs: FailedRunsMode,
     pub previous_report_dir: Option<PathBuf>,
+    pub headroom_threshold: HeadroomThreshold,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -39,6 +41,10 @@ pub struct IterationSummaryDocument {
     /// each split, so a train gain and a flat test result sit side by side with the
     /// overall numbers above.
     pub by_split: BTreeMap<EvalSplit, SplitSummary>,
+    /// Set when the overall `with_skill` assertion pass rate has cleared its headroom
+    /// threshold, so a change to the skill has no room left to show up in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headroom: Option<HeadroomWarning>,
     /// Whether this iteration's `with_skill` arm beat the previous iteration's on each
     /// split, and what that says about keeping or reverting the change. Absent when there
     /// is no previous iteration to compare against.
@@ -91,6 +97,15 @@ pub enum SplitVerdict {
     NoRuns,
 }
 
+/// Why `recommendation` cannot be read as ordinary silence on the test split: the split it
+/// depends on most had already used up its room before this iteration ran, so no change
+/// could have shown as `improved` there regardless of what the change did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum SaturationCap {
+    TestSplitSaturated,
+}
+
 /// What the two verdicts above say to do with the change under review.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +129,11 @@ pub struct KeepOrRevertSection {
     /// suites is not a verdict about the change.
     pub by_split: BTreeMap<EvalSplit, SplitVerdict>,
     pub recommendation: Recommendation,
+    /// Set when the test split's `with_skill` arm has no headroom left, so `recommendation`
+    /// is not misread as an ordinary `inconclusive` or a clean `keep`: the split it depends
+    /// on most could not have shown `improved` here no matter what the change did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capped_by_saturation: Option<SaturationCap>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -121,6 +141,11 @@ pub struct SplitSummary {
     pub always_pass: Vec<AssertionStabilityRecord>,
     pub always_fail: Vec<AssertionStabilityRecord>,
     pub helped_by_skill: Vec<HelpedBySkillRecord>,
+    /// Set when this split's `with_skill` assertion pass rate has cleared its headroom
+    /// threshold, which matters most on the test split: the keep-or-revert verdict can
+    /// never read `improved` there once it has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headroom: Option<HeadroomWarning>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
@@ -310,13 +335,21 @@ pub fn build_iteration_summary_document(
             &previous_dir,
             &previous_report,
             options.failed_runs,
+            options.headroom_threshold,
         )
     });
 
     let (always_pass, always_fail) =
         apply_cross_iteration_deltas(&current.always_pass, &current.always_fail, cross_iteration.as_ref());
 
-    let by_split = split_summaries(report_dir, &report, options.failed_runs);
+    let headroom = compute_headroom(
+        report_dir,
+        &report,
+        None,
+        options.failed_runs,
+        options.headroom_threshold,
+    );
+    let by_split = split_summaries(report_dir, &report, options.failed_runs, options.headroom_threshold);
 
     Ok(IterationSummaryDocument {
         report_id: report.report.id,
@@ -331,6 +364,7 @@ pub fn build_iteration_summary_document(
         token_outliers: current.token_outliers,
         cross_iteration,
         by_split,
+        headroom,
         keep_or_revert,
     })
 }
@@ -344,18 +378,24 @@ fn build_keep_or_revert_section(
     previous_dir: &Path,
     previous_report: &ReportForSummary,
     mode: FailedRunsMode,
+    threshold: HeadroomThreshold,
 ) -> KeepOrRevertSection {
     let suites = suite_comparison(report, previous_report);
 
-    let by_split = match &suites {
-        SuiteComparison::DifferentSuites { .. } => BTreeMap::new(),
-        SuiteComparison::SameSuite => EvalSplit::ALL
-            .into_iter()
-            .map(|split| {
-                let verdict = compute_split_verdict(report_dir, report, previous_dir, previous_report, split, mode);
-                (split, verdict)
-            })
-            .collect(),
+    let (by_split, capped_by_saturation) = match &suites {
+        SuiteComparison::DifferentSuites { .. } => (BTreeMap::new(), None),
+        SuiteComparison::SameSuite => {
+            let by_split: BTreeMap<EvalSplit, SplitVerdict> = EvalSplit::ALL
+                .into_iter()
+                .map(|split| {
+                    let verdict = compute_split_verdict(report_dir, report, previous_dir, previous_report, split, mode);
+                    (split, verdict)
+                })
+                .collect();
+            let capped_by_saturation = compute_headroom(report_dir, report, Some(EvalSplit::Test), mode, threshold)
+                .map(|_| SaturationCap::TestSplitSaturated);
+            (by_split, capped_by_saturation)
+        }
     };
 
     let recommendation = derive_recommendation(&by_split);
@@ -364,6 +404,7 @@ fn build_keep_or_revert_section(
         suites,
         by_split,
         recommendation,
+        capped_by_saturation,
     }
 }
 
@@ -517,6 +558,7 @@ fn split_summaries(
     report_dir: &Path,
     report: &ReportForSummary,
     mode: FailedRunsMode,
+    threshold: HeadroomThreshold,
 ) -> BTreeMap<EvalSplit, SplitSummary> {
     EvalSplit::ALL
         .into_iter()
@@ -527,16 +569,83 @@ fn split_summaries(
                 runs: report.runs.iter().filter(|run| run.split == split).cloned().collect(),
             };
             let analysis = analyze_report(report_dir, &narrowed, mode);
+            let headroom = compute_headroom(report_dir, report, Some(split), mode, threshold);
             (
                 split,
                 SplitSummary {
                     always_pass: analysis.always_pass,
                     always_fail: analysis.always_fail,
                     helped_by_skill: analysis.helped_by_skill,
+                    headroom,
                 },
             )
         })
         .collect()
+}
+
+/// Whether the `with_skill` arm has any headroom left, and which cases individually
+/// passed every scored assertion drawn of them.
+///
+/// Builds its own per-case assertion tally rather than reusing [`analyze_report`]'s,
+/// because a case is saturated only once every assertion it was ever asked has passed
+/// across every attempt, which [`analyze_report`]'s per-assertion `always_pass` list does
+/// not answer by itself: a case with two assertions where one always passes and the other
+/// always fails is not saturated, and nothing distinguishes it from a case where neither
+/// does without grouping by case first.
+fn compute_headroom(
+    report_dir: &Path,
+    report: &ReportForSummary,
+    split: Option<EvalSplit>,
+    mode: FailedRunsMode,
+    threshold: HeadroomThreshold,
+) -> Option<HeadroomWarning> {
+    let mut case_totals: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+
+    for run in &report.runs {
+        if run.scenario_id != ScenarioKind::WithSkill {
+            continue;
+        }
+        if let Some(split) = split {
+            if run.split != split {
+                continue;
+            }
+        }
+        if !matches!(classify_run(run, mode), RunDisposition::Completed) {
+            continue;
+        }
+
+        let sample = load_run_sample(report_dir, &run.paths.workspace);
+        let Some(grading) = &sample.grading else {
+            continue;
+        };
+
+        let scored: Vec<&AssertionResultInput> = grading
+            .assertion_results
+            .iter()
+            .filter(|result| result.is_scored())
+            .collect();
+        if scored.is_empty() {
+            continue;
+        }
+
+        let passed = scored.iter().filter(|result| result.passed).count() as u32;
+        let failed = scored.len() as u32 - passed;
+        let entry = case_totals.entry(run.eval_case_id.clone()).or_insert((0, 0));
+        entry.0 += passed;
+        entry.1 += failed;
+    }
+
+    let assertions = Proportion::observed(
+        case_totals.values().map(|(passed, _)| *passed as usize).sum(),
+        case_totals.values().map(|(_, failed)| *failed as usize).sum(),
+    );
+    let saturated_case_ids = case_totals
+        .iter()
+        .filter(|(_, (passed, failed))| *passed > 0 && *failed == 0)
+        .map(|(eval_case_id, _)| eval_case_id.clone())
+        .collect();
+
+    evaluate_headroom(threshold, assertions, saturated_case_ids)
 }
 
 pub fn write_iteration_summary(report_dir: &Path, document: &IterationSummaryDocument) -> Result<PathBuf> {
@@ -552,6 +661,19 @@ pub fn write_iteration_summary(report_dir: &Path, document: &IterationSummaryDoc
 }
 
 pub fn print_human_summary(document: &IterationSummaryDocument) {
+    if let Some(headroom) = &document.headroom {
+        println!("{}", describe_headroom_warning("overall", headroom));
+    }
+    for split in EvalSplit::ALL {
+        if let Some(headroom) = document
+            .by_split
+            .get(&split)
+            .and_then(|summary| summary.headroom.as_ref())
+        {
+            println!("{}", describe_headroom_warning(split.as_str(), headroom));
+        }
+    }
+
     print_section(
         "Always pass",
         document.always_pass.iter().map(|record| {
@@ -676,6 +798,9 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
             "Keep or revert: {}",
             recommendation_label(keep_or_revert.recommendation)
         );
+        if let Some(cap) = keep_or_revert.capped_by_saturation {
+            println!("  {}", saturation_cap_line(cap));
+        }
         match &keep_or_revert.suites {
             SuiteComparison::DifferentSuites {
                 current_suite_hash,
@@ -703,6 +828,15 @@ pub(crate) fn recommendation_label(recommendation: Recommendation) -> &'static s
         Recommendation::Revert => "revert",
         Recommendation::SuspectedOverfitting => "suspected overfitting",
         Recommendation::Inconclusive => "inconclusive",
+    }
+}
+
+fn saturation_cap_line(cap: SaturationCap) -> &'static str {
+    match cap {
+        SaturationCap::TestSplitSaturated => {
+            "capped by saturation: the test split's with_skill arm has no headroom left, \
+             so this recommendation cannot read as improved regardless of what changed"
+        }
     }
 }
 
@@ -2095,5 +2229,108 @@ mod tests {
         let validator = jsonschema::validator_for(&schema).unwrap();
         let errors: Vec<_> = validator.iter_errors(&json).map(|error| error.to_string()).collect();
         assert!(errors.is_empty(), "schema errors: {errors:?}");
+    }
+
+    #[test]
+    fn build_iteration_summary_reports_headroom_and_names_saturated_cases_per_split() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
+        let mut runs = write_with_skill_runs(&report_dir, "test", "case-a", "test", 40, 0);
+        runs.extend(write_with_skill_runs(&report_dir, "train", "case-b", "train", 40, 0));
+        write_report(&report_dir, serde_json::Value::Array(runs), 1, "report-a");
+
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
+
+        let headroom = summary
+            .headroom
+            .as_ref()
+            .expect("both splits pooled clear the default threshold");
+        assert_eq!(
+            headroom.saturated_case_ids,
+            vec!["case-a".to_string(), "case-b".to_string()]
+        );
+
+        let test_headroom = summary.by_split[&EvalSplit::Test]
+            .headroom
+            .as_ref()
+            .expect("the test split alone is also saturated");
+        assert_eq!(test_headroom.saturated_case_ids, vec!["case-a".to_string()]);
+
+        let train_headroom = summary.by_split[&EvalSplit::Train]
+            .headroom
+            .as_ref()
+            .expect("the train split alone is also saturated");
+        assert_eq!(train_headroom.saturated_case_ids, vec!["case-b".to_string()]);
+    }
+
+    #[test]
+    fn build_iteration_summary_reports_no_headroom_warning_when_the_with_skill_arm_still_has_room() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
+        let runs = write_with_skill_runs(&report_dir, "test", "case-a", "test", 5, 5);
+        write_report(&report_dir, serde_json::Value::Array(runs), 1, "report-a");
+
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
+
+        assert!(summary.headroom.is_none());
+        assert!(summary.by_split[&EvalSplit::Test].headroom.is_none());
+    }
+
+    #[test]
+    fn build_iteration_summary_headroom_threshold_is_configurable() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
+        let runs = write_with_skill_runs(&report_dir, "test", "case-a", "test", 5, 0);
+        write_report(&report_dir, serde_json::Value::Array(runs), 1, "report-a");
+
+        let default_summary =
+            build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
+        assert!(default_summary.headroom.is_none());
+
+        let lenient_summary = build_iteration_summary_document(
+            &report_dir,
+            IterationSummaryOptions {
+                headroom_threshold: HeadroomThreshold::parse(0.5).unwrap(),
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(lenient_summary.headroom.is_some());
+    }
+
+    #[test]
+    fn keep_or_revert_is_capped_by_saturation_when_the_test_split_is_saturated() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev", "case-a", "test", 0, 40);
+        let current_runs = write_with_skill_runs(&current_dir, "cur", "case-a", "test", 40, 0);
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert_eq!(
+            keep_or_revert.capped_by_saturation,
+            Some(SaturationCap::TestSplitSaturated),
+            "the test split's with_skill arm passed everything, so the keep verdict cannot be read as ordinary"
+        );
+    }
+
+    #[test]
+    fn keep_or_revert_is_not_capped_when_the_test_split_still_has_room() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev", "case-a", "test", 5, 5);
+        let current_runs = write_with_skill_runs(&current_dir, "cur", "case-a", "test", 5, 5);
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert_eq!(keep_or_revert.capped_by_saturation, None);
     }
 }
