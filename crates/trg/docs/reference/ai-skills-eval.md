@@ -388,12 +388,21 @@ trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
 | `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these. Comma-separated. Values: `revert`, `overfitting`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
 | `--headroom-threshold` | proportion | `0.9` | The `with_skill` arm's Wilson lower bound is reported as saturated (see [Headroom warning](#headroom-warning)) at or above this proportion in `(0, 1]` |
+| `--withhold-test-detail` | flag | off | Drop test-split eval case ids and assertion text from the document, keeping only its aggregate counts, deltas, and intervals |
 
 `iteration-summary.json` reports `always_pass`, `always_fail`, and `helped_by_skill` for
 the whole report, and again per split under `by_split.train` and `by_split.test`. It also
 reports a `headroom` field, and again per split under `by_split.train.headroom` and
 `by_split.test.headroom`, the same shape and threshold [`eval benchmark`
 reports](#headroom-warning).
+
+`--withhold-test-detail` strips held-out case ids and assertion text from every list that
+would otherwise carry them: the top-level stability lists (`always_pass`, `always_fail`,
+`helped_by_skill`, `flaky_assertions`, timing and token outliers), `cross_iteration`, and
+`by_split.test` itself. Aggregate counts, pass rates, deltas, intervals, and the
+`keep_or_revert` verdict are unaffected, since a hillclimb round only ever needs those to
+decide whether to keep or revert a change. See [Hillclimb a
+skill](../how-to/hillclimb-a-skill.md#the-rule).
 
 ### Keep-or-revert verdict
 
@@ -415,8 +424,10 @@ into a verdict rather than left for the reader to eyeball:
   verdict for context.
 - `recommendation` is `keep` when the test split improved, `revert` when it regressed
   (checked before overfitting, since a held-out regression is reason enough on its own),
-  `suspected_overfitting` when train improved while test did not, and `inconclusive`
-  otherwise.
+  `suspected_overfitting` when train improved while a measured (`indistinguishable`) test
+  split did not, and `inconclusive` otherwise. A `no_runs` test split (no held-out cases
+  declared, or none selected) is silence about generalization, not a flat measurement, so it
+  never yields `suspected_overfitting` on its own, however much train improved.
 - `capped_by_saturation` is set to `test_split_saturated` when the test split's
   `with_skill` arm has cleared `--headroom-threshold`, so `recommendation` is not misread
   as an ordinary `inconclusive` or a clean `keep`: the split the verdict depends on most
@@ -751,9 +762,13 @@ scenario, with the same Wilson and Newcombe intervals `benchmark` reports, so
 a reviser knows the score without seeing what produced it. A suite that
 declares no `test` case gets `held_out.status: "no_test_cases"` instead, and
 `improvement.md` nudges toward declaring one, since every later overfitting
-check depends on a held-out set existing. Suite drift detection still
-compares hashes for a `test`-split case, but the bundle never lists that
-case's id among the added or removed ones.
+check depends on a held-out set existing. A suite that does declare `test`
+cases but whose selection (`--split train`, `--case`) did not run any of them
+gets `held_out.status: "declared_not_run"` with `declared_test_case_count`,
+instead of being reported as if the suite had no held-out set at all. Suite
+drift detection still compares hashes for a `test`-split case, but the bundle
+never lists that case's id among the added or removed ones, whether or not
+this run's selection covered it.
 
 ---
 
@@ -2151,7 +2166,11 @@ A narrowed run records what it covered under `suite.case_selection` in `report.j
       "tags": ["smoke"],
       "split": "test",
       "covered": 2,
-      "declared": ["analyze-refunds", "analyze-sales", "summarize-quarter"]
+      "declared": [
+        { "id": "analyze-refunds", "split": "test" },
+        { "id": "analyze-sales", "split": "test" },
+        { "id": "summarize-quarter", "split": "train" }
+      ]
     }
   }
 }
@@ -2166,9 +2185,13 @@ when the run covered every case the suite declares, however the selection was wr
 pattern that happens to match the whole suite narrowed nothing.
 
 `declared` names the whole suite the selection was taken from, since `dimensions.eval_cases`
-lists only what the run covered. Suite drift is diffed against `declared`, so a case a run
-skipped is not reported as one the suite lost, nor as one it gained the next time a run
-covers it.
+lists only what the run covered. Each entry also carries the split that case belongs to, so
+a case a narrowed run excluded still has a split to be judged by. Suite drift is diffed
+against `declared`, so a case a run skipped is not reported as one the suite lost, nor as
+one it gained the next time a run covers it. A `report.json` an older build wrote may still
+have `declared` as a bare list of case ids; that form is still read, with every case in it
+treated as having an unknown split rather than guessed as train or test, but it is never
+written by a current build.
 
 ## Measuring triggering
 

@@ -166,13 +166,15 @@ impl CaseSelection {
     ///
     /// `declared` names the suite the selection was taken from, not just its size,
     /// because a later reader comparing two reports has to tell a case the suite lost
-    /// from one this run merely did not select.
+    /// from one this run merely did not select. Each declared case carries its split so a
+    /// reader can tell a held-out case that was never selected from one the suite lost,
+    /// without having to fall back to the runs a narrowed selection never produced.
     ///
     /// A selection that ends up covering every case the suite declares covered the whole
     /// suite, however it was written, so there is no narrowing to report: the field is
     /// what tells a narrowed report from a full one, and one present on a full run says a
     /// narrowing happened that did not.
-    pub fn record(&self, covered: usize, declared: Vec<String>) -> Option<CaseSelectionRecord> {
+    pub fn record(&self, covered: usize, declared: Vec<DeclaredEvalCase>) -> Option<CaseSelectionRecord> {
         let Self::Narrowed { patterns, tags, split } = self else {
             return None;
         };
@@ -216,6 +218,47 @@ impl CaseSelection {
     }
 }
 
+/// A case the suite declared, with the split it belongs to.
+///
+/// A run narrowed by `--split train` never produces a run for a `test`-split case it
+/// excludes, so this is the only record of that case's split a later reader (drift
+/// detection, the held-out section) can consult without re-reading the suite off disk,
+/// which may no longer have the case at all.
+///
+/// `split` is `None` when reading a `report.json` an older build wrote as a bare list of
+/// case ids, before a declared case recorded its split at all. Such a case must never be
+/// counted as train or test: guessing wrong here is indistinguishable from a real answer,
+/// so callers that need to know whether a case is safe to reveal treat an unknown split the
+/// same as a test split, and callers that count test cases do not count it as one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct DeclaredEvalCase {
+    pub id: String,
+    pub split: Option<EvalSplit>,
+}
+
+impl<'de> Deserialize<'de> for DeclaredEvalCase {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            LegacyId(String),
+            Current {
+                id: String,
+                #[serde(default)]
+                split: Option<EvalSplit>,
+            },
+        }
+
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::LegacyId(id) => DeclaredEvalCase { id, split: None },
+            Repr::Current { id, split } => DeclaredEvalCase { id, split },
+        })
+    }
+}
+
 /// The selection a report was produced under, so a reader is not shown partial coverage
 /// as if it were a pass over the whole suite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -227,8 +270,8 @@ pub struct CaseSelectionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub split: Option<EvalSplit>,
     pub covered: usize,
-    /// Every case ID the suite declared, covered by this run or not.
-    pub declared: Vec<String>,
+    /// Every case the suite declared, covered by this run or not.
+    pub declared: Vec<DeclaredEvalCase>,
 }
 
 fn selection_error(field: &str, message: impl Into<String>) -> EvalError {
@@ -259,11 +302,20 @@ mod tests {
         .unwrap()
     }
 
+    fn declared(id: &str, split: EvalSplit) -> DeclaredEvalCase {
+        DeclaredEvalCase {
+            id: id.to_string(),
+            split: Some(split),
+        }
+    }
+
     #[test]
     fn no_flags_covers_the_whole_suite() {
         let selection = CaseSelection::parse(&[], &[], None).unwrap();
         assert!(selection.covers(&case("anything", &[])));
-        assert!(selection.record(1, vec!["anything".to_string()]).is_none());
+        assert!(selection
+            .record(1, vec![declared("anything", EvalSplit::Train)])
+            .is_none());
     }
 
     #[test]
@@ -339,22 +391,28 @@ mod tests {
     #[test]
     fn a_selection_that_matched_every_case_records_no_narrowing() {
         let selection = CaseSelection::parse(&["analyze-*".to_string()], &[], None).unwrap();
-        let declared = vec!["analyze-sales".to_string(), "analyze-refunds".to_string()];
+        let declared_cases = vec![
+            declared("analyze-sales", EvalSplit::Train),
+            declared("analyze-refunds", EvalSplit::Train),
+        ];
 
-        assert!(selection.record(declared.len(), declared).is_none());
+        assert!(selection.record(declared_cases.len(), declared_cases).is_none());
     }
 
     #[test]
     fn a_narrowed_run_records_the_suite_it_selected_from() {
         let selection = CaseSelection::parse(&["analyze-*".to_string()], &["smoke".to_string()], None).unwrap();
-        let declared = vec!["analyze-sales".to_string(), "typo-check".to_string()];
-        let record = selection.record(1, declared.clone()).unwrap();
+        let declared_cases = vec![
+            declared("analyze-sales", EvalSplit::Train),
+            declared("typo-check", EvalSplit::Test),
+        ];
+        let record = selection.record(1, declared_cases.clone()).unwrap();
 
         assert_eq!(record.cases, vec!["analyze-*"]);
         assert_eq!(record.tags, vec!["smoke"]);
         assert_eq!(record.split, None);
         assert_eq!(record.covered, 1);
-        assert_eq!(record.declared, declared);
+        assert_eq!(record.declared, declared_cases);
     }
 
     #[test]
@@ -386,9 +444,52 @@ mod tests {
     #[test]
     fn a_narrowed_run_records_the_split_it_selected_by() {
         let selection = CaseSelection::parse(&[], &[], Some(EvalSplit::Test)).unwrap();
-        let declared = vec!["analyze-sales".to_string(), "analyze-refunds".to_string()];
-        let record = selection.record(1, declared).unwrap();
+        let declared_cases = vec![
+            declared("analyze-sales", EvalSplit::Test),
+            declared("analyze-refunds", EvalSplit::Test),
+        ];
+        let record = selection.record(1, declared_cases).unwrap();
 
         assert_eq!(record.split, Some(EvalSplit::Test));
+    }
+
+    #[test]
+    fn an_older_reports_legacy_string_declared_list_deserializes_with_an_unknown_split() {
+        let record: CaseSelectionRecord = serde_json::from_value(serde_json::json!({
+            "covered": 1,
+            "declared": ["analyze-sales", "analyze-refunds"]
+        }))
+        .expect("a legacy bare-string declared list must still deserialize");
+
+        assert_eq!(
+            record.declared,
+            vec![
+                DeclaredEvalCase {
+                    id: "analyze-sales".to_string(),
+                    split: None,
+                },
+                DeclaredEvalCase {
+                    id: "analyze-refunds".to_string(),
+                    split: None,
+                },
+            ],
+            "a legacy entry carries no split of its own, so it must deserialize as unknown \
+             rather than being guessed as train or test"
+        );
+    }
+
+    #[test]
+    fn a_rewritten_legacy_declared_list_still_deserializes_with_an_unknown_split() {
+        let legacy: CaseSelectionRecord = serde_json::from_value(serde_json::json!({
+            "covered": 1,
+            "declared": ["analyze-sales"]
+        }))
+        .unwrap();
+
+        let rewritten = serde_json::to_value(&legacy).unwrap();
+        let reread: CaseSelectionRecord = serde_json::from_value(rewritten)
+            .expect("a report rewritten after loading a legacy declared list must stay readable");
+
+        assert_eq!(reread, legacy);
     }
 }

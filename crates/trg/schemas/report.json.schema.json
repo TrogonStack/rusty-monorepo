@@ -120,9 +120,9 @@
           "type": "integer"
         },
         "declared": {
-          "description": "Every case ID the suite declared, covered by this run or not.",
+          "description": "Every case the suite declared, covered by this run or not.",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/DeclaredEvalCase"
           },
           "type": "array"
         },
@@ -193,6 +193,28 @@
       },
       "required": [
         "provider"
+      ],
+      "type": "object"
+    },
+    "DeclaredEvalCase": {
+      "description": "A case the suite declared, with the split it belongs to.\n\nA run narrowed by `--split train` never produces a run for a `test`-split case it\nexcludes, so this is the only record of that case's split a later reader (drift\ndetection, the held-out section) can consult without re-reading the suite off disk,\nwhich may no longer have the case at all.\n\n`split` is `None` when reading a `report.json` an older build wrote as a bare list of\ncase ids, before a declared case recorded its split at all. Such a case must never be\ncounted as train or test: guessing wrong here is indistinguishable from a real answer,\nso callers that need to know whether a case is safe to reveal treat an unknown split the\nsame as a test split, and callers that count test cases do not count it as one.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "split": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvalSplit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id"
       ],
       "type": "object"
     },
@@ -814,7 +836,7 @@
         },
         {
           "const": "incomplete",
-          "description": "At least one run recorded against this config has no known model, typically\nbecause no run has executed yet or because one fell back to a runner default.",
+          "description": "At least one run recorded against this config has no known model, typically\nbecause no run has executed yet or because one fell back to a runner default.\n\n`partial` is accepted as an alias so a `report.json` an older build wrote still\nloads; the schema and anything this process writes only ever emit `incomplete`.",
           "type": "string"
         }
       ]

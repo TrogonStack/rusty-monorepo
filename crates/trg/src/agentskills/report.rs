@@ -12,7 +12,7 @@ use crate::fs::FileSystem;
 use super::budget::{PassSpend, RunCost, FAILURE_KIND_BUDGET};
 use super::cache::RunCacheInfo;
 use super::case_directories::{resolve_eval_suite, EvalSource};
-use super::case_selection::{CaseSelection, CaseSelectionRecord};
+use super::case_selection::{CaseSelection, CaseSelectionRecord, DeclaredEvalCase};
 use super::evals::{effective_attempts, EvalDirName, EvalError, EvalPriority, EvalSplit, EvalSuite, Result};
 use super::feedback::{
     collect_improvement_feedback, feedback_path_for_run, load_run_feedback_entries, summarize_feedback,
@@ -492,6 +492,10 @@ pub enum ModelCaptureStatus {
     Complete,
     /// At least one run recorded against this config has no known model, typically
     /// because no run has executed yet or because one fell back to a runner default.
+    ///
+    /// `partial` is accepted as an alias so a `report.json` an older build wrote still
+    /// loads; the schema and anything this process writes only ever emit `incomplete`.
+    #[serde(alias = "partial")]
     Incomplete,
 }
 
@@ -1025,9 +1029,16 @@ pub fn build_report_bundle(
     let compiled_suite = resolve_eval_suite(fs, skill_path, &options.eval_dir)?;
     let evals_hash = compiled_suite.hash;
     let mut suite: EvalSuite = compiled_suite.suite;
-    let declared_case_ids: Vec<String> = suite.evals.iter().map(|case| case.id.to_string()).collect();
+    let declared_cases: Vec<DeclaredEvalCase> = suite
+        .evals
+        .iter()
+        .map(|case| DeclaredEvalCase {
+            id: case.id.to_string(),
+            split: Some(case.split),
+        })
+        .collect();
     suite.evals = options.cases.apply(suite.evals)?;
-    let case_selection = options.cases.record(suite.evals.len(), declared_case_ids);
+    let case_selection = options.cases.record(suite.evals.len(), declared_cases);
     let eval_slugs = slugs_for_suite(&suite);
     let iteration = options.iteration.unwrap_or(1);
     let attempts = options.attempts;
@@ -1490,6 +1501,19 @@ mod tests {
             EnvironmentPolicy::default(),
             EnvironmentPolicy::Isolated,
             "the CLI default moved, and this field deliberately does not track it"
+        );
+    }
+
+    #[test]
+    fn a_capture_status_of_partial_from_before_the_rename_reads_as_incomplete() {
+        let status: ModelCaptureStatus =
+            serde_json::from_str("\"partial\"").expect("the retired 'partial' spelling must still deserialize");
+        assert_eq!(status, ModelCaptureStatus::Incomplete);
+
+        assert_eq!(
+            serde_json::to_string(&ModelCaptureStatus::Incomplete).unwrap(),
+            "\"incomplete\"",
+            "this process must only ever write the current spelling, never the retired alias"
         );
     }
 
@@ -2145,7 +2169,23 @@ mod tests {
         let record = bundle.document.suite.case_selection.as_ref().unwrap();
         assert_eq!(record.cases, vec!["parse-*".to_string()]);
         assert_eq!(record.covered, 2);
-        assert_eq!(record.declared, vec!["parse-csv", "parse-json", "render-chart"]);
+        assert_eq!(
+            record.declared,
+            vec![
+                DeclaredEvalCase {
+                    id: "parse-csv".to_string(),
+                    split: Some(EvalSplit::Train)
+                },
+                DeclaredEvalCase {
+                    id: "parse-json".to_string(),
+                    split: Some(EvalSplit::Train)
+                },
+                DeclaredEvalCase {
+                    id: "render-chart".to_string(),
+                    split: Some(EvalSplit::Train)
+                },
+            ]
+        );
     }
 
     #[test]

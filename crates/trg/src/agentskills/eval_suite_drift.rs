@@ -1,9 +1,9 @@
 //! Detect when the eval suite (`evals/evals.json`) changed between iterations.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use super::evals::{EvalDirName, EvalError, Result};
+use super::evals::{EvalDirName, EvalError, EvalSplit, Result};
 use super::report::ReportDocument;
 use crate::fs::FileSystem;
 use schemars::JsonSchema;
@@ -100,10 +100,20 @@ fn recorded_declared_case_ids(value: &serde_json::Value) -> Option<BTreeSet<Stri
         .pointer("/suite/case_selection/declared")?
         .as_array()?
         .iter()
-        .filter_map(|id| id.as_str())
-        .map(str::to_string)
+        .filter_map(declared_case_id)
         .collect();
     (!declared.is_empty()).then_some(declared)
+}
+
+/// Reads a `case_selection.declared` entry's id whether it is the current `{id, split}` object
+/// or a legacy bare string, so a narrowed report written by either build still contributes its
+/// full declared set instead of silently dropping every entry and falling back to only the
+/// cases this run covered.
+fn declared_case_id(entry: &serde_json::Value) -> Option<String> {
+    entry
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| entry.get("id").and_then(|id| id.as_str()).map(str::to_string))
 }
 
 fn dimension_case_ids(value: &serde_json::Value) -> BTreeSet<String> {
@@ -149,12 +159,42 @@ pub fn parse_report_iteration(value: &serde_json::Value) -> Result<u32> {
 /// the suite lost, and report it as added again the next time a run selects it.
 pub fn declared_eval_case_ids(report: &ReportDocument) -> BTreeSet<String> {
     match &report.suite.case_selection {
-        Some(selection) if !selection.declared.is_empty() => selection.declared.iter().cloned().collect(),
+        Some(selection) if !selection.declared.is_empty() => {
+            selection.declared.iter().map(|case| case.id.clone()).collect()
+        }
         _ => report
             .dimensions
             .eval_cases
             .iter()
             .map(|eval_case| eval_case.id.clone())
+            .collect(),
+    }
+}
+
+/// The split every declared case belongs to, covered by this run or not.
+///
+/// A run narrowed to one split never produces a run for a case the other split declares, so
+/// looking up a declared-but-unrun case's split from [`ReportDocument::runs`] silently
+/// defaults it (see [`EvalSplit::default`]), which is indistinguishable from a case that
+/// really is on the default split. `case_selection.declared` carries the split for every
+/// case the suite declared, run or not, so it is consulted first; a full run has no such
+/// record because there is nothing narrowed to explain, and every declared case in that
+/// case did run, so its split is read off the runs that produced it instead.
+///
+/// A declared case's split is `None` when it came from a `report.json` an older build wrote
+/// before a declared case recorded its split at all; a caller must not treat that the same
+/// as a known train split.
+pub fn declared_eval_case_splits(report: &ReportDocument) -> HashMap<&str, Option<EvalSplit>> {
+    match &report.suite.case_selection {
+        Some(selection) if !selection.declared.is_empty() => selection
+            .declared
+            .iter()
+            .map(|case| (case.id.as_str(), case.split))
+            .collect(),
+        _ => report
+            .runs
+            .iter()
+            .map(|run| (run.eval_case_id.as_str(), Some(run.split)))
             .collect(),
     }
 }
@@ -458,6 +498,35 @@ mod tests {
         assert_eq!(
             snapshot.declared_eval_case_ids,
             BTreeSet::from(["case-a".to_string(), "case-b".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_snapshot_reads_declared_case_objects_the_same_as_legacy_declared_strings() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = serde_json::json!({
+            "report": { "iteration": 2 },
+            "suite": {
+                "evals_hash": "sha256:abc",
+                "case_selection": {
+                    "cases": ["case-a"],
+                    "covered": 1,
+                    "declared": [
+                        { "id": "case-a", "split": "train" },
+                        { "id": "case-b", "split": "test" }
+                    ]
+                }
+            },
+            "dimensions": { "eval_cases": [{ "id": "case-a" }] }
+        });
+        std::fs::write(temp.path().join("report.json"), serde_json::to_string(&report).unwrap()).unwrap();
+
+        let snapshot = load_report_drift_snapshot(temp.path()).unwrap();
+        assert_eq!(
+            snapshot.declared_eval_case_ids,
+            BTreeSet::from(["case-a".to_string(), "case-b".to_string()]),
+            "an object-shaped declared entry must not be dropped and fall back to only the \
+             covered dimensions, which would report the held-out case-b as drift"
         );
     }
 
