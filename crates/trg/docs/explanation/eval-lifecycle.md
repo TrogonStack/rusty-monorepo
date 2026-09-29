@@ -247,6 +247,11 @@ happens, name the cases that individually passed everything, and, on
 mistaken for an ordinary one. See [Reference: headroom
 warning](../reference/ai-skills-eval.md#headroom-warning).
 
+Steps 2 through 6 above, one change per round, kept only on a `keep`
+recommendation and reverted otherwise, are packaged as a single procedure in
+[How-to: hillclimb a skill](../how-to/hillclimb-a-skill.md) and the
+`trg-eval-hillclimb` skill it documents.
+
 ---
 
 ## Divergences from agentskills.io

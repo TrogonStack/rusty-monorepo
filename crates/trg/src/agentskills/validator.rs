@@ -213,6 +213,13 @@ mod tests {
     }
 
     #[test]
+    fn the_eval_hillclimb_skill_is_shipped() {
+        let path = shipped_skills_dir().join("trg-eval-hillclimb");
+        let props = validate_skill(&RealFS, &path).expect("trg-eval-hillclimb must validate");
+        assert_eq!(props.name, "trg-eval-hillclimb");
+    }
+
+    #[test]
     fn test_validate_name_valid() {
         let result = validate_name("my-skill", Path::new("/my-skill"));
         assert!(result.is_ok());
