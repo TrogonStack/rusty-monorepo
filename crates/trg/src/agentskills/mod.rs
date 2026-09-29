@@ -41,6 +41,7 @@ pub mod redact;
 pub mod report;
 pub mod runner;
 pub mod sampling;
+pub mod scaling;
 pub mod scenario_selection;
 pub mod schemas;
 pub mod skill_trust;

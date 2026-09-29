@@ -1,0 +1,306 @@
+{
+  "$defs": {
+    "Interval": {
+      "description": "The range a measurement is consistent with.",
+      "properties": {
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "type": "object"
+    },
+    "ModelCaptureStatus": {
+      "description": "Whether every run recorded against a model config resolved to a known model.\n\nA report scaffolded before any run has executed cannot yet know what its runs will\nresolve to, and a runner default that no runner reports back never becomes known at\nall, so this is recomputed from the runs actually on the bundle rather than assumed at\nscaffold time.",
+      "oneOf": [
+        {
+          "const": "complete",
+          "description": "Every run recorded against this config resolved to a known model.",
+          "type": "string"
+        },
+        {
+          "const": "incomplete",
+          "description": "At least one run recorded against this config has no known model, typically\nbecause no run has executed yet or because one fell back to a runner default.",
+          "type": "string"
+        }
+      ]
+    },
+    "ModelConfigDimension": {
+      "properties": {
+        "capture_status": {
+          "$ref": "#/$defs/ModelCaptureStatus"
+        },
+        "extra": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "parameter_sources": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "capture_status",
+        "label",
+        "parameters",
+        "parameter_sources",
+        "extra"
+      ],
+      "type": "object"
+    },
+    "ScalingBundleSummary": {
+      "description": "The model config captured for one bundle in the comparison, so a reader of a step can\ntell which configuration is named `weaker` and `stronger` without opening its report.",
+      "properties": {
+        "model_config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelConfigDimension"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "report_dir": {
+          "type": "string"
+        },
+        "report_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "report_dir",
+        "report_id"
+      ],
+      "type": "object"
+    },
+    "ScalingComparison": {
+      "properties": {
+        "by_split": {
+          "additionalProperties": false,
+          "properties": {
+            "test": {
+              "$ref": "#/$defs/ScalingVerdict"
+            },
+            "train": {
+              "$ref": "#/$defs/ScalingVerdict"
+            }
+          },
+          "type": "object"
+        },
+        "overall": {
+          "$ref": "#/$defs/ScalingVerdict"
+        }
+      },
+      "required": [
+        "overall",
+        "by_split"
+      ],
+      "type": "object"
+    },
+    "ScalingDelta": {
+      "properties": {
+        "pass_rate_delta": {
+          "format": "double",
+          "type": "number"
+        },
+        "pass_rate_delta_interval": {
+          "$ref": "#/$defs/Interval"
+        },
+        "stronger_pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "weaker_pass_rate": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "weaker_pass_rate",
+        "stronger_pass_rate",
+        "pass_rate_delta",
+        "pass_rate_delta_interval"
+      ],
+      "type": "object"
+    },
+    "ScalingOutlier": {
+      "description": "A case the stronger configuration scored lower on than the weaker one, despite the\noperator naming it as the stronger side. Not itself a verdict on the pair: with few\ndraws a single case can move on noise the same way an overall rate can, but the article\ntreats a case that moves backward as worth an author's look regardless.",
+      "properties": {
+        "eval_case_id": {
+          "type": "string"
+        },
+        "stronger_pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "weaker_pass_rate": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "eval_case_id",
+        "weaker_pass_rate",
+        "stronger_pass_rate"
+      ],
+      "type": "object"
+    },
+    "ScalingStep": {
+      "properties": {
+        "comparison": {
+          "$ref": "#/$defs/ScalingComparison"
+        },
+        "outliers": {
+          "items": {
+            "$ref": "#/$defs/ScalingOutlier"
+          },
+          "type": "array"
+        },
+        "stronger": {
+          "$ref": "#/$defs/ScalingBundleSummary"
+        },
+        "weaker": {
+          "$ref": "#/$defs/ScalingBundleSummary"
+        }
+      },
+      "required": [
+        "weaker",
+        "stronger",
+        "comparison"
+      ],
+      "type": "object"
+    },
+    "ScalingVerdict": {
+      "description": "The verdict for one comparison's `with_skill` assertion pass-rate delta, derived from\nwhether the Newcombe interval around `stronger - weaker` excludes zero.",
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ScalingDelta"
+            }
+          ],
+          "description": "The interval sits entirely above zero: the stronger configuration did better.",
+          "properties": {
+            "status": {
+              "const": "improved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ScalingDelta"
+            }
+          ],
+          "description": "The interval sits entirely below zero: the stronger configuration did worse.",
+          "properties": {
+            "status": {
+              "const": "regressed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ScalingDelta"
+            }
+          ],
+          "description": "The interval straddles zero: the configurations have not separated on this suite.",
+          "properties": {
+            "status": {
+              "const": "flat",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Neither bundle scored a `with_skill` run here, so there is nothing to compare.\nNever read as `Flat`: silence about a split is not a finding that it held steady.",
+          "properties": {
+            "status": {
+              "const": "no_runs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/scaling.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "bundles": {
+      "items": {
+        "$ref": "#/$defs/ScalingBundleSummary"
+      },
+      "type": "array"
+    },
+    "end_to_end": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ScalingStep"
+        }
+      ],
+      "description": "The weakest bundle against the strongest, regardless of how many steps sit between\nthem, so a curve that dips in the middle and recovers by the end is not read as an\nend-to-end improvement no single step earned."
+    },
+    "generated_at": {
+      "type": "string"
+    },
+    "steps": {
+      "description": "Adjacent-pair comparisons, in the weakest-to-strongest order the operator listed\nthe bundles in.",
+      "items": {
+        "$ref": "#/$defs/ScalingStep"
+      },
+      "type": "array"
+    },
+    "suite_evals_hash": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "generated_at",
+    "suite_evals_hash",
+    "bundles",
+    "steps",
+    "end_to_end"
+  ],
+  "title": "trg skills eval scaling",
+  "type": "object"
+}

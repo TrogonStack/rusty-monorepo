@@ -1230,6 +1230,7 @@ mod tests {
             },
             runs: vec![RunRecord {
                 runner_model: None,
+                runner_model_source: None,
                 id: "run-001".to_string(),
                 eval_case_id: "case-a".to_string(),
                 eval_slug: "case-a".to_string(),

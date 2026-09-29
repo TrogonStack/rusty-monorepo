@@ -62,7 +62,7 @@
     "model_configs": [
       {
         "id": "ci-sonnet-4",
-        "capture_status": "partial",
+        "capture_status": "incomplete",
         "label": "ci-sonnet-4",
         "parameters": {},
         "parameter_sources": {},

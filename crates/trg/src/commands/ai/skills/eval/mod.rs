@@ -12,6 +12,7 @@ mod next_iteration;
 mod output;
 mod record_mcp;
 mod run;
+mod scaling;
 mod verify;
 
 pub(crate) use output::{print_json, print_report_dir};
@@ -40,6 +41,7 @@ pub use mock_server::MockServerArgs;
 pub use next_iteration::NextIterationArgs;
 pub use record_mcp::RecordMcpArgs;
 pub use run::RunArgs;
+pub use scaling::ScalingArgs;
 pub use verify::VerifyArgs;
 
 #[derive(Args)]
@@ -80,6 +82,8 @@ pub enum EvalCommands {
     HtmlReport(HtmlReportArgs),
     /// Start a real, operator-declared MCP server and record its answers as fixed mocks
     RecordMcp(RecordMcpArgs),
+    /// Check whether a stronger configuration scored higher across ordered report bundles
+    Scaling(ScalingArgs),
 }
 
 impl EvalArgs {
@@ -98,6 +102,7 @@ impl EvalArgs {
             EvalCommands::MockServer(args) => args.handle(),
             EvalCommands::HtmlReport(args) => args.handle(fs),
             EvalCommands::RecordMcp(args) => args.handle(fs),
+            EvalCommands::Scaling(args) => args.handle(fs),
         }
     }
 }
@@ -302,5 +307,16 @@ mod help_tests {
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
         assert!(help.contains("--from"));
         assert!(help.contains("--allow-eval-suite-drift"));
+    }
+
+    #[test]
+    fn eval_scaling_help_includes_examples() {
+        let help = long_help::<ScalingArgs>(
+            "scaling",
+            "Check whether a stronger configuration scored higher across ordered report bundles",
+        );
+        assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
+        assert!(help.contains("--fail-on-regression"));
+        assert!(help.contains("--failed-runs"));
     }
 }

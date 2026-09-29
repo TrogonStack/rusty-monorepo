@@ -21,7 +21,7 @@ use super::feedback::{
 use super::judge::JudgeProvider;
 use super::judge_votes::JudgeVotes;
 use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirror_layout};
-use super::model_name::ModelName;
+use super::model_name::{ModelName, ModelSource};
 use super::outputs::OUTPUTS_DIR;
 use super::permission_outcome::PermissionOutcome;
 use super::runner::capabilities::HarnessControl;
@@ -479,10 +479,26 @@ pub struct SkillRevisionDimension {
     pub skill_hash: String,
 }
 
+/// Whether every run recorded against a model config resolved to a known model.
+///
+/// A report scaffolded before any run has executed cannot yet know what its runs will
+/// resolve to, and a runner default that no runner reports back never becomes known at
+/// all, so this is recomputed from the runs actually on the bundle rather than assumed at
+/// scaffold time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCaptureStatus {
+    /// Every run recorded against this config resolved to a known model.
+    Complete,
+    /// At least one run recorded against this config has no known model, typically
+    /// because no run has executed yet or because one fell back to a runner default.
+    Incomplete,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModelConfigDimension {
     pub id: String,
-    pub capture_status: String,
+    pub capture_status: ModelCaptureStatus,
     pub label: String,
     pub parameters: serde_json::Map<String, serde_json::Value>,
     pub parameter_sources: serde_json::Map<String, serde_json::Value>,
@@ -525,6 +541,12 @@ pub struct RunRecord {
     /// and would read every run as having used the operator's model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_model: Option<ModelName>,
+    /// Where `runner_model` came from, once the case's own choice and the operator's
+    /// `--runner-model` are combined. `None` until the run has been resolved against a
+    /// runner; `runner_model` being `None` alongside `Some(RunnerDefault)` means the
+    /// harness picked its own default, which no runner reports back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_model_source: Option<ModelSource>,
     /// The tool grant this run was actually given, once the operator's ceiling and the
     /// case's own declaration are combined. `None` means unrestricted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1256,7 +1278,9 @@ fn build_dimensions(
         skill_revisions,
         model_configs: vec![ModelConfigDimension {
             id: model_config_label.to_string(),
-            capture_status: "partial".to_string(),
+            // No run has executed yet at scaffold time, so nothing is known to be
+            // captured. `recompute_model_capture_status` corrects this once runs exist.
+            capture_status: ModelCaptureStatus::Incomplete,
             label: model_config_label.to_string(),
             parameters: serde_json::Map::new(),
             parameter_sources: serde_json::Map::new(),
@@ -1270,6 +1294,29 @@ fn build_dimensions(
             })
             .collect(),
         grading_strategies: Vec::new(),
+    }
+}
+
+/// Recomputes each model config's capture status from the runs actually recorded against
+/// it, once execution has given `runner_model` a real value to check.
+///
+/// `build_dimensions` runs before any run executes and cannot know whether every run's
+/// model will resolve, so it always scaffolds `Incomplete`; this is the pass that can
+/// actually tell, and is meant to run again after every re-execution of a bundle's runs.
+pub fn recompute_model_capture_status(document: &mut ReportDocument) {
+    let ReportDocument { runs, dimensions, .. } = document;
+    for config in dimensions.model_configs.iter_mut() {
+        let mut saw_any = false;
+        let complete = runs
+            .iter()
+            .filter(|run| run.model_config_id == config.id)
+            .inspect(|_| saw_any = true)
+            .all(|run| run.runner_model.is_some());
+        config.capture_status = if saw_any && complete {
+            ModelCaptureStatus::Complete
+        } else {
+            ModelCaptureStatus::Incomplete
+        };
     }
 }
 
@@ -1316,6 +1363,7 @@ fn build_runs(
                     iteration,
                     model_config_id: model_config_label.to_string(),
                     runner_model: None,
+                    runner_model_source: None,
                     skill_revision_id: match scenario {
                         ScenarioKind::OldSkill => "old".to_string(),
                         _ => "current".to_string(),
@@ -1511,8 +1559,101 @@ mod tests {
         assert_eq!(dimensions.assertions[1].text, "final text contains 'total'");
         assert_eq!(dimensions.assertions[1].name.as_deref(), Some("mentions-total"));
         assert_eq!(dimensions.scenarios.len(), 2);
-        assert_eq!(dimensions.model_configs[0].capture_status, "partial");
+        assert_eq!(
+            dimensions.model_configs[0].capture_status,
+            ModelCaptureStatus::Incomplete
+        );
         assert_eq!(dimensions.model_configs[0].label, "ci-default");
+    }
+
+    /// `build_dimensions` scaffolds every model config `Incomplete` before a run has
+    /// executed. Once every run resolves a model, the config it belongs to reads
+    /// `Complete`; a run that never resolves one keeps its config `Incomplete` even
+    /// though every other run for that config did resolve one.
+    #[test]
+    fn recompute_model_capture_status_reflects_what_runs_actually_resolved() {
+        let suite = sample_suite();
+        let slugs = crate::agentskills::layout::assign_eval_slugs(&suite.evals);
+        let dimensions = build_dimensions(
+            &suite,
+            "sha256:abc",
+            None,
+            "ci-default",
+            &[ScenarioKind::WithSkill],
+            &slugs,
+        );
+        let (runs, _workspace_dirs) = build_runs(
+            &suite,
+            &[ScenarioKind::WithSkill],
+            "ci-default",
+            1,
+            None,
+            &slugs,
+            SkillStaging::Symlink,
+        );
+
+        let mut document = ReportDocument {
+            report: ReportSection {
+                id: "report-123".to_string(),
+                generated_at: "2026-05-25T22:00:00Z".to_string(),
+                iteration: 1,
+                producer: ProducerSection {
+                    name: "trg".to_string(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                runner: None,
+                runner_binary: None,
+                runner_version: None,
+                environment: EnvironmentPolicy::default(),
+                permission: PermissionOutcome::default(),
+                allowed_tools: None,
+                ci: None,
+            },
+            suite: SuiteSection {
+                skill_name: "demo-skill".to_string(),
+                skill_path: "demo-skill".to_string(),
+                skill_hash: "sha256:deadbeef".to_string(),
+                evals_path: "demo-skill/evals/evals.json".to_string(),
+                evals_hash: "sha256:feedface".to_string(),
+                eval_dir: EvalDirName::default(),
+                old_skill_path: None,
+                old_skill_hash: None,
+                case_selection: None,
+            },
+            dimensions,
+            runs,
+            assertion_results: Vec::new(),
+            summaries: SummariesSection {
+                by_scenario: Vec::new(),
+                human_feedback: None,
+            },
+            improvement_feedback: Vec::new(),
+            comparisons: Vec::new(),
+            iteration_summary: None,
+            budget: None,
+        };
+
+        recompute_model_capture_status(&mut document);
+        assert_eq!(
+            document.dimensions.model_configs[0].capture_status,
+            ModelCaptureStatus::Incomplete
+        );
+
+        for run in document.runs.iter_mut() {
+            run.runner_model = Some(ModelName::parse("opus").unwrap());
+        }
+        recompute_model_capture_status(&mut document);
+        assert_eq!(
+            document.dimensions.model_configs[0].capture_status,
+            ModelCaptureStatus::Complete
+        );
+
+        document.runs[0].runner_model = None;
+        recompute_model_capture_status(&mut document);
+        assert_eq!(
+            document.dimensions.model_configs[0].capture_status,
+            ModelCaptureStatus::Incomplete
+        );
     }
 
     #[test]
