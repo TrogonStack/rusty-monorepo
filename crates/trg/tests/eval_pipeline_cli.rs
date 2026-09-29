@@ -497,6 +497,48 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     );
 }
 
+/// A `--previous` the caller named but that cannot be read is a broken tool invocation, not
+/// silence about there being nothing to compare against: it has to fail closed at the same
+/// exit code every other unreadable-bundle path in this walk reports, not the clean exit a
+/// first iteration with no `--previous` at all gets.
+#[test]
+fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let current_dir = temp.path().join("report-iter-2");
+    let missing_previous = temp.path().join("no-such-previous");
+
+    let current_runs: Vec<(String, &str, &str, bool)> =
+        (0..4).map(|i| (format!("cur-{i}"), "case-a", "test", true)).collect();
+    write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
+
+    let named_but_unreadable = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&current_dir)
+        .arg("--previous")
+        .arg(&missing_previous)
+        .output()
+        .unwrap();
+    assert_eq!(
+        named_but_unreadable.status.code(),
+        Some(3),
+        "a named --previous that cannot be read must fail closed, got {:?} and {}",
+        named_but_unreadable.status.code(),
+        stderr_of(&named_but_unreadable)
+    );
+
+    let none_named = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&current_dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        none_named.status.code(),
+        Some(0),
+        "no --previous at all has nothing to compare against, and that is fine, got {}",
+        stderr_of(&none_named)
+    );
+}
+
 /// A scaffolded suite declares no `test` case, so the improvement bundle it produces has
 /// nothing to withhold. The bundle says so explicitly rather than reporting an empty
 /// `held_out` field, and the markdown nudges toward declaring one, since every later

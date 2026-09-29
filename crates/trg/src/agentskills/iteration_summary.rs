@@ -322,7 +322,7 @@ pub fn build_iteration_summary_document(
         report_dir,
         report.report.iteration,
         options.previous_report_dir.as_deref(),
-    );
+    )?;
 
     let cross_iteration = previous.clone().and_then(|(previous_dir, previous_report)| {
         build_cross_iteration_section(&previous_dir, previous_report, &current, options.failed_runs)
@@ -1117,19 +1117,28 @@ fn apply_cross_iteration_deltas(
 /// or a sibling detected next to `report_dir`. Either way this reads `report.json` exactly
 /// once: an override is read here for the first and only time, and a detected candidate
 /// arrives already parsed from the scan that found it.
+///
+/// `--previous` left unset and auto-detection finding no sibling are the same thing: there
+/// is nothing to compare against, which is normal on a first iteration and reported as
+/// `Ok(None)`. A `--previous` the caller did name is a claim that a specific report exists;
+/// failing to read it is an infrastructure failure the caller asked to be told about, not a
+/// quiet "nothing to compare against", so it is returned as `Err` instead of folded into the
+/// same `None` a first iteration produces.
 fn resolve_previous_report_for_summary(
     report_dir: &Path,
     current_iteration: u32,
     previous_report_dir: Option<&Path>,
-) -> Option<(PathBuf, ReportForSummary)> {
+) -> Result<Option<(PathBuf, ReportForSummary)>> {
     if let Some(dir) = previous_report_dir {
-        let report = load_report(dir).ok()?;
-        return Some((dir.to_path_buf(), report));
+        let report = load_report(dir)?;
+        return Ok(Some((dir.to_path_buf(), report)));
     }
 
-    let previous = detect_previous_report_dir(report_dir, current_iteration)?;
-    let report = previous.report_for_summary().ok()?;
-    Some((previous.dir().to_path_buf(), report))
+    let Some(previous) = detect_previous_report_dir(report_dir, current_iteration) else {
+        return Ok(None);
+    };
+    let report = previous.report_for_summary()?;
+    Ok(Some((previous.dir().to_path_buf(), report)))
 }
 
 fn build_cross_iteration_section(
@@ -1687,6 +1696,39 @@ mod tests {
         let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
         assert!(summary.timing_outliers.is_empty());
         assert!(summary.token_outliers.is_empty());
+    }
+
+    #[test]
+    fn an_explicit_previous_that_cannot_be_read_fails_the_summary_instead_of_comparing_against_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("report-iter-2");
+        let missing_previous = root.path().join("report-iter-1");
+
+        write_report(
+            &current,
+            serde_json::json!([sample_run("run-001", "case-a", "with_skill", 1, "completed")]),
+            2,
+            "report-iter-2",
+        );
+        write_run_artifacts(
+            &current,
+            "run-001",
+            Some(r#"{"assertion_results":[{"assertion":"now stable","passed":true}]}"#),
+            None,
+        );
+
+        let result = build_iteration_summary_document(
+            &current,
+            IterationSummaryOptions {
+                previous_report_dir: Some(missing_previous),
+                ..IterationSummaryOptions::default()
+            },
+        );
+
+        assert!(
+            result.is_err(),
+            "a named --previous that cannot be read must fail the summary, not be silently treated as no previous at all"
+        );
     }
 
     #[test]
