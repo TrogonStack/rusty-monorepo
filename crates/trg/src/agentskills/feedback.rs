@@ -8,6 +8,7 @@
 //! An empty `notes` array means the run was reviewed with no issues found; that
 //! is an explicit signal, not missing data.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::evals::EvalError;
+use super::grading::GradingFile;
 use super::report::ScenarioKind;
 
 pub const FEEDBACK_FILE_NAME: &str = "feedback.json";
@@ -71,12 +73,53 @@ pub struct FeedbackNote {
     pub text: String,
 }
 
+/// A human reviewer's verdict on one grader's call, for the grader-agreement report.
+///
+/// `pass`/`fail` rather than a bool, so a `feedback.json` a reviewer reads without the
+/// schema in hand still says what it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanVerdict {
+    Pass,
+    Fail,
+}
+
+impl HumanVerdict {
+    pub fn passed(self) -> bool {
+        matches!(self, HumanVerdict::Pass)
+    }
+}
+
+impl std::fmt::Display for HumanVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HumanVerdict::Pass => write!(f, "pass"),
+            HumanVerdict::Fail => write!(f, "fail"),
+        }
+    }
+}
+
+/// A human label on one assertion, keyed by its stable id (`<eval-case-id>:g<index>`) in
+/// `FeedbackDocument::assertion_verdicts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssertionVerdict {
+    pub verdict: HumanVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDocument {
     pub reviewer: String,
     pub reviewed_at: String,
     pub notes: Vec<FeedbackNote>,
+    /// Keyed by the stable assertion id a grader's result carries in `grading.json`.
+    /// A grader is only trustworthy where a human has actually looked, so this stays
+    /// empty rather than inferred until a reviewer records a verdict.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub assertion_verdicts: BTreeMap<String, AssertionVerdict>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,20 +169,43 @@ pub struct ImprovementFeedbackRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 struct ReportRunsDocument {
+    #[serde(default)]
+    dimensions: ReportDimensionsRef,
     runs: Vec<ReportRunRef>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ReportRunRef {
-    id: String,
-    eval_case_id: String,
-    scenario_id: ScenarioKind,
-    paths: ReportRunPaths,
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+struct ReportDimensionsRef {
+    #[serde(default)]
+    eval_cases: Vec<ReportEvalCaseRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-struct ReportRunPaths {
-    workspace: String,
+struct ReportEvalCaseRef {
+    id: String,
+    #[serde(default)]
+    assertion_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReportRunRef {
+    pub(crate) id: String,
+    pub(crate) eval_case_id: String,
+    pub(crate) scenario_id: ScenarioKind,
+    pub(crate) paths: ReportRunPaths,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ReportRunPaths {
+    pub(crate) workspace: String,
+}
+
+/// A report's runs, together with the assertion ids each eval case declared, so a
+/// caller can tell a graded assertion from one that was never scored without
+/// re-reading `report.json` itself.
+pub(crate) struct LoadedReport {
+    pub(crate) runs: Vec<ReportRunRef>,
+    pub(crate) assertion_ids_by_case: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -152,6 +218,15 @@ pub struct FeedbackInitReport {
 pub struct FeedbackValidateReport {
     pub validated: usize,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct FeedbackLabelReport {
+    pub run_id: String,
+    pub assertion_id: String,
+    pub verdict: HumanVerdict,
+    /// Whether this call replaced a verdict a prior `label` call had already recorded.
+    pub replaced: bool,
 }
 
 pub fn resolve_reviewer(override_reviewer: Option<&str>) -> Result<String> {
@@ -170,13 +245,22 @@ pub fn resolve_reviewer(override_reviewer: Option<&str>) -> Result<String> {
     })
 }
 
-pub fn feedback_path_for_run(report_dir: &Path, workspace_rel: &str) -> PathBuf {
+fn run_dir_for_workspace(report_dir: &Path, workspace_rel: &str) -> PathBuf {
     let workspace = Path::new(workspace_rel);
     let run_rel = workspace
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from(workspace_rel));
-    report_dir.join(run_rel).join(FEEDBACK_FILE_NAME)
+    report_dir.join(run_rel)
+}
+
+pub fn feedback_path_for_run(report_dir: &Path, workspace_rel: &str) -> PathBuf {
+    run_dir_for_workspace(report_dir, workspace_rel).join(FEEDBACK_FILE_NAME)
+}
+
+/// Where a run's `grading.json` lives, by the same layout `feedback_path_for_run` uses.
+pub fn grading_path_for_run(report_dir: &Path, workspace_rel: &str) -> PathBuf {
+    run_dir_for_workspace(report_dir, workspace_rel).join("grading.json")
 }
 
 pub fn init_feedback(report_dir: &Path, reviewer_override: Option<&str>) -> Result<FeedbackInitReport> {
@@ -187,6 +271,7 @@ pub fn init_feedback(report_dir: &Path, reviewer_override: Option<&str>) -> Resu
         reviewer,
         reviewed_at,
         notes: Vec::new(),
+        assertion_verdicts: BTreeMap::new(),
     };
 
     let mut created = 0;
@@ -226,23 +311,94 @@ pub fn list_runs_needing_review(report_dir: &Path) -> Result<Vec<String>> {
 }
 
 pub fn validate_feedback(report_dir: &Path) -> Result<FeedbackValidateReport> {
-    let runs = load_report_runs(report_dir)?;
+    let loaded = load_report(report_dir)?;
     let mut validated = 0;
     let mut errors = Vec::new();
 
-    for run in runs {
+    for run in &loaded.runs {
         let feedback_path = feedback_path_for_run(report_dir, &run.paths.workspace);
         if !feedback_path.is_file() {
             continue;
         }
 
-        match read_and_validate_feedback_file(&feedback_path) {
-            Ok(()) => validated += 1,
-            Err(message) => errors.push(format!("{} (run {}): {}", feedback_path.display(), run.id, message)),
+        match read_feedback_document(&feedback_path) {
+            Ok(document) => {
+                match validate_assertion_ids_are_graded(report_dir, run, &loaded.assertion_ids_by_case, &document) {
+                    Ok(()) => validated += 1,
+                    Err(message) => errors.push(format!("{} (run {}): {}", feedback_path.display(), run.id, message)),
+                }
+            }
+            Err(error) => errors.push(format!("{} (run {}): {}", feedback_path.display(), run.id, error)),
         }
     }
 
     Ok(FeedbackValidateReport { validated, errors })
+}
+
+/// Records (or replaces) one human verdict on a graded assertion.
+///
+/// Idempotent by design: labelling the same `(run, assertion)` pair again replaces the
+/// prior verdict rather than accumulating a history a reader would have to reconcile.
+pub fn record_assertion_verdict(
+    report_dir: &Path,
+    run_id: &str,
+    assertion_id: &str,
+    verdict: HumanVerdict,
+    rationale: Option<String>,
+    reviewer_override: Option<&str>,
+) -> Result<FeedbackLabelReport> {
+    let loaded = load_report(report_dir)?;
+    let run = loaded
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .ok_or_else(|| FeedbackError::Message(format!("run '{run_id}' not found in report.json")))?;
+
+    let graded = graded_assertion_ids(report_dir, run, &loaded.assertion_ids_by_case)?;
+    if !graded.iter().any(|id| id == assertion_id) {
+        return Err(FeedbackError::Message(format!(
+            "assertion '{assertion_id}' is not a graded assertion for run '{run_id}'"
+        )));
+    }
+
+    let rationale = match rationale {
+        Some(text) if !text.trim().is_empty() => Some(text),
+        Some(_) => {
+            return Err(FeedbackError::Message(
+                "rationale must be a non-empty string when set".to_string(),
+            ))
+        }
+        None => None,
+    };
+
+    let feedback_path = feedback_path_for_run(report_dir, &run.paths.workspace);
+    let mut document = if feedback_path.is_file() {
+        read_feedback_document(&feedback_path)?
+    } else {
+        FeedbackDocument {
+            reviewer: resolve_reviewer(reviewer_override)?,
+            reviewed_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            notes: Vec::new(),
+            assertion_verdicts: BTreeMap::new(),
+        }
+    };
+
+    let replaced = document
+        .assertion_verdicts
+        .insert(assertion_id.to_string(), AssertionVerdict { verdict, rationale })
+        .is_some();
+
+    if let Some(parent) = feedback_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&feedback_path, serde_json::to_string_pretty(&document)?)?;
+
+    Ok(FeedbackLabelReport {
+        run_id: run_id.to_string(),
+        assertion_id: assertion_id.to_string(),
+        verdict,
+        replaced,
+    })
 }
 
 pub fn load_run_feedback_entries(report_dir: &Path) -> Result<Vec<RunFeedbackEntry>> {
@@ -328,10 +484,6 @@ fn read_feedback_document(path: &Path) -> Result<FeedbackDocument> {
     parse_feedback_document(&content)
 }
 
-fn read_and_validate_feedback_file(path: &Path) -> std::result::Result<(), String> {
-    read_feedback_document(path).map(|_| ()).map_err(|e| e.to_string())
-}
-
 fn validate_feedback_document(document: &FeedbackDocument) -> Result<()> {
     if document.reviewer.trim().is_empty() {
         return Err(FeedbackError::Message(
@@ -354,10 +506,76 @@ fn validate_feedback_document(document: &FeedbackDocument) -> Result<()> {
         }
     }
 
+    for (assertion_id, verdict) in &document.assertion_verdicts {
+        if assertion_id.trim().is_empty() {
+            return Err(FeedbackError::Message(
+                "assertion_verdicts keys must be non-empty assertion ids".to_string(),
+            ));
+        }
+        if verdict.rationale.as_ref().is_some_and(|text| text.trim().is_empty()) {
+            return Err(FeedbackError::Message(format!(
+                "assertion_verdicts['{assertion_id}'].rationale must be a non-empty string when present"
+            )));
+        }
+    }
+
     Ok(())
 }
 
-fn load_report_runs(report_dir: &Path) -> Result<Vec<ReportRunRef>> {
+/// Whether every `assertion_verdicts` key in `document` names an assertion this run's
+/// `grading.json` actually scored, rather than one the reviewer mistyped or one from a
+/// different case entirely.
+fn validate_assertion_ids_are_graded(
+    report_dir: &Path,
+    run: &ReportRunRef,
+    assertion_ids_by_case: &HashMap<String, Vec<String>>,
+    document: &FeedbackDocument,
+) -> std::result::Result<(), String> {
+    if document.assertion_verdicts.is_empty() {
+        return Ok(());
+    }
+
+    let graded = graded_assertion_ids(report_dir, run, assertion_ids_by_case).map_err(|e| e.to_string())?;
+    for assertion_id in document.assertion_verdicts.keys() {
+        if !graded.iter().any(|id| id == assertion_id) {
+            return Err(format!(
+                "assertion '{assertion_id}' is not a graded assertion for run '{}'",
+                run.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The assertion ids this run's `grading.json` actually produced results for, in the
+/// same order `grade_report_bundle` wrote them.
+///
+/// Positions past what `grading.json` holds are excluded: a run that appended
+/// mock-violation or read-only-fixture-violation results carries more grading entries
+/// than its case declared graders, and those extra entries have no stable assertion id
+/// to be labelled under.
+fn graded_assertion_ids(
+    report_dir: &Path,
+    run: &ReportRunRef,
+    assertion_ids_by_case: &HashMap<String, Vec<String>>,
+) -> Result<Vec<String>> {
+    let grading_path = grading_path_for_run(report_dir, &run.paths.workspace);
+    if !grading_path.is_file() {
+        return Err(FeedbackError::Message(format!(
+            "run '{}' has not been graded yet; run `eval grade` before labelling its assertions",
+            run.id
+        )));
+    }
+
+    let grading: GradingFile = serde_json::from_str(&std::fs::read_to_string(&grading_path)?)?;
+    let declared = assertion_ids_by_case
+        .get(&run.eval_case_id)
+        .cloned()
+        .unwrap_or_default();
+    Ok(declared.into_iter().take(grading.assertion_results.len()).collect())
+}
+
+pub(crate) fn load_report(report_dir: &Path) -> Result<LoadedReport> {
     let report_path = report_dir.join("report.json");
     if !report_path.is_file() {
         return Err(FeedbackError::Message(format!(
@@ -372,7 +590,21 @@ fn load_report_runs(report_dir: &Path) -> Result<Vec<ReportRunRef>> {
         return Err(FeedbackError::Message("report.json contains no runs".to_string()));
     }
 
-    Ok(document.runs)
+    let assertion_ids_by_case = document
+        .dimensions
+        .eval_cases
+        .into_iter()
+        .map(|case| (case.id, case.assertion_ids))
+        .collect();
+
+    Ok(LoadedReport {
+        runs: document.runs,
+        assertion_ids_by_case,
+    })
+}
+
+fn load_report_runs(report_dir: &Path) -> Result<Vec<ReportRunRef>> {
+    Ok(load_report(report_dir)?.runs)
 }
 
 fn git_user_email() -> Option<String> {
@@ -439,6 +671,39 @@ mod tests {
         .unwrap();
 
         write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap()
+    }
+
+    /// Writes a `grading.json` for each of `sample_report_dir`'s two runs directly,
+    /// rather than through `grade_report_bundle`, since a fabricated result is enough to
+    /// exercise the assertion-id join and none of these tests need a real runner output.
+    fn grade_sample_report(report_dir: &Path) {
+        use crate::agentskills::grading::{build_grading_file, AssertionGradeResult, GraderInfo, GraderKind};
+
+        for (run_id, assertion_text, passed) in [("run-001", "assert a", true), ("run-002", "assert b", false)] {
+            let result = AssertionGradeResult {
+                assertion: assertion_text.to_string(),
+                passed,
+                evidence: format!("evidence for {assertion_text}"),
+                grader: GraderInfo {
+                    kind: GraderKind::Mechanical,
+                    model: None,
+                    command: None,
+                },
+                name: None,
+                rationale: None,
+                unsupported: None,
+                excluded: None,
+                ungraded: None,
+                votes: None,
+                weight: None,
+            };
+            let grading = build_grading_file(vec![result]).unwrap();
+            std::fs::write(
+                report_dir.join(format!("runs/{run_id}/grading.json")),
+                serde_json::to_string_pretty(&grading).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -581,6 +846,7 @@ mod tests {
                         text: "Missing required chart output".to_string(),
                     },
                 ],
+                assertion_verdicts: BTreeMap::new(),
             },
         }];
 
@@ -606,6 +872,7 @@ mod tests {
                     reviewer: "human@example.com".to_string(),
                     reviewed_at: "2026-05-26T12:00:00Z".to_string(),
                     notes: vec![],
+                    assertion_verdicts: BTreeMap::new(),
                 },
             },
             RunFeedbackEntry {
@@ -621,6 +888,7 @@ mod tests {
                         category: FeedbackCategory::Completeness,
                         text: "Add edge-case coverage for empty CSV".to_string(),
                     }],
+                    assertion_verdicts: BTreeMap::new(),
                 },
             },
         ];
@@ -629,5 +897,184 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].run_id, "run-002");
         assert_eq!(records[0].notes.len(), 1);
+    }
+
+    #[test]
+    fn parse_feedback_document_accepts_assertion_verdicts() {
+        let document = parse_feedback_document(
+            r#"{
+                "reviewer": "reviewer@example.com",
+                "reviewed_at": "2026-05-26T12:00:00Z",
+                "notes": [],
+                "assertion_verdicts": {
+                    "case-a:g0": {"verdict": "fail", "rationale": "evidence quoted the wrong file"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let verdict = &document.assertion_verdicts["case-a:g0"];
+        assert_eq!(verdict.verdict, HumanVerdict::Fail);
+        assert_eq!(verdict.rationale.as_deref(), Some("evidence quoted the wrong file"));
+    }
+
+    #[test]
+    fn parse_feedback_document_rejects_invalid_verdict() {
+        let err = parse_feedback_document(
+            r#"{
+                "reviewer": "reviewer@example.com",
+                "reviewed_at": "2026-05-26T12:00:00Z",
+                "notes": [],
+                "assertion_verdicts": {
+                    "case-a:g0": {"verdict": "maybe"}
+                }
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("maybe") || err.to_string().contains("verdict"));
+    }
+
+    #[test]
+    fn parse_feedback_document_rejects_blank_rationale() {
+        let err = parse_feedback_document(
+            r#"{
+                "reviewer": "reviewer@example.com",
+                "reviewed_at": "2026-05-26T12:00:00Z",
+                "notes": [],
+                "assertion_verdicts": {
+                    "case-a:g0": {"verdict": "pass", "rationale": "   "}
+                }
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("rationale"));
+    }
+
+    #[test]
+    fn record_assertion_verdict_creates_feedback_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_sample_report(&report_dir);
+
+        let report = record_assertion_verdict(
+            &report_dir,
+            "run-001",
+            "case-a:g0",
+            HumanVerdict::Pass,
+            Some("looks right".to_string()),
+            Some("reviewer@example.com"),
+        )
+        .unwrap();
+        assert!(!report.replaced);
+
+        let document = read_feedback_document(&report_dir.join("runs/run-001/feedback.json")).unwrap();
+        let verdict = &document.assertion_verdicts["case-a:g0"];
+        assert_eq!(verdict.verdict, HumanVerdict::Pass);
+        assert_eq!(verdict.rationale.as_deref(), Some("looks right"));
+
+        let report = record_assertion_verdict(
+            &report_dir,
+            "run-001",
+            "case-a:g0",
+            HumanVerdict::Fail,
+            None,
+            Some("reviewer@example.com"),
+        )
+        .unwrap();
+        assert!(report.replaced);
+
+        let document = read_feedback_document(&report_dir.join("runs/run-001/feedback.json")).unwrap();
+        let verdict = &document.assertion_verdicts["case-a:g0"];
+        assert_eq!(verdict.verdict, HumanVerdict::Fail);
+        assert!(verdict.rationale.is_none());
+        assert_eq!(document.assertion_verdicts.len(), 1);
+    }
+
+    #[test]
+    fn record_assertion_verdict_rejects_an_unknown_assertion() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_sample_report(&report_dir);
+
+        let err = record_assertion_verdict(
+            &report_dir,
+            "run-001",
+            "case-a:g7",
+            HumanVerdict::Pass,
+            None,
+            Some("reviewer@example.com"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("case-a:g7"));
+    }
+
+    #[test]
+    fn record_assertion_verdict_rejects_an_ungraded_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+
+        let err = record_assertion_verdict(
+            &report_dir,
+            "run-001",
+            "case-a:g0",
+            HumanVerdict::Pass,
+            None,
+            Some("reviewer@example.com"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("has not been graded"));
+    }
+
+    #[test]
+    fn validate_reports_an_assertion_id_the_run_never_graded() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_sample_report(&report_dir);
+        init_feedback(&report_dir, Some("human@example.com")).unwrap();
+
+        let feedback_path = report_dir.join("runs/run-001/feedback.json");
+        std::fs::write(
+            &feedback_path,
+            r#"{
+                "reviewer": "human@example.com",
+                "reviewed_at": "2026-05-26T12:00:00Z",
+                "notes": [],
+                "assertion_verdicts": {
+                    "case-b:g0": {"verdict": "pass"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let report = validate_feedback(&report_dir).unwrap();
+        assert_eq!(report.validated, 1);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("case-b:g0"));
+    }
+
+    #[test]
+    fn validate_accepts_a_verdict_on_a_graded_assertion() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_sample_report(&report_dir);
+        init_feedback(&report_dir, Some("human@example.com")).unwrap();
+
+        record_assertion_verdict(
+            &report_dir,
+            "run-001",
+            "case-a:g0",
+            HumanVerdict::Pass,
+            None,
+            Some("human@example.com"),
+        )
+        .unwrap();
+
+        let report = validate_feedback(&report_dir).unwrap();
+        assert_eq!(report.validated, 2);
+        assert!(report.errors.is_empty());
     }
 }

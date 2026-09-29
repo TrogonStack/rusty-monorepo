@@ -3,6 +3,7 @@ mod ci_args;
 mod compare;
 mod feedback;
 mod grade;
+mod grader_agreement;
 mod html_report;
 mod init;
 mod iteration_summary;
@@ -31,6 +32,7 @@ pub use benchmark::BenchmarkArgs;
 pub use compare::CompareArgs;
 pub use feedback::FeedbackArgs;
 pub use grade::GradeArgs;
+pub use grader_agreement::GraderAgreementArgs;
 pub use html_report::HtmlReportArgs;
 pub use init::InitArgs;
 pub use iteration_summary::IterationSummaryArgs;
@@ -62,6 +64,8 @@ pub enum EvalCommands {
     IterationSummary(IterationSummaryArgs),
     /// Manage human review feedback artifacts
     Feedback(FeedbackArgs),
+    /// Check graders against human-labelled verdicts
+    GraderAgreement(GraderAgreementArgs),
     /// Blindly compare scenario outputs within a report directory
     Compare(CompareArgs),
     /// Build an improvement bundle from a prior iteration for skill revision
@@ -88,6 +92,7 @@ impl EvalArgs {
             EvalCommands::Benchmark(args) => args.handle(fs),
             EvalCommands::IterationSummary(args) => args.handle(fs),
             EvalCommands::Feedback(args) => args.handle(fs),
+            EvalCommands::GraderAgreement(args) => args.handle(fs),
             EvalCommands::Compare(args) => args.handle(fs),
             EvalCommands::NextIteration(args) => args.handle(fs),
             EvalCommands::MockServer(args) => args.handle(),
@@ -169,7 +174,9 @@ pub(crate) fn finish_eval_output(
 #[cfg(test)]
 mod help_tests {
     use super::*;
-    use crate::commands::ai::skills::eval::feedback::{FeedbackInitArgs, FeedbackListArgs, FeedbackValidateArgs};
+    use crate::commands::ai::skills::eval::feedback::{
+        FeedbackInitArgs, FeedbackLabelArgs, FeedbackListArgs, FeedbackValidateArgs,
+    };
     use clap::{Args, Command};
 
     fn long_help<T: Args>(name: &'static str, about: &'static str) -> String {
@@ -258,6 +265,22 @@ mod help_tests {
     fn eval_feedback_validate_help_includes_examples() {
         let help = long_help::<FeedbackValidateArgs>("validate", "Validate feedback.json files");
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
+    }
+
+    #[test]
+    fn eval_feedback_label_help_includes_examples() {
+        let help = long_help::<FeedbackLabelArgs>("label", "Record a human verdict on one graded assertion");
+        assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
+        assert!(help.contains("--verdict"));
+        assert!(help.contains("--assertion"));
+    }
+
+    #[test]
+    fn eval_grader_agreement_help_includes_examples() {
+        let help =
+            long_help::<GraderAgreementArgs>("grader-agreement", "Check graders against human-labelled verdicts");
+        assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
+        assert!(help.contains("--min-agreement"));
     }
 
     #[test]

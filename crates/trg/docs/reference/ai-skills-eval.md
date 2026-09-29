@@ -18,6 +18,7 @@ trg ai skills eval <SUBCOMMAND>
 | `benchmark` | Aggregate grading and timing artifacts into `benchmark.json` |
 | `iteration-summary` | Summarize assertion stability, skill impact, flakiness, and metric outliers |
 | `feedback` | Manage human review feedback artifacts |
+| `grader-agreement` | Check graders against human-labelled verdicts |
 | `compare` | Blindly compare scenario outputs within a report directory |
 | `next-iteration` | Build an improvement bundle from a prior iteration |
 | `html-report` | Render a local-only, self-contained HTML report over a report bundle |
@@ -444,7 +445,7 @@ $ trg ai skills eval iteration-summary ./report --previous ./prior-report --fail
 ## `eval feedback`
 
 Manage human review feedback artifacts for a report bundle. A subcommand
-group: `init`, `list`, and `validate`.
+group: `init`, `list`, `validate`, and `label`.
 
 ```text
 trg ai skills eval feedback <SUBCOMMAND>
@@ -548,6 +549,108 @@ trg ai skills eval feedback validate <REPORT_DIR> [OPTIONS]
 ```shell
 $ trg ai skills eval feedback validate ./artifacts/my-skill/20260526T120000Z-abc
 Validated 1 feedback file(s)
+```
+
+### `eval feedback label`
+
+Record a human reviewer's `pass`/`fail` verdict on one graded assertion,
+keyed by its stable assertion id (`<eval-case-id>:g<index>`, the index of
+the eval case's grader in declaration order), then sync the feedback
+summary into `report.json`. Writing idempotently: labelling the same
+assertion again replaces the prior verdict rather than duplicating it.
+
+```text
+trg ai skills eval feedback label <REPORT_DIR> --run <RUN_ID> --assertion <ASSERTION_ID> --verdict <pass|fail> [OPTIONS]
+```
+
+#### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
+
+#### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--run` | string | *(required)* | The run whose `grading.json` the assertion was scored in |
+| `--assertion` | string | *(required)* | The stable assertion id (`<eval-case-id>:g<index>`) to label |
+| `--verdict` | enum | *(required)* | The human reviewer's verdict: `pass` or `fail` |
+| `--rationale` | string | *(unset)* | Why the reviewer reached this verdict, recorded alongside it |
+| `--reviewer` | string | *(defaults to `git config user.email`)* | Reviewer identity recorded in `feedback.json` when it does not exist yet |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
+
+#### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | The verdict was recorded |
+| `3` | The report bundle could not be read, or `--assertion` names an id this run's eval case did not declare |
+
+#### Example
+
+```shell
+$ trg ai skills eval feedback label ./artifacts/my-skill/20260526T120000Z-abc \
+    --run run-001 --assertion case-a:g0 --verdict fail \
+    --rationale 'evidence quoted the wrong file'
+Recorded verdict 'fail' for case-a:g0 in run run-001
+```
+
+---
+
+## `eval grader-agreement`
+
+Check the graders that scored a report bundle against the cases a human has
+actually labelled, and write `grader-agreement.json`.
+
+A judge vote split (`--grader-votes`, see [Graders](#graders)) says only that
+a judge was unsure. It says nothing about the case where a judge is
+unanimous and simply wrong, which only a human label can catch. This joins
+every scored assertion in `grading.json` against the human verdicts recorded
+in `feedback.json`, and reports how often the two agree, per assertion and
+per grader kind (`mechanical`, `declarative`, `script`, `llm`), with a Wilson
+95% confidence interval around each agreement rate.
+
+```text
+trg ai skills eval grader-agreement <REPORT_DIR> [OPTIONS]
+```
+
+#### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
+
+#### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--min-agreement` | proportion | *(unset)* | Fail when the `llm` bucket's agreement interval's Wilson lower bound is below this proportion in `(0, 1]`. Checks the `llm` bucket specifically, not the overall rate, since an LLM judge is the one grader kind whose verdicts are not already deterministic given its inputs. A threshold nobody's labels can answer yet, because no llm-graded assertion has a human verdict, is reported as a gate failure rather than a silent pass |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints the `grader-agreement.json` document on stdout |
+
+#### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | The report was written, and `--min-agreement`, if given, was met |
+| `1` | `--min-agreement` was given and the `llm` bucket's lower bound fell below it, or no llm-graded assertion has a human label yet |
+| `3` | The report bundle could not be read |
+
+#### Example
+
+```shell
+$ trg ai skills eval grader-agreement ./artifacts/my-skill/20260526T120000Z-abc --min-agreement 0.9
+Grader agreement:
+  overall: 8/10 agree, 95% CI [0.552, 0.962]
+  mechanical: no labelled assertions
+  declarative: no labelled assertions
+  script: no labelled assertions
+  llm: 8/10 agree, 95% CI [0.552, 0.962]
+  coverage: 10/24 graded assertions labelled (14 unlabelled)
+  disagreements:
+    case-b:g1 (run run-004): grader said true, human said fail
+report_dir: ./artifacts/my-skill/20260526T120000Z-abc
+grader-agreement: llm grader agreement's Wilson lower bound 0.552 is below --min-agreement 0.9
 ```
 
 ---
@@ -1773,7 +1876,58 @@ finding. See
 ## Artifact: `feedback.json`
 
 **Status: available.** Managed by `eval feedback`, holding a reviewer identity, a
-timestamp, and severity-tagged notes against a report bundle.
+timestamp, and severity-tagged notes against a report bundle. `eval feedback label`
+adds human verdicts on individual graded assertions, keyed by the stable assertion
+id a grader's result carries in `grading.json`:
+
+```json
+{
+  "assertion_verdicts": {
+    "case-a:g0": { "verdict": "fail", "rationale": "evidence quoted the wrong file" }
+  }
+}
+```
+
+Absent until a reviewer records at least one verdict. `eval feedback validate`
+checks that every key names an assertion id the run's eval case actually
+declares.
+
+---
+
+## Artifact: `grader-agreement.json`
+
+**Status: available.** Written by `eval grader-agreement`, joining every run's
+`grading.json` against the human verdicts recorded in `feedback.json`:
+
+```json
+{
+  "overall": { "agreements": 8, "disagreements": 2, "agreement_rate": 0.8, "interval": { "low": 0.552, "high": 0.962 } },
+  "by_grader_kind": {
+    "mechanical": { "agreements": 0, "disagreements": 0, "agreement_rate": null, "interval": null },
+    "declarative": { "agreements": 0, "disagreements": 0, "agreement_rate": null, "interval": null },
+    "script": { "agreements": 0, "disagreements": 0, "agreement_rate": null, "interval": null },
+    "llm": { "agreements": 8, "disagreements": 2, "agreement_rate": 0.8, "interval": { "low": 0.552, "high": 0.962 } }
+  },
+  "disagreements": [
+    {
+      "run_id": "run-004",
+      "assertion_id": "case-b:g1",
+      "grader_kind": "llm",
+      "grader_passed": true,
+      "grader_evidence": "the transcript said so",
+      "human_verdict": "fail",
+      "human_rationale": "evidence quoted the wrong file"
+    }
+  ],
+  "coverage": { "graded_assertions": 24, "labeled_assertions": 10, "unlabeled": [] }
+}
+```
+
+`agreement_rate` and `interval` are `null` in a bucket where no assertion of
+that grader kind has both a grader verdict and a human label yet.
+`by_grader_kind` covers `mechanical`, `declarative`, `script`, and `llm`; the
+`needs_llm` and `none` grader kinds never carry a stable assertion id to
+label in the first place, so they never contribute here.
 
 ---
 

@@ -17,6 +17,7 @@ pub mod eval_suite_drift;
 pub mod evals;
 pub mod exit_code;
 pub mod feedback;
+pub mod grader_agreement;
 pub mod graders;
 pub mod grading;
 pub mod headroom;
