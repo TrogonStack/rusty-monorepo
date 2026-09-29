@@ -224,6 +224,18 @@ cannot fit the next revision to them, which is what keeps a held-out set
 useful as an overfitting check. See [Reference: `eval
 next-iteration`](../reference/ai-skills-eval.md#eval-next-iteration).
 
+Keeping a revision is a judgment call only as long as the intervals stay a
+number someone has to read. `eval iteration-summary --previous` turns them into
+a verdict instead: it compares this iteration's `with_skill` pass rate against
+the previous one's, per split, and reports whether the 95% interval of that
+change excludes zero. The train split moving is not evidence the test split
+did, and the test split not moving despite the train split improving is itself
+a finding, not a neutral result, so the two are read together into one
+recommendation: keep, revert, suspected overfitting, or inconclusive. See
+[Reference: keep-or-revert
+verdict](../reference/ai-skills-eval.md#keep-or-revert-verdict) and [How-to:
+gate a hillclimb in CI](../how-to/run-in-ci.md#keep-or-revert-gate).
+
 ---
 
 ## Divergences from agentskills.io

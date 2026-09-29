@@ -372,6 +372,131 @@ fn a_grading_artifact_that_cannot_be_parsed_reports_a_broken_tool_and_not_a_fail
     );
 }
 
+fn write_iteration_report(report_dir: &Path, iteration: u32, report_id: &str, runs: &[(String, &str, &str, bool)]) {
+    fs::create_dir_all(report_dir).unwrap();
+    let run_values: Vec<serde_json::Value> = runs
+        .iter()
+        .map(|(id, eval_case_id, split, _)| {
+            serde_json::json!({
+                "id": id,
+                "eval_case_id": eval_case_id,
+                "split": split,
+                "scenario_id": "with_skill",
+                "model_config_id": "ci-default",
+                "skill_revision_id": "current",
+                "attempt": 1,
+                "status": "completed",
+                "paths": { "workspace": format!("runs/{id}/workspace") },
+                "artifacts": [],
+                "metrics": {}
+            })
+        })
+        .collect();
+    let report = serde_json::json!({
+        "report": {
+            "id": report_id,
+            "generated_at": "2026-05-26T00:00:00Z",
+            "iteration": iteration,
+            "producer": { "name": "trg", "version": "0.3.0" }
+        },
+        "suite": {
+            "skill_name": "demo",
+            "skill_path": "demo",
+            "skill_hash": "sha256:abc",
+            "evals_path": "demo/evals/evals.json",
+            "evals_hash": "sha256:def"
+        },
+        "dimensions": {
+            "eval_cases": [],
+            "assertions": [],
+            "skill_revisions": [],
+            "model_configs": [],
+            "scenarios": [],
+            "grading_strategies": []
+        },
+        "runs": run_values,
+        "assertion_results": [],
+        "summaries": { "by_scenario": [] },
+        "comparisons": []
+    });
+    fs::write(
+        report_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap(),
+    )
+    .unwrap();
+
+    for (id, _, _, passed) in runs {
+        let run_dir = report_dir.join(format!("runs/{id}"));
+        fs::create_dir_all(run_dir.join("workspace")).unwrap();
+        fs::write(
+            run_dir.join("grading.json"),
+            format!(r#"{{"assertion_results":[{{"assertion":"a","passed":{passed}}}]}}"#),
+        )
+        .unwrap();
+    }
+}
+
+/// `--fail-on` is opt-in: the same regressed test split exits clean on its own and only
+/// reports the gate's own exit code once the command is told to watch for a revert.
+#[test]
+fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
+    let temp = tempfile::tempdir().unwrap();
+    let previous_dir = temp.path().join("report-iter-1");
+    let current_dir = temp.path().join("report-iter-2");
+
+    let previous_runs: Vec<(String, &str, &str, bool)> =
+        (0..20).map(|i| (format!("prev-{i}"), "case-a", "test", true)).collect();
+    let current_runs: Vec<(String, &str, &str, bool)> =
+        (0..20).map(|i| (format!("cur-{i}"), "case-a", "test", false)).collect();
+
+    write_iteration_report(&previous_dir, 1, "report-iter-1", &previous_runs);
+    write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
+
+    let ungated = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&current_dir)
+        .arg("--previous")
+        .arg(&previous_dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        ungated.status.code(),
+        Some(0),
+        "the regression is real but --fail-on was never asked for, got {}",
+        stderr_of(&ungated)
+    );
+
+    let gated = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&current_dir)
+        .arg("--previous")
+        .arg(&previous_dir)
+        .args(["--fail-on", "revert"])
+        .output()
+        .unwrap();
+    assert_eq!(gated.status.code(), Some(1), "got {}", stderr_of(&gated));
+    assert!(
+        stderr_of(&gated).contains("revert"),
+        "expected the gate to name the recommendation it fired on, got {}",
+        stderr_of(&gated)
+    );
+
+    let gated_on_the_other_condition = trg()
+        .args(["ai", "skills", "eval", "iteration-summary"])
+        .arg(&current_dir)
+        .arg("--previous")
+        .arg(&previous_dir)
+        .args(["--fail-on", "overfitting"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        gated_on_the_other_condition.status.code(),
+        Some(0),
+        "a revert is not overfitting, got {}",
+        stderr_of(&gated_on_the_other_condition)
+    );
+}
+
 /// A scaffolded suite declares no `test` case, so the improvement bundle it produces has
 /// nothing to withhold. The bundle says so explicitly rather than reporting an empty
 /// `held_out` field, and the markdown nudges toward declaring one, since every later

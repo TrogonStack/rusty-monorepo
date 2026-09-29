@@ -357,14 +357,50 @@ trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
 | `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
+| `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these. Comma-separated. Values: `revert`, `overfitting`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
 
 `iteration-summary.json` reports `always_pass`, `always_fail`, and `helped_by_skill` for
 the whole report, and again per split under `by_split.train` and `by_split.test`.
+
+### Keep-or-revert verdict
+
+When `--previous` resolves to a prior iteration, `iteration-summary.json` carries a
+`keep_or_revert` section built from the same 95% intervals `benchmark` reports, turned
+into a verdict rather than left for the reader to eyeball:
+
+- `suites` is `same_suite`, or `different_suites` naming both `evals_hash` values when the
+  suite changed between iterations. `by_split` is empty and `recommendation` is
+  `inconclusive` whenever the suites differ, since a pass-rate change against a suite that
+  gained or lost cases is not a change in the skill.
+- `by_split.train` and `by_split.test` each carry a `SplitVerdict` for that split's
+  `with_skill` arm: `improved` or `regressed` when the 95% interval of the assertion
+  pass-rate delta excludes zero, `indistinguishable` when it straddles zero, or `no_runs`
+  when neither iteration scored a `with_skill` run on that split. The assertion pass rate
+  drives the verdict because it pools every scored assertion rather than collapsing a case
+  with three assertions and one with one assertion to the same single vote a run pass rate
+  would give them; the run pass-rate delta and its own interval are reported alongside each
+  verdict for context.
+- `recommendation` is `keep` when the test split improved, `revert` when it regressed
+  (checked before overfitting, since a held-out regression is reason enough on its own),
+  `suspected_overfitting` when train improved while test did not, and `inconclusive`
+  otherwise.
+
+Absent entirely on a first iteration, since there is no previous run to compare against.
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | Success, or `--fail-on` was not asked to gate on the recommendation this iteration produced |
+| `1` | `--fail-on` named a recommendation, and the keep-or-revert verdict matched it |
+| `3` | The report could not be read, the previous report resolved but could not be read, or the document could not be written or serialized |
 
 ### Example
 
 ```shell
 $ trg ai skills eval iteration-summary ./artifacts/my-skill/20260526T120000Z-abc
+
+$ trg ai skills eval iteration-summary ./report --previous ./prior-report --fail-on revert,overfitting
 ```
 
 ---

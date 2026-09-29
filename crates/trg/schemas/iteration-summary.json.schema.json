@@ -177,6 +177,112 @@
       ],
       "type": "object"
     },
+    "Interval": {
+      "description": "The range a measurement is consistent with.",
+      "properties": {
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "type": "object"
+    },
+    "KeepOrRevertSection": {
+      "properties": {
+        "by_split": {
+          "additionalProperties": false,
+          "description": "Empty when `suites` is `different_suites`, since a verdict across two different\nsuites is not a verdict about the change.",
+          "properties": {
+            "test": {
+              "$ref": "#/$defs/SplitVerdict"
+            },
+            "train": {
+              "$ref": "#/$defs/SplitVerdict"
+            }
+          },
+          "type": "object"
+        },
+        "recommendation": {
+          "$ref": "#/$defs/Recommendation"
+        },
+        "suites": {
+          "$ref": "#/$defs/SuiteComparison"
+        }
+      },
+      "required": [
+        "suites",
+        "by_split",
+        "recommendation"
+      ],
+      "type": "object"
+    },
+    "Recommendation": {
+      "description": "What the two verdicts above say to do with the change under review.",
+      "oneOf": [
+        {
+          "const": "keep",
+          "description": "The held-out split improved: the change generalized past the cases it was tuned on.",
+          "type": "string"
+        },
+        {
+          "const": "revert",
+          "description": "The held-out split regressed: the change made the skill worse where it counts.",
+          "type": "string"
+        },
+        {
+          "const": "suspected_overfitting",
+          "description": "Train improved while test did not, which is what a skill that learned the suite\ninstead of the task looks like.",
+          "type": "string"
+        },
+        {
+          "const": "inconclusive",
+          "description": "Neither split moved far enough to say either way, or the suites being compared are\nnot the same suite.",
+          "type": "string"
+        }
+      ]
+    },
+    "SplitDelta": {
+      "description": "The `with_skill` assertion and run pass-rate change between this iteration and the\nprevious one, and the 95% intervals around each. The assertion pass rate drives the\nverdict this rides alongside: it pools every scored assertion rather than collapsing a\ncase with three assertions and one with one assertion to the same single vote a run\npass rate would give them, so it moves on the same evidence the reviewer's bundle does.",
+      "properties": {
+        "assertion_pass_rate_delta": {
+          "format": "double",
+          "type": "number"
+        },
+        "assertion_pass_rate_delta_interval": {
+          "$ref": "#/$defs/Interval"
+        },
+        "run_pass_rate_delta": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "run_pass_rate_delta_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "assertion_pass_rate_delta",
+        "assertion_pass_rate_delta_interval"
+      ],
+      "type": "object"
+    },
     "SplitSummary": {
       "properties": {
         "always_fail": {
@@ -204,6 +310,115 @@
         "helped_by_skill"
       ],
       "type": "object"
+    },
+    "SplitVerdict": {
+      "description": "The verdict for one split's `with_skill` delta against the previous iteration, derived\nfrom whether `assertion_pass_rate_delta_interval` excludes zero.",
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SplitDelta"
+            }
+          ],
+          "description": "The interval sits entirely above zero: this split's `with_skill` arm did better.",
+          "properties": {
+            "status": {
+              "const": "improved",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SplitDelta"
+            }
+          ],
+          "description": "The interval sits entirely below zero: this split's `with_skill` arm did worse.",
+          "properties": {
+            "status": {
+              "const": "regressed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/SplitDelta"
+            }
+          ],
+          "description": "The interval straddles zero: the change has not beaten this split's own noise.",
+          "properties": {
+            "status": {
+              "const": "indistinguishable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Neither iteration scored a `with_skill` run on this split, so there is nothing to\ncompare. Never treated as `Indistinguishable`: silence about a split is not a\nfinding about it.",
+          "properties": {
+            "status": {
+              "const": "no_runs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SuiteComparison": {
+      "description": "Whether the eval suite is the same one the previous iteration ran, which the\nkeep-or-revert verdict below depends on: a pass-rate change against a suite that\ngained or lost cases is not a change in the skill.",
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "const": "same_suite",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "current_suite_hash": {
+              "type": "string"
+            },
+            "previous_suite_hash": {
+              "type": "string"
+            },
+            "status": {
+              "const": "different_suites",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "current_suite_hash",
+            "previous_suite_hash"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "TimingOutlierRecord": {
       "properties": {
@@ -340,6 +555,17 @@
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
+    },
+    "keep_or_revert": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KeepOrRevertSection"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Whether this iteration's `with_skill` arm beat the previous iteration's on each\nsplit, and what that says about keeping or reverting the change. Absent when there\nis no previous iteration to compare against."
     },
     "report_id": {
       "type": "string"
