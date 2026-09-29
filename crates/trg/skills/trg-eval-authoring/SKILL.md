@@ -150,7 +150,33 @@ Two things about `skill_used` that decide whether this case says anything:
 The linter warns when a case checks skill engagement while the prompt announces
 the skill, which is the mistake this step exists to prevent.
 
-## Step 5: check the suite before spending a run
+## Step 5: assign each case to train or test
+
+A suite that never withholds a case from training cannot tell a skill that got
+better from one that learned the suite. Declare `"split": "test"` on at least
+one case per claim, and leave the rest on the default `"split": "train"`:
+
+```json
+{
+  "id": "totals-by-month-different-fixture",
+  "prompt": "Read evals/files/q3_sales.csv and write outputs/summary.md with a markdown table giving each month's revenue total.",
+  "expected_output": "outputs/summary.md holds a markdown table with one row per month in the fixture.",
+  "files": ["evals/files/q3_sales.csv"],
+  "split": "test",
+  "graders": [
+    { "type": "file_exists", "path": "summary.md" },
+    { "type": "contains", "text": "9500", "target": { "file": "summary.md" } }
+  ]
+}
+```
+
+A held-out case earns its keep by differing from the train cases in something
+the skill's guidance does not special-case: a different fixture, a differently
+worded prompt for the same claim. A copy of a train case with a new id checks
+nothing that case did not already check. The linter warns when a suite
+declares no `test` case.
+
+## Step 6: check the suite before spending a run
 
 Runs cost money and wall clock. Everything that can be caught statically should
 be caught here:
@@ -162,12 +188,13 @@ $ trg ai skills eval verify --skill-dir ./skills/my-skill --mode strict
 `--mode strict` requires every case to declare at least one assertion or grader.
 The same invocation prints the lint warnings: vague prompts, generic
 `expected_output`, duplicate fixture paths, fixtures the prompt never mentions,
-cases with no checks at all, and the announced-prompt mistake from step 4.
+cases with no checks at all, the announced-prompt mistake from step 4, and a
+suite with no `test`-split case from step 5.
 
 Fix every warning before running. `--lint-evals` on `eval run` prints the same
 warnings, but only once you are already paying for the pass.
 
-## Step 6: run both arms
+## Step 7: run both arms
 
 ```shell
 $ trg ai skills eval run --skill-dir ./skills/my-skill --out-dir ./artifacts --runner claude-code --attempts 3 --grade --benchmark
@@ -185,10 +212,11 @@ Notes that change what the number means:
 - Keep the default `--skill-staging copy`. Under `symlink` a run can follow the
   link to the eval suite sitting next to the skill and be scored on text it
   copied.
-- Narrow with `--case <glob>` or `--tag <tag>` while iterating on one case.
+- Narrow with `--case <glob>`, `--tag <tag>`, or `--split train|test` while
+  iterating on one case.
 - `-j` cuts wall clock, not cost. Every run still pays for its own model calls.
 
-## Step 7: read the delta, and read it honestly
+## Step 8: read the delta, and read it honestly
 
 `benchmark.json` is written at the report root. Three places in it answer the
 acceptance bar:
@@ -233,7 +261,11 @@ Its `helped_by_skill` records carry `with_skill_pass_rate`,
 `without_skill_attempts`. A ratio without its attempt count hides whether it
 came from three draws or thirty.
 
-## Step 8: repair what measured nothing
+`by_split.train` and `by_split.test` hold the same `scenarios` and `deltas`
+narrowed to each split. A gain that only shows up under `by_split.train` is the
+suite fitting itself to what it was measured on, not the skill.
+
+## Step 9: repair what measured nothing
 
 For every check in `always_pass`, choose one:
 
@@ -249,7 +281,7 @@ skill: a path the runner never writes, a regex that does not match its own
 target, a fixture the prompt does not mention. Read one run's transcript and
 `grading.json` before changing the skill.
 
-Then go back to step 5. A suite is finished when every case you kept appears in
+Then go back to step 6. A suite is finished when every case you kept appears in
 `helped_by_skill`.
 
 ## What trg will not do for you

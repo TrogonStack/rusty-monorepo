@@ -1849,7 +1849,7 @@ fn update_report_after_grading(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agentskills::evals::RelativeSkillPath;
+    use crate::agentskills::evals::{EvalSplit, RelativeSkillPath};
     use crate::agentskills::report::{
         build_report_bundle, write_report_bundle, BuildReportOptions, RunMetrics, RunNotStarted, RunPaths,
         ScenarioKind, WriteReportOptions,
@@ -2876,6 +2876,7 @@ mod tests {
             id: "run-001".to_string(),
             eval_case_id: "case-a".to_string(),
             eval_slug: "case-a".to_string(),
+            split: EvalSplit::Train,
             scenario_id: ScenarioKind::WithSkill,
             iteration: 1,
             model_config_id: "ci-default".to_string(),

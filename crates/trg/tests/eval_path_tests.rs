@@ -112,6 +112,82 @@ fn run_accepts_relative_skill_dir_from_temp_cwd() {
     assert_eq!(skill_dir, layout.join("skills/fixture-skill"));
 }
 
+fn write_fixture_skill_with_splits(root: &Path, relative_dir: &str, skill_name: &str) -> PathBuf {
+    let skill_dir = root.join(relative_dir);
+    fs::create_dir_all(skill_dir.join("evals")).unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: {skill_name}\ndescription: fixture\n---\n"),
+    )
+    .unwrap();
+    fs::write(
+        skill_dir.join("evals/evals.json"),
+        format!(
+            r#"{{
+            "skill_name": "{skill_name}",
+            "evals": [
+                {{
+                    "id": "one",
+                    "prompt": "first prompt",
+                    "expected_output": "first output",
+                    "graders": [{{ "type": "contains", "text": "checks first" }}],
+                    "split": "train"
+                }},
+                {{
+                    "id": "two",
+                    "prompt": "second prompt",
+                    "expected_output": "second output",
+                    "graders": [{{ "type": "contains", "text": "checks second" }}],
+                    "split": "test"
+                }}
+            ]
+        }}"#
+        ),
+    )
+    .unwrap();
+    skill_dir
+}
+
+#[test]
+fn run_with_split_test_covers_only_the_test_case() {
+    let temp = tempfile::tempdir().unwrap();
+    let skill_dir = write_fixture_skill_with_splits(temp.path(), "fixture-skill", "fixture-skill");
+    let out_dir = temp.path().join("artifacts");
+
+    Command::cargo_bin("trg")
+        .unwrap()
+        .args([
+            "ai",
+            "skills",
+            "eval",
+            "run",
+            "--skill-dir",
+            &skill_dir.to_string_lossy(),
+            "--out-dir",
+            &out_dir.to_string_lossy(),
+            "--iteration",
+            "1",
+            "--trust-skill",
+            "--split",
+            "test",
+        ])
+        .assert()
+        .success();
+
+    let report_dir = find_report_bundle(&out_dir, "fixture-skill");
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+    let runs = report["runs"].as_array().unwrap();
+    assert!(!runs.is_empty(), "expected at least one run covered by --split test");
+    for run in runs {
+        assert_eq!(
+            run["eval_slug"], "two",
+            "only the test-split case should have been covered"
+        );
+        assert_eq!(run["split"], "test");
+    }
+}
+
 #[test]
 fn run_fails_fast_when_runner_missing_from_path() {
     let temp = tempfile::tempdir().unwrap();

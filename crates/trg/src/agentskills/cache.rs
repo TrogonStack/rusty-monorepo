@@ -387,6 +387,7 @@ pub fn apply_cache_hit(
         id: _id,
         eval_case_id: _eval_case_id,
         eval_slug: _eval_slug,
+        split: _split,
         scenario_id: _scenario_id,
         iteration: _iteration,
         model_config_id: _model_config_id,
@@ -537,6 +538,7 @@ fn sha256_hex(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::EvalSplit;
     use crate::agentskills::model_name::ModelName;
     use crate::agentskills::report::{RunMetrics, RunPaths, ScenarioKind};
     use tempfile::tempdir;
@@ -730,6 +732,7 @@ mod tests {
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
+            split: EvalSplit::Train,
             scenario_id: scenario,
             iteration: 2,
             model_config_id: "ci-default".to_string(),
@@ -786,6 +789,7 @@ mod tests {
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
+            split: EvalSplit::Train,
             scenario_id: scenario,
             iteration: 1,
             model_config_id: "ci-default".to_string(),
@@ -873,6 +877,7 @@ mod tests {
             id: run_id.to_string(),
             eval_case_id: eval_case_id.to_string(),
             eval_slug: eval_case_id.to_string(),
+            split: EvalSplit::Train,
             scenario_id: ScenarioKind::WithSkill,
             iteration: 1,
             model_config_id: "ci-default".to_string(),
@@ -1004,6 +1009,7 @@ mod tests {
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
+            split: EvalSplit::Train,
             scenario_id: ScenarioKind::WithSkill,
             iteration: 2,
             model_config_id: "ci-default".to_string(),
@@ -1070,6 +1076,7 @@ mod tests {
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
+            split: EvalSplit::Train,
             scenario_id: ScenarioKind::WithSkill,
             iteration: 2,
             model_config_id: "ci-default".to_string(),
@@ -1141,6 +1148,7 @@ mod tests {
             id: "run-001".to_string(),
             eval_case_id: "one".to_string(),
             eval_slug: "one".to_string(),
+            split: EvalSplit::Train,
             scenario_id: ScenarioKind::WithSkill,
             iteration: 2,
             model_config_id: "ci-default".to_string(),

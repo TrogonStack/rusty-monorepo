@@ -55,6 +55,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--tag` | string | *(unset)* | Cover only the cases carrying this `tags` entry. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
+| `--split` | enum | `all` | Cover only the cases declaring this `split`. Values: `train`, `test`, `all`. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--allow-scaffold` | bool | `false` | Run the `scaffold` a case declares. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 | `--trust-skill` | bool | `false` | Run a skill directory from outside this working tree without being asked about it. See [Running a skill from outside your working tree](#running-a-skill-from-outside-your-working-tree) |
 | `--require-graders` | bool | `false` | Fail when an eval case declares no grader |
@@ -318,6 +319,13 @@ trg ai skills eval benchmark <REPORT_DIR> [OPTIONS]
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
 | `--output-format` | enum | `text` | `text` prints the report directory path; `json` prints the `benchmark.json` document on stdout |
 
+`benchmark.json` reports `scenarios` and `deltas` for the whole report, and again per
+split under `by_split.train` and `by_split.test`, each the same scenario stats and
+with-skill-vs-without-skill deltas narrowed to the runs whose case declared that split.
+A gain visible only under `by_split.train` is the suite fitting itself to what it was
+measured on, not the skill. See [Assign each case to train or
+test](author-an-eval-suite.md#5-assign-each-case-to-train-or-test).
+
 ### Example
 
 ```shell
@@ -349,6 +357,9 @@ trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
 | `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
+
+`iteration-summary.json` reports `always_pass`, `always_fail`, and `helped_by_skill` for
+the whole report, and again per split under `by_split.train` and `by_split.test`.
 
 ### Example
 
@@ -684,6 +695,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
 | `companion_skills` | string[] | no | Relative paths to other skill directories inside the skill directory, staged beside the one under test so an unannounced case has something to pass over. Only an unannounced case may declare them. See [Skills staged only to be passed over](#skills-staged-only-to-be-passed-over) |
 | `tags` | string[] | no | Free-form labels. `--tag` selects by them. See [Covering part of a suite](#covering-part-of-a-suite) |
+| `split` | enum | no | `train` (default) or `test`. `--split` selects by it. A suite declaring no `test` case is warned by the suite lint. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `priority` | enum | no | `low`, `normal`, `high`, or `critical` |
 | `timeout_secs` | integer | no | Per-case runner timeout override |
 | `attempts` | integer | no | How many times this case is drawn, for a case whose stability is the question or whose cost makes the suite default too expensive. At least 1. Yields to an explicit `--attempts`. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
@@ -1734,7 +1746,7 @@ shown distinctly from a scored result rather than folded into a pass or fail.
 
 A full pass costs a model call per case, per scenario, per attempt, so a suite that grows
 past a handful of cases stops being something to run while iterating on one of them.
-`--case` and `--tag` narrow what a single invocation covers:
+`--case`, `--tag`, and `--split` narrow what a single invocation covers:
 
 ```shell
 # One case, by id
@@ -1744,6 +1756,10 @@ trg ai skills eval run --skill-dir ./skills/csv-analyzer --out-dir ./artifacts \
 # Every case whose id starts with analyze-, and every case tagged smoke
 trg ai skills eval run --skill-dir ./skills/csv-analyzer --out-dir ./artifacts \
     --case 'analyze-*' --tag smoke
+
+# Only the held-out cases
+trg ai skills eval run --skill-dir ./skills/csv-analyzer --out-dir ./artifacts \
+    --split test
 ```
 
 `--case` takes a glob, not a regular expression: `*` stands for any run of characters, `?`
@@ -1752,7 +1768,9 @@ against the whole id, so `--case analyze-sales` does not select `analyze-sales-b
 
 Each flag narrows the selection and repeating one widens it. Two `--tag` flags cover a
 case carrying either tag; a `--case` and a `--tag` together cover only the cases that both
-match the pattern and carry the tag.
+match the pattern and carry the tag. `--split` is a third narrowing dimension, composing
+with `--case` and `--tag` the same way: `--split test --tag smoke` covers only cases that
+are both.
 
 A selection matching none of the suite's cases is refused rather than run. An eval that
 covers nothing would otherwise exit successfully with an empty report, which reads the
@@ -1767,12 +1785,16 @@ A narrowed run records what it covered under `suite.case_selection` in `report.j
     "case_selection": {
       "cases": ["analyze-*"],
       "tags": ["smoke"],
+      "split": "test",
       "covered": 2,
       "declared": ["analyze-refunds", "analyze-sales", "summarize-quarter"]
     }
   }
 }
 ```
+
+`split` is absent when `--split` was left at its default of `all`, the same way `cases`
+and `tags` are absent when their flags were never given.
 
 `evals_hash` covers the whole manifest either way, so without this field a narrowed run
 and a full one are indistinguishable to anyone comparing two reports. The field is absent

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::benchmark::FailedRunsMode;
 use super::dispersion::{self, FlakinessLedger, FlakyAssertionRecord, MetricSample};
 use super::eval_suite_drift;
-use super::evals::{EvalError, Result};
+use super::evals::{EvalError, EvalSplit, Result};
 use super::layout;
 use super::report::ScenarioKind;
 
@@ -34,6 +34,17 @@ pub struct IterationSummaryDocument {
     pub token_outliers: Vec<TokenOutlierRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cross_iteration: Option<CrossIterationSection>,
+    /// The same assertion stability and with-skill-vs-without-skill records, narrowed to
+    /// each split, so a train gain and a flat test result sit side by side with the
+    /// overall numbers above.
+    pub by_split: BTreeMap<EvalSplit, SplitSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SplitSummary {
+    pub always_pass: Vec<AssertionStabilityRecord>,
+    pub always_fail: Vec<AssertionStabilityRecord>,
+    pub helped_by_skill: Vec<HelpedBySkillRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
@@ -119,6 +130,8 @@ struct ReportMeta {
 #[derive(Debug, Clone, Deserialize)]
 struct RunForSummary {
     eval_case_id: String,
+    #[serde(default)]
+    split: EvalSplit,
     scenario_id: ScenarioKind,
     attempt: u32,
     status: String,
@@ -208,6 +221,8 @@ pub fn build_iteration_summary_document(
     let (always_pass, always_fail) =
         apply_cross_iteration_deltas(&current.always_pass, &current.always_fail, cross_iteration.as_ref());
 
+    let by_split = split_summaries(report_dir, &report, options.failed_runs);
+
     Ok(IterationSummaryDocument {
         report_id: report.report.id,
         iteration: report.report.iteration,
@@ -220,7 +235,36 @@ pub fn build_iteration_summary_document(
         timing_outliers: current.timing_outliers,
         token_outliers: current.token_outliers,
         cross_iteration,
+        by_split,
     })
+}
+
+/// The report's own analysis, reused once per split rather than reimplemented, so a
+/// split's assertion stability and with-skill deltas are read the same way the overall
+/// numbers are.
+fn split_summaries(
+    report_dir: &Path,
+    report: &ReportForSummary,
+    mode: FailedRunsMode,
+) -> BTreeMap<EvalSplit, SplitSummary> {
+    EvalSplit::ALL
+        .into_iter()
+        .map(|split| {
+            let narrowed = ReportForSummary {
+                report: report.report.clone(),
+                runs: report.runs.iter().filter(|run| run.split == split).cloned().collect(),
+            };
+            let analysis = analyze_report(report_dir, &narrowed, mode);
+            (
+                split,
+                SplitSummary {
+                    always_pass: analysis.always_pass,
+                    always_fail: analysis.always_fail,
+                    helped_by_skill: analysis.helped_by_skill,
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn write_iteration_summary(report_dir: &Path, document: &IterationSummaryDocument) -> Result<PathBuf> {

@@ -715,6 +715,31 @@ pub enum EvalPriority {
     Critical,
 }
 
+/// Which side of the train/test boundary a case belongs to.
+///
+/// A suite that never withholds a case from training cannot tell a skill that got
+/// better from one that learned the suite, and every overfitting check depends on a
+/// split existing. A case declares its side as a typed field rather than a tag
+/// convention, so nothing downstream has to trust that a tag was spelled consistently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalSplit {
+    #[default]
+    Train,
+    Test,
+}
+
+impl EvalSplit {
+    pub const ALL: [Self; 2] = [Self::Train, Self::Test];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Train => "train",
+            Self::Test => "test",
+        }
+    }
+}
+
 /// Whether a case's prompt names the skill that is staged for it.
 ///
 /// A prompt that names the skill asks how well a run uses a skill it has already
@@ -783,6 +808,8 @@ pub struct EvalCase {
     pub tags: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<EvalPriority>,
+    #[serde(default)]
+    pub split: EvalSplit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u32>,
     /// How many times this case is drawn, for a case whose stability is the question or
@@ -1136,6 +1163,15 @@ pub fn lint_eval_suite(suite: &EvalSuite, options: EvalLintOptions) -> Vec<EvalL
                 message: "no graders are declared".to_string(),
             });
         }
+    }
+
+    if !suite.evals.is_empty() && !suite.evals.iter().any(|eval| eval.split == EvalSplit::Test) {
+        warnings.push(EvalLintWarning {
+            eval_id: suite.skill_name.as_str().to_string(),
+            message:
+                "no case declares \"split\": \"test\"; every overfitting check depends on a held-out case existing"
+                    .to_string(),
+        });
     }
 
     warnings
@@ -2302,6 +2338,7 @@ mod tests {
             files: vec![],
             tags: None,
             priority: None,
+            split: EvalSplit::default(),
             timeout_secs: None,
             expected_output_files: None,
             grader_hints: None,
@@ -2385,10 +2422,22 @@ mod tests {
 
     #[test]
     fn lint_eval_suite_does_not_warn_when_typed_graders_are_declared() {
-        let eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
+        let mut eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
+        eval.split = EvalSplit::Test;
         let suite = sample_suite_with_eval(eval);
 
         assert!(lint_eval_suite(&suite, EvalLintOptions::default()).is_empty());
+    }
+
+    #[test]
+    fn lint_eval_suite_warns_when_no_case_declares_the_test_split() {
+        let eval = sample_eval_case("one", "A sufficiently long prompt here", "A detailed analysis output");
+        let suite = sample_suite_with_eval(eval);
+
+        let warnings = lint_eval_suite(&suite, EvalLintOptions::default());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.message.contains("no case declares")));
     }
 
     #[test]

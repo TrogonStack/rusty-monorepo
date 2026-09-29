@@ -683,7 +683,7 @@ impl AssertionForAnnotations {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agentskills::evals::EvalDirName;
+    use crate::agentskills::evals::{EvalDirName, EvalSplit};
     use crate::agentskills::report::{
         ProducerSection, ReportDocument, ReportSection, RunMetrics, RunPaths, RunRecord, ScenarioKind, SuiteSection,
         SummariesSection,
@@ -1233,6 +1233,7 @@ mod tests {
                 id: "run-001".to_string(),
                 eval_case_id: "case-a".to_string(),
                 eval_slug: "case-a".to_string(),
+                split: EvalSplit::Train,
                 iteration: 1,
                 mirror_path: "iteration-1/eval-case-a/with_skill/".to_string(),
                 tool_grant: None,

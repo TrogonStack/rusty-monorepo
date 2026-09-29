@@ -177,6 +177,34 @@
       ],
       "type": "object"
     },
+    "SplitSummary": {
+      "properties": {
+        "always_fail": {
+          "items": {
+            "$ref": "#/$defs/AssertionStabilityRecord"
+          },
+          "type": "array"
+        },
+        "always_pass": {
+          "items": {
+            "$ref": "#/$defs/AssertionStabilityRecord"
+          },
+          "type": "array"
+        },
+        "helped_by_skill": {
+          "items": {
+            "$ref": "#/$defs/HelpedBySkillRecord"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "always_pass",
+        "always_fail",
+        "helped_by_skill"
+      ],
+      "type": "object"
+    },
     "TimingOutlierRecord": {
       "properties": {
         "attempt": {
@@ -267,6 +295,19 @@
       },
       "type": "array"
     },
+    "by_split": {
+      "additionalProperties": false,
+      "description": "The same assertion stability and with-skill-vs-without-skill records, narrowed to\neach split, so a train gain and a flat test result sit side by side with the\noverall numbers above.",
+      "properties": {
+        "test": {
+          "$ref": "#/$defs/SplitSummary"
+        },
+        "train": {
+          "$ref": "#/$defs/SplitSummary"
+        }
+      },
+      "type": "object"
+    },
     "cross_iteration": {
       "anyOf": [
         {
@@ -326,7 +367,8 @@
     "helped_by_skill",
     "flaky_assertions",
     "timing_outliers",
-    "token_outliers"
+    "token_outliers",
+    "by_split"
   ],
   "title": "trg skills eval iteration summary",
   "type": "object"

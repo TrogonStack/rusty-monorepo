@@ -187,5 +187,247 @@
         "high": 1.0
       }
     }
+  },
+  "by_split": {
+    "test": {
+      "scenarios": {
+        "old_skill": {
+          "completed": {
+            "run_count": 0,
+            "assertions": {
+              "passed": 0,
+              "failed": 0,
+              "total": 0,
+              "pass_rate": 0.0
+            },
+            "runs": {
+              "passed": 0,
+              "failed": 0,
+              "total": 0,
+              "pass_rate": 0.0
+            },
+            "duration_ms": {
+              "mean": 0.0,
+              "p50": 0,
+              "p95": 0,
+              "total": 0
+            },
+            "tokens": {},
+            "missing_grading": 0,
+            "missing_timing": 0
+          },
+          "skipped": {
+            "run_count": 0
+          }
+        },
+        "with_skill": {
+          "completed": {
+            "run_count": 0,
+            "assertions": {
+              "passed": 0,
+              "failed": 0,
+              "total": 0,
+              "pass_rate": 0.0
+            },
+            "runs": {
+              "passed": 0,
+              "failed": 0,
+              "total": 0,
+              "pass_rate": 0.0
+            },
+            "duration_ms": {
+              "mean": 0.0,
+              "p50": 0,
+              "p95": 0,
+              "total": 0
+            },
+            "tokens": {},
+            "missing_grading": 0,
+            "missing_timing": 0
+          },
+          "skipped": {
+            "run_count": 0
+          }
+        },
+        "without_skill": {
+          "completed": {
+            "run_count": 0,
+            "assertions": {
+              "passed": 0,
+              "failed": 0,
+              "total": 0,
+              "pass_rate": 0.0
+            },
+            "runs": {
+              "passed": 0,
+              "failed": 0,
+              "total": 0,
+              "pass_rate": 0.0
+            },
+            "duration_ms": {
+              "mean": 0.0,
+              "p50": 0,
+              "p95": 0,
+              "total": 0
+            },
+            "tokens": {},
+            "missing_grading": 0,
+            "missing_timing": 0
+          },
+          "skipped": {
+            "run_count": 0
+          }
+        }
+      },
+      "deltas": {}
+    },
+    "train": {
+      "scenarios": {
+        "old_skill": {
+          "completed": {
+            "run_count": 1,
+            "assertions": {
+              "passed": 0,
+              "failed": 1,
+              "total": 1,
+              "pass_rate": 0.0
+            },
+            "runs": {
+              "passed": 0,
+              "failed": 1,
+              "total": 1,
+              "pass_rate": 0.0
+            },
+            "duration_ms": {
+              "mean": 1500.0,
+              "p50": 1500,
+              "p95": 1500,
+              "total": 1500
+            },
+            "tokens": {
+              "total": 400
+            },
+            "missing_grading": 0,
+            "missing_timing": 0
+          },
+          "skipped": {
+            "run_count": 0
+          }
+        },
+        "with_skill": {
+          "completed": {
+            "run_count": 1,
+            "assertions": {
+              "passed": 3,
+              "failed": 0,
+              "total": 3,
+              "pass_rate": 1.0
+            },
+            "runs": {
+              "passed": 1,
+              "failed": 0,
+              "total": 1,
+              "pass_rate": 1.0
+            },
+            "duration_ms": {
+              "mean": 1000.0,
+              "p50": 1000,
+              "p95": 1000,
+              "total": 1000
+            },
+            "tokens": {
+              "total": 300,
+              "input": 200,
+              "output": 100,
+              "cost": {
+                "kind": "whole",
+                "usd": 0.01
+              },
+              "cost_usd": 0.01
+            },
+            "missing_grading": 0,
+            "missing_timing": 0
+          },
+          "skipped": {
+            "run_count": 0
+          }
+        },
+        "without_skill": {
+          "completed": {
+            "run_count": 1,
+            "assertions": {
+              "passed": 1,
+              "failed": 1,
+              "total": 2,
+              "pass_rate": 0.5
+            },
+            "runs": {
+              "passed": 0,
+              "failed": 1,
+              "total": 1,
+              "pass_rate": 0.0
+            },
+            "duration_ms": {
+              "mean": 2000.0,
+              "p50": 2000,
+              "p95": 2000,
+              "total": 2000
+            },
+            "tokens": {
+              "total": 500,
+              "input": 300,
+              "output": 200
+            },
+            "missing_grading": 0,
+            "missing_timing": 0
+          },
+          "skipped": {
+            "run_count": 0
+          }
+        }
+      },
+      "deltas": {
+        "with_skill_vs_without_skill": {
+          "assertion_pass_rate": 0.5,
+          "run_pass_rate": 1.0,
+          "duration_ms_mean": -1000.0,
+          "tokens_total": -200,
+          "left": {
+            "runs": 1
+          },
+          "right": {
+            "runs": 1
+          },
+          "assertion_pass_rate_interval": {
+            "low": -0.19259213101886707,
+            "high": 0.9054687942983473
+          },
+          "run_pass_rate_interval": {
+            "low": -0.12210872079072144,
+            "high": 1.0
+          }
+        },
+        "with_skill_vs_old_skill": {
+          "assertion_pass_rate": 1.0,
+          "run_pass_rate": 1.0,
+          "duration_ms_mean": -500.0,
+          "tokens_total": -100,
+          "left": {
+            "runs": 1
+          },
+          "right": {
+            "runs": 1
+          },
+          "assertion_pass_rate_interval": {
+            "low": 0.027969698292900524,
+            "high": 1.0
+          },
+          "run_pass_rate_interval": {
+            "low": -0.12210872079072144,
+            "high": 1.0
+          }
+        }
+      }
+    }
   }
 }
