@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::benchmark::FailedRunsMode;
+use super::case_selection::CaseSelectionRecord;
 use super::dispersion::{self, FlakinessLedger, FlakyAssertionRecord, MetricSample};
 use super::eval_suite_drift;
 use super::evals::{EvalError, EvalSplit, Result};
@@ -240,6 +241,8 @@ struct ReportMeta {
 struct SuiteForSummary {
     #[serde(default)]
     evals_hash: String,
+    #[serde(default)]
+    case_selection: Option<CaseSelectionRecord>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -330,6 +333,8 @@ pub fn build_iteration_summary_document(
         options.previous_report_dir.as_deref(),
     )?;
 
+    let previous_report_for_withhold = previous.as_ref().map(|(_, previous_report)| previous_report.clone());
+
     let cross_iteration = previous.clone().and_then(|(previous_dir, previous_report)| {
         build_cross_iteration_section(&previous_dir, previous_report, &current, options.failed_runs)
     });
@@ -375,7 +380,7 @@ pub fn build_iteration_summary_document(
     };
 
     if options.withhold_test_detail {
-        withhold_test_split_detail(&mut document, &report);
+        withhold_test_split_detail(&mut document, &report, previous_report_for_withhold.as_ref());
     }
 
     Ok(document)
@@ -387,14 +392,39 @@ pub fn build_iteration_summary_document(
 /// than filtered once into a narrowed report, because the records this touches come from
 /// several different computations (`analyze_report`, `compute_headroom`, `split_summaries`)
 /// that each already ran against the full, unfiltered report.
-fn withhold_test_split_detail(document: &mut IterationSummaryDocument, report: &ReportForSummary) {
-    let test_case_ids: HashSet<String> = report
-        .runs
-        .iter()
-        .filter(|run| run.split == EvalSplit::Test)
-        .map(|run| run.eval_case_id.clone())
-        .collect();
-    let is_held_out = |eval_case_id: &String| test_case_ids.contains(eval_case_id);
+///
+/// `document.cross_iteration` carries stability records the previous report produced, not
+/// the current one, so a case the current run never executed (a narrower `--split train` or
+/// `--case` selection) still needs to be recognized as held out: it is looked up in the
+/// previous report's runs and declared cases too, not only the current report's.
+fn withhold_test_split_detail(
+    document: &mut IterationSummaryDocument,
+    report: &ReportForSummary,
+    previous_report: Option<&ReportForSummary>,
+) {
+    let mut held_out_ids: HashSet<String> = HashSet::new();
+    for report in std::iter::once(report).chain(previous_report) {
+        held_out_ids.extend(
+            report
+                .runs
+                .iter()
+                .filter(|run| run.split == EvalSplit::Test)
+                .map(|run| run.eval_case_id.clone()),
+        );
+        if let Some(selection) = &report.suite.case_selection {
+            // An unknown split (a legacy declared entry with no split of its own) must be
+            // treated the same as a known test split: guessing it is train is exactly the
+            // mistake that would let a held-out case leak.
+            held_out_ids.extend(
+                selection
+                    .declared
+                    .iter()
+                    .filter(|case| case.split != Some(EvalSplit::Train))
+                    .map(|case| case.id.clone()),
+            );
+        }
+    }
+    let is_held_out = |eval_case_id: &String| held_out_ids.contains(eval_case_id);
 
     document.always_pass.retain(|record| !is_held_out(&record.eval_case_id));
     document.always_fail.retain(|record| !is_held_out(&record.eval_case_id));
@@ -2480,6 +2510,67 @@ mod tests {
             summary.headroom.as_ref().unwrap().saturated_case_ids,
             vec!["case-b".to_string()],
             "the pooled headroom warning must drop the test-split case id but keep the train-split one"
+        );
+    }
+
+    /// A case the current run never executed at all, because a narrower selection excluded
+    /// it, still has to be masked when its stability came from the previous report instead:
+    /// `cross_iteration.no_longer_always_pass` is populated from runs the previous report
+    /// made, not the current one, so looking up "is this a test case" only in the current
+    /// report's runs misses it entirely.
+    #[test]
+    fn withhold_test_detail_masks_a_held_out_case_that_only_appears_in_the_previous_reports_cross_iteration_data() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = write_with_skill_runs(&previous_dir, "prev-test", "case-a", "test", 40, 0);
+        let current_runs = write_with_skill_runs(&current_dir, "cur-train", "case-b", "train", 40, 0);
+        write_report(
+            &previous_dir,
+            serde_json::Value::Array(previous_runs),
+            1,
+            "report-iter-1",
+        );
+        write_report(&current_dir, serde_json::Value::Array(current_runs), 2, "report-iter-2");
+
+        let leaky = build_iteration_summary_document(
+            &current_dir,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous_dir.clone()),
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+        let leaky_cross_iteration = leaky.cross_iteration.as_ref().expect("a previous iteration exists");
+        assert!(
+            leaky_cross_iteration
+                .no_longer_always_pass
+                .iter()
+                .any(|record| record.eval_case_id == "case-a"),
+            "sanity check: without withholding, the never-rerun held-out case must show up as \
+             no longer always passing, or this test proves nothing"
+        );
+
+        let summary = build_iteration_summary_document(
+            &current_dir,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous_dir),
+                withhold_test_detail: true,
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+
+        let cross_iteration = summary.cross_iteration.as_ref().expect("a previous iteration exists");
+        assert!(
+            cross_iteration
+                .no_longer_always_pass
+                .iter()
+                .all(|record| record.eval_case_id != "case-a"),
+            "a test-split case the current run never executed must still be withheld from \
+             cross-iteration detail"
         );
     }
 
