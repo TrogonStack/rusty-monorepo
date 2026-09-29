@@ -190,3 +190,7 @@ After `trg ai skills eval grade`, each run directory contains:
 
 Assertion results are also copied into `report.json` under `assertion_results`
 after grading completes.
+
+## Related docs
+
+- [Validate graders against human labels](./validate-graders-against-human-labels.md)

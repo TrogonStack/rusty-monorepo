@@ -1,5 +1,24 @@
 {
   "$defs": {
+    "AssertionVerdict": {
+      "additionalProperties": false,
+      "description": "A human label on one assertion, keyed by its stable id (`<eval-case-id>:g<index>`) in\n`FeedbackDocument::assertion_verdicts`.",
+      "properties": {
+        "rationale": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verdict": {
+          "$ref": "#/$defs/HumanVerdict"
+        }
+      },
+      "required": [
+        "verdict"
+      ],
+      "type": "object"
+    },
     "FeedbackCategory": {
       "enum": [
         "correctness",
@@ -36,12 +55,27 @@
         "blocker"
       ],
       "type": "string"
+    },
+    "HumanVerdict": {
+      "description": "A human reviewer's verdict on one grader's call, for the grader-agreement report.\n\n`pass`/`fail` rather than a bool, so a `feedback.json` a reviewer reads without the\nschema in hand still says what it means.",
+      "enum": [
+        "pass",
+        "fail"
+      ],
+      "type": "string"
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/feedback.json.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "assertion_verdicts": {
+      "additionalProperties": {
+        "$ref": "#/$defs/AssertionVerdict"
+      },
+      "description": "Keyed by the stable assertion id a grader's result carries in `grading.json`.\nA grader is only trustworthy where a human has actually looked, so this stays\nempty rather than inferred until a reviewer records a verdict.",
+      "type": "object"
+    },
     "notes": {
       "items": {
         "$ref": "#/$defs/FeedbackNote"

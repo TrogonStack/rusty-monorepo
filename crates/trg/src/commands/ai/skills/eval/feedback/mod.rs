@@ -1,4 +1,5 @@
 mod init;
+mod label;
 mod list;
 mod validate;
 
@@ -7,6 +8,7 @@ use crate::fs::FileSystem;
 use clap::{Args, Subcommand};
 
 pub use init::FeedbackInitArgs;
+pub use label::FeedbackLabelArgs;
 pub use list::FeedbackListArgs;
 pub use validate::FeedbackValidateArgs;
 
@@ -24,6 +26,8 @@ pub enum FeedbackCommands {
     List(FeedbackListArgs),
     /// Schema-validate all feedback.json files in a report bundle
     Validate(FeedbackValidateArgs),
+    /// Record a human verdict on one graded assertion
+    Label(FeedbackLabelArgs),
 }
 
 impl FeedbackArgs {
@@ -32,6 +36,7 @@ impl FeedbackArgs {
             FeedbackCommands::Init(args) => args.handle(),
             FeedbackCommands::List(args) => args.handle(),
             FeedbackCommands::Validate(args) => args.handle(),
+            FeedbackCommands::Label(args) => args.handle(),
         }
     }
 }

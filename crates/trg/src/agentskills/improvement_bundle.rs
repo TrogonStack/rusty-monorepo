@@ -1076,6 +1076,7 @@ pub(crate) mod testutil {
                 category: FeedbackCategory::Correctness,
                 text: text.to_string(),
             }],
+            assertion_verdicts: std::collections::BTreeMap::new(),
         };
         std::fs::write(
             run_dir.join(FEEDBACK_FILE_NAME),
@@ -1089,6 +1090,7 @@ pub(crate) mod testutil {
             reviewer: "reviewer@example.com".to_string(),
             reviewed_at: "2026-05-26T12:00:00Z".to_string(),
             notes: Vec::new(),
+            assertion_verdicts: std::collections::BTreeMap::new(),
         };
         std::fs::write(
             run_dir.join(FEEDBACK_FILE_NAME),

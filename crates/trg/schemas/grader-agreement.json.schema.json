@@ -1,0 +1,250 @@
+{
+  "$defs": {
+    "AgreementBucket": {
+      "description": "Agreement counted over a set of (run, assertion) pairs a grader scored and a human\nalso labelled.",
+      "properties": {
+        "agreement_rate": {
+          "description": "`agreements / (agreements + disagreements)`. Absent when nothing in this bucket\nhas both a grader verdict and a human label yet.",
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "agreements": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "disagreements": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The Wilson 95% interval around `agreement_rate`. Absent for the same reason."
+        }
+      },
+      "required": [
+        "agreements",
+        "disagreements"
+      ],
+      "type": "object"
+    },
+    "AgreementByGraderKind": {
+      "description": "One grader kind's agreement bucket, for every kind that can appear in a `case.graders`\nentry. `needs_llm` and `none` are deliberately excluded: the former never survives\ngrading and the latter marks run-integrity results (mock and read-only-fixture\nviolations) that carry no stable assertion id to label in the first place.",
+      "properties": {
+        "declarative": {
+          "$ref": "#/$defs/AgreementBucket"
+        },
+        "llm": {
+          "$ref": "#/$defs/AgreementBucket"
+        },
+        "mechanical": {
+          "$ref": "#/$defs/AgreementBucket"
+        },
+        "script": {
+          "$ref": "#/$defs/AgreementBucket"
+        }
+      },
+      "required": [
+        "mechanical",
+        "declarative",
+        "script",
+        "llm"
+      ],
+      "type": "object"
+    },
+    "CoverageSummary": {
+      "properties": {
+        "graded_assertions": {
+          "description": "Scored assertions across every run, regardless of whether a human labelled them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "labeled_assertions": {
+          "description": "The subset of `graded_assertions` a human has recorded a verdict for.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unlabeled": {
+          "items": {
+            "$ref": "#/$defs/UnlabeledAssertion"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "graded_assertions",
+        "labeled_assertions",
+        "unlabeled"
+      ],
+      "type": "object"
+    },
+    "Disagreement": {
+      "description": "A grader's call and a human's call on the same assertion, disagreeing.",
+      "properties": {
+        "assertion_id": {
+          "type": "string"
+        },
+        "grader_evidence": {
+          "type": "string"
+        },
+        "grader_kind": {
+          "$ref": "#/$defs/GraderKind"
+        },
+        "grader_passed": {
+          "type": "boolean"
+        },
+        "human_rationale": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "human_verdict": {
+          "$ref": "#/$defs/HumanVerdict"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "votes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgeVoteTally"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a judge panel split, when the grader that produced this call was a panel."
+        }
+      },
+      "required": [
+        "run_id",
+        "assertion_id",
+        "grader_kind",
+        "grader_passed",
+        "grader_evidence",
+        "human_verdict"
+      ],
+      "type": "object"
+    },
+    "GraderKind": {
+      "enum": [
+        "mechanical",
+        "declarative",
+        "llm",
+        "script",
+        "needs_llm",
+        "none"
+      ],
+      "type": "string"
+    },
+    "HumanVerdict": {
+      "description": "A human reviewer's verdict on one grader's call, for the grader-agreement report.\n\n`pass`/`fail` rather than a bool, so a `feedback.json` a reviewer reads without the\nschema in hand still says what it means.",
+      "enum": [
+        "pass",
+        "fail"
+      ],
+      "type": "string"
+    },
+    "Interval": {
+      "description": "The range a measurement is consistent with.",
+      "properties": {
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "type": "object"
+    },
+    "JudgeVoteTally": {
+      "description": "How a panel of judges split on one assertion.\n\nRecorded so a reader can tell an assertion the judge was sure about from one it was\ndivided on. A divided panel is a statement about the assertion, not about the run: it\nsays the material admits both readings, which is a prompt to write the assertion more\nprecisely rather than to go looking at the skill.",
+      "properties": {
+        "failed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "passed": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed"
+      ],
+      "type": "object"
+    },
+    "UnlabeledAssertion": {
+      "description": "A scored assertion nobody has labelled yet, named so an author knows exactly which\n`eval feedback label` call would close the gap.",
+      "properties": {
+        "assertion_id": {
+          "type": "string"
+        },
+        "grader_kind": {
+          "$ref": "#/$defs/GraderKind"
+        },
+        "run_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "assertion_id",
+        "grader_kind"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://trogonstack.dev/schemas/trg/grader-agreement.json.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "by_grader_kind": {
+      "$ref": "#/$defs/AgreementByGraderKind"
+    },
+    "coverage": {
+      "$ref": "#/$defs/CoverageSummary"
+    },
+    "disagreements": {
+      "items": {
+        "$ref": "#/$defs/Disagreement"
+      },
+      "type": "array"
+    },
+    "overall": {
+      "$ref": "#/$defs/AgreementBucket"
+    }
+  },
+  "required": [
+    "overall",
+    "by_grader_kind",
+    "disagreements",
+    "coverage"
+  ],
+  "title": "trg skills eval grader agreement",
+  "type": "object"
+}

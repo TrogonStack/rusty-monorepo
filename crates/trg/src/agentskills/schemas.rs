@@ -311,6 +311,7 @@ mod tests {
                 category: FeedbackCategory::Completeness,
                 text: "Missing summary section".to_string(),
             }],
+            assertion_verdicts: std::collections::BTreeMap::new(),
         };
 
         let json = serde_json::to_value(&document).unwrap();

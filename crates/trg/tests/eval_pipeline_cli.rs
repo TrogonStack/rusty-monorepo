@@ -609,3 +609,146 @@ fn headroom_threshold_is_configurable_from_the_command_line() {
         "a stricter threshold than the arm's own floor should not report saturation"
     );
 }
+
+/// A report bundle with exactly one graded, llm-scored assertion, laid out well enough
+/// for `feedback label` to accept a verdict on it and for `grader-agreement` to join
+/// that verdict against `grading.json`.
+fn write_agreement_report(report_dir: &Path, run_id: &str, passed: bool) {
+    fs::create_dir_all(report_dir).unwrap();
+    let report = serde_json::json!({
+        "report": {
+            "id": "report-test",
+            "generated_at": "2026-05-26T00:00:00Z",
+            "iteration": 1,
+            "producer": { "name": "trg", "version": "0.3.0" }
+        },
+        "suite": {
+            "skill_name": "demo",
+            "skill_path": "demo",
+            "skill_hash": "sha256:abc",
+            "evals_path": "demo/evals/evals.json",
+            "evals_hash": "sha256:def"
+        },
+        "dimensions": {
+            "eval_cases": [{
+                "id": "case-a",
+                "slug": "case-a",
+                "prompt": "do the thing",
+                "expected_output": "the thing, done",
+                "files": [],
+                "assertion_ids": ["case-a:g0"]
+            }],
+            "assertions": [],
+            "skill_revisions": [],
+            "model_configs": [],
+            "scenarios": [],
+            "grading_strategies": []
+        },
+        "runs": [{
+            "id": run_id,
+            "eval_case_id": "case-a",
+            "eval_slug": "case-a",
+            "split": "train",
+            "scenario_id": "with_skill",
+            "iteration": 1,
+            "model_config_id": "ci-default",
+            "skill_revision_id": "current",
+            "attempt": 1,
+            "status": "completed",
+            "paths": {
+                "workspace": format!("runs/{run_id}/workspace"),
+                "outputs": format!("runs/{run_id}/workspace/outputs")
+            },
+            "mirror_path": "iterations/1/case-a/with_skill/attempt-1",
+            "artifacts": [],
+            "metrics": {}
+        }],
+        "assertion_results": [],
+        "summaries": { "by_scenario": [] },
+        "comparisons": []
+    });
+    fs::write(
+        report_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap(),
+    )
+    .unwrap();
+
+    let run_dir = report_dir.join(format!("runs/{run_id}"));
+    fs::create_dir_all(run_dir.join("workspace")).unwrap();
+    let grading = serde_json::json!({
+        "assertion_results": [{
+            "assertion": "assert something",
+            "passed": passed,
+            "evidence": "the transcript said so",
+            "grader": { "kind": "llm", "model": "test-model" }
+        }],
+        "summary": {
+            "passed": usize::from(passed),
+            "failed": usize::from(!passed),
+            "total": 1
+        }
+    });
+    fs::write(
+        run_dir.join("grading.json"),
+        serde_json::to_string_pretty(&grading).unwrap(),
+    )
+    .unwrap();
+}
+
+/// A human label recorded through `feedback label` has to be the same one
+/// `grader-agreement` reads back out, through the real binary end to end.
+#[test]
+fn feedback_label_then_grader_agreement_walk_the_real_binary() {
+    let temp = tempfile::tempdir().unwrap();
+    let report_dir = temp.path().join("report");
+    write_agreement_report(&report_dir, "run-001", true);
+
+    trg()
+        .args(["ai", "skills", "eval", "feedback", "label"])
+        .arg(&report_dir)
+        .args(["--run", "run-001", "--assertion", "case-a:g0"])
+        .args(["--verdict", "pass", "--reviewer", "reviewer@example.com"])
+        .assert()
+        .success();
+
+    let output = trg()
+        .args(["ai", "skills", "eval", "grader-agreement"])
+        .arg(&report_dir)
+        .args(["--output-format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "got {}", stderr_of(&output));
+
+    let document: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).unwrap();
+    assert_eq!(document["overall"]["agreements"], 1);
+    assert_eq!(document["by_grader_kind"]["llm"]["agreements"], 1);
+    assert_eq!(document["coverage"]["labeled_assertions"], 1);
+    assert!(report_dir.join("grader-agreement.json").is_file());
+}
+
+/// A judge unanimous and wrong is exactly what `--min-agreement` exists to catch, and the
+/// gate has to fire from the real binary, not only from the library function underneath it.
+#[test]
+fn a_confidently_wrong_judge_fails_the_min_agreement_gate() {
+    let temp = tempfile::tempdir().unwrap();
+    let report_dir = temp.path().join("report");
+    write_agreement_report(&report_dir, "run-001", true);
+
+    trg()
+        .args(["ai", "skills", "eval", "feedback", "label"])
+        .arg(&report_dir)
+        .args(["--run", "run-001", "--assertion", "case-a:g0"])
+        .args(["--verdict", "fail", "--reviewer", "reviewer@example.com"])
+        .assert()
+        .success();
+
+    let output = trg()
+        .args(["ai", "skills", "eval", "grader-agreement"])
+        .arg(&report_dir)
+        .args(["--min-agreement", "0.5"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "got {}", stderr_of(&output));
+    assert!(stderr_of(&output).contains("min-agreement"));
+}

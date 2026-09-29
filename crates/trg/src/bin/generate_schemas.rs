@@ -9,6 +9,7 @@ use trg::agentskills::benchmark::BenchmarkDocument;
 use trg::agentskills::compare::ComparisonRecord;
 use trg::agentskills::evals::EvalSuite;
 use trg::agentskills::feedback::FeedbackDocument;
+use trg::agentskills::grader_agreement::GraderAgreementDocument;
 use trg::agentskills::grading::GradingFile;
 use trg::agentskills::improvement_bundle::ImprovementBundleDocument;
 use trg::agentskills::iteration_summary::IterationSummaryDocument;
@@ -30,6 +31,11 @@ fn main() -> std::io::Result<()> {
     write_schema::<NormalizedTranscript>(&schemas_dir, "events.json.schema.json", "trg skills eval events")?;
     write_schema::<EvalSuite>(&schemas_dir, "evals.json.schema.json", "trg skills eval suite")?;
     write_schema::<FeedbackDocument>(&schemas_dir, "feedback.json.schema.json", "trg skills eval feedback")?;
+    write_schema::<GraderAgreementDocument>(
+        &schemas_dir,
+        "grader-agreement.json.schema.json",
+        "trg skills eval grader agreement",
+    )?;
     write_schema::<GradingFile>(&schemas_dir, "grading.json.schema.json", "trg skills eval grading")?;
     write_schema::<ImprovementBundleDocument>(
         &schemas_dir,

@@ -306,6 +306,14 @@ ordinary result. Treat it as a prompt to harden the held-out cases (step 5),
 not to raise the threshold. See [Reference: headroom
 warning](../../docs/reference/ai-skills-eval.md#headroom-warning).
 
+None of the above says whether an `llm` grader itself is trustworthy.
+`--grader-votes` on a case's judge shows when it was unsure, not when it was
+unanimous and wrong, and only a human reviewer can catch the second one.
+Before leaning on an `llm` grader's verdict, label a sample of its results by
+hand with `trg ai skills eval feedback label` and check its agreement rate
+with `trg ai skills eval grader-agreement`. See [Validate graders against
+human labels](../../docs/how-to/validate-graders-against-human-labels.md).
+
 ## Step 9: repair what measured nothing
 
 For every check in `always_pass`, choose one:
@@ -340,6 +348,7 @@ Say so plainly rather than working around it:
 ## Further reading
 
 - [Write graders](../../docs/how-to/write-graders.md)
+- [Validate graders against human labels](../../docs/how-to/validate-graders-against-human-labels.md)
 - [Author an eval suite by hand](../../docs/how-to/author-an-eval-suite.md)
 - [Run with a skill vs without a skill](../../docs/how-to/run-with-skill-vs-without-skill.md)
 - [AI skills eval reference](../../docs/reference/ai-skills-eval.md)

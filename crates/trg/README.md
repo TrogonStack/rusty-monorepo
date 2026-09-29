@@ -25,6 +25,7 @@
 - [Author an eval suite](docs/how-to/author-an-eval-suite.md)
 - [Write graders](docs/how-to/write-graders.md)
 - [Write mechanical grader scripts](docs/how-to/write-mechanical-grader-scripts.md)
+- [Validate graders against human labels](docs/how-to/validate-graders-against-human-labels.md)
 - [Troubleshooting](docs/how-to/troubleshooting.md)
 
 ### Explanation
