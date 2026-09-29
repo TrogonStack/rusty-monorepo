@@ -14,7 +14,7 @@ use super::eval_suite_drift::{
 use super::evals::{EvalError, EvalSplit, Result};
 use super::iteration_summary::detect_previous_report_dir;
 use super::proportion::{self, Interval, Proportion};
-use super::report::ScenarioKind;
+use super::report::{RunRecord, ScenarioKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -365,6 +365,35 @@ struct RunForBenchmark {
 #[derive(Debug, Clone, Deserialize)]
 struct RunPathsForBenchmark {
     workspace: String,
+}
+
+impl From<&RunRecord> for RunForBenchmark {
+    fn from(run: &RunRecord) -> Self {
+        Self {
+            id: run.id.clone(),
+            eval_case_id: run.eval_case_id.clone(),
+            split: run.split,
+            scenario_id: run.scenario_id,
+            attempt: run.attempt,
+            status: run.status.clone(),
+            paths: RunPathsForBenchmark {
+                workspace: run.paths.workspace.clone(),
+            },
+            iteration_id: None,
+        }
+    }
+}
+
+/// Reduce runs already parsed as [`RunRecord`] the same way [`build_benchmark`] reduces its
+/// own report parse, so a caller holding a [`super::report::ReportDocument`] never has to
+/// duplicate the scenario, pass-rate, and delta math to summarize a subset of its runs.
+pub(crate) fn aggregate_scenarios_for_records<'a>(
+    report_dir: &Path,
+    runs: impl Iterator<Item = &'a RunRecord>,
+    mode: FailedRunsMode,
+) -> (BTreeMap<String, ScenarioBenchmark>, ScenarioDeltas) {
+    let converted: Vec<RunForBenchmark> = runs.map(RunForBenchmark::from).collect();
+    aggregate_scenarios(report_dir, converted.iter(), mode)
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

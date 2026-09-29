@@ -215,6 +215,15 @@ Typical skill author loop:
 Each iteration produces a new `<report_id>` directory. Hashes in `report.json`
 let you detect when the skill or eval suite changed between runs.
 
+`eval next-iteration` turns a report bundle into an improvement bundle for
+whoever revises the skill next. It withholds everything case-specific
+(transcripts, failed assertion text, feedback, prompts, case ids) for runs
+whose case declared `"split": "test"`, reporting only how many were withheld
+and their aggregate pass rate. A reviser who never sees the held-out cases
+cannot fit the next revision to them, which is what keeps a held-out set
+useful as an overfitting check. See [Reference: `eval
+next-iteration`](../reference/ai-skills-eval.md#eval-next-iteration).
+
 ---
 
 ## Divergences from agentskills.io

@@ -208,6 +208,174 @@
       ],
       "type": "string"
     },
+    "HeldOutDelta": {
+      "description": "The same subtraction [`ScenarioDelta`] publishes, narrowed to the pass rates and their\nintervals, so the held-out section can say a skill helped on withheld cases without\ncarrying the duration, token, or cost fields a delta over case content has no bearing on.",
+      "properties": {
+        "assertion_pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "assertion_pass_rate_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "run_pass_rate_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "assertion_pass_rate",
+        "run_pass_rate"
+      ],
+      "type": "object"
+    },
+    "HeldOutDeltas": {
+      "properties": {
+        "with_skill_vs_old_skill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeldOutDelta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "with_skill_vs_without_skill": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeldOutDelta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "HeldOutPassFailSummary": {
+      "description": "A summary of assertion and run pass rates, with none of the case content behind them.\n\nMirrors [`PassFailSummary`] rather than reusing it directly, so the held-out section\nnever has to widen to whatever else a `ScenarioBenchmark` publishes (durations, tokens,\ncost) just to round-trip through JSON.",
+      "properties": {
+        "failed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pass_rate": {
+          "format": "double",
+          "type": "number"
+        },
+        "passed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "total": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "total",
+        "pass_rate"
+      ],
+      "type": "object"
+    },
+    "HeldOutScenarioStats": {
+      "properties": {
+        "assertions": {
+          "$ref": "#/$defs/HeldOutPassFailSummary"
+        },
+        "run_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "$ref": "#/$defs/HeldOutPassFailSummary"
+        }
+      },
+      "required": [
+        "run_count",
+        "assertions",
+        "runs"
+      ],
+      "type": "object"
+    },
+    "HeldOutSection": {
+      "description": "What the bundle says about the suite's `test`-split cases, instead of showing them.\n\nA missing field would read as an oversight; a variant that names the empty case as\nexplicitly as the populated one is what lets the markdown nudge toward declaring test\ncases rather than silently omitting a section.",
+      "oneOf": [
+        {
+          "description": "The suite declares no `test`-split cases, so nothing was withheld from this bundle.",
+          "properties": {
+            "status": {
+              "const": "no_test_cases",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "deltas": {
+              "$ref": "#/$defs/HeldOutDeltas"
+            },
+            "scenarios": {
+              "additionalProperties": {
+                "$ref": "#/$defs/HeldOutScenarioStats"
+              },
+              "type": "object"
+            },
+            "status": {
+              "const": "withheld",
+              "type": "string"
+            },
+            "test_case_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "test_run_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "status",
+            "test_case_count",
+            "test_run_count",
+            "scenarios",
+            "deltas"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "HumanFeedbackAttachment": {
       "properties": {
         "notes": {
@@ -271,6 +439,24 @@
       },
       "required": [
         "reviewed_no_issues_runs"
+      ],
+      "type": "object"
+    },
+    "Interval": {
+      "description": "The range a measurement is consistent with.",
+      "properties": {
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
       ],
       "type": "object"
     },
@@ -349,6 +535,9 @@
     "generated_at": {
       "type": "string"
     },
+    "held_out": {
+      "$ref": "#/$defs/HeldOutSection"
+    },
     "human_feedback": {
       "items": {
         "$ref": "#/$defs/HumanFeedbackGroup"
@@ -390,6 +579,7 @@
     "human_feedback",
     "human_feedback_summary",
     "transcript_excerpts",
+    "held_out",
     "suggested_focus"
   ],
   "title": "trg skills eval improvement bundle",

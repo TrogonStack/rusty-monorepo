@@ -371,3 +371,34 @@ fn a_grading_artifact_that_cannot_be_parsed_reports_a_broken_tool_and_not_a_fail
         "nothing read the bundle, so nothing can be said about the skill"
     );
 }
+
+/// A scaffolded suite declares no `test` case, so the improvement bundle it produces has
+/// nothing to withhold. The bundle says so explicitly rather than reporting an empty
+/// `held_out` field, and the markdown nudges toward declaring one, since every later
+/// overfitting check depends on a held-out set existing.
+#[test]
+fn next_iteration_reports_no_test_cases_and_nudges_toward_declaring_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let skill_dir = write_skill(temp.path(), "pipeline-skill");
+    scaffold_suite(&skill_dir);
+    let report_dir = scaffold_bundle(&skill_dir, &temp.path().join("artifacts"));
+
+    let output = trg()
+        .args(["ai", "skills", "eval", "next-iteration"])
+        .arg(&report_dir)
+        .args(["--skill-dir"])
+        .arg(&skill_dir)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "got {}", stderr_of(&output));
+
+    let bundle_dir = report_dir.parent().unwrap().join("next-iteration");
+    let document: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(bundle_dir.join("improvement-bundle.json")).unwrap()).unwrap();
+    assert_eq!(document["held_out"]["status"], "no_test_cases");
+
+    let markdown = fs::read_to_string(bundle_dir.join("improvement-bundle.md")).unwrap();
+    assert!(markdown.contains("Held-Out Test Cases"));
+    assert!(markdown.contains("Declare at least one case"));
+}
