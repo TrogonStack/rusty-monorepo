@@ -23,6 +23,7 @@
 - [Compare with a skill vs an older skill](docs/how-to/compare-with-skill-vs-old-skill.md)
 - [Run the grade benchmark pipeline](docs/how-to/run-grade-benchmark-pipeline.md)
 - [Author an eval suite](docs/how-to/author-an-eval-suite.md)
+- [Hillclimb a skill](docs/how-to/hillclimb-a-skill.md)
 - [Write graders](docs/how-to/write-graders.md)
 - [Write mechanical grader scripts](docs/how-to/write-mechanical-grader-scripts.md)
 - [Validate graders against human labels](docs/how-to/validate-graders-against-human-labels.md)

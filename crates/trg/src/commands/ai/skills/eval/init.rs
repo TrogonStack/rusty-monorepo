@@ -28,6 +28,9 @@ The scaffold is a shape, not a measurement: a case that passes with and without 
 skill measures nothing. To turn it into a suite that discriminates, follow
 docs/how-to/author-an-eval-suite.md, or hand an agent the skill at
 skills/trg-eval-authoring.
+
+Once the suite discriminates, improving the skill one change per round is
+docs/how-to/hillclimb-a-skill.md, or the skill at skills/trg-eval-hillclimb.
 ")]
 pub struct InitArgs {
     #[arg(long, value_name = "DIR", help = "Path to a skill directory containing SKILL.md")]
