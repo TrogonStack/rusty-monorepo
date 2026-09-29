@@ -16,6 +16,7 @@ use trg::agentskills::iteration_summary::IterationSummaryDocument;
 use trg::agentskills::report::ReportDocument;
 use trg::agentskills::runner::environment::RecordedEnvironment;
 use trg::agentskills::runner::TimingFile;
+use trg::agentskills::scaling::ScalingDocument;
 use trg::agentskills::transcript::NormalizedTranscript;
 
 fn main() -> std::io::Result<()> {
@@ -48,6 +49,7 @@ fn main() -> std::io::Result<()> {
         "trg skills eval iteration summary",
     )?;
     write_schema::<ReportDocument>(&schemas_dir, "report.json.schema.json", "trg skills eval report")?;
+    write_schema::<ScalingDocument>(&schemas_dir, "scaling.json.schema.json", "trg skills eval scaling")?;
     write_schema::<TimingFile>(&schemas_dir, "timing.json.schema.json", "trg skills eval timing")?;
 
     Ok(())

@@ -22,6 +22,7 @@ trg ai skills eval <SUBCOMMAND>
 | `compare` | Blindly compare scenario outputs within a report directory |
 | `next-iteration` | Build an improvement bundle from a prior iteration |
 | `html-report` | Render a local-only, self-contained HTML report over a report bundle |
+| `scaling` | Check whether a stronger configuration scored higher across ordered report bundles |
 
 ---
 
@@ -860,6 +861,70 @@ trg ai skills eval html-report <REPORT_DIR> [OPTIONS]
 $ trg ai skills eval html-report ./artifacts/my-skill/20260526T120000Z-abc
 ./artifacts/my-skill/20260526T120000Z-abc
 html report: ./artifacts/my-skill/20260526T120000Z-abc/report.html
+```
+
+---
+
+## `eval scaling`
+
+Check whether a stronger model or configuration actually scores higher on
+the same suite, across two or more report bundles the operator lists
+weakest to strongest, and write `scaling.json`.
+
+This never ranks models itself: the order is the operator's claim, taken as
+given. Every bundle must share the same suite (`suite.evals_hash`), or the
+comparison is refused rather than computed against a suite that changed
+underneath it. For each adjacent pair, and for the weakest bundle against
+the strongest end to end, the `with_skill` assertion pass rate is compared
+with a Newcombe interval the same way a keep-or-revert verdict compares
+iterations: a configuration that reads as stronger only because of noise is
+not read as a real gain. Each comparison is also broken out per split
+(`train`, `test`). A case the stronger configuration scored lower on than
+the weaker one, despite the operator's own ordering, is listed as an
+outlier: with few draws a single case can move on noise the same way an
+overall rate can, but a case that moves backward is worth an author's look
+regardless.
+
+```text
+trg ai skills eval scaling <REPORT_DIR> <REPORT_DIR>... [OPTIONS]
+```
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR`... | Two or more report bundle directories, ordered weakest to strongest configuration |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates, same as `eval benchmark` |
+| `--output-format` | enum | `text` | `text` prints a human summary; `json` prints the `scaling.json` document on stdout |
+| `--fail-on-regression` | flag | off | Exit with the gate-failed code when any step, on any split, or the end-to-end comparison regressed |
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | The report was written, and no step regressed, or `--fail-on-regression` was not given |
+| `1` | `--fail-on-regression` was given and some step, split, or the end-to-end comparison regressed |
+| `3` | Fewer than two bundles were given, a bundle could not be read, or the bundles were not built from the same suite |
+
+`scaling.json` is always written to the last (strongest) directory in the
+list, alongside that bundle's own `report.json`.
+
+### Example
+
+```shell
+$ trg ai skills eval scaling ./report-small-model ./report-large-model --fail-on-regression
+Model scaling across 2 bundles:
+  small-run -> large-run: improved (0.500 -> 1.000)
+    train: improved (0.500 -> 1.000)
+    test: no with_skill runs on either side
+End to end:
+  small-run -> large-run: improved (0.500 -> 1.000)
+report_dir: ./report-large-model
 ```
 
 ---
@@ -1996,6 +2061,48 @@ timestamps, attempt counts, and the skill integrity report), per-scenario
 summaries, and a case-by-case, arm-by-arm breakdown of every run: pass or fail,
 each assertion's evidence, and non-scoring outcomes (`unsupported`, `excluded`)
 shown distinctly from a scored result rather than folded into a pass or fail.
+
+---
+
+## Artifact: `scaling.json`
+
+**Status: available.** Written by `eval scaling` into the last (strongest)
+report directory the operator listed:
+
+```json
+{
+  "generated_at": "2026-05-26T12:00:00Z",
+  "suite_evals_hash": "sha256:...",
+  "bundles": [
+    { "report_dir": "./report-small-model", "report_id": "small-run", "model_config": { "id": "small-model", "capture_status": "complete", "label": "small-model", "parameters": {}, "parameter_sources": {}, "extra": {} } },
+    { "report_dir": "./report-large-model", "report_id": "large-run", "model_config": { "id": "large-model", "capture_status": "complete", "label": "large-model", "parameters": {}, "parameter_sources": {}, "extra": {} } }
+  ],
+  "steps": [
+    {
+      "weaker": { "report_dir": "./report-small-model", "report_id": "small-run", "model_config": { "...": "..." } },
+      "stronger": { "report_dir": "./report-large-model", "report_id": "large-run", "model_config": { "...": "..." } },
+      "comparison": {
+        "overall": { "status": "improved", "weaker_pass_rate": 0.5, "stronger_pass_rate": 1.0, "pass_rate_delta": 0.5, "pass_rate_delta_interval": { "low": 0.1, "high": 0.8 } },
+        "by_split": {
+          "train": { "status": "improved", "weaker_pass_rate": 0.5, "stronger_pass_rate": 1.0, "pass_rate_delta": 0.5, "pass_rate_delta_interval": { "low": 0.1, "high": 0.8 } },
+          "test": { "status": "no_runs" }
+        }
+      },
+      "outliers": []
+    }
+  ],
+  "end_to_end": { "weaker": { "...": "..." }, "stronger": { "...": "..." }, "comparison": { "...": "..." }, "outliers": [] }
+}
+```
+
+`model_config` is absent from a bundle summary when the report bundle
+carries no model config dimension at all. `status` is `improved`,
+`regressed`, or `flat` when the Newcombe interval around the pass-rate
+delta separates from, or straddles, zero; `no_runs` when neither side
+scored a `with_skill` run on that split, which is never conflated with
+`flat`, since silence about a split is not a finding that it held steady.
+`outliers` lists every eval case the stronger side scored lower on than the
+weaker side, each with both sides' pass rate for that case alone.
 
 ---
 

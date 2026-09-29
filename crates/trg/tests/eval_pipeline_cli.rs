@@ -752,3 +752,141 @@ fn a_confidently_wrong_judge_fails_the_min_agreement_gate() {
     assert_eq!(output.status.code(), Some(1), "got {}", stderr_of(&output));
     assert!(stderr_of(&output).contains("min-agreement"));
 }
+
+/// Like `write_iteration_report`, but with every field `ReportDocument`'s own strict
+/// `Deserialize` requires, since `scaling` reads a bundle back as that full type rather
+/// than the lenient summary `iteration-summary` reads it as.
+fn write_scaling_report(
+    report_dir: &Path,
+    report_id: &str,
+    model_config_id: &str,
+    runs: &[(String, &str, &str, bool)],
+) {
+    fs::create_dir_all(report_dir).unwrap();
+    let run_values: Vec<serde_json::Value> = runs
+        .iter()
+        .map(|(id, eval_case_id, split, _)| {
+            serde_json::json!({
+                "id": id,
+                "eval_case_id": eval_case_id,
+                "eval_slug": eval_case_id,
+                "split": split,
+                "scenario_id": "with_skill",
+                "iteration": 1,
+                "model_config_id": model_config_id,
+                "skill_revision_id": "current",
+                "attempt": 1,
+                "status": "completed",
+                "paths": { "workspace": format!("runs/{id}/workspace"), "outputs": format!("runs/{id}/workspace/outputs") },
+                "mirror_path": format!("iteration-1/eval-{eval_case_id}/with_skill/attempt-1/"),
+                "artifacts": [],
+                "metrics": {},
+                "cache": null
+            })
+        })
+        .collect();
+    let report = serde_json::json!({
+        "report": {
+            "id": report_id,
+            "generated_at": "2026-05-26T00:00:00Z",
+            "iteration": 1,
+            "producer": { "name": "trg", "version": "0.3.0" }
+        },
+        "suite": {
+            "skill_name": "demo",
+            "skill_path": "demo",
+            "skill_hash": "sha256:abc",
+            "evals_path": "demo/evals/evals.json",
+            "evals_hash": "sha256:def"
+        },
+        "dimensions": {
+            "eval_cases": [],
+            "assertions": [],
+            "skill_revisions": [],
+            "model_configs": [{ "id": model_config_id, "capture_status": "incomplete", "label": model_config_id, "parameters": {}, "parameter_sources": {}, "extra": {} }],
+            "scenarios": [],
+            "grading_strategies": []
+        },
+        "runs": run_values,
+        "assertion_results": [],
+        "summaries": { "by_scenario": [] },
+        "comparisons": []
+    });
+    fs::write(
+        report_dir.join("report.json"),
+        serde_json::to_string_pretty(&report).unwrap(),
+    )
+    .unwrap();
+
+    for (id, _, _, passed) in runs {
+        let run_dir = report_dir.join(format!("runs/{id}"));
+        fs::create_dir_all(run_dir.join("workspace")).unwrap();
+        fs::write(
+            run_dir.join("grading.json"),
+            format!(r#"{{"assertion_results":[{{"assertion":"a","passed":{passed}}}]}}"#),
+        )
+        .unwrap();
+    }
+}
+
+/// A stronger configuration that clears the noise on the same suite reads as improved
+/// through the real binary, and `--fail-on-regression` only fires once a weaker
+/// configuration is asked for last.
+#[test]
+fn scaling_reads_a_cleared_gain_as_improved_and_gates_on_a_reversed_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let weaker_dir = temp.path().join("report-small-model");
+    let stronger_dir = temp.path().join("report-large-model");
+
+    let weaker_runs: Vec<(String, &str, &str, bool)> = vec![
+        ("weak-a".to_string(), "case-a", "train", false),
+        ("weak-b".to_string(), "case-b", "train", false),
+    ];
+    let stronger_runs: Vec<(String, &str, &str, bool)> = vec![
+        ("strong-a".to_string(), "case-a", "train", true),
+        ("strong-b".to_string(), "case-b", "train", true),
+    ];
+    write_scaling_report(&weaker_dir, "report-small-model", "small-model", &weaker_runs);
+    write_scaling_report(&stronger_dir, "report-large-model", "large-model", &stronger_runs);
+
+    let ungated = trg()
+        .args(["ai", "skills", "eval", "scaling"])
+        .arg(&weaker_dir)
+        .arg(&stronger_dir)
+        .args(["--output-format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(ungated.status.code(), Some(0), "got {}", stderr_of(&ungated));
+    let document: serde_json::Value = serde_json::from_slice(&ungated.stdout).unwrap();
+    assert_eq!(document["steps"][0]["comparison"]["overall"]["status"], "improved");
+    assert_eq!(document["bundles"][0]["model_config"]["id"], "small-model");
+    assert_eq!(document["bundles"][1]["model_config"]["id"], "large-model");
+    assert!(stronger_dir.join("scaling.json").is_file());
+
+    let ungated_reversed = trg()
+        .args(["ai", "skills", "eval", "scaling"])
+        .arg(&stronger_dir)
+        .arg(&weaker_dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        ungated_reversed.status.code(),
+        Some(0),
+        "the regression is real but --fail-on-regression was never asked for, got {}",
+        stderr_of(&ungated_reversed)
+    );
+
+    let gated_reversed = trg()
+        .args(["ai", "skills", "eval", "scaling"])
+        .arg(&stronger_dir)
+        .arg(&weaker_dir)
+        .arg("--fail-on-regression")
+        .output()
+        .unwrap();
+    assert_eq!(
+        gated_reversed.status.code(),
+        Some(1),
+        "got {}",
+        stderr_of(&gated_reversed)
+    );
+}

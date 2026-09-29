@@ -26,6 +26,7 @@
 - [Write graders](docs/how-to/write-graders.md)
 - [Write mechanical grader scripts](docs/how-to/write-mechanical-grader-scripts.md)
 - [Validate graders against human labels](docs/how-to/validate-graders-against-human-labels.md)
+- [Check model scaling](docs/how-to/check-model-scaling.md)
 - [Troubleshooting](docs/how-to/troubleshooting.md)
 
 ### Explanation
