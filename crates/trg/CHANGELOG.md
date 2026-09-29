@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.11.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.10.0...trg@v0.11.0) (2026-09-29)
+
+
+### Features
+
+* **trg:** Stop a change that never cleared the noise from being kept ([#222](https://github.com/TrogonStack/rusty-monorepo/issues/222)) ([9a7b6c8](https://github.com/TrogonStack/rusty-monorepo/commit/9a7b6c85ed63fe5be53a70f67c368da71f5f2c9e))
+* **trg:** Stop a confidently wrong judge from passing as a trusted grader ([#224](https://github.com/TrogonStack/rusty-monorepo/issues/224)) ([1858f4e](https://github.com/TrogonStack/rusty-monorepo/commit/1858f4e4b109499776fdfa0b15680d1a30338f62))
+* **trg:** Stop a hillclimb round from keeping a change the held-out split never confirmed ([#226](https://github.com/TrogonStack/rusty-monorepo/issues/226)) ([0da3f01](https://github.com/TrogonStack/rusty-monorepo/commit/0da3f01fdd2cbac87b5d83b14d0b03ca992ce343))
+* **trg:** Stop a stronger model scoring lower from going unnoticed ([#225](https://github.com/TrogonStack/rusty-monorepo/issues/225)) ([b28f920](https://github.com/TrogonStack/rusty-monorepo/commit/b28f92081f856d3988807d8d7e7190666435ceac))
+* **trg:** Stop a suite with nothing left to measure from reading as a passing one ([#223](https://github.com/TrogonStack/rusty-monorepo/issues/223)) ([4175358](https://github.com/TrogonStack/rusty-monorepo/commit/41753588a9f022a930d84970bb1a401a2ba156c5))
+* **trg:** Stop a suite's train gain from passing as generalization ([#220](https://github.com/TrogonStack/rusty-monorepo/issues/220)) ([5a4f28c](https://github.com/TrogonStack/rusty-monorepo/commit/5a4f28c14c4a612c0f3f74d5d0aa6ceb5fbb3ae7))
+* **trg:** Stop next-iteration from leaking held-out cases into the bundle ([#221](https://github.com/TrogonStack/rusty-monorepo/issues/221)) ([5d4b9a3](https://github.com/TrogonStack/rusty-monorepo/commit/5d4b9a391b842e094577c2af8cd7ca1ebc9ac8db))
+
+
+### Bug Fixes
+
+* **trg:** Stop held-out cases from leaking and eval gates from failing open ([#229](https://github.com/TrogonStack/rusty-monorepo/issues/229)) ([6437870](https://github.com/TrogonStack/rusty-monorepo/commit/64378701bdf3586b511222203316b3d370708e39))
+
 ## [0.10.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.9.0...trg@v0.10.0) (2026-09-15)
 
 
