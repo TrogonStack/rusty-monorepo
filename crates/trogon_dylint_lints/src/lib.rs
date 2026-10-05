@@ -18,6 +18,7 @@ mod function_local_macro_rules;
 mod function_local_use;
 mod inline_module_block;
 mod manual_error_impl;
+mod new_instead_of_from;
 mod redundant_module_path;
 mod serde_json_macro;
 mod serde_json_macro_allow_without_reason;
@@ -58,6 +59,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         FUNCTION_LOCAL_USE,
         INLINE_MODULE_BLOCK,
         MANUAL_ERROR_IMPL,
+        NEW_INSTEAD_OF_FROM,
         REDUNDANT_MODULE_PATH,
         SERDE_JSON_MACRO,
         SERDE_JSON_MACRO_ALLOW_WITHOUT_REASON,
@@ -464,6 +466,68 @@ rustc_session::declare_lint! {
     pub MANUAL_ERROR_IMPL,
     Deny,
     "implement `std::error::Error` with the thiserror derive, not by hand",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects an inherent `new` whose body does nothing but hand its one
+    /// argument to a single-field struct: `Self(v)`, `Self { field: v }`, and
+    /// the same written with the type's own name, optionally with `v`
+    /// carried through `.into()`, `.to_owned()`, `.to_string()`, or
+    /// `.into_owned()`.
+    ///
+    /// Out of scope: constructors that take `impl Into<T>` or a generic
+    /// parameter, more than one argument, an impl with generic parameters, a
+    /// multi-field or enum self type, a body with a `let` or any call beyond
+    /// the one conversion, and anything reachable from outside the crate
+    /// (configurable; see below).
+    ///
+    /// ### Why is this bad?
+    ///
+    /// A constructor that only renames its argument into the type is a
+    /// conversion wearing `new`'s name. `From` says the same thing through a
+    /// trait the standard library already expects: it composes with `.into()`
+    /// at the call site, with `?` through `From`-based error conversion, and
+    /// with any API written against `impl Into<T>`. `new` earns its keep when
+    /// it does real setup work, such as opening a handle or validating input;
+    /// a constructor that is pure relabeling does not need its own name.
+    ///
+    /// By default, a `new` reachable from outside the crate is left alone, to
+    /// avoid breaking a public API out from under a downstream caller.
+    /// Configure this with a `dylint.toml` in the target workspace's root:
+    ///
+    /// ```toml
+    /// [new_instead_of_from]
+    /// avoid_breaking_exported_api = false
+    /// ```
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// pub struct Label(String);
+    ///
+    /// impl Label {
+    ///     pub fn new(value: String) -> Self {
+    ///         Self(value)
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// pub struct Label(String);
+    ///
+    /// impl From<String> for Label {
+    ///     fn from(value: String) -> Self {
+    ///         Self(value)
+    ///     }
+    /// }
+    /// ```
+    pub NEW_INSTEAD_OF_FROM,
+    Warn,
+    "a single-field wrapper's `new` that only wraps its argument should be `From` instead",
 }
 
 rustc_session::declare_lint! {
@@ -1086,6 +1150,7 @@ struct TrogonLints {
     debug_remnants: debug_remnants::DebugRemnants,
     error_string_comparison: error_string_comparison::ErrorStringComparison,
     function_local_use: function_local_use::FunctionLocalUse,
+    new_instead_of_from: new_instead_of_from::NewInsteadOfFrom,
     serde_json_macro: serde_json_macro::SerdeJsonMacro,
     std_env_access: std_env_access::StdEnvAccess,
     telemetry_attribute_literal: telemetry_attribute_literal::TelemetryAttributeLiteral,
@@ -1127,6 +1192,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
         def_id: LocalDefId,
     ) {
         fallible_new::check_fn(cx, kind, body, span, def_id);
+        self.new_instead_of_from.check_fn(cx, kind, body, span, def_id);
     }
 
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'tcx>) {
@@ -1169,6 +1235,7 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     FUNCTION_LOCAL_USE,
     INLINE_MODULE_BLOCK,
     MANUAL_ERROR_IMPL,
+    NEW_INSTEAD_OF_FROM,
     SERDE_JSON_MACRO,
     STD_ENV_ACCESS,
     TELEMETRY_ATTRIBUTE_LITERAL,
@@ -1192,6 +1259,13 @@ rustc_session::impl_lint_pass!(
 #[test]
 fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
+}
+
+#[test]
+fn ui_new_instead_of_from_without_exported_guard() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_new_instead_of_from_config")
+        .dylint_toml("[new_instead_of_from]\navoid_breaking_exported_api = false\n")
+        .run();
 }
 
 // The telemetry lints gate on real `tracing` / `opentelemetry` types, so their

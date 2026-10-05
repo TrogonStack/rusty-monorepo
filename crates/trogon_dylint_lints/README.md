@@ -46,6 +46,7 @@ per-invocation flags.
 | `function_local_use` | deny | `use` imports to be declared at module level, not inside a function body |
 | `inline_module_block` | deny | modules to be declared in their own file with `mod foo;` |
 | `manual_error_impl` | deny | `std::error::Error` to be implemented with the thiserror derive, not by hand |
+| `new_instead_of_from` | warn | a single-field wrapper's `new` that only wraps its argument to be `From` instead |
 | `redundant_module_path` | deny | `#[path]` to be dropped when `mod foo;` already resolves to the same file |
 | `serde_json_macro` | deny | JSON payloads to be built from a `Serialize` type, not an ad-hoc `json!` literal |
 | `serde_json_macro_allow_without_reason` | deny | a technical reason to be stated when suppressing `serde_json_macro` |
@@ -79,6 +80,16 @@ cargo dylint --all --workspace --no-deps -- --all-features
 Every rule carries its own default level, so there are no flags to pass. Add
 `--all-targets` to also lint test code such as `#[cfg(test)] mod tests { ... }`,
 which a late (HIR) pass only sees once the test target is compiled.
+
+`new_instead_of_from` is the one rule with configuration. By default it skips a
+`new` reachable from outside the crate, to avoid breaking a public API out from
+under a downstream caller; a workspace that wants it enforced there too can add
+a `dylint.toml` at the workspace root:
+
+```toml
+[new_instead_of_from]
+avoid_breaking_exported_api = false
+```
 
 ## Credits
 

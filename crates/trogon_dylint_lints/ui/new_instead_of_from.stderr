@@ -1,0 +1,84 @@
+warning: `new` only wraps its argument into `UserId`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:10:8
+   |
+LL |     fn new(value: String) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<std::string::String> for UserId` and construct with `UserId::from(..)` or `.into()` instead of `UserId::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+   = note: `#[warn(new_instead_of_from)]` on by default
+
+warning: `new` only wraps its argument into `Wrapper`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:21:8
+   |
+LL |     fn new(value: String) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<std::string::String> for Wrapper` and construct with `Wrapper::from(..)` or `.into()` instead of `Wrapper::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: `new` only wraps its argument into `ShorthandWrapper`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:32:8
+   |
+LL |     fn new(value: String) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<std::string::String> for ShorthandWrapper` and construct with `ShorthandWrapper::from(..)` or `.into()` instead of `ShorthandWrapper::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: `new` only wraps its argument into `Name`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:41:8
+   |
+LL |     fn new(value: &str) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<&str> for Name` and construct with `Name::from(..)` or `.into()` instead of `Name::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: `new` only wraps its argument into `Label`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:50:8
+   |
+LL |     fn new(value: &str) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<&str> for Label` and construct with `Label::from(..)` or `.into()` instead of `Label::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: `new` only wraps its argument into `Count`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:59:8
+   |
+LL |     fn new(value: u32) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<u32> for Count` and construct with `Count::from(..)` or `.into()` instead of `Count::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: `new` only wraps its argument into `Owned`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:68:8
+   |
+LL |     fn new(value: Cow<'_, str>) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<std::borrow::Cow<'_, str>> for Owned` and construct with `Owned::from(..)` or `.into()` instead of `Owned::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: `new` only wraps its argument into `Spelled`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:77:8
+   |
+LL |     fn new(value: String) -> Spelled {
+   |        ^^^
+   |
+   = help: implement `impl From<std::string::String> for Spelled` and construct with `Spelled::from(..)` or `.into()` instead of `Spelled::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: `new` only wraps its argument into `Specialized<std::string::String>`, which is a conversion
+  --> $DIR/new_instead_of_from.rs:285:8
+   |
+LL |     fn new(value: String) -> Self {
+   |        ^^^
+   |
+   = help: implement `impl From<std::string::String> for Specialized<std::string::String>` and construct with `Specialized::from(..)` or `.into()` instead of `Specialized::new(..)`
+   = note: if the implicit conversion would weaken the type, such as an id or a unit that must stay distinct from its inner representation, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(new_instead_of_from, reason = "..."))]`
+
+warning: 9 warnings emitted
+
