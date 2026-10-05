@@ -1,16 +1,18 @@
 use clippy_utils::diagnostics::span_lint_and_then;
+use clippy_utils::sym;
+use clippy_utils::ty::implements_trait;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::{DefId, LocalDefId};
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{Body, Expr, ExprKind, HirId, PatKind, StructTailExpr};
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, GenericParamDefKind};
-use rustc_span::{Ident, Span};
+use rustc_span::{Ident, Span, Symbol};
 
 use crate::NEW_INSTEAD_OF_FROM;
 use crate::test_context::is_test_context;
 
-const ALLOWED_CONVERSIONS: &[&str] = &["into", "to_owned", "to_string", "into_owned"];
+const CONVERSION_TRAITS: &[Symbol] = &[sym::Into, sym::ToOwned, sym::ToString];
 
 #[derive(serde::Deserialize)]
 #[serde(default)]
@@ -83,17 +85,25 @@ impl NewInsteadOfFrom {
             return;
         }
 
+        let self_ty = cx.tcx.type_of(impl_def_id).instantiate_identity();
+        let param_ty = cx
+            .tcx
+            .instantiate_bound_regions_with_erased(cx.tcx.fn_sig(def_id).instantiate_identity())
+            .inputs()[0];
+        if already_converts(cx, self_ty, param_ty) {
+            return;
+        }
+
         let name = cx.tcx.item_name(adt_def.did());
-        let param_ty = cx.tcx.fn_sig(def_id).instantiate_identity().input(0).skip_binder();
 
         span_lint_and_then(
             cx,
             NEW_INSTEAD_OF_FROM,
             ident.span,
-            format!("`new` only wraps its argument into `{name}`, which is a conversion"),
+            format!("`new` only wraps its argument into `{self_ty}`, which is a conversion"),
             |diag| {
                 diag.help(format!(
-                    "implement `impl From<{param_ty}> for {name}` and construct with `{name}::from(..)` or \
+                    "implement `impl From<{param_ty}> for {self_ty}` and construct with `{name}::from(..)` or \
                      `.into()` instead of `{name}::new(..)`"
                 ));
                 diag.note(
@@ -115,18 +125,29 @@ fn constructor_ident(kind: FnKind<'_>) -> Option<Ident> {
     (ident.name.as_str() == "new").then_some(ident)
 }
 
-/// No `self` receiver, not `async`, and no type or const generics. A generic
-/// constructor such as `fn new(v: impl Into<String>)` has no `From`
-/// equivalent: the blanket impl would overlap core's `impl<T> From<T> for T`
-/// (E0119).
+/// No `self` receiver and no type or const generics: a generic constructor
+/// such as `fn new(v: impl Into<String>)` has no `From` equivalent, because
+/// the blanket impl would overlap core's `impl<T> From<T> for T` (E0119).
+/// `async`, `const`, and `unsafe` constructors are skipped too, since `From`
+/// can express none of them.
 fn has_qualifying_signature<'tcx>(cx: &LateContext<'tcx>, kind: FnKind<'tcx>, def_id: LocalDefId) -> bool {
-    let no_self = match kind {
-        FnKind::Method(_, sig) => !sig.decl.implicit_self.has_implicit_self(),
-        FnKind::ItemFn(..) => true,
-        FnKind::Closure => false,
+    let FnKind::Method(_, sig) = kind else {
+        return false;
     };
 
-    no_self && !cx.tcx.asyncness(def_id).is_async() && !has_type_or_const_generics(cx, def_id)
+    !sig.decl.implicit_self.has_implicit_self()
+        && !sig.header.is_async()
+        && !sig.header.is_const()
+        && !sig.header.is_unsafe()
+        && !has_type_or_const_generics(cx, def_id)
+}
+
+/// An existing `From<ParamTy>`, including core's identity impl, means there is
+/// nothing to suggest.
+fn already_converts<'tcx>(cx: &LateContext<'tcx>, self_ty: ty::Ty<'tcx>, param_ty: ty::Ty<'tcx>) -> bool {
+    cx.tcx
+        .get_diagnostic_item(sym::From)
+        .is_some_and(|from| implements_trait(cx, self_ty, from, &[param_ty.into()]))
 }
 
 /// Lifetimes are ignored, since `fn new(v: &str)` carries one.
@@ -231,11 +252,34 @@ fn tail_wraps_parameter<'tcx>(
 
 fn is_parameter_value<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>, param_hir_id: HirId) -> bool {
     match expr.kind {
-        ExprKind::MethodCall(segment, receiver, [], _) => {
-            ALLOWED_CONVERSIONS.contains(&segment.ident.name.as_str()) && is_parameter(cx, receiver, param_hir_id)
+        ExprKind::MethodCall(_, receiver, [], _) => {
+            is_conversion_method(cx, expr) && is_parameter(cx, receiver, param_hir_id)
         }
         _ => is_parameter(cx, expr, param_hir_id),
     }
+}
+
+/// Resolves the call rather than trusting its name, so an inherent `into` or
+/// `to_owned` that validates or has effects does not pass as a conversion.
+fn is_conversion_method(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    let Some(method) = cx.typeck_results().type_dependent_def_id(expr.hir_id) else {
+        return false;
+    };
+
+    if let Some(trait_def_id) = cx.tcx.trait_of_assoc(method) {
+        return CONVERSION_TRAITS
+            .iter()
+            .any(|&name| cx.tcx.is_diagnostic_item(name, trait_def_id));
+    }
+
+    cx.tcx.item_name(method) == sym::into_owned
+        && cx.tcx.impl_of_assoc(method).is_some_and(|impl_def_id| {
+            cx.tcx
+                .type_of(impl_def_id)
+                .instantiate_identity()
+                .ty_adt_def()
+                .is_some_and(|adt| cx.tcx.is_diagnostic_item(sym::Cow, adt.did()))
+        })
 }
 
 fn is_parameter(cx: &LateContext<'_>, expr: &Expr<'_>, param_hir_id: HirId) -> bool {

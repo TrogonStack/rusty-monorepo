@@ -218,4 +218,73 @@ impl Chained {
     }
 }
 
+// An `unsafe` constructor carries a contract `From` cannot express: does not fire.
+struct Unchecked(u32);
+
+impl Unchecked {
+    unsafe fn new(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+// A `const` constructor stays usable in const contexts, `From::from` does not: does not fire.
+struct ConstWrapper(u32);
+
+impl ConstWrapper {
+    const fn new(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+// The conversion already exists: does not fire.
+struct AlreadyConverts(String);
+
+impl From<&str> for AlreadyConverts {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl AlreadyConverts {
+    fn new(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+// Core's identity `From<Recursive> for Recursive` already exists: does not fire.
+struct Recursive(Box<Option<Recursive>>);
+
+impl Recursive {
+    fn new(value: Recursive) -> Self {
+        Self(Box::new(Some(value)).into())
+    }
+}
+
+struct Inner(String);
+
+impl Inner {
+    fn into(self) -> String {
+        assert!(!self.0.is_empty());
+        self.0
+    }
+}
+
+// An inherent method that merely shares a conversion's name: does not fire.
+struct Validated(String);
+
+impl Validated {
+    fn new(value: Inner) -> Self {
+        Self(value.into())
+    }
+}
+
+struct Specialized<T>(T);
+
+// A concrete impl of a generic type is named with its arguments: fires.
+impl Specialized<String> {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+}
+
 fn main() {}
