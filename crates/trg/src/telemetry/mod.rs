@@ -115,20 +115,63 @@ impl Providers {
         }
     }
 
+    /// Shuts every configured provider down within `timeout` total, not `timeout` apiece:
+    /// each provider's own `shutdown_with_timeout` runs on its own thread, so their bounds
+    /// overlap instead of stacking into a multiple of the budget a caller such as
+    /// [`interrupt`] is holding the process open for.
     fn shutdown(&self, timeout: Duration) {
-        if let Some(provider) = &self.tracer {
-            let _ = provider.shutdown_with_timeout(timeout);
+        let providers = self.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("trg-telemetry-shutdown".to_string())
+            .spawn(move || {
+                providers.shutdown_each(timeout);
+                let _ = done.send(());
+            });
+        if spawned.is_ok() {
+            let _ = finished.recv_timeout(timeout);
         }
-        if let Some(provider) = &self.meter {
-            let _ = provider.shutdown_with_timeout(timeout);
+    }
+
+    fn shutdown_each(&self, timeout: Duration) {
+        let mut tasks: Vec<Box<dyn FnOnce() + Send>> = Vec::new();
+        if let Some(provider) = self.tracer.clone() {
+            tasks.push(Box::new(move || {
+                let _ = provider.shutdown_with_timeout(timeout);
+            }));
         }
-        if let Some(provider) = &self.logger {
-            let _ = provider.shutdown_with_timeout(timeout);
+        if let Some(provider) = self.meter.clone() {
+            tasks.push(Box::new(move || {
+                let _ = provider.shutdown_with_timeout(timeout);
+            }));
         }
+        if let Some(provider) = self.logger.clone() {
+            tasks.push(Box::new(move || {
+                let _ = provider.shutdown_with_timeout(timeout);
+            }));
+        }
+        run_concurrently(tasks);
     }
 
     fn any(&self) -> bool {
         self.tracer.is_some() || self.meter.is_some() || self.logger.is_some()
+    }
+}
+
+/// Runs each task on its own thread and waits for all of them, so their individual
+/// bounds overlap instead of adding up.
+fn run_concurrently(tasks: Vec<Box<dyn FnOnce() + Send>>) {
+    let handles: Vec<_> = tasks
+        .into_iter()
+        .filter_map(|task| {
+            std::thread::Builder::new()
+                .name("trg-telemetry-shutdown-one".to_string())
+                .spawn(task)
+                .ok()
+        })
+        .collect();
+    for handle in handles {
+        let _ = handle.join();
     }
 }
 
@@ -537,6 +580,7 @@ fn log_path(env: &impl EnvLookup) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::thread;
 
     use opentelemetry::trace::Status;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
@@ -786,5 +830,42 @@ mod tests {
     #[test]
     fn interrupt_before_init_does_nothing() {
         interrupt(TerminationSignal::Interrupt);
+    }
+
+    /// The bug this guards against: three providers shut down one after another would take
+    /// close to 3 * 200ms. Run concurrently, as [`Providers::shutdown`] now does, the total
+    /// stays close to the slowest one instead.
+    #[test]
+    fn run_concurrently_overlaps_tasks_instead_of_stacking_them() {
+        let per_task = Duration::from_millis(200);
+        let start = std::time::Instant::now();
+        run_concurrently(vec![
+            Box::new(move || thread::sleep(per_task)),
+            Box::new(move || thread::sleep(per_task)),
+            Box::new(move || thread::sleep(per_task)),
+        ]);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < per_task * 2,
+            "three {per_task:?} tasks took {elapsed:?}; stacked sequentially they would take ~{:?}",
+            per_task * 3
+        );
+    }
+
+    #[test]
+    fn shutdown_tears_down_every_configured_provider_and_returns() {
+        let (tracer, _exporter) = in_memory_tracer();
+        let providers = Providers {
+            tracer: Some(tracer.clone()),
+            ..Providers::default()
+        };
+        providers.shutdown(Duration::from_secs(1));
+        assert!(
+            matches!(
+                tracer.shutdown_with_timeout(Duration::from_secs(1)),
+                Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown)
+            ),
+            "Providers::shutdown must have already shut this provider down"
+        );
     }
 }
