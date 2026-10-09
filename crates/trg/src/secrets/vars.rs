@@ -150,56 +150,71 @@ where
     for ((backend_name, path), vars) in at_path {
         let representative = vars[0].0;
         let span = round_trip_span(backend_name, vars.len());
-        let map = traced(span.clone(), async {
+        // Selecting each var's value out of the map runs inside the traced
+        // work, so a key missing from the answer fails the round-trip span
+        // rather than only the parent fetch span.
+        let selected = traced(span.clone(), async {
             let backend = build(&resolve, &mut built, backend_name, representative)?;
             span.record(SECRETS_BACKEND_KIND, backend.kind());
-            backend
+            let map = backend
                 .get(path)
                 .await
                 .map_err(|cause| read_error(representative, cause))?
-                .ok_or_else(|| missing_entry(representative))
+                .ok_or_else(|| missing_entry(representative))?;
+
+            let mut selected = Vec::with_capacity(vars.len());
+            for &(var, key) in &vars {
+                // Key names are not secret; the values behind them are, and
+                // none of them is named here.
+                let value = map.get(key).ok_or_else(|| VarFetchError::MissingKey {
+                    var: var.clone(),
+                    present: map
+                        .sorted_keys()
+                        .iter()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                })?;
+                selected.push((var.clone(), value.clone()));
+            }
+            Ok(selected)
         })
         .await?;
 
-        for (var, key) in vars {
-            // Key names are not secret; the values behind them are, and none
-            // of them is named here.
-            let value = map.get(key).ok_or_else(|| VarFetchError::MissingKey {
-                var: var.clone(),
-                present: map
-                    .sorted_keys()
-                    .iter()
-                    .map(|k| k.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            })?;
-            out.insert(var.clone(), value.clone());
+        for (var, value) in selected {
+            out.insert(var, value);
         }
     }
 
     for ((backend_name, item), vars) in in_item {
         let representative = vars[0].0;
         let span = round_trip_span(backend_name, vars.len());
-        let fields = traced(span.clone(), async {
+        let selected = traced(span.clone(), async {
             let backend = build(&resolve, &mut built, backend_name, representative)?;
             span.record(SECRETS_BACKEND_KIND, backend.kind());
-            backend
+            let fields = backend
                 .get_item(item)
                 .await
                 .map_err(|cause| read_error(representative, cause))?
-                .ok_or_else(|| missing_entry(representative))
+                .ok_or_else(|| missing_entry(representative))?;
+
+            let mut selected = Vec::with_capacity(vars.len());
+            for &(var, reference) in &vars {
+                let value = fields
+                    .get(reference)
+                    .map_err(|cause| read_error(var, cause))?
+                    .ok_or_else(|| VarFetchError::MissingKey {
+                        var: var.clone(),
+                        present: fields.addresses().join(", "),
+                    })?;
+                selected.push((var.clone(), value.clone()));
+            }
+            Ok(selected)
         })
         .await?;
 
-        for (var, reference) in vars {
-            let value = fields
-                .get(reference)
-                .map_err(|cause| read_error(var, cause))?
-                .ok_or_else(|| VarFetchError::MissingKey {
-                    var: var.clone(),
-                    present: fields.addresses().join(", "),
-                })?;
-            out.insert(var.clone(), value.clone());
+        for (var, value) in selected {
+            out.insert(var, value);
         }
     }
 
@@ -537,6 +552,60 @@ mod tests {
             assert_eq!(
                 trace.attribute(name, "error.type").map(|v| v.to_string()).as_deref(),
                 Some("missing_path")
+            );
+        }
+    }
+
+    /// The entry round trip succeeds; it is picking the wanted key out of it
+    /// that fails. That selection runs inside the traced work, so the
+    /// round-trip span must carry the failure too, not only the parent fetch.
+    #[test]
+    fn a_missing_key_fails_its_round_trip_and_the_fetch() {
+        use crate::secrets::telemetry::testing::current_thread;
+        use opentelemetry::trace::Status;
+
+        let (fetched, trace) = crate::telemetry::testing::capture(|| {
+            current_thread(async {
+                let fake = seeded(&[("agentgateway", &[("token", "t")])]).await;
+                let backend = Backend::Fake(fake);
+                fetch_with(|_| Ok(backend.clone()), &[var("homelab", "agentgateway", "nope")]).await
+            })
+        });
+        assert!(fetched.is_err());
+
+        for name in ["fetch secrets", "fetch secret"] {
+            let span = trace.span(name).expect(name);
+            assert!(matches!(span.status, Status::Error { .. }), "{name}: {:?}", span.status);
+            assert_eq!(
+                trace.attribute(name, "error.type").map(|v| v.to_string()).as_deref(),
+                Some("missing_key")
+            );
+        }
+    }
+
+    /// The same, for a 1Password reference whose field is not on the item:
+    /// the lookup happens after `get_item` succeeds, so it must still be
+    /// attributed to that round trip.
+    #[test]
+    fn a_missing_field_in_an_item_fails_its_round_trip_and_the_fetch() {
+        use crate::secrets::telemetry::testing::current_thread;
+        use opentelemetry::trace::Status;
+
+        let (fetched, trace) = crate::telemetry::testing::capture(|| {
+            current_thread(async {
+                let fake = seeded(&[("Ops/deploy", &[("TOKEN", "t")])]).await;
+                let backend = Backend::Fake(fake);
+                fetch_with(|_| Ok(backend.clone()), &[op_var("op", "op://Ops/deploy/NOPE")]).await
+            })
+        });
+        assert!(fetched.is_err());
+
+        for name in ["fetch secrets", "fetch secret"] {
+            let span = trace.span(name).expect(name);
+            assert!(matches!(span.status, Status::Error { .. }), "{name}: {:?}", span.status);
+            assert_eq!(
+                trace.attribute(name, "error.type").map(|v| v.to_string()).as_deref(),
+                Some("missing_key")
             );
         }
     }
