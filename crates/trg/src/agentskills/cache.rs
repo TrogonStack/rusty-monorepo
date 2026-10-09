@@ -410,6 +410,7 @@ pub fn apply_cache_hit(
         mock_violations,
         case_score: _case_score,
         trace: _trace,
+        grade_trace: _grade_trace,
     } = source_run;
 
     run.status = status;
@@ -792,6 +793,7 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
             trace: None,
+            grade_trace: None,
         }
     }
 
@@ -851,6 +853,7 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
             trace: None,
+            grade_trace: None,
         };
 
         customize(&mut run);
@@ -942,6 +945,7 @@ mod tests {
             mock_violations: vec![violation],
             case_score: None,
             trace: None,
+            grade_trace: None,
         };
 
         let document = serde_json::json!({
@@ -1076,6 +1080,7 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
             trace: None,
+            grade_trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -1156,6 +1161,7 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
             trace: None,
+            grade_trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).expect("the pointer's own key input is still fresh");
@@ -1222,6 +1228,7 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
             trace: None,
+            grade_trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -1296,6 +1303,7 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
             trace: None,
+            grade_trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();

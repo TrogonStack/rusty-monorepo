@@ -282,4 +282,63 @@ mod tests {
 
         assert_eq!(status, ExitCode::GateFailed);
     }
+
+    #[test]
+    fn grader_agreement_nests_loading_collecting_and_writing_under_one_span() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_run(&report_dir, "run-001", true);
+        record_assertion_verdict(&report_dir, "run-001", "case-a:g0", HumanVerdict::Pass, None, Some("h")).unwrap();
+
+        let (status, trace) = crate::telemetry::testing::capture(|| {
+            GraderAgreementArgs {
+                report_dir: report_dir.clone(),
+                min_agreement: None,
+                output_format: OutputFormat::Json,
+            }
+            .handle(&crate::fs::RealFS)
+        });
+
+        assert_eq!(status, ExitCode::Success);
+        let root = trace.span("grader agreement").expect("the command has its own span");
+        let phases: Vec<&str> = trace.children_of(root).iter().map(|span| span.name.as_ref()).collect();
+        assert_eq!(
+            phases,
+            vec!["load report", "collect verdicts", "write grader agreement"]
+        );
+        assert_eq!(root.status, opentelemetry::trace::Status::Unset);
+    }
+
+    #[test]
+    fn a_failed_gate_marks_the_grader_agreement_span_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_run(&report_dir, "run-001", true);
+
+        let (status, trace) = crate::telemetry::testing::capture(|| {
+            GraderAgreementArgs {
+                report_dir,
+                min_agreement: Some(AgreementThreshold::parse(0.9).unwrap()),
+                output_format: OutputFormat::Json,
+            }
+            .handle(&crate::fs::RealFS)
+        });
+
+        assert_eq!(status, ExitCode::GateFailed);
+        assert_eq!(
+            trace.attribute(
+                "grader agreement",
+                opentelemetry_semantic_conventions::attribute::ERROR_TYPE
+            ),
+            Some(opentelemetry::Value::from(GATE_FAILED))
+        );
+        assert_eq!(
+            trace.attribute(
+                "write grader agreement",
+                opentelemetry_semantic_conventions::attribute::ERROR_TYPE
+            ),
+            None,
+            "the artifact was written before the gate was checked"
+        );
+    }
 }

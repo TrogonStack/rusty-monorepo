@@ -188,6 +188,8 @@ struct LoadedRun {
     paths: LoadedRunPaths,
     #[serde(default)]
     trace: Option<SpanReference>,
+    #[serde(default)]
+    grade_trace: Option<SpanReference>,
 }
 
 fn default_loaded_run_attempt() -> u32 {
@@ -332,6 +334,7 @@ fn compare_pair(
     let pair_span = tracing::Span::current();
     for loaded in [&left, &right] {
         telemetry::link_to(&pair_span, loaded.trace.as_ref());
+        telemetry::link_to(&pair_span, loaded.grade_trace.as_ref());
     }
 
     let (mapping, blind_outputs) = tracing::info_span!("build blind pair")
@@ -385,7 +388,7 @@ fn compare_pair(
         },
     };
 
-    emit_verdict(&record, pair);
+    emit_verdict(&record, pair, SpanReference::of(&pair_span).as_ref());
 
     if options.emit_comparison_json {
         phase(
@@ -399,8 +402,9 @@ fn compare_pair(
 
 /// The verdict as an evaluation of the pair's first scenario against its
 /// second: 1 when the first won, 0 when the second did, 0.5 on a tie. The
-/// label names the winning scenario, or `tie`.
-fn emit_verdict(record: &ComparisonRecord, pair: &ScenarioPair) {
+/// label names the winning scenario, or `tie`. It is reported in the context of
+/// `parent`, the pair's span, when tracing gave that span an identity.
+fn emit_verdict(record: &ComparisonRecord, pair: &ScenarioPair, parent: Option<&SpanReference>) {
     let (label, score) = match record.winner_scenario {
         Some(winner) if winner == pair.a => (winner.as_str(), 1.0),
         Some(winner) => (winner.as_str(), 0.0),
@@ -420,7 +424,7 @@ fn emit_verdict(record: &ComparisonRecord, pair: &ScenarioPair) {
         case_id: &record.eval_case_id,
         run_id: None,
     }
-    .emit(None, ContentCapture::from_env());
+    .emit(parent, ContentCapture::from_env());
 }
 
 fn merge_comparisons_into_report(
@@ -507,11 +511,12 @@ fn select_latest_completed_run<'a>(
         .max_by_key(|run| run.attempt)
 }
 
-/// A scenario's output, with the span its run executed under when the report
-/// recorded one.
+/// A scenario's output, with the spans its run executed and was graded under
+/// when the report recorded them.
 struct LoadedOutput {
     text: String,
     trace: Option<SpanReference>,
+    grade_trace: Option<SpanReference>,
 }
 
 fn load_scenario_output(
@@ -538,6 +543,7 @@ fn load_scenario_output(
     Ok(LoadedOutput {
         text: collect_workspace_output(&workspace)?,
         trace: run.trace,
+        grade_trace: run.grade_trace,
     })
 }
 
@@ -989,6 +995,201 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
         assert_eq!(
             comparison_json.get("eval_case_id").and_then(|v| v.as_str()),
             Some("case-a")
+        );
+    }
+
+    fn reference(trace_id: &str, span_id: &str) -> SpanReference {
+        serde_json::from_value(serde_json::json!({ "trace_id": trace_id, "span_id": span_id })).unwrap()
+    }
+
+    /// A report whose case-a runs record the spans they executed and were graded under.
+    struct TracedReport {
+        _temp: tempfile::TempDir,
+        report_dir: PathBuf,
+        recorded: Vec<SpanReference>,
+    }
+
+    fn traced_report(completed: bool) -> TracedReport {
+        let temp = tempfile::tempdir().unwrap();
+        let fs = MemFS::new();
+        let skill_path = sample_skill(&fs);
+        let bundle = build_report_bundle(
+            &fs,
+            &skill_path,
+            &skill_path,
+            "demo-skill",
+            "ci-default",
+            &[ScenarioKind::WithSkill, ScenarioKind::WithoutSkill],
+            BuildReportOptions::default(),
+        )
+        .unwrap();
+        let report_dir = write_report_bundle(temp.path(), &bundle, WriteReportOptions::default()).unwrap();
+        for run in &bundle.document.runs {
+            write_workspace_output(&report_dir, &run.paths.workspace, run.scenario_id.as_str());
+        }
+        if completed {
+            mark_all_runs_completed(&report_dir);
+        }
+
+        let report_path = report_dir.join("report.json");
+        let mut report: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report_path).unwrap()).unwrap();
+        let mut recorded = Vec::new();
+        let case_a_runs = report["runs"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|run| run["eval_case_id"] == "case-a");
+        for (index, run) in case_a_runs.enumerate() {
+            let run_trace = reference(&format!("{:032x}", index + 1), &format!("{:016x}", index + 1));
+            let grade_trace = reference(&format!("{:032x}", index + 11), &format!("{:016x}", index + 11));
+            run["trace"] = serde_json::to_value(run_trace).unwrap();
+            run["grade_trace"] = serde_json::to_value(grade_trace).unwrap();
+            recorded.extend([run_trace, grade_trace]);
+        }
+        std::fs::write(&report_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+
+        TracedReport {
+            _temp: temp,
+            report_dir,
+            recorded,
+        }
+    }
+
+    fn script_judge_options() -> CompareOptions {
+        CompareOptions {
+            pairs: vec![ScenarioPair {
+                a: ScenarioKind::WithSkill,
+                b: ScenarioKind::WithoutSkill,
+            }],
+            judge: JudgeKind::Script,
+            judge_provider: JudgeProvider::default(),
+            judge_model: None,
+            judge_command: Some(r#"cat >/dev/null; echo '{"winner": "A", "evidence": "A is clearer"}'"#.to_string()),
+            emit_comparison_json: true,
+        }
+    }
+
+    fn pair_span_of<'a>(
+        trace: &'a crate::telemetry::testing::CapturedTrace,
+        case_id: &str,
+    ) -> &'a opentelemetry_sdk::trace::SpanData {
+        let case = trace
+            .span(&format!("compare case {case_id}"))
+            .unwrap_or_else(|| panic!("no span for {case_id}"));
+        let pairs = trace.children_of(case);
+        assert_eq!(pairs.len(), 1, "one span per pair under {case_id}");
+        pairs[0]
+    }
+
+    #[test]
+    fn a_comparison_links_both_runs_and_their_grades_and_nests_its_phases() {
+        let traced = traced_report(true);
+
+        let (records, trace) =
+            crate::telemetry::testing::capture(|| run_comparisons(&traced.report_dir, script_judge_options()));
+
+        assert_eq!(records.unwrap().len(), 2);
+        trace.assert_child_of("compare case case-a", "compare");
+        trace.assert_child_of("compare case case-b", "compare");
+        trace.assert_child_of("write report", "compare");
+
+        let pair = pair_span_of(&trace, "case-a");
+        assert_eq!(pair.name, "compare with_skill:without_skill");
+        let attribute = |key: &str| {
+            pair.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.clone())
+        };
+        assert_eq!(attribute(EVAL_CASE_ID), Some(opentelemetry::Value::from("case-a")));
+        assert_eq!(
+            attribute(EVAL_COMPARISON_PAIR),
+            Some(opentelemetry::Value::from("with_skill:without_skill"))
+        );
+        let phases: Vec<&str> = trace.children_of(pair).iter().map(|span| span.name.as_ref()).collect();
+        for phase in ["load outputs", "build blind pair", "sh", "write comparison"] {
+            assert!(
+                phases.contains(&phase),
+                "{phase:?} is not under the pair span: {phases:?}"
+            );
+        }
+        let judge = trace
+            .children_of(pair)
+            .into_iter()
+            .find(|span| span.name == "sh")
+            .unwrap();
+        assert_eq!(judge.span_kind, opentelemetry::trace::SpanKind::Client);
+
+        let linked: Vec<(opentelemetry::trace::TraceId, opentelemetry::trace::SpanId)> = pair
+            .links
+            .iter()
+            .map(|link| (link.span_context.trace_id(), link.span_context.span_id()))
+            .collect();
+        assert_eq!(linked.len(), traced.recorded.len());
+        for reference in &traced.recorded {
+            assert!(
+                linked.contains(&(reference.trace_id(), reference.span_id())),
+                "the pair span links to every run and grade span its outputs came from"
+            );
+        }
+        assert!(
+            pair_span_of(&trace, "case-b").links.is_empty(),
+            "runs that recorded no span have nothing to link to"
+        );
+    }
+
+    #[test]
+    fn a_comparison_verdict_is_reported_in_the_context_of_its_pair_span() {
+        let traced = traced_report(true);
+
+        let (records, trace, logs) = super::telemetry::testing::capture_with_logs(|| {
+            run_comparisons(&traced.report_dir, script_judge_options())
+        });
+
+        records.unwrap();
+        let verdicts: Vec<_> = logs
+            .iter()
+            .filter(|record| record.event_name() == Some("gen_ai.evaluation.result"))
+            .collect();
+        assert_eq!(verdicts.len(), 2, "one verdict per case and pair");
+        let pairs = [pair_span_of(&trace, "case-a"), pair_span_of(&trace, "case-b")];
+        for verdict in verdicts {
+            let context = verdict.trace_context().expect("a verdict carries a trace context");
+            assert!(
+                pairs.iter().any(|pair| context.trace_id == pair.span_context.trace_id()
+                    && context.span_id == pair.span_context.span_id()),
+                "a verdict lands under the pair span that judged it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pair_without_a_completed_run_fails_its_phase_its_case_and_the_comparison() {
+        let traced = traced_report(false);
+
+        let (records, trace) =
+            crate::telemetry::testing::capture(|| run_comparisons(&traced.report_dir, script_judge_options()));
+
+        assert!(records.is_err());
+        let validation = Some(opentelemetry::Value::from("validation"));
+        for span in ["load outputs", "compare case case-a", "compare"] {
+            assert_eq!(trace.attribute(span, ERROR_TYPE), validation, "{span}");
+            assert!(
+                matches!(
+                    trace.span(span).unwrap().status,
+                    opentelemetry::trace::Status::Error { .. }
+                ),
+                "{span}"
+            );
+        }
+        assert_eq!(
+            trace.attribute("compare with_skill:without_skill", ERROR_TYPE),
+            validation
+        );
+        assert!(
+            trace.span("write report").is_none(),
+            "nothing is written after a failed pair"
         );
     }
 

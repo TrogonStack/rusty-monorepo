@@ -606,6 +606,10 @@ pub struct RunRecord {
     /// Absent when tracing was off for the pass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace: Option<SpanReference>,
+    /// The span this run was last graded under, so a later `compare` can link to it.
+    /// Absent until graded, or when tracing was off for the grading pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade_trace: Option<SpanReference>,
 }
 
 fn default_runner_invocations() -> u32 {
@@ -722,6 +726,10 @@ impl RunNotStarted {
 impl RunRecord {
     pub fn span_reference(&self) -> Option<&SpanReference> {
         self.trace.as_ref()
+    }
+
+    pub fn grade_span_reference(&self) -> Option<&SpanReference> {
+        self.grade_trace.as_ref()
     }
 
     /// The one way a run is recorded as never having reached the harness.
@@ -1429,6 +1437,7 @@ fn build_runs(
                     mock_violations: Vec::new(),
                     case_score: None,
                     trace: None,
+                    grade_trace: None,
                 });
                 run_number += 1;
             }

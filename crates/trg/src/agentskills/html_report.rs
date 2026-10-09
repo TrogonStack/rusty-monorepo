@@ -866,6 +866,7 @@ mod tests {
                 mock_violations: Vec::new(),
                 case_score: None,
                 trace: None,
+                grade_trace: None,
             }],
             assertion_results: Vec::new(),
             summaries: SummariesSection {
@@ -1006,6 +1007,7 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
             trace: None,
+            grade_trace: None,
         }
     }
 

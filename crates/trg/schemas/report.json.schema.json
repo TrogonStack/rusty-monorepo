@@ -1271,6 +1271,17 @@
             "null"
           ]
         },
+        "grade_trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpanReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The span this run was last graded under, so a later `compare` can link to it.\nAbsent until graded, or when tracing was off for the grading pass."
+        },
         "id": {
           "type": "string"
         },

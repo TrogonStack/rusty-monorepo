@@ -17,6 +17,7 @@ use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest}
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
 use super::report::{GraderChoice, GradingStrategy, JudgeSettings, ReportDocument, RunRecord};
+use super::span_reference::SpanReference;
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
 use crate::telemetry::semconv::generated::attributes::GEN_AI_REQUEST_MODEL;
@@ -537,6 +538,7 @@ fn grade_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport>
         }
 
         let span = grade_run_span(run);
+        run_mut.grade_trace = SpanReference::of(&span);
         let graded = span.in_scope(|| {
             grade_run(
                 RunToGrade {
@@ -3086,6 +3088,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             trace: None,
+            grade_trace: None,
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
@@ -4596,6 +4599,59 @@ echo '{"passed": true, "evidence": "script verified"}'
                 .all(|(key, _)| key.as_str() != GEN_AI_EVALUATION_EXPLANATION)),
             "the explanation quotes graded content, so it stays off by default"
         );
+    }
+
+    #[test]
+    fn grading_a_run_records_its_grade_span_in_the_report_for_later_links() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _) = unobservable_report_dir(&temp);
+        let run_id = with_run_reference(&report_dir, run_reference());
+
+        let (report, trace) = crate::telemetry::testing::capture(|| {
+            grade_report_bundle(
+                &report_dir,
+                GradeOptions {
+                    grader: GraderMode::None,
+                    ..GradeOptions::default()
+                },
+            )
+        });
+
+        report.unwrap();
+        let grade_span = trace.span(&format!("grade {run_id}")).unwrap();
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let run = document.runs.iter().find(|run| run.id == run_id).unwrap();
+        let recorded = run.grade_span_reference().expect("a traced grade is recorded");
+        assert_eq!(recorded.span_id(), grade_span.span_context.span_id());
+        assert_eq!(recorded.trace_id(), grade_span.span_context.trace_id());
+        assert_eq!(
+            run.span_reference(),
+            Some(&run_reference()),
+            "the run keeps the span it executed under"
+        );
+    }
+
+    #[test]
+    fn regrading_without_tracing_drops_a_grade_span_that_no_longer_describes_the_grade() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _) = unobservable_report_dir(&temp);
+        let path = report_dir.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        document["runs"][0]["grade_trace"] = serde_json::to_value(run_reference()).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(document["runs"][0].get("grade_trace").is_none());
     }
 
     #[test]

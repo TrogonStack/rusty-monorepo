@@ -262,4 +262,64 @@ mod tests {
             .to_string();
         assert!(help.contains("--allow-eval-suite-drift"));
     }
+
+    fn phase_names<'a>(trace: &'a crate::telemetry::testing::CapturedTrace, parent: &str) -> Vec<&'a str> {
+        let parent = trace.span(parent).unwrap_or_else(|| panic!("no span named {parent:?}"));
+        trace
+            .children_of(parent)
+            .iter()
+            .map(|span| span.name.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn benchmarking_a_report_nests_every_phase_under_the_benchmark_span() {
+        let root = tempfile::tempdir().unwrap();
+        let report_dir = root.path().join("demo-skill").join("report-iter-1");
+        write_minimal_report(&report_dir, 1, "sha256:1111", &["case-a"]);
+
+        let ((code, _), trace) = crate::telemetry::testing::capture(|| {
+            benchmark_report_dir_with_document(&report_dir, BenchmarkOptions::default())
+        });
+
+        assert!(code.is_success());
+        assert_eq!(
+            phase_names(&trace, "benchmark"),
+            vec![
+                "read report",
+                "aggregate scenarios",
+                "check eval suite drift",
+                "build headroom",
+                "write benchmark"
+            ]
+        );
+        let benchmark = trace.span("benchmark").unwrap();
+        assert_eq!(benchmark.status, opentelemetry::trace::Status::Unset);
+    }
+
+    #[test]
+    fn a_report_that_cannot_be_read_fails_the_read_phase_and_the_benchmark() {
+        let root = tempfile::tempdir().unwrap();
+
+        let ((code, _), trace) = crate::telemetry::testing::capture(|| {
+            benchmark_report_dir_with_document(root.path(), BenchmarkOptions::default())
+        });
+
+        assert_eq!(code, ExitCode::InfrastructureFailure);
+        assert_eq!(phase_names(&trace, "benchmark"), vec!["read report"]);
+        for span in ["read report", "benchmark"] {
+            assert_eq!(
+                trace.attribute(span, opentelemetry_semantic_conventions::attribute::ERROR_TYPE),
+                Some(opentelemetry::Value::from("io")),
+                "{span}"
+            );
+            assert!(
+                matches!(
+                    trace.span(span).unwrap().status,
+                    opentelemetry::trace::Status::Error { .. }
+                ),
+                "{span}"
+            );
+        }
+    }
 }
