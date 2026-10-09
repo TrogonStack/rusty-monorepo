@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_nats::jetstream::consumer::pull::{self, MessagesError};
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy, StreamError};
 use async_nats::jetstream::context::ConsumerInfoError;
-use async_nats::jetstream::stream::{ConsumerError, RawMessageError, RawMessageErrorKind, Stream};
+use async_nats::jetstream::stream::{ConsumerError, InfoError, RawMessageError, RawMessageErrorKind, Stream};
 use async_nats::jetstream::Message;
 use async_nats::{HeaderMap, Statistics, Subject};
 use bytes::Bytes;
@@ -603,7 +603,16 @@ impl ReplayConsumer {
         if !observed.is_caught_up() {
             return observed;
         }
-        match self.stored_after(Revision::from(info.delivered.stream_sequence)).await {
+        let delivered = Revision::from(info.delivered.stream_sequence);
+        match self.stream_tail().await {
+            Ok(tail) if tail <= delivered => return observed,
+            Ok(_) => {}
+            Err(err) => {
+                tracing::debug!(%err, "replay watermark could not read the stream tail");
+                return Watermark::Unknown;
+            }
+        }
+        match self.stored_after(delivered).await {
             Ok(None) => observed,
             Ok(Some(stored)) => Watermark::Behind {
                 stored,
@@ -614,6 +623,10 @@ impl ReplayConsumer {
                 Watermark::Unknown
             }
         }
+    }
+
+    async fn stream_tail(&self) -> Result<Revision, InfoError> {
+        Ok(Revision::from(self.stream.get_info().await?.state.last_sequence))
     }
 
     async fn stored_after(&self, delivered: Revision) -> Result<Option<Revision>, RawMessageError> {

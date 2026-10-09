@@ -572,6 +572,92 @@ async fn watermark_never_certifies_an_acknowledged_publish_before_it_is_applied(
 }
 
 #[tokio::test]
+async fn a_quiet_caught_up_watermark_reads_no_stored_messages() -> TestResult {
+    let server = server_or_skip!();
+    let client = server.client().await;
+    let config = PresenceConfig::default();
+    Presence::provision(client.clone(), config.clone(), ProvisionOptions::default()).await?;
+    let (topic, key) = lobby()?;
+    publish(
+        &client,
+        &config,
+        &entry_key(&config, &topic, &key)?,
+        stored(&topic, &key, "Fq1")?.to_json_bytes()?,
+        LONG_TTL,
+    )
+    .await?;
+    let stream = stream_of(&client, &config).await?;
+    let classifier = ShardClassifier::new(config.bucket(), config.shards(), ViewShard::of(&topic, config.shards()));
+    let replay = ReplayConsumer::rebuild(&stream, &classifier.filters(), RebuildBudget::default(), |_| {}).await?;
+
+    let mut spy = MessageReads::watch(&server).await?;
+    spy.prove_it_sees(&stream).await?;
+    for tick in 0..3 {
+        let watermark = replay.watermark().await;
+        assert!(watermark.is_caught_up(), "tick {tick}: {watermark:?}");
+    }
+    assert_eq!(
+        spy.drain().await?,
+        0,
+        "a quiet caught-up watermark read stored messages"
+    );
+    Ok(())
+}
+
+struct MessageReads {
+    client: async_nats::Client,
+    subscriptions: Vec<async_nats::Subscriber>,
+}
+
+impl MessageReads {
+    const SUBJECTS: [&str; 2] = ["$JS.API.STREAM.MSG.GET.>", "$JS.API.DIRECT.GET.>"];
+    const SETTLE: Duration = Duration::from_millis(500);
+
+    async fn watch(server: &NatsServer) -> Result<Self, BoxError> {
+        let client = server.client().await;
+        let mut subscriptions = Vec::new();
+        for subject in Self::SUBJECTS {
+            subscriptions.push(client.subscribe(subject).await?);
+        }
+        let sentinel = client.new_inbox();
+        let mut registered = client.subscribe(sentinel.clone()).await?;
+        client.publish(sentinel, "".into()).await?;
+        tokio::time::timeout(CONVERGE_TIMEOUT, registered.next())
+            .await?
+            .ok_or("the spy lost its connection before its subscriptions registered")?;
+        Ok(Self { client, subscriptions })
+    }
+
+    async fn prove_it_sees(&mut self, stream: &Stream) -> Result<(), BoxError> {
+        stream.get_raw_message(1).await?;
+        let [first, second] = &mut self.subscriptions[..] else {
+            return Err("the spy watches two subjects".into());
+        };
+        let seen = tokio::time::timeout(CONVERGE_TIMEOUT, async {
+            tokio::select! {
+                read = first.next() => read,
+                read = second.next() => read,
+            }
+        })
+        .await;
+        assert!(matches!(seen, Ok(Some(_))), "the spy missed a raw message read");
+        self.drain().await?;
+        Ok(())
+    }
+
+    async fn drain(&mut self) -> Result<usize, BoxError> {
+        self.client.flush().await?;
+        let mut reads = 0;
+        for subscription in &mut self.subscriptions {
+            while let Ok(Some(_)) = tokio::time::timeout(Self::SETTLE, subscription.next()).await {
+                reads += 1;
+            }
+        }
+        Ok(reads)
+    }
+}
+
+#[tokio::test]
 async fn reconcile_repairs_an_injected_divergence() -> TestResult {
     let server = server_or_skip!();
     let client = server.client().await;
