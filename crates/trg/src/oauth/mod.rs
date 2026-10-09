@@ -4,24 +4,39 @@
 
 pub mod flow;
 pub mod store;
+pub mod telemetry;
 
 use http::header::AUTHORIZATION;
+use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
 use rmcp::transport::auth::{AuthError, AuthorizationManager};
 use secrecy::ExposeSecret;
+use tracing::{field::Empty, Instrument};
 
 use crate::{
     config::ResolvedMcpServer,
     oauth::{
         flow::{run_authorization, FlowConfig, FlowError},
         store::{OAuthCredentialStore, StorageFailure},
+        telemetry::{auth_error_type, record_error, AuthOutcome, OAuthHttp, OAuthStep},
     },
     secrets::{Backend, SecretPath},
+    telemetry::semconv::trg::{MCP_AUTH_OUTCOME, MCP_SERVER_NAME},
 };
 
 pub enum EnsureOutcome {
     NoAuthRequired,
     AlreadyAuthorized(AuthorizationManager),
     Authorized(AuthorizationManager),
+}
+
+impl EnsureOutcome {
+    pub fn auth_outcome(&self) -> AuthOutcome {
+        match self {
+            Self::NoAuthRequired => AuthOutcome::None,
+            Self::AlreadyAuthorized(_) => AuthOutcome::AlreadyAuthorized,
+            Self::Authorized(_) => AuthOutcome::Authorized,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +61,18 @@ pub enum EnsureError {
     /// command that does reach one was wired as though it did not.
     #[error("no endpoint was resolved for `{0}`")]
     NoEndpoint(String),
+}
+
+impl EnsureError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::Storage(_) => "storage_error",
+            Self::Auth(error) => auth_error_type(error),
+            Self::Flow(error) => error.error_type(),
+            Self::MissingAfterFlow => "missing_after_flow",
+            Self::NoEndpoint(_) => "no_endpoint",
+        }
+    }
 }
 
 /// Prefer what the credential store recorded over what rmcp made of it.
@@ -85,6 +112,34 @@ pub async fn ensure_credentials_for(
     backend: &Backend,
     cred_path: &SecretPath,
     fallback: Option<&SecretPath>,
+    http: &OAuthHttp,
+) -> Result<EnsureOutcome, EnsureError> {
+    let span = tracing::info_span!(
+        "ensure credentials",
+        "otel.status_code" = Empty,
+        { MCP_SERVER_NAME } = server_name,
+        { MCP_AUTH_OUTCOME } = Empty,
+        { ERROR_TYPE } = Empty,
+    );
+    let result = ensure(profile, server_name, backend, cred_path, fallback, http)
+        .instrument(span.clone())
+        .await;
+    match &result {
+        Ok(outcome) => {
+            span.record(MCP_AUTH_OUTCOME, outcome.auth_outcome().as_str());
+        }
+        Err(error) => record_error(&span, error.error_type()),
+    }
+    result
+}
+
+async fn ensure(
+    profile: &ResolvedMcpServer,
+    server_name: &str,
+    backend: &Backend,
+    cred_path: &SecretPath,
+    fallback: Option<&SecretPath>,
+    http: &OAuthHttp,
 ) -> Result<EnsureOutcome, EnsureError> {
     if profile.http_headers.contains_key(&AUTHORIZATION) {
         return Ok(EnsureOutcome::NoAuthRequired);
@@ -92,8 +147,15 @@ pub async fn ensure_credentials_for(
 
     let url = profile.url.expose_secret();
 
-    let mut manager = AuthorizationManager::new(url).await?;
-    let resolution = match manager.resolve_metadata().await {
+    let mut manager = AuthorizationManager::new_with_oauth_http_client(url, http.client()).await?;
+    let discovery = OAuthStep::DiscoverMetadata.span(server_name);
+    let resolution = manager.resolve_metadata().instrument(discovery.clone()).await;
+    if let Err(error) = &resolution {
+        if !matches!(error, AuthError::NoAuthorizationSupport) {
+            record_error(&discovery, auth_error_type(error));
+        }
+    }
+    let resolution = match resolution {
         Ok(resolution) => resolution,
         Err(AuthError::NoAuthorizationSupport) => return Ok(EnsureOutcome::NoAuthRequired),
         Err(e) => return Err(e.into()),
@@ -144,7 +206,7 @@ pub async fn ensure_credentials_for(
     // from the shared path even when the flow wrote nothing, and would hand
     // back a manager still pointed at the shared path for refreshes on a
     // machine that just logged in and should own its own credential.
-    let mut manager = AuthorizationManager::new(url).await?;
+    let mut manager = AuthorizationManager::new_with_oauth_http_client(url, http.client()).await?;
     let store = OAuthCredentialStore::new(backend.clone(), cred_path.clone(), server_name, None);
     let failure = store.failure();
     manager.set_credential_store(store);
@@ -156,4 +218,50 @@ pub async fn ensure_credentials_for(
         return Err(EnsureError::MissingAfterFlow);
     }
     Ok(EnsureOutcome::Authorized(manager))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use secrecy::SecretString;
+
+    use super::*;
+    use crate::secrets::fake::FakeBackend;
+    use crate::telemetry::testing::capture;
+
+    #[test]
+    fn a_static_authorization_header_needs_no_oauth_and_says_so_on_the_span() {
+        let profile = ResolvedMcpServer {
+            secrets: None,
+            url: SecretString::from("https://example.com/mcp".to_string()),
+            transport: None,
+            max_disconnected_time: None,
+            initial_retry_interval: None,
+            override_protocol_version: None,
+            http_headers: HashMap::from([(AUTHORIZATION, SecretString::from("Bearer token".to_string()))]),
+        };
+        let backend = Backend::Fake(FakeBackend::new());
+        let path = SecretPath::parse("mcp/weather").expect("path");
+        let http = OAuthHttp::traced().expect("client");
+
+        let (outcome, trace) = capture(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime")
+                .block_on(ensure_credentials_for(
+                    &profile, "weather", &backend, &path, None, &http,
+                ))
+        });
+
+        assert!(matches!(outcome, Ok(EnsureOutcome::NoAuthRequired)));
+        assert_eq!(
+            trace
+                .attribute("ensure credentials", MCP_AUTH_OUTCOME)
+                .map(|value| value.to_string())
+                .as_deref(),
+            Some("none")
+        );
+        assert_eq!(trace.spans.len(), 1);
+    }
 }

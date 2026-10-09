@@ -2,6 +2,7 @@
 
 mod cli;
 mod run;
+mod telemetry;
 
 pub use cli::ProxyArgs;
 pub use run::{refuse_over_stdio, run_mcp_daemon, ProxyError};

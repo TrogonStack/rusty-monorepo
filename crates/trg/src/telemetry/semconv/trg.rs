@@ -46,6 +46,25 @@ pub const EVAL_HARNESS_DURATION_MS: &str = "trg.eval.harness.duration_ms";
 /// The grader's name, on a `grade` span's children.
 pub const EVAL_GRADER_NAME: &str = "trg.eval.grader.name";
 
+/// The `[mcp.servers.<name>]` entry an MCP proxy session or OAuth step serves.
+pub const MCP_SERVER_NAME: &str = "trg.mcp.server.name";
+
+/// How an MCP proxy session obtained credentials (`none`,
+/// `already_authorized`, `authorized`).
+pub const MCP_AUTH_OUTCOME: &str = "trg.mcp.auth.outcome";
+
+/// Why an MCP proxy bridge stopped (`host_eof`, `remote_closed`,
+/// `local_closed`).
+pub const MCP_EXIT_REASON: &str = "trg.mcp.exit.reason";
+
+/// Which way a proxied MCP message travelled (`host_to_remote`,
+/// `remote_to_host`).
+pub const MCP_MESSAGE_DIRECTION: &str = "trg.mcp.message.direction";
+
+/// How the OAuth loopback callback wait ended (`received`, `timeout`,
+/// `state_mismatch`, `provider_error`).
+pub const OAUTH_CALLBACK_OUTCOME: &str = "trg.oauth.callback.outcome";
+
 /// The `kind` of the secrets backend an operation addressed (`keychain`,
 /// `openbao`, `onepassword`).
 pub const SECRETS_BACKEND_KIND: &str = "trg.secrets.backend.kind";
