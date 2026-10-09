@@ -29,8 +29,7 @@ macro_rules! server_or_skip {
 
 const DEFAULT_MARKER_TTL: Duration = Duration::from_secs(5);
 
-/// A marker ttl wide enough that a host starved for several seconds between the purge write
-/// and the follow-up read still observes the tombstone before the server reclaims it.
+/// Wide enough that a starved host still sees the tombstone before the server reclaims it.
 const RESURRECTION_CHECK_MARKER_TTL: Duration = Duration::from_secs(20);
 
 fn config(lease: Duration, interval: Duration, marker: Duration) -> Result<PresenceConfig, TestError> {
@@ -72,11 +71,7 @@ enum LastRecord {
     Reclaimed,
 }
 
-/// Like [`raw_entry`], but a subject with no message left at all is reported as
-/// [`LastRecord::Reclaimed`] instead of an error: the last message for a subject is a tombstone
-/// published with its own ttl (see `MarkerTtl`), and the server is free to reclaim it once that
-/// ttl elapses. A reclaimed subject is the strongest possible proof that nothing resurrected the
-/// entry, since a resurrection would itself be a live message the server has not reclaimed.
+/// Like [`raw_entry`], but a reclaimed tombstone is reported as [`LastRecord::Reclaimed`] instead of an error.
 async fn last_record_or_reclaimed(
     client: &async_nats::Client,
     config: &PresenceConfig,
