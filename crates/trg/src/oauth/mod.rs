@@ -148,13 +148,16 @@ async fn ensure(
     let url = profile.url.expose_secret();
 
     let mut manager = AuthorizationManager::new_with_oauth_http_client(url, http.client()).await?;
-    let discovery = OAuthStep::DiscoverMetadata.span(server_name);
-    let resolution = manager.resolve_metadata().instrument(discovery.clone()).await;
-    if let Err(error) = &resolution {
-        if !matches!(error, AuthError::NoAuthorizationSupport) {
-            record_error(&discovery, auth_error_type(error));
+    let resolution = {
+        let discovery = OAuthStep::DiscoverMetadata.span(server_name);
+        let resolution = manager.resolve_metadata().instrument(discovery.clone()).await;
+        if let Err(error) = &resolution {
+            if !matches!(error, AuthError::NoAuthorizationSupport) {
+                record_error(&discovery, auth_error_type(error));
+            }
         }
-    }
+        resolution
+    };
     let resolution = match resolution {
         Ok(resolution) => resolution,
         Err(AuthError::NoAuthorizationSupport) => return Ok(EnsureOutcome::NoAuthRequired),

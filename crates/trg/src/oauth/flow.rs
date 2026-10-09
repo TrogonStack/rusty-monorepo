@@ -115,14 +115,16 @@ async fn authorize(
     let redirect_uri = format!("http://127.0.0.1:{port}/oauth/callback");
 
     let request = AuthorizationRequest::new(&redirect_uri).with_scopes(scopes.iter().copied());
-    let register = OAuthStep::RegisterClient.span(server_name);
-    let session = AuthorizationSession::new(auth_manager, request)
-        .instrument(register.clone())
-        .await
-        .map_err(|(_, e)| {
-            record_error(&register, auth_error_type(&e));
-            FlowError::Oauth(e)
-        })?;
+    let session = {
+        let register = OAuthStep::RegisterClient.span(server_name);
+        AuthorizationSession::new(auth_manager, request)
+            .instrument(register.clone())
+            .await
+            .map_err(|(_, e)| {
+                record_error(&register, auth_error_type(&e));
+                FlowError::Oauth(e)
+            })?
+    };
 
     let auth_url = session.get_authorization_url().to_string();
     let expected_state = oauth_state_from_authorization_url(&auth_url)
@@ -131,21 +133,23 @@ async fn authorize(
 
     let browser_err = open::that(&auth_url).err();
 
-    let wait = callback_wait_span(server_name);
     let wait_outcome = {
+        let wait = callback_wait_span(server_name);
         let server = server.clone();
         let timeout = config.callback_timeout;
         let expected_state = expected_state.clone();
         let server_name = server_name.to_string();
-        tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state, server_name))
-            .instrument(wait.clone())
-            .await
-            .map_err(|e| {
-                record_error(&wait, "callback_task_failed");
-                AuthError::InternalError(format!("OAuth callback task failed to run: {e}"))
-            })?
+        let outcome =
+            tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state, server_name))
+                .instrument(wait.clone())
+                .await
+                .map_err(|e| {
+                    record_error(&wait, "callback_task_failed");
+                    AuthError::InternalError(format!("OAuth callback task failed to run: {e}"))
+                })?;
+        outcome.record_on(&wait);
+        outcome
     };
-    wait_outcome.record_on(&wait);
 
     let (code, state) = match wait_outcome {
         CallbackWait::Success { code, state } => (code, state),
@@ -163,12 +167,14 @@ async fn authorize(
         }
     };
 
-    let exchange = OAuthStep::ExchangeCode.span(server_name);
-    let token_result = session
-        .handle_callback(&code, &state)
-        .instrument(exchange.clone())
-        .await
-        .inspect_err(|e| record_error(&exchange, auth_error_type(e)))?;
+    let token_result = {
+        let exchange = OAuthStep::ExchangeCode.span(server_name);
+        session
+            .handle_callback(&code, &state)
+            .instrument(exchange.clone())
+            .await
+            .inspect_err(|e| record_error(&exchange, auth_error_type(e)))?
+    };
 
     let granted_scopes = granted_scopes_from_token_response(&token_result);
 
