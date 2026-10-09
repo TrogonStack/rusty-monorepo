@@ -120,7 +120,7 @@ pub const EVAL_RUNNER_VERSION: &str = "trg.eval.runner.version";
 /// A run's final status (`completed`, `failed`, `timeout`, `skipped`).
 pub const EVAL_RUN_STATUS: &str = "trg.eval.run.status";
 
-/// What one attempt ended as (`completed`, `failed`, `timeout`, `runner_error`).
+/// What one attempt ended as (`completed`, `transient_failure`, `runner_error`).
 pub const EVAL_ATTEMPT_OUTCOME: &str = "trg.eval.attempt.outcome";
 
 /// Whether an attempt failed in a way a retry may recover from.
@@ -149,7 +149,7 @@ pub const EVAL_TRUST_ANSWER: &str = "trg.eval.trust.answer";
 /// Counter: eval cache lookups, split by `trg.eval.cache.hit`.
 pub const EVAL_CACHE_LOOKUPS_METRIC: &str = "trg.eval.cache.lookups";
 
-/// Counter: runner attempts, split by outcome and transience.
+/// Counter: runner attempts, split by `trg.eval.attempt.outcome`.
 pub const EVAL_ATTEMPTS_METRIC: &str = "trg.eval.attempts";
 
 /// Counter: finished runs, split by `trg.eval.run.status`.
