@@ -1,38 +1,55 @@
 defmodule TrogonPresence.PresenceParityTest do
   use TrogonPresence.Test.PresenceCase, async: false
 
-  alias TrogonPresence.Test.{Presence, RealPresence}
+  alias TrogonPresence.Test.{
+    DualPresence,
+    NatsReadPresence,
+    PhoenixPresence,
+    Presence,
+    RealPresence
+  }
 
   setup %{conn: conn} do
     start_supervised!({Phoenix.PubSub, name: TrogonPresence.Test.PubSub})
     start_supervised!({Presence, conn: conn})
+    start_supervised!({DualPresence, conn: conn})
+    start_supervised!({NatsReadPresence, conn: conn})
+    start_supervised!(PhoenixPresence)
     start_supervised!(RealPresence)
     :ok
   end
 
-  test "the shim and real Phoenix.Presence agree on list/1 and get_by_key/2 for the same operations" do
-    suffix = System.unique_integer([:positive, :monotonic])
-    shim_topic = "presence:parity-shim:#{suffix}"
-    real_topic = "presence:parity-real:#{suffix}"
+  for {name, module} <- [
+        nats: TrogonPresence.Test.Presence,
+        dual: TrogonPresence.Test.DualPresence,
+        nats_read: TrogonPresence.Test.NatsReadPresence,
+        phoenix: TrogonPresence.Test.PhoenixPresence
+      ] do
+    test "the #{name} stage agrees with real Phoenix.Presence on list/1 and get_by_key/2" do
+      module = unquote(module)
+      suffix = System.unique_integer([:positive, :monotonic])
+      shim_topic = "presence:parity-#{unquote(name)}:#{suffix}"
+      real_topic = "presence:parity-real-#{unquote(name)}:#{suffix}"
 
-    run_sequence(Presence, shim_topic)
-    run_sequence(RealPresence, real_topic)
+      run_sequence(module, shim_topic)
+      run_sequence(RealPresence, real_topic)
 
-    expected = %{"alice" => [%{"status" => "busy"}]}
+      expected = %{"alice" => [%{"status" => "busy"}]}
 
-    wait_until(fn -> normalize_list(Presence.list(shim_topic)) == expected end)
+      wait_until(fn -> normalize_list(module.list(shim_topic)) == expected end)
 
-    assert normalize_list(Presence.list(shim_topic)) == expected
-    assert normalize_list(RealPresence.list(real_topic)) == expected
+      assert normalize_list(module.list(shim_topic)) == expected
+      assert normalize_list(RealPresence.list(real_topic)) == expected
 
-    assert normalize_list(Presence.list(shim_topic)) ==
-             normalize_list(RealPresence.list(real_topic))
+      assert normalize_list(module.list(shim_topic)) ==
+               normalize_list(RealPresence.list(real_topic))
 
-    assert normalize_entry(Presence.get_by_key(shim_topic, "alice")) ==
-             normalize_entry(RealPresence.get_by_key(real_topic, "alice"))
+      assert normalize_entry(module.get_by_key(shim_topic, "alice")) ==
+               normalize_entry(RealPresence.get_by_key(real_topic, "alice"))
 
-    assert Presence.get_by_key(shim_topic, "bob") == []
-    assert RealPresence.get_by_key(real_topic, "bob") == []
+      assert module.get_by_key(shim_topic, "bob") == []
+      assert RealPresence.get_by_key(real_topic, "bob") == []
+    end
   end
 
   defp run_sequence(module, topic) do
