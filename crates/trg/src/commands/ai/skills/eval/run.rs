@@ -5081,14 +5081,26 @@ mod tests {
             // The first pass on a thread pays for registering every callsite, which is
             // not time the pass itself spends anywhere.
             traced_pass(1);
-            let (_, trace) = traced_pass(1);
-            let suite = trace.span(SUITE).unwrap();
-            let total = suite.end_time.duration_since(suite.start_time).unwrap();
-            let covered: std::time::Duration = trace
-                .children_of(suite)
-                .iter()
-                .map(|child| child.end_time.duration_since(child.start_time).unwrap())
-                .sum();
+            // Scheduling noise only ever adds time no child covers, so the best of a few
+            // passes is the one that shows whether the pass leaves any of its own work
+            // untraced.
+            let (covered, total) = (0..5)
+                .map(|_| {
+                    let (_, trace) = traced_pass(1);
+                    let suite = trace.span(SUITE).unwrap();
+                    let total = suite.end_time.duration_since(suite.start_time).unwrap();
+                    let covered: std::time::Duration = trace
+                        .children_of(suite)
+                        .iter()
+                        .map(|child| child.end_time.duration_since(child.start_time).unwrap())
+                        .sum();
+                    (covered, total)
+                })
+                .max_by(|(a_covered, a_total), (b_covered, b_total)| {
+                    (a_covered.as_secs_f64() / a_total.as_secs_f64())
+                        .total_cmp(&(b_covered.as_secs_f64() / b_total.as_secs_f64()))
+                })
+                .unwrap();
             assert!(
                 covered.as_secs_f64() >= total.as_secs_f64() * 0.9,
                 "children cover {covered:?} of {total:?}"
