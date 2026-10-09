@@ -61,6 +61,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--split` | enum | `all` | Cover only the cases declaring this `split`. Values: `train`, `test`, `all`. See [Covering part of a suite](#covering-part-of-a-suite) |
 | `--allow-scaffold` | bool | `false` | Run the `scaffold` a case declares. See [The state a case is asking about](#the-state-a-case-is-asking-about) |
 | `--trust-skill` | bool | `false` | Run a skill directory from outside this working tree without being asked about it. See [Running a skill from outside your working tree](#running-a-skill-from-outside-your-working-tree) |
+| `--forward-telemetry` | bool | `false` | Hand each run's harness `trg`'s own OpenTelemetry settings, so a harness that exports telemetry sends it to the same collector under this pass's trace. Recorded as `report.telemetry_forwarding`. See [Forward telemetry into eval harnesses](../how-to/forward-telemetry-to-eval-harnesses.md) |
 | `--require-graders` | bool | `false` | Fail when an eval case declares no grader |
 | `--lint-evals` | bool | `false` | Print the suite lint's warnings to stderr. Off by default, so a run that does not ask for them prints none, and they change no exit code either way |
 
@@ -1890,6 +1891,8 @@ other field forward as declared there, including `name`, `excluded`,
 | `environment` | string | Environment policy the runs were executed under: `scrubbed`, `isolated`, or `inherited` |
 | `permission` | string | Permission grant the runs were executed under: `workspace_write` or `unrestricted`. Absent in reports written before this field existed, which is equivalent to `workspace_write`. See [Run permission](#run-permission) |
 | `ci` | object | Present when running inside GitHub Actions (`GITHUB_ACTIONS=true`) |
+| `telemetry_forwarding` | string | `on` when the pass ran with `--forward-telemetry`. Absent otherwise |
+| `trace` | object | The suite span of the pass, as `trace_id` and `span_id` in lowercase hex. Absent when tracing was off. See [Trace references in reports](telemetry.md#trace-references-in-reports) |
 
 ### `suite` section
 
@@ -1924,6 +1927,7 @@ other field forward as declared there, including `name`, `excluded`,
 | `warnings` | string[] | Run-level anomalies that do not fail the run on their own, such as a read-only fixture that changed, an expected output that was never written, a path reached outside the workspace, or a usage field the harness wrote in a shape that is not a token count. Also carries the reason a run that was never started was skipped |
 | `case_score` | float or null | This run's own pass rate over its scored assertions, from grading. `null` until graded, or when grading scored nothing for this run. A suite-wide pass rate can stay high while one run's `case_score` is low; check both |
 | `mock_violations` | array | Every logged `expect` mismatch from `mock-calls.jsonl`, read back after the run finished. Empty when the case declares no mocks or violates nothing |
+| `trace` | object | The span this run executed under, as `trace_id` and `span_id` in lowercase hex, so `grade` and `compare` can link to it. Absent when tracing was off |
 
 Run ordering: eval cases in manifest order, then scenarios in flag order.
 
