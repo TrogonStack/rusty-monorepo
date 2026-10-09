@@ -15,6 +15,7 @@ pub mod keychain;
 pub mod kv_v2;
 pub mod onepassword;
 pub mod openbao;
+pub(crate) mod telemetry;
 pub mod vars;
 
 use std::collections::HashMap;
@@ -153,6 +154,25 @@ pub enum SecretsError {
 
     #[error("`{op}` is not supported by the `{kind}` backend")]
     Unsupported { kind: &'static str, op: &'static str },
+}
+
+impl SecretsError {
+    /// A low-cardinality name for this failure, for `error.type`. Never
+    /// carries the path, the payload or the backend's own message.
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::NotFound(_) => "not_found",
+            Self::Unauthorized { .. } => "unauthorized",
+            Self::Unauthenticated { .. } => "unauthenticated",
+            Self::Unavailable(_) => "unavailable",
+            Self::Transport(_) => "transport",
+            Self::Malformed { .. } => "malformed",
+            Self::MalformedItem { .. } => "malformed_item",
+            Self::AmbiguousField { .. } => "ambiguous_field",
+            Self::PermissionDenied(_) => "permission_denied",
+            Self::Unsupported { .. } => "unsupported",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

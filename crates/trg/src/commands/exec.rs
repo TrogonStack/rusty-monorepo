@@ -24,6 +24,7 @@ use serde_json::json;
 
 use crate::config::{self, LoadedExec};
 use crate::output::{print_json, OutputFormat};
+use crate::telemetry::semconv::trg::EXEC_ENV_VAR_COUNT;
 use crate::telemetry::{propagation, Telemetry};
 
 #[derive(Subcommand)]
@@ -120,12 +121,29 @@ pub fn run(loaded: LoadedExec, args: &ExecArgs) -> PreparedLaunch {
     let unset: Vec<String> = loaded.unset.iter().cloned().chain(args.unset.iter().cloned()).collect();
 
     let parent: HashMap<String, String> = std::env::vars().collect();
-    let env = merge_env(&parent, &unset, &loaded.env, &args.env);
+    let env = traced_merge_env(&parent, &unset, &loaded.env, &args.env);
 
     let mut command_args = loaded.args;
     command_args.extend(args.extra_args.iter().cloned());
 
     PreparedLaunch::new(loaded.command, command_args, env, args.output_format)
+}
+
+/// [`merge_env`] under a span recording how many variables the launched
+/// command receives, and never which ones or what they hold: the entry's own
+/// `env` is where its resolved secrets live.
+fn traced_merge_env(
+    parent: &HashMap<String, String>,
+    unset: &[String],
+    entry_env: &HashMap<String, String>,
+    cli_env: &[(String, String)],
+) -> HashMap<String, String> {
+    let span = tracing::info_span!("merge env", { EXEC_ENV_VAR_COUNT } = tracing::field::Empty);
+    span.in_scope(|| {
+        let env = merge_env(parent, unset, entry_env, cli_env);
+        span.record(EXEC_ENV_VAR_COUNT, i64::try_from(env.len()).unwrap_or(i64::MAX));
+        env
+    })
 }
 
 /// The environment the launched command actually sees: everything this
@@ -407,6 +425,23 @@ mod tests {
             report_names(&["alpha".to_string(), "zebra".to_string()], OutputFormat::Text),
             0
         );
+    }
+
+    #[test]
+    fn merging_records_how_many_variables_and_never_which() {
+        use crate::secrets::telemetry::testing::assert_never_recorded;
+
+        const SECRET: &str = "exec-span-secret-2a9f";
+        let parent = HashMap::from([("PATH".to_string(), "/bin".to_string())]);
+        let entry_env = HashMap::from([("ANTHROPIC_API_KEY".to_string(), SECRET.to_string())]);
+        let (env, trace) = crate::telemetry::testing::capture(|| traced_merge_env(&parent, &[], &entry_env, &[]));
+        assert_eq!(env.len(), 2);
+
+        assert_eq!(
+            trace.attribute("merge env", "trg.exec.env.var.count"),
+            Some(opentelemetry::Value::I64(2))
+        );
+        assert_never_recorded(&trace, &[SECRET, "ANTHROPIC_API_KEY", "/bin"]);
     }
 
     #[test]
