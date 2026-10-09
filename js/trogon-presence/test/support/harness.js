@@ -52,13 +52,20 @@ export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Resolves the next time `callback` is invoked, carrying its arguments. */
-export function nextCall(install) {
+/** Resolves the next time `callback` is invoked, carrying its arguments, or rejects once
+ * `withinMillis` elapses: a callback that never fires must fail the test clearly, not hang it. */
+export function nextCall(install, withinMillis = 15_000) {
   let resolve;
-  const promise = new Promise((res) => {
+  let reject;
+  const promise = new Promise((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  install((...args) => resolve(args));
+  const timer = setTimeout(() => reject(new Error("timed out waiting for the callback to fire")), withinMillis);
+  install((...args) => {
+    clearTimeout(timer);
+    resolve(args);
+  });
   return promise;
 }
 

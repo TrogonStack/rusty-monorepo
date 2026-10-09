@@ -193,9 +193,17 @@ async fn browser_glue() -> TestResult {
     let addr = listener.local_addr()?;
     let js_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../js/trogon-presence");
 
+    // Node's own per-test timeout turns a single stuck test into a clear failure for that test.
+    // The overall deadline below is only a backstop for whatever that does not catch (node
+    // itself wedged, or a hang outside any single test's accounting), so the whole harness can
+    // never again sit forever the way it did under heavy host load before this was added.
+    const NODE_TEST_TIMEOUT_MS: &str = "60000";
+    const OVERALL_DEADLINE: Duration = Duration::from_secs(600);
+
     let mut child = Command::new("node")
         .arg("--test")
         .arg("--test-concurrency=1")
+        .arg(format!("--test-timeout={NODE_TEST_TIMEOUT_MS}"))
         .arg("test/**/*.test.js")
         .current_dir(&js_dir)
         .env("PRESENCE_RPC_ADDR", addr.to_string())
@@ -203,8 +211,8 @@ async fn browser_glue() -> TestResult {
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
-    let exit = tokio::spawn(async move { child.wait().await });
-    tokio::pin!(exit);
+    let overall_deadline = tokio::time::sleep(OVERALL_DEADLINE);
+    tokio::pin!(overall_deadline);
 
     let outcome: Result<(), BoxError> = loop {
         tokio::select! {
@@ -214,12 +222,16 @@ async fn browser_glue() -> TestResult {
                     break Err(error);
                 }
             }
-            status = &mut exit => {
-                let status = status??;
+            status = child.wait() => {
+                let status = status?;
                 if !status.success() {
                     break Err(format!("node --test exited with {status}").into());
                 }
                 break Ok(());
+            }
+            _ = &mut overall_deadline => {
+                let _ = child.kill().await;
+                break Err(format!("node --test did not finish within {OVERALL_DEADLINE:?}, killed it").into());
             }
         }
     };

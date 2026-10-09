@@ -7,7 +7,10 @@ import { createClient, sleep, waitFor } from "./support/harness.js";
 test("the client's own token cache refreshes before the deadline and survives a forced reconnect, with no manual refresh", async (t) => {
   const rpc = new RpcClient(rpcAddress());
   t.after(() => rpc.close());
-  const shortSessionSecs = 5;
+  // Meaningfully longer than TokenCache's REFRESH_LEEWAY (5s): a session at or below the
+  // leeway leaves no real "refresh ahead of expiry" point to aim for and is a degenerate
+  // configuration, not something this test should exercise.
+  const shortSessionSecs = 15;
   const client = createClient(rpc, { sub: "token-refresh-bob", sessionSecs: shortSessionSecs });
   t.after(() => client.close());
 

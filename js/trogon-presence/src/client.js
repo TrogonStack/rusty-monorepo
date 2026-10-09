@@ -139,7 +139,8 @@ export class PresenceClient {
     this.heartbeatMillis = options.heartbeatMillis ?? DEFAULT_HEARTBEAT_MS;
     this.webLock = new WebLockHolder(this.holderId);
     this.subjects = new Subjects();
-    this.tokenCache = new TokenCache(options.fetchGrant);
+    this.redialing = false;
+    this.tokenCache = new TokenCache(options.fetchGrant, { isRedialing: () => this.redialing });
     this.connection = null;
     this.connectionId = null;
     this.currentToken = null;
@@ -258,6 +259,7 @@ export class PresenceClient {
     }
     for (const view of this.views.values()) this._unsubscribeView(view);
     this.lastReconnectAt = Date.now();
+    this.redialing = false;
     try {
       // A fresh connect, never `connection.reconnect()`: nats-core's shared request/reply
       // mux inbox is computed once from `inboxPrefix` and never recomputed on `.reconnect()`,
@@ -288,9 +290,15 @@ export class PresenceClient {
     this.statusLoop = (async () => {
       for await (const status of this.connection.status()) {
         if (status.type === "disconnect") {
-          this.tokenCache.forceRefresh([...this.views.keys()].map((raw) => new Topic(raw))).catch(() => {});
+          // Not forceRefresh: every refresh bumps AuthVersion and would fence out the token
+          // nats-core's concurrent redial is already presenting. This one `get()` is exempt
+          // from the redialing gate below: it is the only chance a cache that is genuinely
+          // stale has to catch up before nats-core's own dial loop can possibly succeed.
+          this.redialing = true;
+          this.tokenCache.get([...this.views.keys()].map((raw) => new Topic(raw))).catch(() => {});
         }
         if (status.type === "reconnect") {
+          this.redialing = false;
           for (const view of this.views.values()) view.glue.resync("transport reconnected");
         }
       }
@@ -373,9 +381,14 @@ export class PresenceClient {
     setTimeout(() => {
       if (this.views.get(view.topic.raw) !== view) return;
       if (view.glue.pending?.requestId !== requestId) return;
-      if (Date.now() >= deadline) return;
+      // Always clear pending and retry, never give up silently: `Glue.resync()` no-ops while
+      // `pending` is set, so abandoning a stale request without clearing it would wedge the
+      // view forever, with no future epoch hint or diff gap able to kick off a fresh request.
+      // The per-attempt delay is already capped, so retrying past `deadline` is a bounded-rate
+      // background loop, not an unbounded wait anything awaits directly.
       view.glue.abandonPending(requestId);
-      this._requestSnapshot(view, { deadline, attempt: attempt + 1 }).catch(() => {});
+      const nextDeadline = Date.now() >= deadline ? Date.now() + SNAPSHOT_RETRY_DEADLINE_MS : deadline;
+      this._requestSnapshot(view, { deadline: nextDeadline, attempt: attempt + 1 }).catch(() => {});
     }, fullJitterBackoff(SNAPSHOT_RETRY_BASE_MS, SNAPSHOT_RETRY_CAP_MS, attempt));
   }
 
@@ -503,5 +516,9 @@ export class PresenceClient {
     this.views.clear();
     this.tokenCache.close();
     if (this.connection != null) await this.connection.close();
+    // The status loop's for-await only ends once the connection it iterates is closed, above.
+    // Without this, close() can resolve while that loop is still unwinding, outliving whatever
+    // awaited close() (a test's cleanup hook, in particular).
+    if (this.statusLoop != null) await this.statusLoop.catch(() => {});
   }
 }

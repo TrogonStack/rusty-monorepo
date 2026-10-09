@@ -2,6 +2,9 @@ import { Milliseconds } from "./values.js";
 
 const REFRESH_LEEWAY = new Milliseconds(5_000);
 const MIN_REFRESH_DELAY = new Milliseconds(250);
+// How long to wait before re-checking whether a redial is still in flight, once a proactive
+// refresh has deferred itself for that reason.
+const REDIAL_RECHECK_MS = new Milliseconds(500);
 
 function base64UrlDecode(segment) {
   const padded = segment.replace(/-/g, "+").replace(/_/g, "/");
@@ -66,9 +69,17 @@ export function denialFor(grant, topic) {
 export class TokenCache {
   /**
    * @param {(topics: import("./values.js").Topic[]) => Promise<ConnectGrant>} fetchGrant
+   * @param {object} [options]
+   * @param {() => boolean} [options.isRedialing] reports whether the transport is mid an
+   *   automatic redial. The proactive refresh timer defers while this is true, since the
+   *   service bumps the connection's AuthVersion on every refresh and would fence out
+   *   whatever token the redial is presenting mid-handshake. A disconnect-triggered `get()`
+   *   is exempt: it is the one refresh an actually stale cache needs before a redial can
+   *   possibly succeed at all.
    */
-  constructor(fetchGrant) {
+  constructor(fetchGrant, options = {}) {
     this._fetchGrant = fetchGrant;
+    this._isRedialing = options.isRedialing ?? (() => false);
     this._topicKey = null;
     this._grant = null;
     this._expiryMillis = 0;
@@ -125,10 +136,27 @@ export class TokenCache {
     if (this._refreshTimer !== null) {
       clearTimeout(this._refreshTimer);
     }
-    const delay = Math.max(MIN_REFRESH_DELAY.value, this._expiryMillis - REFRESH_LEEWAY.value - Date.now());
-    this._refreshTimer = setTimeout(() => {
-      this._refresh(topics).catch(() => {});
-    }, delay);
+    const now = Date.now();
+    const aheadOfLeeway = this._expiryMillis - REFRESH_LEEWAY.value - now;
+    // A session whose remaining lifetime is at or below REFRESH_LEEWAY has no meaningful
+    // "leeway before expiry" point: that arithmetic stays near zero forever, which would
+    // refire at MIN_REFRESH_DELAY in a tight loop, bumping the connection's AuthVersion fast
+    // enough to fence out tokens still in flight to the server during a reconnect. Back off
+    // to half the remaining lifetime instead, so the rate decays as expiry approaches rather
+    // than spinning at the floor.
+    const delay =
+      aheadOfLeeway > MIN_REFRESH_DELAY.value
+        ? aheadOfLeeway
+        : Math.max(MIN_REFRESH_DELAY.value, (this._expiryMillis - now) / 2);
+    this._refreshTimer = setTimeout(() => this._fireProactiveRefresh(topics), delay);
+  }
+
+  _fireProactiveRefresh(topics) {
+    if (this._isRedialing()) {
+      this._refreshTimer = setTimeout(() => this._fireProactiveRefresh(topics), REDIAL_RECHECK_MS.value);
+      return;
+    }
+    this._refresh(topics).catch(() => {});
   }
 
   close() {
