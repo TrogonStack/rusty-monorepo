@@ -3,6 +3,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use async_nats::header::{NATS_EXPECTED_LAST_SUBJECT_SEQUENCE, NATS_MARKER_REASON, NATS_MESSAGE_TTL};
+use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use async_nats::jetstream::{self, message::StreamMessage};
 use async_nats::HeaderMap;
 use common::NatsServer;
@@ -26,18 +27,32 @@ macro_rules! server_or_skip {
     };
 }
 
-fn config(lease: Duration, interval: Duration) -> Result<PresenceConfig, TestError> {
+const DEFAULT_MARKER_TTL: Duration = Duration::from_secs(5);
+
+/// A marker ttl wide enough that a host starved for several seconds between the purge write
+/// and the follow-up read still observes the tombstone before the server reclaims it.
+const RESURRECTION_CHECK_MARKER_TTL: Duration = Duration::from_secs(20);
+
+fn config(lease: Duration, interval: Duration, marker: Duration) -> Result<PresenceConfig, TestError> {
     Ok(PresenceConfig::new(
         BucketName::default(),
         LeaseTtl::try_from(lease)?,
         HeartbeatInterval::try_from(interval)?,
-        MarkerTtl::try_from(Duration::from_secs(5))?,
+        MarkerTtl::try_from(marker)?,
         ShardCount::DEFAULT,
     )?)
 }
 
 fn fast_config() -> Result<PresenceConfig, TestError> {
-    config(Duration::from_secs(1), Duration::from_millis(400))
+    config(Duration::from_secs(1), Duration::from_millis(400), DEFAULT_MARKER_TTL)
+}
+
+fn resilient_untrack_config() -> Result<PresenceConfig, TestError> {
+    config(
+        Duration::from_secs(1),
+        Duration::from_millis(400),
+        RESURRECTION_CHECK_MARKER_TTL,
+    )
 }
 
 async fn raw_entry(
@@ -50,6 +65,32 @@ async fn raw_entry(
         .await?;
     let subject = config.bucket().subject_for(&entry.encode(config.shards())?);
     Ok(stream.get_last_raw_message_by_subject(&subject).await?)
+}
+
+enum LastRecord {
+    Present(StreamMessage),
+    Reclaimed,
+}
+
+/// Like [`raw_entry`], but a subject with no message left at all is reported as
+/// [`LastRecord::Reclaimed`] instead of an error: the last message for a subject is a tombstone
+/// published with its own ttl (see `MarkerTtl`), and the server is free to reclaim it once that
+/// ttl elapses. A reclaimed subject is the strongest possible proof that nothing resurrected the
+/// entry, since a resurrection would itself be a live message the server has not reclaimed.
+async fn last_record_or_reclaimed(
+    client: &async_nats::Client,
+    config: &PresenceConfig,
+    entry: &EntryKey,
+) -> Result<LastRecord, TestError> {
+    let stream = jetstream::new(client.clone())
+        .get_stream(config.bucket().stream_name())
+        .await?;
+    let subject = config.bucket().subject_for(&entry.encode(config.shards())?);
+    match stream.get_last_raw_message_by_subject(&subject).await {
+        Ok(message) => Ok(LastRecord::Present(message)),
+        Err(err) if err.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(LastRecord::Reclaimed),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn header<'a>(message: &'a StreamMessage, name: &str) -> Option<&'a str> {
@@ -377,7 +418,7 @@ async fn heartbeat_timeout_never_publishes_expected_sequence_zero() -> TestResul
 async fn untrack_during_a_round_is_not_resurrected() -> TestResult {
     let server = server_or_skip!();
     let client = server.client().await;
-    let config = fast_config()?;
+    let config = resilient_untrack_config()?;
     let presence = Presence::provision(client.clone(), config.clone(), ProvisionOptions::default()).await?;
     let mut stream = jetstream::new(client.clone())
         .get_stream(config.bucket().stream_name())
@@ -399,7 +440,10 @@ async fn untrack_during_a_round_is_not_resurrected() -> TestResult {
 
         assert!(tracker.entries().await?.is_empty());
         for entry in &entries {
-            let raw = raw_entry(&client, &config, entry).await?;
+            let raw = match last_record_or_reclaimed(&client, &config, entry).await? {
+                LastRecord::Present(raw) => raw,
+                LastRecord::Reclaimed => continue,
+            };
             assert!(
                 StoredValue::from_json_bytes(&raw.payload).is_err(),
                 "entry was resurrected: seq {} headers {:?} payload {:?}",
@@ -431,7 +475,7 @@ async fn three_hundred_entries_heartbeat_within_one_interval() -> TestResult {
     let server = server_or_skip!();
     let client = server.client().await;
     let interval = Duration::from_millis(800);
-    let config = config(Duration::from_secs(2), interval)?;
+    let config = config(Duration::from_secs(2), interval, DEFAULT_MARKER_TTL)?;
     let presence = Presence::provision(client.clone(), config.clone(), ProvisionOptions::default()).await?;
     let key: PresenceKey = "ana".parse()?;
 
