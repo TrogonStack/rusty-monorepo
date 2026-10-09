@@ -849,7 +849,7 @@ pub struct MockCallTimestamp(chrono::DateTime<chrono::Utc>);
 
 impl MockCallTimestamp {
     pub fn now() -> Self {
-        Self(chrono::Utc::now())
+        Self(chrono::SubsecRound::trunc_subsecs(chrono::Utc::now(), 6))
     }
 
     pub fn as_datetime(&self) -> chrono::DateTime<chrono::Utc> {
