@@ -486,7 +486,7 @@ fn root_span() -> tracing::Span {
     tracing::info_span!(
         "trg",
         "process.executable.name" = "trg",
-        "process.pid" = std::process::id(),
+        "process.pid" = i64::from(std::process::id()),
         "process.exit.code" = Empty,
         "error.type" = Empty,
     )
@@ -594,11 +594,12 @@ mod tests {
 
         let spans = finished(&provider, &exporter);
         let span = spans.iter().find(|s| s.name == "trg").expect("root span exported");
-        let has_pid = span
+        let pid = span
             .attributes
             .iter()
-            .any(|kv| kv.key.as_str() == "process.pid" && kv.value.as_str() == std::process::id().to_string());
-        assert!(has_pid);
+            .find(|kv| kv.key.as_str() == "process.pid")
+            .map(|kv| kv.value.clone());
+        assert_eq!(pid, Some(opentelemetry::Value::I64(i64::from(std::process::id()))));
         let has_exit_code = span.attributes.iter().any(|kv| kv.key.as_str() == "process.exit.code");
         assert!(has_exit_code);
     }
