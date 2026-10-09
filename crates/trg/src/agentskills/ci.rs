@@ -1206,7 +1206,9 @@ mod tests {
                 environment: crate::agentskills::report::EnvironmentPolicy::default(),
                 permission: crate::agentskills::permission_outcome::PermissionOutcome::default(),
                 allowed_tools: None,
+                telemetry_forwarding: crate::agentskills::runner::TelemetryForwarding::Off,
                 ci: None,
+                trace: None,
                 iteration: 1,
             },
             suite: SuiteSection {
@@ -1265,6 +1267,7 @@ mod tests {
                 warnings: Vec::new(),
                 mock_violations: Vec::new(),
                 case_score: None,
+                trace: None,
             }],
             assertion_results: Vec::new(),
             summaries: SummariesSection {

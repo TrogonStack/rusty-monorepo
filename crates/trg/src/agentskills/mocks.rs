@@ -400,6 +400,43 @@ const MCP_CONFIG_TOML_FILE_NAME: &str = "mcp-config.toml";
 struct MockServerInvocation {
     command: String,
     args: Vec<String>,
+    #[serde(skip_serializing_if = "MockServerEnv::is_empty")]
+    env: MockServerEnv,
+}
+
+/// Variables written into each mock server's `env` block, so a harness that starts the
+/// server with a cleared environment still hands it the trace it belongs to.
+///
+/// Empty unless a trace exporter is active, which keeps the generated config byte for byte
+/// what it was before tracing existed. `OTEL_*` variables that end in `HEADERS` are never
+/// copied: they routinely carry exporter credentials, and the config lands in the report
+/// bundle.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MockServerEnv(BTreeMap<String, String>);
+
+impl MockServerEnv {
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The current span's trace context plus this process's OTLP exporter settings.
+    pub fn from_current_trace() -> Self {
+        Self::from_parts(crate::telemetry::propagation::carrier_pairs(), std::env::vars())
+    }
+
+    fn from_parts(carrier: Vec<(String, String)>, process_env: impl IntoIterator<Item = (String, String)>) -> Self {
+        if carrier.is_empty() {
+            return Self::none();
+        }
+        let exporter = process_env
+            .into_iter()
+            .filter(|(key, _)| key.starts_with("OTEL_") && !key.ends_with("HEADERS"));
+        Self(exporter.chain(carrier).collect())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -457,6 +494,7 @@ pub fn materialize_mock_set(
     mock_set: &MockSet,
     run_dir: &Path,
     trg_binary: &MockServerBinary,
+    server_env: &MockServerEnv,
 ) -> Result<MaterializedMcpConfig, MocksError> {
     // Every path written here is resolved by someone else: the harness reads the config
     // with its working directory set to the run's workspace, and it in turn spawns the
@@ -493,6 +531,7 @@ pub fn materialize_mock_set(
                     "--calls".to_string(),
                     calls_path.to_string_lossy().into_owned(),
                 ],
+                env: server_env.clone(),
             },
         );
     }
@@ -797,6 +836,40 @@ pub struct MockCallLogEntry {
     pub input: serde_json::Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub violations: Vec<MockViolation>,
+    /// When the mock server received the call. Absent on logs written before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<MockCallTimestamp>,
+}
+
+/// The instant a mock server received a call, serialized as RFC 3339 in UTC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[schemars(with = "String", extend("format" = "date-time"))]
+pub struct MockCallTimestamp(chrono::DateTime<chrono::Utc>);
+
+impl MockCallTimestamp {
+    pub fn now() -> Self {
+        Self(chrono::Utc::now())
+    }
+
+    pub fn as_datetime(&self) -> chrono::DateTime<chrono::Utc> {
+        self.0
+    }
+}
+
+impl Serialize for MockCallTimestamp {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    }
+}
+
+impl<'de> Deserialize<'de> for MockCallTimestamp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        chrono::DateTime::parse_from_rfc3339(&raw)
+            .map(|at| Self(at.with_timezone(&chrono::Utc)))
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Every `tools/call` a run made against its mocks, rendered one call per line as
@@ -1387,6 +1460,7 @@ mod tests {
             &mock_set,
             &run_dir,
             &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &MockServerEnv::none(),
         )
         .unwrap();
 
@@ -1491,7 +1565,7 @@ mod tests {
         let run_dir = temp.path().join("run-dir");
         let trg_binary = MockServerBinary::at("/usr/local/bin/trg").unwrap();
 
-        let config = materialize_mock_set(&mock_set, &run_dir, &trg_binary).unwrap();
+        let config = materialize_mock_set(&mock_set, &run_dir, &trg_binary, &MockServerEnv::none()).unwrap();
         let run_dir = run_dir.canonicalize().unwrap();
 
         let tool_json_path = run_dir.join("mcp-mocks/github/create_issue.json");
@@ -1552,6 +1626,7 @@ mod tests {
             &mock_set,
             &run_dir,
             &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &MockServerEnv::none(),
         )
         .unwrap();
 
@@ -1607,6 +1682,7 @@ mod tests {
             &mock_set,
             &run_dir,
             &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &MockServerEnv::none(),
         )
         .unwrap();
 
@@ -1645,6 +1721,7 @@ mod tests {
             &mock_set,
             &run_dir,
             &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &MockServerEnv::none(),
         )
         .unwrap();
 
@@ -1668,6 +1745,7 @@ mod tests {
             &mock_set,
             &run_dir,
             &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &MockServerEnv::none(),
         )
         .unwrap();
 
@@ -1747,5 +1825,112 @@ mod tests {
         let error = RenderedMockCalls::read(&path).expect_err("invalid utf-8 is not an absent log");
 
         assert_ne!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_pass_with_no_active_trace_gives_mock_servers_no_environment() {
+        let env = MockServerEnv::from_parts(
+            Vec::new(),
+            [(
+                "OTEL_EXPORTER_OTLP_ENDPOINT".to_string(),
+                "http://collector".to_string(),
+            )],
+        );
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn a_traced_pass_hands_mock_servers_its_trace_and_exporter_but_never_its_headers() {
+        let env = MockServerEnv::from_parts(
+            vec![("TRACEPARENT".to_string(), "00-abc-def-01".to_string())],
+            [
+                (
+                    "OTEL_EXPORTER_OTLP_ENDPOINT".to_string(),
+                    "http://collector".to_string(),
+                ),
+                ("OTEL_EXPORTER_OTLP_HEADERS".to_string(), "api-key=secret".to_string()),
+                (
+                    "OTEL_EXPORTER_OTLP_TRACES_HEADERS".to_string(),
+                    "api-key=secret".to_string(),
+                ),
+                ("HOME".to_string(), "/home/someone".to_string()),
+            ],
+        );
+        let keys: Vec<&str> = env.0.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["OTEL_EXPORTER_OTLP_ENDPOINT", "TRACEPARENT"]);
+    }
+
+    #[test]
+    fn a_traced_pass_writes_the_trace_into_every_server_env_block_in_both_formats() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\nok\n",
+        );
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "case").unwrap();
+        let env = MockServerEnv::from_parts(vec![("TRACEPARENT".to_string(), "00-abc-def-01".to_string())], []);
+
+        let config = materialize_mock_set(
+            &mock_set,
+            &temp.path().join("run"),
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &env,
+        )
+        .unwrap();
+
+        let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(config.json()).unwrap()).unwrap();
+        assert_eq!(json["mcpServers"]["github"]["env"]["TRACEPARENT"], "00-abc-def-01");
+        let toml: toml::Value = toml::from_str(&fs::read_to_string(config.toml()).unwrap()).unwrap();
+        assert_eq!(
+            toml["mcp_servers"]["github"]["env"]["TRACEPARENT"].as_str(),
+            Some("00-abc-def-01")
+        );
+    }
+
+    #[test]
+    fn an_untraced_pass_writes_no_env_block() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\nok\n",
+        );
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "case").unwrap();
+
+        let config = materialize_mock_set(
+            &mock_set,
+            &temp.path().join("run"),
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &MockServerEnv::none(),
+        )
+        .unwrap();
+
+        assert!(!fs::read_to_string(config.json()).unwrap().contains("\"env\""));
+        assert!(!fs::read_to_string(config.toml()).unwrap().contains("env"));
+    }
+
+    #[test]
+    fn a_call_log_line_written_before_timestamps_still_reads_back() {
+        let entry: MockCallLogEntry =
+            serde_json::from_str(r#"{"server":"github","tool":"create_issue","input":{}}"#).unwrap();
+        assert_eq!(entry.received_at, None);
+    }
+
+    #[test]
+    fn a_call_timestamp_round_trips_through_the_log() {
+        let entry = MockCallLogEntry {
+            server: ServerName::from("github"),
+            tool: ToolName::from("create_issue"),
+            input: serde_json::json!({}),
+            violations: Vec::new(),
+            received_at: Some(MockCallTimestamp::now()),
+        };
+        let line = serde_json::to_string(&entry).unwrap();
+        assert_eq!(serde_json::from_str::<MockCallLogEntry>(&line).unwrap(), entry);
     }
 }

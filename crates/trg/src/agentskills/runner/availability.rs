@@ -3,7 +3,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::telemetry::{CliProcessSpan, FailureType};
 use super::Runner;
+use crate::telemetry::propagation::inject_std_command;
 
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const VERSION_PROBE_POLL: Duration = Duration::from_millis(50);
@@ -91,13 +93,30 @@ pub fn eprint_runner_unavailable(err: &RunnerUnavailable) {
 }
 
 fn capture_version(binary: &Path) -> Option<String> {
-    let mut child = Command::new(binary)
+    let executable = binary
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let probe = CliProcessSpan::start(&executable);
+    probe.span().in_scope(|| run_version_probe(binary, &probe))
+}
+
+fn run_version_probe(binary: &Path, probe: &CliProcessSpan) -> Option<String> {
+    let mut command = Command::new(binary);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::piped());
+    inject_std_command(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            probe.failed(FailureType::SpawnFailed);
+            return None;
+        }
+    };
+    probe.spawned(child.id());
 
     let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
     loop {
@@ -107,6 +126,7 @@ fn capture_version(binary: &Path) -> Option<String> {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    probe.failed(FailureType::Timeout);
                     return None;
                 }
                 thread::sleep(VERSION_PROBE_POLL);
@@ -114,12 +134,14 @@ fn capture_version(binary: &Path) -> Option<String> {
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                probe.failed(FailureType::Io);
                 return None;
             }
         }
     }
 
     let output = child.wait_with_output().ok()?;
+    probe.exited(output.status.code());
     if !output.status.success() {
         return None;
     }
@@ -181,5 +203,31 @@ mod tests {
         write_stub_runner(temp.path(), "stub-runner", "stub-runner 1.2.3");
         let version = capture_version(&temp.path().join("stub-runner")).expect("stub --version should succeed");
         assert_eq!(version, "stub-runner 1.2.3");
+    }
+
+    #[test]
+    fn a_version_probe_is_a_cli_client_span_named_for_the_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        write_stub_runner(temp.path(), "stub-runner", "stub-runner 1.2.3");
+        let (version, trace) = crate::telemetry::testing::capture(|| capture_version(&temp.path().join("stub-runner")));
+        assert_eq!(version.as_deref(), Some("stub-runner 1.2.3"));
+
+        let span = trace.span("stub-runner").expect("probe span exported");
+        assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Client);
+        assert_eq!(
+            trace
+                .attribute(
+                    "stub-runner",
+                    opentelemetry_semantic_conventions::attribute::PROCESS_EXIT_CODE
+                )
+                .map(|value| value.to_string()),
+            Some("0".to_string())
+        );
+        assert!(trace
+            .attribute(
+                "stub-runner",
+                opentelemetry_semantic_conventions::attribute::PROCESS_PID
+            )
+            .is_some());
     }
 }

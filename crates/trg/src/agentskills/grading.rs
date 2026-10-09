@@ -2913,6 +2913,7 @@ mod tests {
             cache: None,
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
+            trace: None,
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,

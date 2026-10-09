@@ -19,11 +19,17 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use opentelemetry_semantic_conventions::attribute::{ERROR_TYPE, JSONRPC_REQUEST_ID, RPC_RESPONSE_STATUS_CODE};
 use serde_json::{json, Value};
+use tracing::field::Empty;
 
 use crate::agentskills::mocks::{
-    resolve_call, MockCallAnswer, MockCallLogEntry, MockDeclaration, ServerName, ToolName,
+    resolve_call, MockCallAnswer, MockCallLogEntry, MockCallTimestamp, MockDeclaration, ServerName, ToolName,
 };
+use crate::telemetry::semconv::generated::attributes::{
+    gen_ai_operation_name, mcp_method_name, GEN_AI_OPERATION_NAME, GEN_AI_TOOL_NAME, MCP_METHOD_NAME,
+};
+use crate::telemetry::semconv::trg::{EVAL_MOCK_MATCH, EVAL_MOCK_SERVER};
 
 /// `trg ai skills eval mock-server` flags. Not meant to be typed by hand: a run's
 /// generated `--mcp-config` is the only caller.
@@ -143,76 +149,162 @@ fn handle_request(
         return Ok(None);
     };
     let method = request.get("method").and_then(Value::as_str).unwrap_or_default();
+    let span = request_span(request, method, &id, server);
+    let mut matched = None;
 
-    let response = match method {
-        "initialize" => {
-            let protocol_version = request
-                .pointer("/params/protocolVersion")
-                .cloned()
-                .unwrap_or_else(|| json!("2024-11-05"));
-            success(
-                id,
-                json!({
-                    "protocolVersion": protocol_version,
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "trg-mock-server", "version": env!("CARGO_PKG_VERSION")},
-                }),
-            )
-        }
-        "tools/list" => {
-            let tool_list: Vec<Value> = tools
-                .keys()
-                .map(|tool| {
-                    json!({
-                        "name": tool.as_str(),
-                        "inputSchema": {"type": "object"},
-                    })
-                })
-                .collect();
-            success(id, json!({"tools": tool_list}))
-        }
-        "tools/call" => {
-            let tool_name = request
-                .pointer("/params/name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let arguments = request
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or(Value::Object(serde_json::Map::new()));
-            match tools.get(&ToolName::from(tool_name)) {
-                None => error(id, INVALID_PARAMS, format!("unknown tool `{tool_name}`")),
-                Some(declaration) => {
-                    let tool = ToolName::from(tool_name);
-                    let outcome = resolve_call(declaration, server, &tool, &arguments);
-                    append_call_log(
-                        calls_log_path,
-                        &MockCallLogEntry {
-                            server: server.clone(),
-                            tool,
-                            input: arguments,
-                            violations: outcome.violations,
-                        },
-                    )?;
-                    match outcome.answer {
-                        MockCallAnswer::Answered { text, is_error } => success(
-                            id,
+    let response = span
+        .in_scope(|| -> io::Result<Value> {
+            Ok(match method {
+                "initialize" => {
+                    let protocol_version = request
+                        .pointer("/params/protocolVersion")
+                        .cloned()
+                        .unwrap_or_else(|| json!("2024-11-05"));
+                    success(
+                        id,
+                        json!({
+                            "protocolVersion": protocol_version,
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "trg-mock-server", "version": env!("CARGO_PKG_VERSION")},
+                        }),
+                    )
+                }
+                "tools/list" => {
+                    let tool_list: Vec<Value> = tools
+                        .keys()
+                        .map(|tool| {
                             json!({
-                                "content": [{"type": "text", "text": text}],
-                                "isError": is_error,
-                            }),
-                        ),
-                        MockCallAnswer::Unresolved(unresolved) => {
-                            error(id, MOCK_SUBSTITUTION_FAILED, unresolved.to_string())
+                                "name": tool.as_str(),
+                                "inputSchema": {"type": "object"},
+                            })
+                        })
+                        .collect();
+                    success(id, json!({"tools": tool_list}))
+                }
+                "tools/call" => {
+                    let tool_name = request
+                        .pointer("/params/name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let arguments = request
+                        .pointer("/params/arguments")
+                        .cloned()
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
+                    match tools.get(&ToolName::from(tool_name)) {
+                        None => {
+                            matched = Some(MockMatch::UnknownTool);
+                            error(id, INVALID_PARAMS, format!("unknown tool `{tool_name}`"))
+                        }
+                        Some(declaration) => {
+                            let received_at = MockCallTimestamp::now();
+                            let tool = ToolName::from(tool_name);
+                            let outcome = resolve_call(declaration, server, &tool, &arguments);
+                            matched = Some(MockMatch::of(&outcome.answer, outcome.violations.is_empty()));
+                            append_call_log(
+                                calls_log_path,
+                                &MockCallLogEntry {
+                                    server: server.clone(),
+                                    tool,
+                                    input: arguments,
+                                    violations: outcome.violations,
+                                    received_at: Some(received_at),
+                                },
+                            )?;
+                            match outcome.answer {
+                                MockCallAnswer::Answered { text, is_error } => success(
+                                    id,
+                                    json!({
+                                        "content": [{"type": "text", "text": text}],
+                                        "isError": is_error,
+                                    }),
+                                ),
+                                MockCallAnswer::Unresolved(unresolved) => {
+                                    error(id, MOCK_SUBSTITUTION_FAILED, unresolved.to_string())
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
-        other => error(id, METHOD_NOT_FOUND, format!("method not found: {other}")),
-    };
+                other => error(id, METHOD_NOT_FOUND, format!("method not found: {other}")),
+            })
+        })
+        .inspect_err(|error| {
+            span.record("otel.status_code", "ERROR");
+            span.record(ERROR_TYPE, format!("{:?}", error.kind()).as_str());
+        })?;
 
+    record_response(&span, &response, matched);
     Ok(Some(response))
+}
+
+/// How a mocked `tools/call` met its declaration, so a trace tells a call the agent got
+/// right from one the mock answered anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MockMatch {
+    Matched,
+    Violated,
+    Unresolved,
+    UnknownTool,
+}
+
+impl MockMatch {
+    fn of(answer: &MockCallAnswer, satisfied: bool) -> Self {
+        match (answer, satisfied) {
+            (MockCallAnswer::Unresolved(_), _) => Self::Unresolved,
+            (_, true) => Self::Matched,
+            (_, false) => Self::Violated,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Violated => "violated",
+            Self::Unresolved => "unresolved",
+            Self::UnknownTool => "unknown_tool",
+        }
+    }
+}
+
+/// The MCP SERVER span for one request, named `{mcp.method.name} {tool}` for a tool call.
+fn request_span(request: &Value, method: &str, id: &Value, server: &ServerName) -> tracing::Span {
+    let tool = (method == mcp_method_name::TOOLS_CALL)
+        .then(|| request.pointer("/params/name").and_then(Value::as_str))
+        .flatten();
+    let name = match tool {
+        Some(tool) => format!("{method} {tool}"),
+        None => method.to_string(),
+    };
+    let request_id = match id {
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    tracing::info_span!(
+        "mcp request",
+        "otel.name" = name,
+        "otel.kind" = "server",
+        "otel.status_code" = Empty,
+        { MCP_METHOD_NAME } = method,
+        { JSONRPC_REQUEST_ID } = request_id,
+        { GEN_AI_TOOL_NAME } = tool,
+        { GEN_AI_OPERATION_NAME } = tool.map(|_| gen_ai_operation_name::EXECUTE_TOOL),
+        { EVAL_MOCK_SERVER } = server.as_str(),
+        { EVAL_MOCK_MATCH } = Empty,
+        { RPC_RESPONSE_STATUS_CODE } = Empty,
+        { ERROR_TYPE } = Empty,
+    )
+}
+
+fn record_response(span: &tracing::Span, response: &Value, matched: Option<MockMatch>) {
+    if let Some(matched) = matched {
+        span.record(EVAL_MOCK_MATCH, matched.as_str());
+    }
+    if let Some(code) = response.pointer("/error/code").and_then(Value::as_i64) {
+        let code = code.to_string();
+        span.record("otel.status_code", "ERROR");
+        span.record(RPC_RESPONSE_STATUS_CODE, code.as_str());
+        span.record(ERROR_TYPE, code.as_str());
+    }
 }
 
 fn append_call_log(path: &PathBuf, entry: &MockCallLogEntry) -> io::Result<()> {
@@ -471,5 +563,59 @@ mod tests {
 
         let response: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(response["result"]["tools"][0]["name"], "create_issue");
+    }
+
+    #[test]
+    fn a_tool_call_is_a_server_span_named_for_the_tool() {
+        let server = ServerName::from("github");
+        let mut tools = BTreeMap::new();
+        tools.insert(ToolName::from("create_issue"), declaration("issue created"));
+        let request = json!({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "create_issue", "arguments": {}},
+        });
+        let calls_path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+
+        let (_, trace) =
+            crate::telemetry::testing::capture(|| handle_request(&request, &server, &tools, &calls_path).unwrap());
+
+        let span = trace.span("tools/call create_issue").expect("server span exported");
+        assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Server);
+        let name = "tools/call create_issue";
+        assert_eq!(trace.attribute(name, MCP_METHOD_NAME).unwrap().as_str(), "tools/call");
+        assert_eq!(
+            trace.attribute(name, GEN_AI_TOOL_NAME).unwrap().as_str(),
+            "create_issue"
+        );
+        assert_eq!(trace.attribute(name, JSONRPC_REQUEST_ID).unwrap().as_str(), "7");
+        assert_eq!(trace.attribute(name, EVAL_MOCK_MATCH).unwrap().as_str(), "matched");
+        assert_eq!(trace.attribute(name, EVAL_MOCK_SERVER).unwrap().as_str(), "github");
+
+        let logged = fs::read_to_string(&calls_path).unwrap();
+        let entry: MockCallLogEntry = serde_json::from_str(logged.trim()).unwrap();
+        assert!(entry.received_at.is_some());
+    }
+
+    #[test]
+    fn a_call_to_an_undeclared_tool_marks_its_span_failed() {
+        let server = ServerName::from("github");
+        let tools = BTreeMap::new();
+        let request = json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "delete_repo", "arguments": {}},
+        });
+        let calls_path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+
+        let (_, trace) =
+            crate::telemetry::testing::capture(|| handle_request(&request, &server, &tools, &calls_path).unwrap());
+
+        let name = "tools/call delete_repo";
+        let span = trace.span(name).expect("server span exported");
+        assert!(matches!(span.status, opentelemetry::trace::Status::Error { .. }));
+        assert_eq!(trace.attribute(name, EVAL_MOCK_MATCH).unwrap().as_str(), "unknown_tool");
+        assert_eq!(
+            trace.attribute(name, RPC_RESPONSE_STATUS_CODE).unwrap().as_str(),
+            INVALID_PARAMS.to_string()
+        );
     }
 }

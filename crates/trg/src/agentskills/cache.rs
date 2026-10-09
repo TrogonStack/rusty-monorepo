@@ -372,10 +372,10 @@ pub fn apply_cache_hit(
     key: &CacheKey,
     pointer: &CachePointer,
     report_dir: &Path,
-) -> io::Result<()> {
+) -> io::Result<RestoredArtifacts> {
     let source_report = PathBuf::from(&pointer.report_dir);
     let source_run = load_source_run(&source_report, &pointer.run_id)?;
-    copy_run_artifacts(&source_report, &pointer.run_id, report_dir, &run.id)?;
+    let restored = copy_run_artifacts(&source_report, &pointer.run_id, report_dir, &run.id)?;
 
     // Named field by field, not `..source_run`, so a field added to `RunRecord` later
     // fails this match rather than silently keeping `run`'s own (usually empty) value.
@@ -409,6 +409,7 @@ pub fn apply_cache_hit(
         warnings,
         mock_violations,
         case_score: _case_score,
+        trace: _trace,
     } = source_run;
 
     run.status = status;
@@ -432,7 +433,30 @@ pub fn apply_cache_hit(
         source_run_id: pointer.run_id.clone(),
         key: key.as_str().to_string(),
     });
-    Ok(())
+    Ok(restored)
+}
+
+/// How much a cache hit copied into the run reusing it, so the cost of a hit is visible
+/// next to the cost of executing the run it replaced.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestoredArtifacts {
+    files: u64,
+    bytes: u64,
+}
+
+impl RestoredArtifacts {
+    pub fn files(&self) -> u64 {
+        self.files
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    fn add_file(&mut self, bytes: u64) {
+        self.files += 1;
+        self.bytes += bytes;
+    }
 }
 
 fn load_source_run(source_report: &Path, run_id: &str) -> io::Result<RunRecord> {
@@ -470,36 +494,37 @@ fn copy_run_artifacts(
     source_run_id: &str,
     dest_report: &Path,
     dest_run_id: &str,
-) -> io::Result<()> {
+) -> io::Result<RestoredArtifacts> {
     let source_run_dir = source_report.join("runs").join(source_run_id);
     let dest_run_dir = dest_report.join("runs").join(dest_run_id);
     fs::create_dir_all(&dest_run_dir)?;
 
+    let mut restored = RestoredArtifacts::default();
     for name in ["transcript.jsonl", "timing.json", MOCK_CALLS_LOG_NAME] {
         let source = source_run_dir.join(name);
         if source.is_file() {
-            fs::copy(&source, dest_run_dir.join(name))?;
+            restored.add_file(fs::copy(&source, dest_run_dir.join(name))?);
         }
     }
 
     let source_workspace = source_run_dir.join("workspace");
     let dest_workspace = dest_run_dir.join("workspace");
     if source_workspace.is_dir() {
-        copy_dir_recursive(&source_workspace, &dest_workspace)?;
+        copy_dir_recursive(&source_workspace, &dest_workspace, &mut restored)?;
     }
-    Ok(())
+    Ok(restored)
 }
 
-fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+fn copy_dir_recursive(src: &Path, dest: &Path, restored: &mut RestoredArtifacts) -> io::Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let target = dest.join(entry.file_name());
         if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
+            copy_dir_recursive(&entry.path(), &target, restored)?;
         } else if file_type.is_file() {
-            fs::copy(entry.path(), &target)?;
+            restored.add_file(fs::copy(entry.path(), &target)?);
         }
     }
     Ok(())
@@ -766,6 +791,7 @@ mod tests {
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
+            trace: None,
         }
     }
 
@@ -824,6 +850,7 @@ mod tests {
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
+            trace: None,
         };
 
         customize(&mut run);
@@ -869,6 +896,7 @@ mod tests {
             tool: violation.tool.clone(),
             input: serde_json::json!({"repo": "other/repo"}),
             violations: vec![violation.clone()],
+            received_at: None,
         };
         fs::write(
             run_dir.join(MOCK_CALLS_LOG_NAME),
@@ -913,6 +941,7 @@ mod tests {
             read_only_fixture_violations: Vec::new(),
             mock_violations: vec![violation],
             case_score: None,
+            trace: None,
         };
 
         let document = serde_json::json!({
@@ -1046,6 +1075,7 @@ mod tests {
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
+            trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -1125,6 +1155,7 @@ mod tests {
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
+            trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).expect("the pointer's own key input is still fresh");
@@ -1190,6 +1221,7 @@ mod tests {
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
+            trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
@@ -1263,6 +1295,7 @@ mod tests {
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
+            trace: None,
         };
 
         let pointer = lookup_exact(&out_dir, &key, &input).unwrap();
