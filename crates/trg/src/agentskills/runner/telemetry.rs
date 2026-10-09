@@ -13,7 +13,7 @@ use opentelemetry_semantic_conventions::attribute::{
 use tracing::field::Empty;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use super::harness_spans::{self, HarnessStream, Reconstruction};
+use super::harness_spans::{self, HarnessStream, Reconstruction, StreamEnd};
 use super::{capture_subprocess, CapturedProcess, EvalRunOutcome, RunStatus, Runner, RunnerError};
 use crate::agentskills::budget::RunCost;
 use crate::telemetry::propagation::inject_std_command;
@@ -242,6 +242,11 @@ impl AgentInvocation {
                 stdout: &captured.stdout,
                 timeline: &captured.stdout_timeline,
                 started_at: captured.started_at,
+                ended: if captured.timed_out {
+                    StreamEnd::TimedOut(captured.ended_at)
+                } else {
+                    StreamEnd::Exited(captured.ended_at)
+                },
             },
             runner_model,
             content,
@@ -413,6 +418,18 @@ mod tests {
         assert!(lines.iter().all(|line| line.at >= captured.started_at));
         assert!(lines.windows(2).all(|pair| pair[0].at <= pair[1].at));
         assert!(lines[2].at > lines[0].at, "lines written apart arrive apart");
+    }
+
+    #[test]
+    fn a_harness_killed_at_its_time_limit_ends_after_its_last_line_and_the_limit() {
+        let mut command = Command::new("bash");
+        command.arg("-c").arg("trap '' TERM; echo started; sleep 30");
+        let captured = capture_subprocess(&mut command, Some(Duration::from_secs(1))).unwrap();
+
+        assert!(captured.timed_out);
+        let last_line = captured.stdout_timeline.lines(&captured.stdout).last().unwrap().at;
+        assert!(captured.ended_at > last_line);
+        assert!(captured.ended_at >= captured.started_at + Duration::from_secs(1));
     }
 
     fn traceparent_seen_by_harness() -> String {

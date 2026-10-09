@@ -337,6 +337,17 @@ mod tests {
     }
 
     #[test]
+    fn the_result_total_is_the_runs_usage_even_when_per_message_usage_sums_to_something_else() {
+        let stdout = br#"{"type":"assistant","message":{"id":"msg_1","content":[],"usage":{"input_tokens":10,"output_tokens":6}}}
+{"type":"assistant","message":{"id":"msg_2","content":[],"usage":{"input_tokens":20,"output_tokens":4}}}
+{"type":"result","is_error":false,"duration_ms":10,"usage":{"input_tokens":500,"output_tokens":90}}
+"#;
+        let outcome = parse_outcome(stdout, 0, true, Some(0));
+        assert_eq!(outcome.tokens.input_tokens(), Some(500));
+        assert_eq!(outcome.tokens.output_tokens(), Some(90));
+    }
+
+    #[test]
     fn missing_result_event_is_runner_failure() {
         let stdout = br#"{"type":"system"}
 "#;

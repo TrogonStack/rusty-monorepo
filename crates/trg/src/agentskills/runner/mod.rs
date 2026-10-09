@@ -227,6 +227,8 @@ pub struct CapturedProcess {
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// When the harness was seen exiting, or was killed at its time limit.
+    pub ended_at: SystemTime,
     pub duration_ms: u64,
 }
 
@@ -268,9 +270,10 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
     let stdout_handle = thread::spawn(move || read_stamped(stdout_pipe));
     let stderr_handle = thread::spawn(move || read_child_stream(stderr_pipe));
 
-    loop {
+    let ended_at = loop {
         match child.try_wait()? {
             Some(status) => {
+                let ended_at = SystemTime::now();
                 group.stop_leftovers();
                 let (stdout, stdout_timeline) = stdout_handle.join().unwrap_or_default();
                 let stderr = stderr_handle.join().unwrap_or_default();
@@ -282,6 +285,7 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
                     stderr,
                     exit_code: status.code(),
                     timed_out: false,
+                    ended_at,
                     duration_ms: start.elapsed().as_millis() as u64,
                 });
             }
@@ -294,13 +298,13 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
                         tracing::info!(grace_ms = terminating.elapsed().as_millis() as u64, "SIGKILL");
                         let _ = child.kill();
                         let _ = child.wait();
-                        break;
+                        break SystemTime::now();
                     }
                 }
                 thread::sleep(Duration::from_millis(50));
             }
         }
-    }
+    };
 
     let (stdout, stdout_timeline) = stdout_handle.join().unwrap_or_default();
     let stderr = stderr_handle.join().unwrap_or_default();
@@ -312,6 +316,7 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
         stderr,
         exit_code: None,
         timed_out: true,
+        ended_at,
         duration_ms: timeout
             .map(|limit| limit.as_millis() as u64)
             .unwrap_or_else(|| start.elapsed().as_millis() as u64),
