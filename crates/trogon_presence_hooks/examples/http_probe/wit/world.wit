@@ -1,0 +1,6 @@
+package trogon:presence-http-probe@0.1.0;
+
+world http-probe {
+    include trogon:presence/hooks@0.1.0;
+    import wasi:http/outgoing-handler@0.2.12;
+}

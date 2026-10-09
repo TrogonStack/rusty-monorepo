@@ -1,0 +1,19 @@
+package trogon:presence@0.1.0;
+
+interface types {
+    enum op {
+        track,
+        update,
+        retrack,
+    }
+
+    variant hook-error {
+        reject(string),
+        error(string),
+    }
+}
+
+world hooks {
+    use types.{op, hook-error};
+    export enrich: func(op: op, topic: string, key: string, meta: list<u8>) -> result<list<u8>, hook-error>;
+}
