@@ -2,12 +2,17 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::error::Error;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use async_nats::jetstream;
+use async_nats::jetstream::stream::LastRawMessageErrorKind;
 use futures_util::future::join_all;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use trogon_presence::{HolderId, PresenceConfig, PresenceKey, ProvisionOptions, ShardCount, Topic, WriterMode};
+use trogon_presence::value::StoredValue;
+use trogon_presence::{
+    EntryKey, HolderId, PresenceConfig, PresenceKey, ProvisionOptions, ShardCount, Topic, WriterMode,
+};
 use trogon_presence_service::{
     KeepaliveInterval, NodeId, ReplyCode, ServiceConfig, ServiceHandle, ShardLeaseTtl, WriteOp,
 };
@@ -24,6 +29,14 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 const OWNERSHIP_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDOFF_WITHIN: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(20);
+
+/// The FIND-013 signature: an ingress permit held by a denied hand-off ack, never a starved writer.
+const INGRESS_QUEUE_FULL: &str = "ingress queue is full";
+const OVERLOAD_RETRY_ATTEMPTS: u32 = 10;
+const OVERLOAD_RETRY_BASE: Duration = Duration::from_millis(20);
+const OVERLOAD_RETRY_CAP: Duration = Duration::from_millis(500);
+const OVERLOAD_RETRY_DEADLINE: Duration = Duration::from_secs(15);
+const CONFIRM_DEADLINE: Duration = Duration::from_secs(15);
 
 macro_rules! restricted_server_or_skip {
     () => {
@@ -65,6 +78,7 @@ async fn start_owning_all(server: &NatsServer) -> Result<ServiceHandle, BoxError
     Ok(handle)
 }
 
+#[derive(Clone)]
 struct Reply {
     code: String,
     body: Value,
@@ -87,6 +101,103 @@ async fn send(client: &async_nats::Client, subject: String, key: &PresenceKey, b
     })
 }
 
+/// Full jitter backoff (AWS-style): `random(0, min(cap, base * 2^attempt))`.
+fn full_jitter_backoff(attempt: u32) -> Duration {
+    let base = OVERLOAD_RETRY_BASE.as_millis() as u64;
+    let cap = OVERLOAD_RETRY_CAP.as_millis() as u64;
+    let ceiling = base.saturating_mul(1u64 << attempt.min(16)).min(cap).max(1);
+    Duration::from_millis(getrandom::u64().map_or(ceiling, |random| random % ceiling))
+}
+
+/// Retries a command while the admission layer answers `overloaded`, bounded by both an attempt
+/// count and a wall-clock deadline, and records every attempted reply (not only the final one).
+async fn send_retrying_overload(
+    client: &async_nats::Client,
+    subject: &str,
+    key: &PresenceKey,
+    body: &Value,
+    attempts: &mut Vec<Reply>,
+) -> Result<Reply, BoxError> {
+    let deadline = Instant::now() + OVERLOAD_RETRY_DEADLINE;
+    let mut attempt = 0u32;
+    loop {
+        let reply = send(client, subject.to_owned(), key, body.clone()).await?;
+        let overloaded = reply.code == ReplyCode::Overloaded.as_str();
+        attempts.push(reply.clone());
+        attempt += 1;
+        if !overloaded || attempt >= OVERLOAD_RETRY_ATTEMPTS || Instant::now() >= deadline {
+            return Ok(reply);
+        }
+        tokio::time::sleep(full_jitter_backoff(attempt)).await;
+    }
+}
+
+fn is_reply_deadline_unknown(reply: &Reply) -> bool {
+    reply.code == ReplyCode::Unavailable.as_str()
+        && reply.body["outcome_unknown"] == true
+        && reply.body["retryable"] == true
+}
+
+enum RecordState {
+    Tracked(Box<StoredValue>),
+    Untracked,
+}
+
+async fn record_state(
+    client: &async_nats::Client,
+    presence: &PresenceConfig,
+    entry: &EntryKey,
+) -> Result<RecordState, BoxError> {
+    let stream = jetstream::new(client.clone())
+        .get_stream(presence.bucket().stream_name())
+        .await?;
+    let subject = presence.bucket().subject_for(&entry.encode(presence.shards())?);
+    match stream.get_last_raw_message_by_subject(&subject).await {
+        Ok(message) => match StoredValue::from_json_bytes(&message.payload) {
+            Ok(value) => Ok(RecordState::Tracked(Box::new(value))),
+            Err(_) => Ok(RecordState::Untracked),
+        },
+        Err(err) if err.kind() == LastRawMessageErrorKind::NoMessageFound => Ok(RecordState::Untracked),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// Polls the stored record for a writer whose reply deadline fired before its job finished,
+/// so a degraded acknowledgement is only accepted once the real end state is confirmed.
+async fn confirm_tracked(
+    client: &async_nats::Client,
+    presence: &PresenceConfig,
+    entry: &EntryKey,
+) -> Result<Option<Box<StoredValue>>, BoxError> {
+    let deadline = Instant::now() + CONFIRM_DEADLINE;
+    loop {
+        if let RecordState::Tracked(value) = record_state(client, presence, entry).await? {
+            return Ok(Some(value));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+async fn confirm_untracked(
+    client: &async_nats::Client,
+    presence: &PresenceConfig,
+    entry: &EntryKey,
+) -> Result<bool, BoxError> {
+    let deadline = Instant::now() + CONFIRM_DEADLINE;
+    loop {
+        if matches!(record_state(client, presence, entry).await?, RecordState::Untracked) {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
 struct Entry {
     key: PresenceKey,
     topic: Topic,
@@ -98,17 +209,30 @@ fn topics_of(writer: usize) -> Result<[Topic; 2], BoxError> {
     Ok([LOBBY.parse()?, format!("room:{}", writer % ROOMS).parse()?])
 }
 
-async fn track(client: &async_nats::Client, writer: usize) -> Result<(Vec<Entry>, Vec<Reply>), BoxError> {
+struct TrackOutcome {
+    entries: Vec<Entry>,
+    failures: Vec<Reply>,
+    attempts: Vec<Reply>,
+}
+
+async fn track(
+    client: &async_nats::Client,
+    presence: &PresenceConfig,
+    writer: usize,
+) -> Result<TrackOutcome, BoxError> {
     let key: PresenceKey = format!("writer{writer}").parse()?;
     let holder = HolderId::generate()?;
     let mut entries = Vec::new();
-    let mut refused = Vec::new();
+    let mut failures = Vec::new();
+    let mut attempts = Vec::new();
     for topic in topics_of(writer)? {
-        let reply = send(
+        let body = json!({ "holder": holder, "meta": { "status": "online" } });
+        let reply = send_retrying_overload(
             client,
-            WriteOp::Track.subject(&key, &topic),
+            &WriteOp::Track.subject(&key, &topic),
             &key,
-            json!({ "holder": holder, "meta": { "status": "online" } }),
+            &body,
+            &mut attempts,
         )
         .await?;
         if reply.code == "ok" {
@@ -118,31 +242,64 @@ async fn track(client: &async_nats::Client, writer: usize) -> Result<(Vec<Entry>
                 holder,
                 tracked: reply.body,
             });
-        } else {
-            refused.push(reply);
+            continue;
         }
+        if is_reply_deadline_unknown(&reply) {
+            let entry_key = EntryKey::new(topic.clone(), key.clone(), holder);
+            if let Some(value) = confirm_tracked(client, presence, &entry_key).await? {
+                entries.push(Entry {
+                    key: key.clone(),
+                    topic,
+                    holder,
+                    tracked: json!({
+                        "lifetime": serde_json::to_value(value.lifetime())?,
+                        "mutation_seq": serde_json::to_value(value.mutation_seq())?,
+                    }),
+                });
+                continue;
+            }
+        }
+        failures.push(reply);
     }
-    Ok((entries, refused))
+    Ok(TrackOutcome {
+        entries,
+        failures,
+        attempts,
+    })
 }
 
-async fn untrack(client: &async_nats::Client, entries: &[Entry]) -> Result<Vec<Reply>, BoxError> {
-    let mut replies = Vec::new();
+struct UntrackOutcome {
+    failures: Vec<Reply>,
+    attempts: Vec<Reply>,
+}
+
+async fn untrack(
+    client: &async_nats::Client,
+    presence: &PresenceConfig,
+    entries: &[Entry],
+) -> Result<UntrackOutcome, BoxError> {
+    let mut failures = Vec::new();
+    let mut attempts = Vec::new();
     for entry in entries {
-        replies.push(
-            send(
-                client,
-                WriteOp::Untrack.subject(&entry.key, &entry.topic),
-                &entry.key,
-                json!({
-                    "holder": entry.holder,
-                    "lifetime": entry.tracked["lifetime"],
-                    "mutation_seq": entry.tracked["mutation_seq"],
-                }),
-            )
-            .await?,
-        );
+        let body = json!({
+            "holder": entry.holder,
+            "lifetime": entry.tracked["lifetime"],
+            "mutation_seq": entry.tracked["mutation_seq"],
+        });
+        let subject = WriteOp::Untrack.subject(&entry.key, &entry.topic);
+        let reply = send_retrying_overload(client, &subject, &entry.key, &body, &mut attempts).await?;
+        if reply.code == "ok" {
+            continue;
+        }
+        if is_reply_deadline_unknown(&reply) {
+            let entry_key = EntryKey::new(entry.topic.clone(), entry.key.clone(), entry.holder);
+            if confirm_untracked(client, presence, &entry_key).await? {
+                continue;
+            }
+        }
+        failures.push(reply);
     }
-    Ok(replies)
+    Ok(UntrackOutcome { failures, attempts })
 }
 
 fn tally<'a>(replies: impl IntoIterator<Item = &'a Reply>) -> BTreeMap<String, usize> {
@@ -156,15 +313,8 @@ fn tally<'a>(replies: impl IntoIterator<Item = &'a Reply>) -> BTreeMap<String, u
     codes
 }
 
-/// A writer that could not answer within the `WriterReplyDeadline` replies `unavailable` with
-/// `outcome_unknown` and `retryable` set, while the command it already admitted keeps running to
-/// completion in the background. That is a degraded acknowledgement, not the ingress refusal this
-/// test is named after, so it is tolerated alongside `ok` and only a genuinely different code fails
-/// the test.
-fn is_reply_deadline_unknown(reply: &Reply) -> bool {
-    reply.code == ReplyCode::Unavailable.as_str()
-        && reply.body["outcome_unknown"] == true
-        && reply.body["retryable"] == true
+fn is_ingress_refusal(reply: &Reply) -> bool {
+    reply.code == ReplyCode::Overloaded.as_str() && reply.body["detail"] == INGRESS_QUEUE_FULL
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -204,39 +354,47 @@ async fn a_lobby_then_room_burst_is_never_refused_at_ingress() -> TestResult {
     let server = restricted_server_or_skip!();
     let handle = start_owning_all(&server).await?;
     let client = server.client().await;
+    let presence = service_config()?.presence().clone();
 
-    let tracked = join_all((0..WRITERS).map(|writer| track(&client, writer))).await;
-    let mut entries = Vec::new();
-    let mut refused = Vec::new();
+    let tracked = join_all((0..WRITERS).map(|writer| track(&client, &presence, writer))).await;
+    let mut per_writer_entries = Vec::new();
+    let mut track_failures = Vec::new();
+    let mut all_attempts = Vec::new();
     for outcome in tracked {
-        let (mine, theirs) = outcome?;
-        entries.push(mine);
-        refused.extend(theirs);
+        let outcome = outcome?;
+        per_writer_entries.push(outcome.entries);
+        track_failures.extend(outcome.failures);
+        all_attempts.extend(outcome.attempts);
     }
-    let untracked = join_all(entries.iter().map(|mine| untrack(&client, mine))).await;
-    let mut untrack_replies = Vec::new();
+
+    let untracked = join_all(per_writer_entries.iter().map(|mine| untrack(&client, &presence, mine))).await;
+    let mut untrack_failures = Vec::new();
     for outcome in untracked {
-        untrack_replies.extend(outcome?);
+        let outcome = outcome?;
+        untrack_failures.extend(outcome.failures);
+        all_attempts.extend(outcome.attempts);
     }
+
     let stats = handle.stats();
     handle.shutdown().await;
 
-    let hard_refusals: Vec<&Reply> = refused
-        .iter()
-        .filter(|reply| !is_reply_deadline_unknown(reply))
-        .collect();
-    assert!(hard_refusals.is_empty(), "tracks refused: {:?}", tally(hard_refusals));
-    let hard_failures: Vec<&Reply> = untrack_replies
-        .iter()
-        .filter(|reply| reply.code != ReplyCode::Ok.as_str() && !is_reply_deadline_unknown(reply))
-        .collect();
-    assert!(hard_failures.is_empty(), "untrack replies: {:?}", tally(hard_failures));
-    assert_eq!(
-        stats.overloaded(),
-        0,
-        "ingress refused commands: {:?} {:?}",
-        tally(&refused),
-        tally(&untrack_replies)
+    let ingress_refusals: Vec<&Reply> = all_attempts.iter().filter(|reply| is_ingress_refusal(reply)).collect();
+    assert!(
+        ingress_refusals.is_empty(),
+        "ingress queue refused: {:?} (admitted {}, overloaded {})",
+        tally(ingress_refusals),
+        stats.admitted(),
+        stats.overloaded()
+    );
+    assert!(
+        track_failures.is_empty(),
+        "tracks never settled: {:?}",
+        tally(&track_failures)
+    );
+    assert!(
+        untrack_failures.is_empty(),
+        "untracks never settled: {:?}",
+        tally(&untrack_failures)
     );
     Ok(())
 }
