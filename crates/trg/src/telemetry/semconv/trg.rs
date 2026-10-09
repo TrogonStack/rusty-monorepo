@@ -96,7 +96,9 @@ pub const EVAL_SKILL_REVISION: &str = "trg.eval.skill.revision";
 /// The scenarios an eval suite covers, comma-separated in suite order.
 pub const EVAL_SCENARIOS: &str = "trg.eval.scenarios";
 
-/// How an eval suite is graded once its runs finish (`none`, `auto`).
+/// How an eval suite is graded once its runs finish (`none`, `auto`). A replayed
+/// suite carries the strategy its report was last graded under, so `llm` and
+/// `script` appear there too.
 pub const EVAL_GRADING_STRATEGY: &str = "trg.eval.grading.strategy";
 
 /// How many runs an eval suite executes at once (`-j`).
@@ -164,6 +166,13 @@ pub const EVAL_GRADER_KIND: &str = "trg.eval.grader.kind";
 
 /// The two scenarios a `compare` pair puts side by side, as `{a}:{b}`.
 pub const EVAL_COMPARISON_PAIR: &str = "trg.eval.comparison.pair";
+
+/// `true` on every span and evaluation event `eval export` rebuilt from a report
+/// bundle after the fact, so a backend can tell a replay from a live pass.
+pub const EVAL_REPLAYED: &str = "trg.eval.replayed";
+
+/// The `report.id` of the bundle a replayed `invoke_workflow` span was rebuilt from.
+pub const EVAL_REPORT_ID: &str = "trg.eval.report.id";
 
 /// Counter: graded assertions, split by `gen_ai.evaluation.score.label` and
 /// `trg.eval.grader.kind`.

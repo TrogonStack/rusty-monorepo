@@ -26,6 +26,8 @@ pub mod semconv;
 pub(crate) mod testing;
 
 pub use content::ContentCapture;
+#[cfg(test)]
+pub(crate) use env::fixed;
 pub use env::{EnvLookup, ProcessEnv};
 pub use identity::CommandIdentity;
 

@@ -59,7 +59,7 @@ impl FailureType {
         }
     }
 
-    fn of_exit(code: Option<i32>) -> Option<Self> {
+    pub(crate) fn of_exit(code: Option<i32>) -> Option<Self> {
         match code {
             Some(0) => None,
             Some(_) => Some(Self::NonzeroExit),

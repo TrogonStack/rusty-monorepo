@@ -41,6 +41,19 @@ pub enum GraderKind {
     None,
 }
 
+impl GraderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mechanical => "mechanical",
+            Self::Declarative => "declarative",
+            Self::Llm => "llm",
+            Self::Script => "script",
+            Self::NeedsLlm => "needs_llm",
+            Self::None => "none",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum GraderMode {
     #[default]
@@ -710,6 +723,7 @@ fn emit_evaluations(
             grader_kind: None,
             case_id: &run.eval_case_id,
             run_id: Some(&run.id),
+            provenance: telemetry::Provenance::Live,
         }
         .emit(parent, content);
     }

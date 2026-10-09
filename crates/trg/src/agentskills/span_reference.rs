@@ -25,8 +25,11 @@ impl SpanReference {
     /// The span's OTel identity, or `None` when no trace exporter gave it one or the
     /// sampler dropped it, since a link to an unexported span leads nowhere.
     pub fn of(span: &tracing::Span) -> Option<Self> {
-        let context = span.context();
-        let span_context = context.span().span_context().clone();
+        Self::of_context(span.context().span().span_context())
+    }
+
+    /// A span context's identity, under the same rule as [`SpanReference::of`].
+    pub fn of_context(span_context: &SpanContext) -> Option<Self> {
         (span_context.is_valid() && span_context.is_sampled()).then(|| Self {
             trace_id: span_context.trace_id(),
             span_id: span_context.span_id(),
@@ -130,6 +133,22 @@ mod tests {
             SpanReference::of(&tracing::info_span!("run")).expect("a sampled span is referenced")
         });
         assert!(reference.span_context().is_sampled());
+    }
+
+    #[test]
+    fn a_span_context_the_sampler_dropped_has_nothing_to_reference() {
+        let context = |flags| {
+            SpanContext::new(
+                TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap(),
+                SpanId::from_hex("00f067aa0ba902b7").unwrap(),
+                flags,
+                false,
+                TraceState::default(),
+            )
+        };
+
+        assert_eq!(SpanReference::of_context(&context(TraceFlags::default())), None);
+        assert!(SpanReference::of_context(&context(TraceFlags::SAMPLED)).is_some());
     }
 
     #[test]

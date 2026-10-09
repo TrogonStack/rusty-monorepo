@@ -1,6 +1,7 @@
 mod benchmark;
 mod ci_args;
 mod compare;
+mod export;
 mod feedback;
 mod grade;
 mod grader_agreement;
@@ -32,6 +33,7 @@ use clap::{Args, Subcommand};
 
 pub use benchmark::BenchmarkArgs;
 pub use compare::CompareArgs;
+pub use export::ExportArgs;
 pub use feedback::FeedbackArgs;
 pub use grade::GradeArgs;
 pub use grader_agreement::GraderAgreementArgs;
@@ -85,6 +87,8 @@ pub enum EvalCommands {
     RecordMcp(RecordMcpArgs),
     /// Check whether a stronger configuration scored higher across ordered report bundles
     Scaling(ScalingArgs),
+    /// Replay a finished report bundle as OpenTelemetry traces and evaluation events
+    Export(ExportArgs),
 }
 
 impl EvalArgs {
@@ -104,6 +108,7 @@ impl EvalArgs {
             EvalCommands::HtmlReport(args) => args.handle(fs),
             EvalCommands::RecordMcp(args) => args.handle(fs),
             EvalCommands::Scaling(args) => args.handle(fs),
+            EvalCommands::Export(args) => args.handle(fs),
         }
     }
 }

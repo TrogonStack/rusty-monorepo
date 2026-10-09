@@ -39,6 +39,7 @@ pub mod prompt;
 pub mod proportion;
 pub mod real_mcp_server;
 pub mod redact;
+pub mod replay;
 pub mod report;
 pub mod runner;
 pub mod sampling;
