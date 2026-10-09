@@ -82,6 +82,15 @@ impl TelemetryForwarding {
         }
         vars
     }
+
+    /// Whether a harness configured through its environment is handed a traces exporter.
+    /// Switching its telemetry on without one exports no spans at all.
+    pub(crate) fn forwards_traces(self, runner: Runner, host: &BTreeMap<String, String>) -> bool {
+        matches!(self, Self::On)
+            && runner.telemetry_passthrough() == HarnessPassthrough::EnvVars
+            && OtlpSignal::Traces.endpoint_configured(host)
+            && !OtlpSignal::Traces.disabled(host)
+    }
 }
 
 /// How a harness takes telemetry configuration, if at all.
@@ -549,6 +558,30 @@ mod tests {
 
     fn host_logs_only() -> BTreeMap<String, String> {
         host(&[("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "http://collector:4318/v1/logs")])
+    }
+
+    #[test]
+    fn claude_code_forwards_traces_only_when_handed_a_traces_exporter() {
+        let forwards =
+            |host: &BTreeMap<String, String>| TelemetryForwarding::On.forwards_traces(Runner::ClaudeCode, host);
+        assert!(forwards(&otel_host()));
+        assert!(forwards(&host(&[(
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "http://collector:4318/v1/traces"
+        )])));
+
+        assert!(!forwards(&host(&[("PATH", "/usr/bin")])));
+        assert!(!forwards(&host_logs_only()));
+        let mut disabled = otel_host();
+        disabled.insert("OTEL_TRACES_EXPORTER".to_string(), "none".to_string());
+        assert!(!forwards(&disabled));
+    }
+
+    #[test]
+    fn traces_are_forwarded_only_when_asked_and_only_to_a_harness_that_reads_otel_vars() {
+        assert!(!TelemetryForwarding::Off.forwards_traces(Runner::ClaudeCode, &otel_host()));
+        assert!(!TelemetryForwarding::On.forwards_traces(Runner::Codex, &otel_host()));
+        assert!(!TelemetryForwarding::On.forwards_traces(Runner::CursorAgent, &otel_host()));
     }
 
     #[test]
