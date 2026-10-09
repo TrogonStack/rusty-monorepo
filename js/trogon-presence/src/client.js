@@ -244,20 +244,24 @@ export class PresenceClient {
     for (const view of this.views.values()) this._unsubscribeView(view);
     this.lastReconnectAt = Date.now();
     try {
-      if (this.connection == null) {
-        this.connection = await wsconnect({
-          servers: this.servers,
-          authenticator: tokenAuthenticator(() => this.currentToken),
-          ignoreAuthErrorAbort: true,
-          reconnect: true,
-          maxReconnectAttempts: -1,
-          waitOnFirstConnect: true,
-          inboxPrefix: connectionInboxPrefix(this.key, this.connectionId),
-        });
-        this._watchStatus();
-      } else {
-        await this.connection.reconnect();
+      // A fresh connect, never `connection.reconnect()`: nats-core's shared request/reply
+      // mux inbox is computed once from `inboxPrefix` and never recomputed on `.reconnect()`,
+      // so reusing the old connection after a connectionId change would keep issuing
+      // `connection.request()` calls (track/update/untrack/heartbeat/release) against an
+      // inbox the new grant does not authorize.
+      if (this.connection != null) {
+        await this.connection.close();
       }
+      this.connection = await wsconnect({
+        servers: this.servers,
+        authenticator: tokenAuthenticator(() => this.currentToken),
+        ignoreAuthErrorAbort: true,
+        reconnect: true,
+        maxReconnectAttempts: -1,
+        waitOnFirstConnect: true,
+        inboxPrefix: connectionInboxPrefix(this.key, this.connectionId),
+      });
+      this._watchStatus();
       this.authFailureStreak = 0;
     } catch (error) {
       this.authFailureStreak += 1;
