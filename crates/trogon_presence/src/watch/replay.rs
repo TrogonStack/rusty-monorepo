@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_nats::jetstream::consumer::pull::{self, MessagesError};
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy, StreamError};
 use async_nats::jetstream::context::ConsumerInfoError;
-use async_nats::jetstream::stream::{ConsumerError, Stream};
+use async_nats::jetstream::stream::{ConsumerError, RawMessageError, RawMessageErrorKind, Stream};
 use async_nats::jetstream::Message;
 use async_nats::{HeaderMap, Subject};
 use bytes::Bytes;
@@ -305,6 +305,10 @@ pub enum Watermark {
         delivered: ConsumerSequence,
         applied: ConsumerSequence,
     },
+    Behind {
+        stored: Revision,
+        applied: ConsumerSequence,
+    },
     Unknown,
 }
 
@@ -363,6 +367,7 @@ impl ReplayError {
 
 pub struct ReplayConsumer {
     stream: Stream,
+    filters: ReplayFilters,
     consumer: PullConsumer,
     name: ReplayConsumerName,
     messages: pull::Stream,
@@ -441,6 +446,7 @@ impl ReplayConsumer {
             .await?;
         Ok(Self {
             stream: stream.clone(),
+            filters: filters.clone(),
             consumer,
             name,
             messages,
@@ -472,17 +478,53 @@ impl ReplayConsumer {
     }
 
     pub async fn watermark(&self) -> Watermark {
-        match self.consumer.get_info().await {
-            Ok(info) => Watermark::observe(
-                PendingCount::from(info.num_pending),
-                ConsumerSequence::from(info.delivered.consumer_sequence),
-                self.applied,
-            ),
+        let info = match self.consumer.get_info().await {
+            Ok(info) => info,
             Err(err) => {
                 tracing::debug!(%err, "replay watermark unavailable");
+                return Watermark::Unknown;
+            }
+        };
+        let observed = Watermark::observe(
+            PendingCount::from(info.num_pending),
+            ConsumerSequence::from(info.delivered.consumer_sequence),
+            self.applied,
+        );
+        if !observed.is_caught_up() {
+            return observed;
+        }
+        match self.stored_after(Revision::from(info.delivered.stream_sequence)).await {
+            Ok(None) => observed,
+            Ok(Some(stored)) => Watermark::Behind {
+                stored,
+                applied: self.applied,
+            },
+            Err(err) => {
+                tracing::debug!(%err, "replay watermark could not read the stream past the consumer");
                 Watermark::Unknown
             }
         }
+    }
+
+    async fn stored_after(&self, delivered: Revision) -> Result<Option<Revision>, RawMessageError> {
+        let Ok(from) = delivered.checked_add(1) else {
+            return Ok(None);
+        };
+        for filter in self.filters.as_slice() {
+            let found = self
+                .stream
+                .raw_message_builder()
+                .sequence(from.get())
+                .next_by_subject(filter.as_str())
+                .send()
+                .await;
+            match found {
+                Ok(message) => return Ok(Some(Revision::from(message.sequence))),
+                Err(err) if err.kind() == RawMessageErrorKind::NoMessageFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(None)
     }
 
     pub fn name(&self) -> &ReplayConsumerName {

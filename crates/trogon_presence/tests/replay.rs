@@ -388,7 +388,10 @@ async fn lagging_consumer_suspends_the_sweep() -> TestResult {
     )
     .await?;
     let watermark = replay.watermark().await;
-    assert!(matches!(watermark, Watermark::Lagging { .. }), "{watermark:?}");
+    assert!(
+        matches!(watermark, Watermark::Lagging { .. } | Watermark::Behind { .. }),
+        "{watermark:?}"
+    );
 
     let policy = StalePolicy::from(&config);
     let far_future = SystemTime::now() + Duration::from_secs(3_600);
@@ -405,6 +408,72 @@ async fn lagging_consumer_suspends_the_sweep() -> TestResult {
     }
     let caught_up = replay.watermark().await;
     assert!(caught_up.is_caught_up(), "{caught_up:?}");
+    Ok(())
+}
+
+async fn busy_bystanders(stream: &Stream, config: &PresenceConfig, consumers: usize) -> Result<(), BoxError> {
+    for index in 0..consumers {
+        stream
+            .create_consumer(jetstream::consumer::pull::Config {
+                name: Some(format!("bystander_{index}")),
+                filter_subject: config.bucket().subjects_filter(),
+                memory_storage: true,
+                ..Default::default()
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+async fn flood_controls(client: async_nats::Client, config: PresenceConfig) -> Result<(), BoxError> {
+    let context = jetstream::new(client);
+    let subjects = (0..16)
+        .map(|_| {
+            Ok(config
+                .bucket()
+                .subject_for(&KvKey::try_from(format!("ctl.direct.{}", HolderId::generate()?))?))
+        })
+        .collect::<Result<Vec<_>, BoxError>>()?;
+    loop {
+        let mut acks = Vec::with_capacity(512);
+        for subject in subjects.iter().cycle().take(512) {
+            acks.push(context.publish(subject.clone(), "{}".into()).await?);
+        }
+        for ack in acks {
+            ack.await?;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn watermark_never_certifies_an_acknowledged_publish_before_it_is_applied() -> TestResult {
+    let server = server_or_skip!();
+    let client = server.client().await;
+    let config = PresenceConfig::default();
+    Presence::provision(client.clone(), config.clone(), ProvisionOptions::default()).await?;
+    let (topic, key) = lobby()?;
+    let kv_key = entry_key(&config, &topic, &key)?;
+    let stream = stream_of(&client, &config).await?;
+    busy_bystanders(&stream, &config, 64).await?;
+    let classifier = ShardClassifier::new(config.bucket(), config.shards(), ViewShard::of(&topic, config.shards()));
+    let mut replay = ReplayConsumer::rebuild(&stream, &classifier.filters(), RebuildBudget::default(), |_| {}).await?;
+    let flooding = tokio::spawn(flood_controls(server.client().await, config.clone()));
+
+    for round in 0..200 {
+        publish(
+            &client,
+            &config,
+            &kv_key,
+            stored(&topic, &key, &format!("Fq{round}"))?.to_json_bytes()?,
+            LONG_TTL,
+        )
+        .await?;
+        let watermark = replay.watermark().await;
+        assert!(!watermark.is_caught_up(), "round {round}: {watermark:?}");
+        let record = tokio::time::timeout(CONVERGE_TIMEOUT, replay.next()).await??;
+        assert_eq!(record.subject(), config.bucket().subject_for(&kv_key));
+    }
+    flooding.abort();
     Ok(())
 }
 
