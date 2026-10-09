@@ -4,6 +4,7 @@ use opentelemetry::KeyValue;
 use opentelemetry_sdk::Resource;
 use sha2::{Digest, Sha256};
 
+use super::env::EnvLookup;
 use super::identity::CommandIdentity;
 use crate::telemetry::semconv::trg;
 
@@ -14,9 +15,9 @@ use crate::telemetry::semconv::trg;
 /// `OTEL_SERVICE_NAME` automatically, but an attribute set in code always
 /// wins over the env-derived one for the same key, so setting it
 /// unconditionally would make the env var impossible to override.
-pub fn build(command: &CommandIdentity) -> Resource {
+pub fn build(command: &CommandIdentity, env: &impl EnvLookup) -> Resource {
     let mut builder = Resource::builder();
-    if std::env::var_os("OTEL_SERVICE_NAME").is_none() {
+    if env.get("OTEL_SERVICE_NAME").is_none() {
         builder = builder.with_attribute(KeyValue::new("service.name", "trg"));
     }
     builder
@@ -48,22 +49,18 @@ fn instance_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::env::fixed;
 
     #[test]
     fn sets_default_service_name_without_env_override() {
-        // SAFETY: test-only, single-threaded assumption for this check; no
-        // other test in this process reads OTEL_SERVICE_NAME concurrently.
-        unsafe {
-            std::env::remove_var("OTEL_SERVICE_NAME");
-        }
-        let resource = build(&CommandIdentity::new("mcp proxy"));
+        let resource = build(&CommandIdentity::new("mcp proxy"), &fixed(&[]));
         let value = resource.get(&opentelemetry::Key::from_static_str("service.name"));
         assert_eq!(value.map(|v| v.to_string()), Some("trg".to_string()));
     }
 
     #[test]
     fn carries_command_identity() {
-        let resource = build(&CommandIdentity::new("ai skills eval run"));
+        let resource = build(&CommandIdentity::new("ai skills eval run"), &fixed(&[]));
         let value = resource.get(&opentelemetry::Key::from_static_str(trg::COMMAND));
         assert_eq!(value.map(|v| v.to_string()), Some("ai skills eval run".to_string()));
     }

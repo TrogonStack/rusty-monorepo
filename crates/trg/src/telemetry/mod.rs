@@ -12,11 +12,12 @@
 //!
 //! [`init`] returns a [`Telemetry`] guard carrying the root span every
 //! subcommand runs inside. [`Telemetry::shutdown`] must run before
-//! `std::process::exit`, and [`Telemetry::flush`] before any call that
-//! replaces the process image, such as `exec(2)`, since nothing runs
+//! `std::process::exit`, and [`Telemetry::end_before_exec`] before any call
+//! that replaces the process image, such as `exec(2)`, since nothing runs
 //! afterward to flush on success.
 
 mod content;
+mod env;
 mod identity;
 pub mod propagation;
 mod resource;
@@ -25,27 +26,202 @@ pub mod semconv;
 pub(crate) mod testing;
 
 pub use content::ContentCapture;
+pub use env::{EnvLookup, ProcessEnv};
 pub use identity::CommandIdentity;
 
 use std::fs::OpenOptions;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::trace::{Status, TraceContextExt as _, TracerProvider as _};
+use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter};
+use opentelemetry_otlp::{ExporterBuildError, LogExporter, MetricExporter, SpanExporter};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
+use opentelemetry_semantic_conventions::attribute::{ERROR_TYPE, PROCESS_EXIT_CODE};
 use tracing::field::Empty;
+use tracing::level_filters::LevelFilter;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+use crate::agentskills::exit_code::{ExitCode, TerminationSignal};
+use crate::agentskills::runner::group::with_termination_signals_blocked;
 
 /// Bound on provider shutdown so a slow or unreachable collector can never
 /// hang `trg`'s exit.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a termination signal may hold the process open while the
+/// providers flush, before the signal is re-raised regardless.
+pub const INTERRUPT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+const DEFAULT_FILE_FILTER: &str = "info,trg=debug,rmcp=debug";
+
+/// Crates the OTLP export path itself runs through. An event from any of
+/// them reaching the OTel log bridge would be exported by the very pipeline
+/// that produced it, and an export failure would then feed itself.
+const EXPORT_PIPELINE_TARGETS: [&str; 7] = ["opentelemetry", "reqwest", "hyper", "h2", "tower", "rustls", "tonic"];
+
+/// The providers [`init`] built, reachable from the termination path so a
+/// signal can flush them before re-raising.
+static INTERRUPT_TARGET: OnceLock<InterruptTarget> = OnceLock::new();
+
+/// Holds the root span's OTel context rather than the `tracing` span itself:
+/// a `tracing::Span` handle kept here would stop the root span from ever
+/// closing, and so from ever exporting, on an ordinary exit.
+struct InterruptTarget {
+    providers: Providers,
+    root: opentelemetry::Context,
+}
+
+#[derive(Clone, Default)]
+struct Providers {
+    tracer: Option<SdkTracerProvider>,
+    meter: Option<SdkMeterProvider>,
+    logger: Option<SdkLoggerProvider>,
+}
+
+impl Providers {
+    /// `force_flush` takes no timeout of its own, so the flush runs on its
+    /// own thread and is abandoned, not awaited, once `timeout` passes.
+    fn flush_within(&self, timeout: Duration) {
+        let providers = self.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("trg-telemetry-flush".to_string())
+            .spawn(move || {
+                providers.flush();
+                let _ = done.send(());
+            });
+        if spawned.is_ok() {
+            let _ = finished.recv_timeout(timeout);
+        }
+    }
+
+    fn flush(&self) {
+        if let Some(provider) = &self.tracer {
+            let _ = provider.force_flush();
+        }
+        if let Some(provider) = &self.meter {
+            let _ = provider.force_flush();
+        }
+        if let Some(provider) = &self.logger {
+            let _ = provider.force_flush();
+        }
+    }
+
+    fn shutdown(&self, timeout: Duration) {
+        if let Some(provider) = &self.tracer {
+            let _ = provider.shutdown_with_timeout(timeout);
+        }
+        if let Some(provider) = &self.meter {
+            let _ = provider.shutdown_with_timeout(timeout);
+        }
+        if let Some(provider) = &self.logger {
+            let _ = provider.shutdown_with_timeout(timeout);
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.tracer.is_some() || self.meter.is_some() || self.logger.is_some()
+    }
+}
+
+/// One of the OTLP signals `trg` can export, each switched on by its own
+/// standard environment variables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OtelSignal {
+    Traces,
+    Metrics,
+    Logs,
+}
+
+impl OtelSignal {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Traces => "traces",
+            Self::Metrics => "metrics",
+            Self::Logs => "logs",
+        }
+    }
+
+    fn endpoint_var(self) -> &'static str {
+        match self {
+            Self::Traces => "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            Self::Metrics => "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            Self::Logs => "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        }
+    }
+
+    fn exporter_var(self) -> &'static str {
+        match self {
+            Self::Traces => "OTEL_TRACES_EXPORTER",
+            Self::Metrics => "OTEL_METRICS_EXPORTER",
+            Self::Logs => "OTEL_LOGS_EXPORTER",
+        }
+    }
+
+    fn protocol_var(self) -> &'static str {
+        match self {
+            Self::Traces => "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+            Self::Metrics => "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+            Self::Logs => "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+        }
+    }
+
+    /// The variable asking for OTLP over gRPC for this signal, if one does.
+    /// The per-signal variable wins over the generic one, as in the spec.
+    fn grpc_requested_by(self, env: &impl EnvLookup) -> Option<&'static str> {
+        [self.protocol_var(), "OTEL_EXPORTER_OTLP_PROTOCOL"]
+            .into_iter()
+            .find_map(|var| env.get(var).map(|value| (var, value)))
+            .filter(|(_, value)| value.trim().eq_ignore_ascii_case("grpc"))
+            .map(|(var, _)| var)
+    }
+
+    fn enabled(self, env: &impl EnvLookup) -> bool {
+        let endpoint_configured =
+            env.get(self.endpoint_var()).is_some() || env.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_some();
+        let exporter_none = env
+            .get(self.exporter_var())
+            .is_some_and(|v| v.eq_ignore_ascii_case("none"));
+        endpoint_configured && !exporter_none
+    }
+}
+
+/// An OTLP signal that was asked for but will not be exported, reported to
+/// the file log once the subscriber exists to carry it.
+enum ExportProblem {
+    BuildFailed {
+        signal: OtelSignal,
+        error: ExporterBuildError,
+    },
+    /// Only the `http-proto` transport is compiled in. The signal is skipped
+    /// rather than sent over HTTP anyway: an endpoint configured for gRPC
+    /// (port 4317, typically) would not accept it.
+    GrpcRequested { signal: OtelSignal, variable: &'static str },
+}
+
+impl ExportProblem {
+    fn report(&self) {
+        match self {
+            Self::BuildFailed { signal, error } => tracing::warn!(
+                signal = signal.as_str(),
+                error = %error,
+                "OTLP exporter failed to build; this signal will not be exported"
+            ),
+            Self::GrpcRequested { signal, variable } => tracing::warn!(
+                signal = signal.as_str(),
+                "trg exports OTLP over http/protobuf only; {variable}=grpc is not supported, so this signal will not be exported"
+            ),
+        }
+    }
+}
 
 /// Owns every OTel provider this process created and the root span every
 /// subcommand runs inside.
@@ -53,9 +229,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 /// Dropping it flushes nothing: call [`Telemetry::shutdown`] before
 /// `std::process::exit`.
 pub struct Telemetry {
-    tracer_provider: Option<SdkTracerProvider>,
-    meter_provider: Option<SdkMeterProvider>,
-    logger_provider: Option<SdkLoggerProvider>,
+    providers: Providers,
     root_span: tracing::Span,
 }
 
@@ -65,10 +239,19 @@ impl Telemetry {
     /// (tests, mostly).
     pub fn noop() -> Self {
         Self {
-            tracer_provider: None,
-            meter_provider: None,
-            logger_provider: None,
+            providers: Providers::default(),
             root_span: tracing::Span::none(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exporting_traces_to(provider: SdkTracerProvider, root_span: tracing::Span) -> Self {
+        Self {
+            providers: Providers {
+                tracer: Some(provider),
+                ..Providers::default()
+            },
+            root_span,
         }
     }
 
@@ -78,21 +261,30 @@ impl Telemetry {
         self.root_span.clone()
     }
 
-    /// Flushes every configured provider without shutting them down.
+    /// Flushes every configured provider without shutting them down, giving
+    /// up after the same bound as [`Telemetry::shutdown`] so a black-holed
+    /// collector cannot stall the caller.
     ///
     /// Only call this from a normal thread. It takes locks and performs
     /// network IO, neither of which is async-signal-safe, so it must never
-    /// run from inside a raw signal handler.
+    /// run from inside a raw signal handler; [`interrupt`] is the path for
+    /// signals.
     pub fn flush(&self) {
-        if let Some(provider) = &self.tracer_provider {
-            let _ = provider.force_flush();
-        }
-        if let Some(provider) = &self.meter_provider {
-            let _ = provider.force_flush();
-        }
-        if let Some(provider) = &self.logger_provider {
-            let _ = provider.force_flush();
-        }
+        self.providers.flush_within(SHUTDOWN_TIMEOUT);
+    }
+
+    /// Ends the root span and shuts every provider down, bounded like
+    /// [`Telemetry::shutdown`], for a process about to replace its own image
+    /// with `exec(2)`.
+    ///
+    /// Records no exit code: the process does not exit, it becomes the
+    /// launched command. The root span only exports once it ends, which is
+    /// once every handle to it is gone, so the caller must already have
+    /// dropped any clone it took from [`Telemetry::root_span`], including
+    /// the one inside an `.instrument(...)` future.
+    pub fn end_before_exec(self) {
+        drop(self.root_span);
+        self.providers.shutdown(SHUTDOWN_TIMEOUT);
     }
 
     /// Records `exit_code` on the root span, then flushes and shuts down
@@ -107,16 +299,45 @@ impl Telemetry {
             self.root_span.record("error.type", "nonzero_exit");
         }
         drop(self.root_span);
+        self.providers.shutdown(SHUTDOWN_TIMEOUT);
+    }
+}
 
-        if let Some(provider) = &self.tracer_provider {
-            let _ = provider.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
-        }
-        if let Some(provider) = &self.meter_provider {
-            let _ = provider.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
-        }
-        if let Some(provider) = &self.logger_provider {
-            let _ = provider.shutdown_with_timeout(SHUTDOWN_TIMEOUT);
-        }
+/// Ends the root span as interrupted by `signal`, then flushes and shuts
+/// down every provider [`init`] built, each bounded by
+/// [`INTERRUPT_FLUSH_TIMEOUT`].
+///
+/// For the termination path only, and only from a normal thread: it takes
+/// locks and performs network IO, so it must never run inside a signal
+/// handler. A no-op before [`init`] or when nothing is exported.
+pub fn interrupt(signal: TerminationSignal) {
+    let Some(target) = INTERRUPT_TARGET.get() else {
+        return;
+    };
+    mark_interrupted(&target.root, signal);
+    target.providers.shutdown(INTERRUPT_FLUSH_TIMEOUT);
+}
+
+/// The root span would otherwise never close: the thread holding it is the
+/// one the signal is about to take down. Ending the OTel span directly
+/// exports it now; the later close of the `tracing` span finds it already
+/// ended and does nothing.
+fn mark_interrupted(root: &opentelemetry::Context, signal: TerminationSignal) {
+    let span = root.span();
+    span.set_attribute(KeyValue::new(
+        PROCESS_EXIT_CODE,
+        i64::from(ExitCode::Interrupted(signal).code()),
+    ));
+    span.set_attribute(KeyValue::new(ERROR_TYPE, signal_name(signal)));
+    span.set_status(Status::error(format!("interrupted by {}", signal_name(signal))));
+    span.end();
+}
+
+fn signal_name(signal: TerminationSignal) -> &'static str {
+    match signal {
+        TerminationSignal::Interrupt => "SIGINT",
+        TerminationSignal::Terminate => "SIGTERM",
+        TerminationSignal::Hangup => "SIGHUP",
     }
 }
 
@@ -126,9 +347,17 @@ impl Telemetry {
 /// `command` becomes the `trg.command` resource attribute, so it must be
 /// derived after `Cli::parse()` succeeds, not before.
 pub fn init(command: CommandIdentity) -> Telemetry {
-    let filter = EnvFilter::try_from_env("RUST_LOG").unwrap_or_else(|_| EnvFilter::new("info,trg=debug,rmcp=debug"));
+    init_from(command, &ProcessEnv)
+}
 
-    let file_layer = log_path()
+/// Every layer carries its own filter, so `RUST_LOG` only tunes the file log:
+/// `RUST_LOG=warn` must not silently drop every exported span.
+///
+/// The providers are built with the termination signals blocked, so the
+/// exporter threads they spawn are never the one a signal handler holds
+/// while the flush it is waiting on needs them.
+fn init_from(command: CommandIdentity, env: &impl EnvLookup) -> Telemetry {
+    let file_layer = log_path(env)
         .and_then(|path| {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
@@ -140,55 +369,112 @@ pub fn init(command: CommandIdentity) -> Telemetry {
                 .with_writer(Mutex::new(file))
                 .with_ansi(false)
                 .with_target(true)
+                .with_filter(file_filter(env))
         });
 
-    if sdk_disabled() {
-        let _ = tracing_subscriber::registry().with(filter).with(file_layer).try_init();
+    if sdk_disabled(env) {
+        let _ = tracing_subscriber::registry().with(file_layer).try_init();
         return Telemetry {
-            tracer_provider: None,
-            meter_provider: None,
-            logger_provider: None,
+            providers: Providers::default(),
             root_span: root_span(),
         };
     }
 
-    let resource = resource::build(&command);
+    let resource = resource::build(&command, env);
+    let mut problems = Vec::new();
 
-    let tracer_provider = traces_enabled()
-        .then(|| build_tracer_provider(resource.clone()))
-        .flatten();
-    let meter_provider = metrics_enabled()
-        .then(|| build_meter_provider(resource.clone()))
-        .flatten();
-    let logger_provider = logs_enabled().then(|| build_logger_provider(resource)).flatten();
+    let providers = with_termination_signals_blocked(|| Providers {
+        tracer: enabled_provider(OtelSignal::Traces, env, &mut problems, || {
+            build_tracer_provider(resource.clone())
+        }),
+        meter: enabled_provider(OtelSignal::Metrics, env, &mut problems, || {
+            build_meter_provider(resource.clone())
+        }),
+        logger: enabled_provider(OtelSignal::Logs, env, &mut problems, || {
+            build_logger_provider(resource.clone())
+        }),
+    });
 
-    let otel_trace_layer = tracer_provider
+    let otel_trace_layer = providers.tracer.as_ref().map(|provider| {
+        tracing_opentelemetry::layer()
+            .with_tracer(provider.tracer("trg"))
+            .with_filter(trace_filter())
+    });
+    let otel_log_layer = providers
+        .logger
         .as_ref()
-        .map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer("trg")));
-    let otel_log_layer = logger_provider.as_ref().map(OpenTelemetryTracingBridge::new);
+        .map(|provider| OpenTelemetryTracingBridge::new(provider).with_filter(log_filter()));
 
     let _ = tracing_subscriber::registry()
-        .with(filter)
         .with(file_layer)
         .with(otel_trace_layer)
         .with(otel_log_layer)
         .try_init();
 
-    if let Some(provider) = &meter_provider {
+    for problem in &problems {
+        problem.report();
+    }
+
+    if let Some(provider) = &providers.tracer {
+        opentelemetry::global::set_tracer_provider(provider.clone());
+    }
+    if let Some(provider) = &providers.meter {
         opentelemetry::global::set_meter_provider(provider.clone());
     }
 
     let span = root_span();
-    if tracer_provider.is_some() {
-        let _ = span.set_parent(propagation::extract_from_env());
+    if providers.tracer.is_some() {
+        let _ = span.set_parent(propagation::extract_from_env(env));
+    }
+
+    if providers.any() {
+        let _ = INTERRUPT_TARGET.set(InterruptTarget {
+            providers: providers.clone(),
+            root: span.context(),
+        });
     }
 
     Telemetry {
-        tracer_provider,
-        meter_provider,
-        logger_provider,
+        providers,
         root_span: span,
     }
+}
+
+fn enabled_provider<P>(
+    signal: OtelSignal,
+    env: &impl EnvLookup,
+    problems: &mut Vec<ExportProblem>,
+    build: impl FnOnce() -> Result<P, ExporterBuildError>,
+) -> Option<P> {
+    if !signal.enabled(env) {
+        return None;
+    }
+    if let Some(variable) = signal.grpc_requested_by(env) {
+        problems.push(ExportProblem::GrpcRequested { signal, variable });
+        return None;
+    }
+    build()
+        .map_err(|error| problems.push(ExportProblem::BuildFailed { signal, error }))
+        .ok()
+}
+
+fn file_filter(env: &impl EnvLookup) -> EnvFilter {
+    env.get("RUST_LOG")
+        .and_then(|directives| EnvFilter::try_new(directives).ok())
+        .unwrap_or_else(|| EnvFilter::new(DEFAULT_FILE_FILTER))
+}
+
+fn trace_filter() -> Targets {
+    Targets::new().with_target("trg", LevelFilter::INFO)
+}
+
+fn log_filter() -> Targets {
+    EXPORT_PIPELINE_TARGETS.into_iter().fold(
+        Targets::new()
+            .with_default(LevelFilter::WARN)
+            .with_target("trg", LevelFilter::INFO),
+        |targets, target| targets.with_target(target, LevelFilter::OFF),
+    )
 }
 
 /// The root span every subcommand runs inside, named for
@@ -206,94 +492,107 @@ fn root_span() -> tracing::Span {
     )
 }
 
-fn sdk_disabled() -> bool {
-    std::env::var("OTEL_SDK_DISABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true"))
-}
-
-fn exporter_none(var: &str) -> bool {
-    std::env::var(var).is_ok_and(|v| v.eq_ignore_ascii_case("none"))
-}
-
-fn endpoint_configured(signal_var: &str) -> bool {
-    std::env::var_os(signal_var).is_some() || std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
-}
-
-fn traces_enabled() -> bool {
-    endpoint_configured("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT") && !exporter_none("OTEL_TRACES_EXPORTER")
-}
-
-fn metrics_enabled() -> bool {
-    endpoint_configured("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") && !exporter_none("OTEL_METRICS_EXPORTER")
-}
-
-fn logs_enabled() -> bool {
-    endpoint_configured("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT") && !exporter_none("OTEL_LOGS_EXPORTER")
+fn sdk_disabled(env: &impl EnvLookup) -> bool {
+    env.get("OTEL_SDK_DISABLED")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
 }
 
 /// Sampling is left to `opentelemetry_sdk`'s own defaults: it already reads
 /// `OTEL_TRACES_SAMPLER`/`OTEL_TRACES_SAMPLER_ARG` and defaults to
 /// `parentbased_always_on`, so no explicit sampler call is needed here.
-fn build_tracer_provider(resource: Resource) -> Option<SdkTracerProvider> {
-    let exporter = SpanExporter::builder().with_http().build().ok()?;
-    Some(
-        SdkTracerProvider::builder()
-            .with_resource(resource)
-            .with_batch_exporter(exporter)
-            .build(),
-    )
+fn build_tracer_provider(resource: Resource) -> Result<SdkTracerProvider, ExporterBuildError> {
+    let exporter = SpanExporter::builder().with_http().build()?;
+    Ok(SdkTracerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
+        .build())
 }
 
-fn build_meter_provider(resource: Resource) -> Option<SdkMeterProvider> {
-    let exporter = MetricExporter::builder().with_http().build().ok()?;
+fn build_meter_provider(resource: Resource) -> Result<SdkMeterProvider, ExporterBuildError> {
+    let exporter = MetricExporter::builder().with_http().build()?;
     let reader = PeriodicReader::builder(exporter).build();
-    Some(
-        SdkMeterProvider::builder()
-            .with_resource(resource)
-            .with_reader(reader)
-            .build(),
-    )
+    Ok(SdkMeterProvider::builder()
+        .with_resource(resource)
+        .with_reader(reader)
+        .build())
 }
 
-fn build_logger_provider(resource: Resource) -> Option<SdkLoggerProvider> {
-    let exporter = LogExporter::builder().with_http().build().ok()?;
-    Some(
-        SdkLoggerProvider::builder()
-            .with_resource(resource)
-            .with_batch_exporter(exporter)
-            .build(),
-    )
+fn build_logger_provider(resource: Resource) -> Result<SdkLoggerProvider, ExporterBuildError> {
+    let exporter = LogExporter::builder().with_http().build()?;
+    Ok(SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(exporter)
+        .build())
 }
 
-fn log_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
+fn log_path(env: &impl EnvLookup) -> Option<PathBuf> {
+    let base = env
+        .get("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
+        .or_else(|| env.get("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
     Some(base.join("trg").join("trg.log"))
 }
 
 #[cfg(test)]
 mod tests {
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use std::sync::Arc;
+
+    use opentelemetry::trace::Status;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
+    use tracing::Level;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::Layer;
 
     use super::*;
+    use crate::telemetry::env::fixed;
+
+    const EXPORTING: &[(&str, &str)] = &[("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")];
+
+    fn in_memory_tracer() -> (SdkTracerProvider, InMemorySpanExporter) {
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_resource(resource::build(&CommandIdentity::new("mcp proxy"), &fixed(&[])))
+            .with_simple_exporter(exporter.clone())
+            .build();
+        (provider, exporter)
+    }
+
+    fn finished(provider: &SdkTracerProvider, exporter: &InMemorySpanExporter) -> Vec<SpanData> {
+        let _ = provider.force_flush();
+        exporter.get_finished_spans().expect("exporter not shut down")
+    }
+
+    /// Records the target of every event that reaches it.
+    #[derive(Clone, Default)]
+    struct EventTargets(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> Layer<S> for EventTargets {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            self.0
+                .lock()
+                .expect("not poisoned")
+                .push(event.metadata().target().to_string());
+        }
+    }
+
+    impl EventTargets {
+        fn seen(&self) -> Vec<String> {
+            self.0.lock().expect("not poisoned").clone()
+        }
+    }
 
     #[test]
     fn root_span_carries_process_attributes() {
-        let exporter = InMemorySpanExporter::default();
-        let provider = SdkTracerProvider::builder()
-            .with_resource(resource::build(&CommandIdentity::new("mcp proxy")))
-            .with_simple_exporter(exporter.clone())
-            .build();
-        let tracer = provider.tracer("trg");
-        let subscriber = tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+        let (provider, exporter) = in_memory_tracer();
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(provider.tracer("trg")));
         let _guard = tracing::subscriber::set_default(subscriber);
 
         let span = root_span();
         span.record("process.exit.code", 0);
         drop(span);
-        let _ = provider.force_flush();
 
-        let spans = exporter.get_finished_spans().expect("exporter not shut down");
+        let spans = finished(&provider, &exporter);
         let span = spans.iter().find(|s| s.name == "trg").expect("root span exported");
         let has_pid = span
             .attributes
@@ -306,30 +605,184 @@ mod tests {
 
     #[test]
     fn no_exporter_configured_without_otel_env_vars() {
-        // SAFETY: test-only; no other test in this process reads these vars
-        // concurrently.
-        unsafe {
-            std::env::remove_var("OTEL_SDK_DISABLED");
-            std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
-            std::env::remove_var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
-            std::env::remove_var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT");
-            std::env::remove_var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT");
-        }
-        assert!(!traces_enabled());
-        assert!(!metrics_enabled());
-        assert!(!logs_enabled());
+        let env = fixed(&[]);
+        assert!(!OtelSignal::Traces.enabled(&env));
+        assert!(!OtelSignal::Metrics.enabled(&env));
+        assert!(!OtelSignal::Logs.enabled(&env));
+    }
+
+    #[test]
+    fn generic_endpoint_enables_every_signal() {
+        let env = fixed(EXPORTING);
+        assert!(OtelSignal::Traces.enabled(&env));
+        assert!(OtelSignal::Metrics.enabled(&env));
+        assert!(OtelSignal::Logs.enabled(&env));
+    }
+
+    #[test]
+    fn signal_endpoint_enables_only_that_signal() {
+        let env = fixed(&[("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4318/v1/traces")]);
+        assert!(OtelSignal::Traces.enabled(&env));
+        assert!(!OtelSignal::Metrics.enabled(&env));
+        assert!(!OtelSignal::Logs.enabled(&env));
+    }
+
+    #[test]
+    fn exporter_none_disables_that_signal() {
+        let env = fixed(&[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"),
+            ("OTEL_METRICS_EXPORTER", "NONE"),
+        ]);
+        assert!(OtelSignal::Traces.enabled(&env));
+        assert!(!OtelSignal::Metrics.enabled(&env));
     }
 
     #[test]
     fn sdk_disabled_env_var_is_respected() {
-        // SAFETY: test-only; no other test in this process reads this var
-        // concurrently.
-        unsafe {
-            std::env::set_var("OTEL_SDK_DISABLED", "true");
-        }
-        assert!(sdk_disabled());
-        unsafe {
-            std::env::remove_var("OTEL_SDK_DISABLED");
-        }
+        assert!(sdk_disabled(&fixed(&[("OTEL_SDK_DISABLED", "TRUE")])));
+        assert!(!sdk_disabled(&fixed(&[("OTEL_SDK_DISABLED", "false")])));
+        assert!(!sdk_disabled(&fixed(&[])));
+    }
+
+    #[test]
+    fn log_path_prefers_xdg_cache_home() {
+        let env = fixed(&[("XDG_CACHE_HOME", "/cache"), ("HOME", "/home/someone")]);
+        assert_eq!(log_path(&env), Some(PathBuf::from("/cache/trg/trg.log")));
+        let env = fixed(&[("HOME", "/home/someone")]);
+        assert_eq!(log_path(&env), Some(PathBuf::from("/home/someone/.cache/trg/trg.log")));
+        assert_eq!(log_path(&fixed(&[])), None);
+    }
+
+    #[test]
+    fn a_quiet_rust_log_still_exports_spans() {
+        let (provider, exporter) = in_memory_tracer();
+        let file = EventTargets::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(file.clone().with_filter(file_filter(&fixed(&[("RUST_LOG", "warn")]))))
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(provider.tracer("trg"))
+                    .with_filter(trace_filter()),
+            );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info_span!(target: "trg::eval", "run eval").in_scope(|| {
+                tracing::info!(target: "trg::eval", "progress");
+            });
+            tracing::info_span!(target: "rmcp::service", "serve").in_scope(|| ());
+        });
+
+        let names: Vec<_> = finished(&provider, &exporter)
+            .into_iter()
+            .map(|span| span.name.to_string())
+            .collect();
+        assert_eq!(names, vec!["run eval".to_string()]);
+        assert!(file.seen().is_empty(), "RUST_LOG=warn keeps INFO out of the file log");
+    }
+
+    #[test]
+    fn log_bridge_takes_trg_info_and_dependency_warnings_only() {
+        let bridge = EventTargets::default();
+        let subscriber = tracing_subscriber::registry().with(bridge.clone().with_filter(log_filter()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "trg::mcp", "kept");
+            tracing::debug!(target: "trg::mcp", "dropped");
+            tracing::warn!(target: "rmcp::service", "kept");
+            tracing::info!(target: "rmcp::service", "dropped");
+            tracing::error!(target: "opentelemetry_sdk", "dropped");
+            tracing::error!(target: "opentelemetry_otlp::exporter", "dropped");
+            tracing::error!(target: "reqwest::connect", "dropped");
+            tracing::error!(target: "hyper_util::client", "dropped");
+            tracing::error!(target: "h2::proto", "dropped");
+        });
+        assert_eq!(bridge.seen(), vec!["trg::mcp".to_string(), "rmcp::service".to_string()]);
+    }
+
+    #[test]
+    fn an_invalid_rust_log_falls_back_to_the_default_file_filter() {
+        let file = EventTargets::default();
+        let subscriber = tracing_subscriber::registry().with(
+            file.clone()
+                .with_filter(file_filter(&fixed(&[("RUST_LOG", "trg=nonsense=level")]))),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::event!(target: "trg::exec", Level::DEBUG, "kept");
+        });
+        assert_eq!(file.seen(), vec!["trg::exec".to_string()]);
+    }
+
+    #[test]
+    fn an_interrupted_root_span_is_exported_with_the_signal() {
+        let (provider, exporter) = in_memory_tracer();
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(provider.tracer("trg")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let span = root_span();
+        mark_interrupted(&span.context(), TerminationSignal::Terminate);
+        let spans = finished(&provider, &exporter);
+        drop(span);
+
+        let root = spans
+            .iter()
+            .find(|s| s.name == "trg")
+            .expect("exported before the span closes");
+        let attribute = |key: &str| {
+            root.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.to_string())
+        };
+        assert_eq!(attribute(ERROR_TYPE), Some("SIGTERM".to_string()));
+        assert_eq!(attribute(PROCESS_EXIT_CODE), Some("143".to_string()));
+        assert!(matches!(root.status, Status::Error { .. }));
+        assert_eq!(
+            finished(&provider, &exporter).len(),
+            1,
+            "closing it later exports nothing more"
+        );
+    }
+
+    #[test]
+    fn grpc_requested_skips_the_signal_and_says_why() {
+        let env = fixed(&[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317"),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+        ]);
+        let mut problems = Vec::new();
+        let built = enabled_provider(OtelSignal::Traces, &env, &mut problems, || -> Result<(), _> {
+            panic!("a gRPC signal must not reach the HTTP exporter")
+        });
+        assert!(built.is_none());
+        assert!(matches!(
+            problems.as_slice(),
+            [ExportProblem::GrpcRequested {
+                signal: OtelSignal::Traces,
+                variable: "OTEL_EXPORTER_OTLP_PROTOCOL"
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_signal_protocol_overrides_the_generic_one() {
+        let env = fixed(&[
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+            ("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf"),
+            ("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "GRPC"),
+        ]);
+        assert_eq!(OtelSignal::Traces.grpc_requested_by(&env), None);
+        assert_eq!(
+            OtelSignal::Metrics.grpc_requested_by(&env),
+            Some("OTEL_EXPORTER_OTLP_PROTOCOL")
+        );
+        assert_eq!(
+            OtelSignal::Logs.grpc_requested_by(&env),
+            Some("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL")
+        );
+        assert_eq!(OtelSignal::Traces.grpc_requested_by(&fixed(&[])), None);
+    }
+
+    #[test]
+    fn interrupt_before_init_does_nothing() {
+        interrupt(TerminationSignal::Interrupt);
     }
 }

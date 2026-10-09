@@ -14,6 +14,8 @@ use opentelemetry::Context;
 use opentelemetry_sdk::propagation::{BaggagePropagator, TraceContextPropagator};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use super::env::EnvLookup;
+
 const CARRIER_KEYS: [&str; 3] = ["traceparent", "tracestate", "baggage"];
 
 fn propagator() -> TextMapCompositePropagator {
@@ -77,10 +79,10 @@ pub fn inject_tokio_command(command: &mut tokio::process::Command) {
 
 /// Extracts an inbound trace context from this process's own environment
 /// (`TRACEPARENT`/`TRACESTATE`/`BAGGAGE`), for use as the root span's parent.
-pub(super) fn extract_from_env() -> Context {
+pub(super) fn extract_from_env(env: &impl EnvLookup) -> Context {
     let mut carrier = MapCarrier(HashMap::new());
     for key in CARRIER_KEYS {
-        if let Ok(value) = std::env::var(key.to_uppercase()) {
+        if let Some(value) = env.get(&key.to_uppercase()) {
             carrier.0.insert(key.to_string(), value);
         }
     }
@@ -149,14 +151,17 @@ mod tests {
 
     #[test]
     fn extract_from_env_ignores_absent_vars() {
-        // SAFETY: test-only; no other test in this process reads these vars
-        // concurrently.
-        unsafe {
-            std::env::remove_var("TRACEPARENT");
-            std::env::remove_var("TRACESTATE");
-            std::env::remove_var("BAGGAGE");
-        }
-        let context = extract_from_env();
+        let context = extract_from_env(&crate::telemetry::env::fixed(&[]));
         assert!(!context.span().span_context().is_valid());
+    }
+
+    #[test]
+    fn extract_from_env_reads_an_inbound_traceparent() {
+        let env =
+            crate::telemetry::env::fixed(&[("TRACEPARENT", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")]);
+        let context = extract_from_env(&env);
+        let span_context = context.span().span_context().clone();
+        assert!(span_context.is_remote());
+        assert_eq!(span_context.trace_id().to_string(), "4bf92f3577b34da6a3ce929d0e0e4736");
     }
 }

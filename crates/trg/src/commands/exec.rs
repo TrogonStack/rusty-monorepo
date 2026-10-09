@@ -110,7 +110,10 @@ fn report_names(names: &[String], format: OutputFormat) -> i32 {
     0
 }
 
-pub fn run(loaded: LoadedExec, args: &ExecArgs, telemetry: &Telemetry) -> i32 {
+/// Resolves everything the launched command needs, including the trace
+/// context it continues, which is why this runs inside the root span. The
+/// `exec(2)` itself is left to [`PreparedLaunch::exec`], outside it.
+pub fn run(loaded: LoadedExec, args: &ExecArgs) -> PreparedLaunch {
     // The entry's own `unset` and a caller's `--unset` answer the same
     // question — which inherited vars must not reach the child — so both are
     // applied before anything is layered back on, in the order they arrived.
@@ -122,8 +125,7 @@ pub fn run(loaded: LoadedExec, args: &ExecArgs, telemetry: &Telemetry) -> i32 {
     let mut command_args = loaded.args;
     command_args.extend(args.extra_args.iter().cloned());
 
-    let message = launch(&loaded.command, &command_args, env, telemetry);
-    report_failure(&message, args.output_format)
+    PreparedLaunch::new(loaded.command, command_args, env, args.output_format)
 }
 
 /// The environment the launched command actually sees: everything this
@@ -151,39 +153,65 @@ fn merge_env(
     out
 }
 
-/// Replace this process with `command`, never returning on success.
+/// A command ready to replace this process, built while the root span was
+/// current so its environment carries that span as the parent.
 ///
-/// `env_clear` before `envs` is not optional: `merge_env`'s output already
-/// includes everything this process inherited that was worth keeping, so
-/// starting `Command` from its own default inherit-everything and layering
-/// `env` on top would mean an `unset` var reappeared underneath it instead of
-/// staying gone.
-///
-/// The trace context is injected into `env` directly rather than through
-/// `propagation::inject_std_command`, since the launched `Command` clears
-/// its environment and the carrier pairs must survive that. `telemetry` is
-/// flushed just before `exec(2)`: on success nothing runs afterward in this
-/// process to flush it instead.
-#[cfg(unix)]
-fn launch(command: &str, args: &[String], mut env: HashMap<String, String>, telemetry: &Telemetry) -> String {
-    use std::os::unix::process::CommandExt;
-
-    for (key, value) in propagation::carrier_pairs() {
-        env.insert(key, value);
-    }
-    telemetry.flush();
-
-    let err = std::process::Command::new(command)
-        .args(args)
-        .env_clear()
-        .envs(env)
-        .exec();
-    format!("could not start `{command}`: {err}")
+/// The replacement happens outside the root span on purpose: the span only
+/// exports once it ends, and nothing runs in this process after a
+/// successful `exec(2)` to end it.
+pub struct PreparedLaunch {
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    output_format: OutputFormat,
 }
 
-#[cfg(not(unix))]
-fn launch(_command: &str, _args: &[String], _env: HashMap<String, String>, _telemetry: &Telemetry) -> String {
-    "trg exec replaces this process with exec(2), which only exists on unix".to_string()
+impl PreparedLaunch {
+    /// The trace context is injected into `env` directly rather than
+    /// through `propagation::inject_std_command`, since the launched
+    /// `Command` clears its environment and the carrier pairs must survive
+    /// that.
+    fn new(command: String, args: Vec<String>, mut env: HashMap<String, String>, output_format: OutputFormat) -> Self {
+        env.extend(propagation::carrier_pairs());
+        Self {
+            command,
+            args,
+            env,
+            output_format,
+        }
+    }
+
+    /// Ends `telemetry`, then replaces this process with the command, never
+    /// returning on success. On failure, reports why and returns the exit
+    /// code to leave with.
+    pub fn exec(self, telemetry: Telemetry) -> i32 {
+        use std::os::unix::process::CommandExt;
+        self.exec_with(telemetry, |command| command.exec())
+    }
+
+    /// `env_clear` before `envs` is not optional: `merge_env`'s output
+    /// already includes everything this process inherited that was worth
+    /// keeping, so starting `Command` from its own default
+    /// inherit-everything and layering `env` on top would mean an `unset`
+    /// var reappeared underneath it instead of staying gone.
+    fn exec_with(
+        self,
+        telemetry: Telemetry,
+        replace: impl FnOnce(&mut std::process::Command) -> std::io::Error,
+    ) -> i32 {
+        telemetry.end_before_exec();
+        let message = self.replace_with(replace);
+        report_failure(&message, self.output_format)
+    }
+
+    /// Returns only when `replace` failed, with a message naming the command
+    /// and never its environment, which holds the entry's resolved secrets.
+    fn replace_with(&self, replace: impl FnOnce(&mut std::process::Command) -> std::io::Error) -> String {
+        let mut command = std::process::Command::new(&self.command);
+        command.args(&self.args).env_clear().envs(&self.env);
+        let err = replace(&mut command);
+        format!("could not start `{}`: {err}", self.command)
+    }
 }
 
 fn report_failure(message: &str, format: OutputFormat) -> i32 {
@@ -345,12 +373,16 @@ mod tests {
     #[test]
     fn a_launch_failure_names_the_command_and_never_the_env() {
         let env = map(&[("TOKEN", "super-secret-value")]);
-        let message = launch(
-            "trg-exec-test-command-that-does-not-exist",
-            &[],
+        let launch = PreparedLaunch::new(
+            "trg-exec-test-command-that-does-not-exist".to_string(),
+            Vec::new(),
             env,
-            &Telemetry::noop(),
+            OutputFormat::Text,
         );
+        let message = launch.replace_with(|command| {
+            use std::os::unix::process::CommandExt;
+            command.exec()
+        });
         assert!(
             message.contains("trg-exec-test-command-that-does-not-exist"),
             "{message}"
@@ -375,5 +407,45 @@ mod tests {
             report_names(&["alpha".to_string(), "zebra".to_string()], OutputFormat::Text),
             0
         );
+    }
+
+    #[test]
+    fn the_root_span_is_exported_before_exec_and_parents_the_launched_command() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::prelude::*;
+
+        let exporter = crate::telemetry::testing::KeptSpans::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(provider.tracer("trg")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let root = tracing::info_span!("trg");
+        let launch =
+            root.in_scope(|| PreparedLaunch::new("true".to_string(), Vec::new(), HashMap::new(), OutputFormat::Text));
+        let telemetry = Telemetry::exporting_traces_to(provider, root);
+
+        let code = launch.exec_with(telemetry, |command| {
+            let traceparent = command
+                .get_envs()
+                .find(|(key, _)| *key == "TRACEPARENT")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+                .expect("the launched command continues the trace");
+            let spans = exporter.spans();
+            let root = spans
+                .iter()
+                .find(|span| span.name == "trg")
+                .expect("root span exported before exec");
+            assert!(
+                traceparent.contains(&root.span_context.span_id().to_string()),
+                "{traceparent}"
+            );
+            std::io::Error::other("exec refused in test")
+        });
+        assert_eq!(code, 1);
     }
 }

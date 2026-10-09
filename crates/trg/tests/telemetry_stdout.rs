@@ -44,3 +44,32 @@ fn stdout_stays_clean_when_the_otlp_endpoint_is_unreachable() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
+
+#[test]
+fn an_exporter_that_fails_to_build_is_reported_to_the_file_log_only() {
+    let config_home = config_home_declaring_nothing();
+    let cache_home = tempfile::tempdir().unwrap();
+    let mut cmd = Command::cargo_bin("trg").unwrap();
+    cmd.env("XDG_CONFIG_HOME", config_home.path());
+    cmd.env("XDG_CACHE_HOME", cache_home.path());
+    for var in [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_SDK_DISABLED",
+        "OTEL_TRACES_EXPORTER",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd.env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://not a host/v1/traces");
+    cmd.args(["doctor", "--output-format", "json"]);
+    let out = cmd.output().unwrap();
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    serde_json::from_str::<serde_json::Value>(&stdout)
+        .unwrap_or_else(|e| panic!("stdout was not pure JSON: {e}\n{stdout}"));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains("OTLP exporter"), "{stderr}");
+
+    let log = fs::read_to_string(cache_home.path().join("trg/trg.log")).unwrap();
+    assert!(log.contains("OTLP exporter failed to build"), "{log}");
+    assert!(log.contains("traces"), "{log}");
+}

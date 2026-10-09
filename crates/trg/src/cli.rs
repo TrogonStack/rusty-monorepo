@@ -8,6 +8,7 @@
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
 use crate::commands::Commands;
+use crate::telemetry::CommandIdentity;
 
 #[derive(Parser)]
 #[command(name = "trg")]
@@ -24,30 +25,66 @@ impl Cli {
     /// eval run`, ...), for the `trg.command` resource attribute.
     ///
     /// `Cli::parse()` followed by a second `Cli::command().get_matches()`
-    /// would parse argv twice: harmless for a well-formed command line, but
-    /// it means `--help`/`--version`/a parse error gets evaluated and acted
-    /// on (printed, process exited) twice over, and the two parses could in
-    /// principle disagree. Parsing once into `ArgMatches`, reading the
-    /// subcommand path off it, then building `Cli` from those same matches
-    /// keeps exactly clap's error/help/exit behaviour while only ever
-    /// touching argv once.
-    pub fn parse_with_command_identity() -> (Self, String) {
-        let mut matches = Self::command().get_matches();
+    /// would parse argv twice: `--help`/`--version`/a parse error would be
+    /// acted on twice over, and the two parses could in principle disagree.
+    /// Parsing once into `ArgMatches`, reading the subcommand path off it,
+    /// then building `Cli` from those same matches keeps exactly
+    /// `Cli::parse()`'s error/help/exit behaviour while touching argv once.
+    pub fn parse_with_command_identity() -> (Self, CommandIdentity) {
+        Self::from_matches(Self::command().get_matches()).unwrap_or_else(|e| e.exit())
+    }
+
+    /// The half of [`Cli::parse_with_command_identity`] after argv is read.
+    /// Errors are formatted against the command the way `Cli::parse()`
+    /// formats them, so the message and usage printed are unchanged.
+    fn from_matches(mut matches: ArgMatches) -> Result<(Self, CommandIdentity), clap::Error> {
         let identity = Self::identity_from_matches(&matches);
-        let cli = Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|e| e.exit());
-        (cli, identity)
+        let cli = Self::from_arg_matches_mut(&mut matches).map_err(|e| e.format(&mut Self::command()))?;
+        Ok((cli, identity))
     }
 
     /// Walks `ArgMatches` rather than matching `Commands` by hand, so a new
     /// subcommand doesn't also need a case added here to be named correctly.
-    fn identity_from_matches(matches: &ArgMatches) -> String {
+    fn identity_from_matches(matches: &ArgMatches) -> CommandIdentity {
         let mut parts = Vec::new();
         let mut current = matches;
         while let Some((name, sub_matches)) = current.subcommand() {
-            parts.push(name.to_string());
+            parts.push(name);
             current = sub_matches;
         }
-        parts.join(" ")
+        CommandIdentity::new(parts.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod command_identity {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    fn identity_of(args: &[&str]) -> String {
+        let matches = Cli::command()
+            .try_get_matches_from(args)
+            .unwrap_or_else(|e| panic!("{args:?} should parse: {e}"));
+        let (_, identity) = Cli::from_matches(matches).expect("matches build a Cli");
+        identity.as_str().to_string()
+    }
+
+    #[test]
+    fn names_the_full_subcommand_path() {
+        assert_eq!(
+            identity_of(&["trg", "mcp", "proxy", "--server", "example"]),
+            "mcp proxy"
+        );
+        assert_eq!(identity_of(&["trg", "doctor"]), "doctor");
+    }
+
+    #[test]
+    fn excludes_positional_arguments_and_flags() {
+        assert_eq!(
+            identity_of(&["trg", "exec", "list", "--output-format", "json"]),
+            "exec list"
+        );
     }
 }
 

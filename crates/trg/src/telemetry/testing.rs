@@ -1,9 +1,12 @@
 //! Captures the spans a closure produces, for asserting span trees in unit
 //! tests without touching the process-global subscriber.
 
+use std::sync::{Arc, Mutex};
+
 use opentelemetry::trace::{SpanId, TracerProvider as _};
 use opentelemetry::Value;
-use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData, SpanExporter};
 use tracing_subscriber::prelude::*;
 
 pub(crate) struct CapturedTrace {
@@ -26,6 +29,24 @@ pub(crate) fn capture<T>(work: impl FnOnce() -> T) -> (T, CapturedTrace) {
         .get_finished_spans()
         .expect("in-memory exporter is never shut down here");
     (output, CapturedTrace { spans })
+}
+
+/// An exporter whose spans survive the provider shutting down, unlike
+/// [`InMemorySpanExporter`], for asserting on what a shutdown path exported.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct KeptSpans(Arc<Mutex<Vec<SpanData>>>);
+
+impl KeptSpans {
+    pub fn spans(&self) -> Vec<SpanData> {
+        self.0.lock().expect("not poisoned").clone()
+    }
+}
+
+impl SpanExporter for KeptSpans {
+    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        self.0.lock().expect("not poisoned").extend(batch);
+        Ok(())
+    }
 }
 
 impl CapturedTrace {
