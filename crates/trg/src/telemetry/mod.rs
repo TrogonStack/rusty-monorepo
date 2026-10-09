@@ -50,7 +50,7 @@ use tracing_subscriber::filter::Targets;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use crate::agentskills::exit_code::{ExitCode, TerminationSignal};
-use crate::agentskills::runner::group::with_termination_signals_blocked;
+use crate::agentskills::runner::group::{install_termination_handler, with_termination_signals_blocked};
 
 /// Bound on provider shutdown so a slow or unreachable collector can never
 /// hang `trg`'s exit.
@@ -432,6 +432,7 @@ fn init_from(command: CommandIdentity, env: &impl EnvLookup) -> Telemetry {
             providers: providers.clone(),
             root: span.context(),
         });
+        install_termination_handler();
     }
 
     Telemetry {

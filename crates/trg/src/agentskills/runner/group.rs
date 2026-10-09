@@ -151,12 +151,13 @@ fn track(pgid: i32) -> Option<usize> {
     })
 }
 
-/// Take every running harness down before `trg` itself goes.
+/// Take every running harness down before `trg` itself goes, and make sure a termination
+/// signal gives telemetry a chance to flush before it does.
 ///
 /// Without this, interrupting `trg` leaves the harnesses it started behind: they are in
 /// their own process groups precisely so that a timeout can reach their children, which
 /// also means the terminal's own interrupt no longer reaches them.
-fn install_termination_handler() {
+pub(crate) fn install_termination_handler() {
     INSTALL_HANDLER.call_once(|| {
         start_flush_watcher();
         for signal in TerminationSignal::ALL {
