@@ -409,15 +409,16 @@ impl AttemptRecord {
 
     fn blueprint(self, run: &RunRecord) -> Blueprint {
         let blueprint = Blueprint::new("attempt").with(KeyValue::new(EVAL_ATTEMPT, i64::from(run.runner_invocations)));
+        let outcome = match self {
+            Self::Answered => AttemptOutcome::Completed,
+            Self::RunnerError => AttemptOutcome::RunnerError,
+        };
+        let blueprint = blueprint
+            .with(KeyValue::new(EVAL_ATTEMPT_OUTCOME, outcome.as_str()))
+            .with(KeyValue::new(EVAL_ATTEMPT_TRANSIENT, outcome.is_transient()));
         match self {
             Self::Answered => blueprint,
-            Self::RunnerError => {
-                let outcome = AttemptOutcome::RunnerError;
-                blueprint
-                    .with(KeyValue::new(EVAL_ATTEMPT_OUTCOME, outcome.as_str()))
-                    .with(KeyValue::new(EVAL_ATTEMPT_TRANSIENT, outcome.is_transient()))
-                    .failed(outcome.as_str().to_string())
-            }
+            Self::RunnerError => blueprint.failed(outcome.as_str().to_string()),
         }
     }
 }
@@ -1045,6 +1046,19 @@ mod tests {
         let agent = trace.span("invoke_agent claude-code").unwrap();
         assert_eq!(attribute(agent, GEN_AI_PROVIDER_NAME), Some(Value::from("anthropic")));
         assert_eq!(attribute(agent, PROCESS_EXECUTABLE_NAME), Some(Value::from("claude")));
+    }
+
+    #[test]
+    fn an_answered_attempt_carries_the_same_outcome_attributes_a_live_pass_records() {
+        let (_, trace, _) = replayed(&bundle(), &options(TracedRuns::Skip));
+
+        let answered = child(&trace, run_span(&trace, "run-001"), "attempt").unwrap();
+        assert_eq!(
+            attribute(answered, EVAL_ATTEMPT_OUTCOME),
+            Some(Value::from("completed"))
+        );
+        assert_eq!(attribute(answered, EVAL_ATTEMPT_TRANSIENT), Some(Value::Bool(false)));
+        assert!(matches!(answered.status, Status::Unset));
     }
 
     #[test]
