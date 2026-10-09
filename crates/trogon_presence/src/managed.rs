@@ -698,6 +698,27 @@ impl GuardCell {
     }
 }
 
+struct CommitInFlight<'a>(Option<&'a GuardCell>);
+
+impl<'a> CommitInFlight<'a> {
+    fn arm(cell: &'a GuardCell) -> Self {
+        Self(Some(cell))
+    }
+
+    fn land(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CommitInFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(cell) = self.0 {
+            tracing::debug!("a guard write was abandoned in flight, the next job rebuilds the key guard");
+            cell.set_state(State::Rebuilding);
+        }
+    }
+}
+
 /// How long a refresh may hold the guard turn on a single publish before it abandons it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RefreshPublishBound(Duration);
@@ -1201,6 +1222,7 @@ impl KeyCoordinator {
         let record = self.guard_record(&self.cell.index(), GuardState::Ready, Expected::At(guard))?;
         let mut batch = AtomicBatch::new()?;
         let position = batch.push(record)?;
+        let in_flight = CommitInFlight::arm(&cell);
         let raced = tokio::select! {
             published = self.publish(batch) => Raced::Published(published),
             () = &mut preempted => Raced::Preempted,
@@ -1210,15 +1232,17 @@ impl KeyCoordinator {
             Raced::Published(published) => published?,
             Raced::Preempted => {
                 cell.abandon(guard);
+                in_flight.land();
                 tracing::debug!(key = %self.key, "a job preempted a guard refresh, the next guard write confirms first");
                 return Ok(());
             }
             Raced::Stalled => {
                 cell.abandon(guard);
+                in_flight.land();
                 return Err(ManagedError::OutcomeUnknown);
             }
         };
-        match outcome {
+        let settled = match outcome {
             BatchOutcome::Committed(ack) => self
                 .adopt(ack.revision_of(position)?, sent)
                 .map_err(ManagedError::SelfFenced),
@@ -1226,7 +1250,9 @@ impl KeyCoordinator {
                 Err(WriteError::Rejected(rejection).into())
             }
             BatchOutcome::Rejected(_) | BatchOutcome::Unknown => self.confirm_guard(sent).await,
-        }
+        };
+        in_flight.land();
+        settled
     }
 
     pub async fn relinquish(&mut self) -> Result<(), ManagedError> {
@@ -1360,18 +1386,19 @@ impl KeyCoordinator {
             )?;
             batch.push(data)?;
             sent = true;
+            let in_flight = CommitInFlight::arm(&cell);
             let (outcome, sent_at) = self.publish(batch).await?;
-            match self.settle(outcome, guard_position, sent_at).await? {
-                Committed::Done(guard_revision) => {
-                    self.cell.set_index(next);
-                    return Ok(WriteOutcome::Applied(receipt.write_receipt(
-                        revision_after(guard_revision, receipt_position, guard_position)?,
-                        &kv_key,
-                    )?));
-                }
-                Committed::Retry => {}
+            if let Committed::Done(guard_revision) = self.settle(outcome, guard_position, sent_at).await? {
+                self.cell.set_index(next);
+                in_flight.land();
+                return Ok(WriteOutcome::Applied(receipt.write_receipt(
+                    revision_after(guard_revision, receipt_position, guard_position)?,
+                    &kv_key,
+                )?));
             }
-            if let Some(resolved) = self.resolve_unknown(&receipt_key, &kv_key, &next, sent_at).await? {
+            let resolved = self.resolve_unknown(&receipt_key, &kv_key, &next, sent_at).await?;
+            in_flight.land();
+            if let Some(resolved) = resolved {
                 return Ok(resolved);
             }
             tracing::debug!(attempt, key = %self.key, "managed write did not commit, reading the leader again");
@@ -1634,6 +1661,7 @@ impl KeyCoordinator {
             )?;
         }
         let before = self.ready_guard()?;
+        let in_flight = CommitInFlight::arm(&cell);
         let (outcome, sent) = self.publish(batch).await?;
         let committed = match outcome {
             BatchOutcome::Unknown => match self.read_guard().await? {
@@ -1656,6 +1684,7 @@ impl KeyCoordinator {
             },
             outcome => matches!(self.settle(outcome, guard_position, sent).await?, Committed::Done(_)),
         };
+        in_flight.land();
         if !committed {
             return Ok(Committed::Retry);
         }
@@ -1770,9 +1799,11 @@ impl KeyCoordinator {
             for (kv_key, change) in &purges {
                 batch.push(change.record(&self.writer, kv_key)?)?;
             }
+            let in_flight = CommitInFlight::arm(&cell);
             let (outcome, sent) = self.publish(batch).await?;
             if let Committed::Done(_) = self.settle(outcome, guard_position, sent).await? {
                 self.cell.set_index(next);
+                in_flight.land();
                 return Ok(ReleaseOutcome {
                     entries,
                     replayed: false,
@@ -1785,6 +1816,7 @@ impl KeyCoordinator {
                         self.check_live()?;
                         self.confirm_guard(sent).await?;
                         self.cell.set_index(next);
+                        in_flight.land();
                         let mut outcome = self.replay_release(&intent, &receipt, false)?;
                         outcome.holder_freed = holder_freed;
                         Ok(outcome)
@@ -1792,6 +1824,7 @@ impl KeyCoordinator {
                     ReceiptRead::Absent(_) => Err(ManagedError::OutcomeUnknown),
                 };
             }
+            in_flight.land();
             tracing::debug!(attempt, key = %self.key, "managed release did not commit, reading the leader again");
         }
         Err(WriteError::Contended(CAS_MAX_ATTEMPTS).into())
