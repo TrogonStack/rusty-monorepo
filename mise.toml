@@ -5,6 +5,7 @@ rust = { version = "stable", components = ["rustfmt", "clippy"] }
 "cargo:cargo-dylint" = { version = "6.0.1", locked = true }
 "cargo:dylint-link" = { version = "6.0.1", locked = true }
 nats-server = ["2.14.7", "2.12.15"]
+node = "22"
 
 [tasks."schemas:generate"]
 description = "Generate JSON schemas from Rust structs (crates/trg/schemas/)"
@@ -127,6 +128,17 @@ for version in 2.12.15 2.14.7; do
   binary="$(mise exec "nats-server@${version}" -- which nats-server)"
   echo "authenticated presence tests against nats-server ${version}"
   TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence_auth -p trogon_presence_e2e
+done
+'''
+
+[tasks."presence:glue"]
+description = "Run the browser glue test against the js/trogon-presence package once per supported nats-server version"
+run = '''
+set -eu
+for version in 2.12.15 2.14.7; do
+  binary="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "browser glue test against nats-server ${version}"
+  TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence_e2e --test browser_glue
 done
 '''
 

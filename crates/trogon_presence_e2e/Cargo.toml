@@ -12,7 +12,7 @@ futures-util = { workspace = true }
 nkeys = { version = "0.4.5", features = ["xkeys"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 trogon_presence = { path = "../trogon_presence" }
 trogon_presence_auth = { path = "../trogon_presence_auth" }
 trogon_presence_hooks = { path = "../trogon_presence_hooks" }
