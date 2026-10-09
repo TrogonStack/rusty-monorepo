@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { PermissionViolationError } from "@nats-io/nats-core";
 
 import { RpcClient, rpcAddress } from "./support/rpc.js";
 import { createClient, nextCall, waitFor } from "./support/harness.js";
-import { JoinError } from "../index.js";
+import { JoinError, Topic } from "../index.js";
+import { Subjects } from "../src/subjects.js";
 
 test("a denied topic surfaces a join error without disturbing an already-joined topic", async (t) => {
   const rpc = new RpcClient(rpcAddress());
@@ -30,4 +32,24 @@ test("a denied topic surfaces a join error without disturbing an already-joined 
   ]);
   assert.equal(await stillAlive, "no resync", "the denied join did not force a resnapshot of the granted topic");
   assert.deepEqual(Object.keys(granted.state), ["denied-topic-bob"], "the granted topic's state survives untouched");
+});
+
+test("nats-server itself refuses a subscribe to a private topic's diff subject that is not in the grant", async (t) => {
+  const rpc = new RpcClient(rpcAddress());
+  t.after(() => rpc.close());
+  const client = createClient(rpc, { sub: "denied-topic-enforcement-bob" });
+  t.after(() => client.close());
+
+  // The app-level `JoinError` stand-in above proves the harness never even tries to use a
+  // denied topic. This proves the real security boundary from A20: the server's own
+  // permissions, not just the client's own bookkeeping, refuse the subject.
+  await client.join("rooms:enforcement-public-room");
+  const subjects = new Subjects();
+  const deniedSubject = subjects.diffSubject(new Topic("rooms:denied-enforcement-room"));
+
+  const sub = client.connection.subscribe(deniedSubject);
+  const violation = await sub.closed;
+  assert.ok(violation instanceof PermissionViolationError, "nats-server reports a permission violation");
+  assert.equal(violation.operation, "subscription");
+  assert.equal(violation.subject, deniedSubject);
 });
