@@ -408,9 +408,9 @@ struct MockServerInvocation {
 /// server with a cleared environment still hands it the trace it belongs to.
 ///
 /// Empty unless a trace exporter is active, which keeps the generated config byte for byte
-/// what it was before tracing existed. `OTEL_*` variables that end in `HEADERS` are never
-/// copied: they routinely carry exporter credentials, and the config lands in the report
-/// bundle.
+/// what it was before tracing existed. `OTEL_*` variables that end in `HEADERS` or
+/// `CLIENT_KEY` are never copied: they routinely carry exporter credentials, and the
+/// config lands in the report bundle.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MockServerEnv(BTreeMap<String, String>);
 
@@ -430,7 +430,7 @@ impl MockServerEnv {
         }
         let exporter = process_env
             .into_iter()
-            .filter(|(key, _)| key.starts_with("OTEL_") && !key.ends_with("HEADERS"));
+            .filter(|(key, _)| key.starts_with("OTEL_") && !key.ends_with("HEADERS") && !key.ends_with("CLIENT_KEY"));
         Self(exporter.chain(carrier).collect())
     }
 
@@ -1852,6 +1852,10 @@ mod tests {
                 (
                     "OTEL_EXPORTER_OTLP_TRACES_HEADERS".to_string(),
                     "api-key=secret".to_string(),
+                ),
+                (
+                    "OTEL_EXPORTER_OTLP_CLIENT_KEY".to_string(),
+                    "-----BEGIN PRIVATE KEY-----".to_string(),
                 ),
                 ("HOME".to_string(), "/home/someone".to_string()),
             ],
