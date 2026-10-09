@@ -20,8 +20,12 @@ defmodule TrogonPresence.Key do
   @spec new(binary()) :: {:ok, t()} | {:error, error()}
   def new(raw) when is_binary(raw) do
     cond do
-      byte_size(raw) == 0 -> {:error, :empty}
-      byte_size(raw) > @max_raw_bytes -> {:error, :too_long}
+      byte_size(raw) == 0 ->
+        {:error, :empty}
+
+      byte_size(raw) > @max_raw_bytes ->
+        {:error, :too_long}
+
       true ->
         token = Codec.encode(raw)
 

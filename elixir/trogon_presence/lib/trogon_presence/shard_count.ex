@@ -71,7 +71,7 @@ defmodule TrogonPresence.ShardCount do
     bytes
     |> :binary.bin_to_list()
     |> Enum.reduce(@fnv1a64_offset_basis, fn byte, hash ->
-      (bxor(hash, byte) * @fnv1a64_prime) &&& @u64_mask
+      bxor(hash, byte) * @fnv1a64_prime &&& @u64_mask
     end)
   end
 

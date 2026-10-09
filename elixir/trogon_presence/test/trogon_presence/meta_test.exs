@@ -15,7 +15,9 @@ defmodule TrogonPresence.MetaTest do
 
   test "rejects prototype keys at any depth" do
     assert Meta.new(%{"__proto__" => 1}) == {:error, {:reserved_key, "__proto__"}}
-    assert Meta.new(%{"nested" => %{"constructor" => 1}}) == {:error, {:reserved_key, "constructor"}}
+
+    assert Meta.new(%{"nested" => %{"constructor" => 1}}) ==
+             {:error, {:reserved_key, "constructor"}}
   end
 
   test "rejects a payload over the encoded size limit" do

@@ -17,7 +17,8 @@ defmodule TrogonPresence.Topic do
   @max_raw_bytes 256
   @max_escaped_bytes 768
 
-  @type error :: :empty | :too_long | :segment_too_long | :escaped_too_long | :segment_escaped_too_long
+  @type error ::
+          :empty | :too_long | :segment_too_long | :escaped_too_long | :segment_escaped_too_long
 
   @spec new(binary()) :: {:ok, t()} | {:error, error()}
   def new(raw) when is_binary(raw) do

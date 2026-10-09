@@ -22,7 +22,9 @@ defmodule TrogonPresence.OpaqueId do
       end
 
       @spec from_bytes(binary()) :: t()
-      def from_bytes(bytes) when is_binary(bytes) and byte_size(bytes) == unquote(TrogonPresence.OpaqueId.id_bytes()) do
+      def from_bytes(bytes)
+          when is_binary(bytes) and
+                 byte_size(bytes) == unquote(TrogonPresence.OpaqueId.id_bytes()) do
         %__MODULE__{bytes: bytes}
       end
 

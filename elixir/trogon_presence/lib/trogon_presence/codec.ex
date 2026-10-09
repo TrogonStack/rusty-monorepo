@@ -24,9 +24,11 @@ defmodule TrogonPresence.Codec do
 
   defp passthrough?(bytes), do: Enum.all?(:binary.bin_to_list(bytes), &passthrough_byte?/1)
 
-  defp passthrough_byte?(byte), do: byte in ?0..?9 or byte in ?A..?Z or byte in ?a..?z or byte in [?_, ?-]
+  defp passthrough_byte?(byte),
+    do: byte in ?0..?9 or byte in ?A..?Z or byte in ?a..?z or byte in [?_, ?-]
 
-  defp encode_byte(byte) when byte in ?0..?9 or byte in ?A..?Z or byte in ?a..?z or byte in [?_, ?-] do
+  defp encode_byte(byte)
+       when byte in ?0..?9 or byte in ?A..?Z or byte in ?a..?z or byte in [?_, ?-] do
     <<byte>>
   end
 
@@ -50,7 +52,8 @@ defmodule TrogonPresence.Codec do
 
   defp decode_tokens(<<>>, acc), do: {:ok, acc |> Enum.reverse() |> IO.iodata_to_binary()}
 
-  defp decode_tokens(<<@escape, hex1, hex2, rest::binary>>, acc) when hex1 in ?0..?9 or hex1 in ?A..?F do
+  defp decode_tokens(<<@escape, hex1, hex2, rest::binary>>, acc)
+       when hex1 in ?0..?9 or hex1 in ?A..?F do
     if hex2 in ?0..?9 or hex2 in ?A..?F do
       case Integer.parse(<<hex1, hex2>>, 16) do
         {byte, ""} -> decode_tokens(rest, [<<byte>> | acc])

@@ -97,6 +97,19 @@ mise run presence:cluster
 mise run presence:domain
 '''
 
+[tasks."presence:shim"]
+description = "Run the Elixir presence shim tests once per supported nats-server version"
+run = '''
+set -eu
+cargo build -p trogon_presence_service --bin trogon-presence
+bin="$(pwd)/target/debug/trogon-presence"
+for version in 2.12.15 2.14.7; do
+  server="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "presence shim tests against nats-server ${version}"
+  (cd elixir/trogon_presence && TROGON_PRESENCE_NATS_SERVER="$server" TROGON_PRESENCE_BIN="$bin" mise exec -- mix test)
+done
+'''
+
 [tasks."presence:cluster"]
 description = "Run the three-node cluster fault tests once per supported nats-server version"
 run = '''

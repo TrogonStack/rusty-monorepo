@@ -18,7 +18,8 @@ defmodule TrogonPresence.DecimalSequence do
       @type t :: %__MODULE__{value: non_neg_integer()}
 
       @spec from_integer(non_neg_integer()) :: t()
-      def from_integer(value), do: %__MODULE__{value: TrogonPresence.DecimalSequence.validate!(value)}
+      def from_integer(value),
+        do: %__MODULE__{value: TrogonPresence.DecimalSequence.validate!(value)}
 
       @spec parse(binary()) :: {:ok, t()} | :error
       def parse(text) do
@@ -28,11 +29,20 @@ defmodule TrogonPresence.DecimalSequence do
         end
       end
 
+      @spec parse!(binary()) :: t()
+      def parse!(text) do
+        case parse(text) do
+          {:ok, sequence} -> sequence
+          :error -> raise ArgumentError, "invalid #{inspect(__MODULE__)}: #{inspect(text)}"
+        end
+      end
+
       @spec to_string(t()) :: binary()
       def to_string(%__MODULE__{value: value}), do: Integer.to_string(value)
 
       @spec compare(t(), t()) :: :lt | :eq | :gt
-      def compare(%__MODULE__{value: a}, %__MODULE__{value: b}), do: TrogonPresence.DecimalSequence.compare(a, b)
+      def compare(%__MODULE__{value: a}, %__MODULE__{value: b}),
+        do: TrogonPresence.DecimalSequence.compare(a, b)
 
       defimpl String.Chars do
         def to_string(sequence), do: @for.to_string(sequence)

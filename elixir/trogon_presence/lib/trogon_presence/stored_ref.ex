@@ -40,6 +40,7 @@ defmodule TrogonPresence.StoredRef do
   end
 
   defimpl Jason.Encoder do
-    def encode(%TrogonPresence.StoredRef{value: value}, opts), do: Jason.Encode.string(value, opts)
+    def encode(%TrogonPresence.StoredRef{value: value}, opts),
+      do: Jason.Encode.string(value, opts)
   end
 end
