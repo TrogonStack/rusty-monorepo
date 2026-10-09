@@ -1,4 +1,4 @@
-use clap::Parser;
+use tracing::Instrument;
 
 use trg::cli::Cli;
 use trg::commands::ai::AiCommands;
@@ -86,44 +86,51 @@ async fn wire_exec(name: &str) -> Result<config::LoadedExec, Box<WireError>> {
 
 #[tokio::main]
 async fn main() {
-    trg::telemetry::init();
+    let (cli, command_identity) = Cli::parse_with_command_identity();
+    let identity = trg::telemetry::CommandIdentity::new(command_identity);
+    let telemetry = trg::telemetry::init(identity);
+    let root_span = telemetry.root_span();
 
-    let cli = Cli::parse();
     let fs = trg::fs::RealFS;
 
-    let exit_code = match cli.command {
-        Commands::Ai { command } => match command {
-            AiCommands::Skills { command } => command.handle(&fs),
-        },
-        Commands::Mcp { command } => match wire_mcp(&command).await {
-            Ok(ctx) => command.handle(&ctx).await,
-            Err(e) => report_startup_failure(&command, &e).await,
-        },
-        Commands::Secret { command } => match wire_secrets() {
-            Ok(registry) => command.handle(&registry).await,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-        },
-        Commands::Doctor(args) => match wire_secrets() {
-            Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-        },
-        Commands::Exec { command } => match command {
-            ExecCommands::Run(args) => match wire_exec(&args.name).await {
-                Ok(loaded) => trg::commands::exec::run(loaded, &args),
+    let exit_code = async {
+        match cli.command {
+            Commands::Ai { command } => match command {
+                AiCommands::Skills { command } => command.handle(&fs),
+            },
+            Commands::Mcp { command } => match wire_mcp(&command).await {
+                Ok(ctx) => command.handle(&ctx).await,
+                Err(e) => report_startup_failure(&command, &e).await,
+            },
+            Commands::Secret { command } => match wire_secrets() {
+                Ok(registry) => command.handle(&registry).await,
                 Err(e) => {
                     eprintln!("{e}");
                     1
                 }
             },
-            ExecCommands::List(args) => trg::commands::exec::list(&args),
-        },
-    };
+            Commands::Doctor(args) => match wire_secrets() {
+                Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            },
+            Commands::Exec { command } => match command {
+                ExecCommands::Run(args) => match wire_exec(&args.name).await {
+                    Ok(loaded) => trg::commands::exec::run(loaded, &args, &telemetry),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                },
+                ExecCommands::List(args) => trg::commands::exec::list(&args),
+            },
+        }
+    }
+    .instrument(root_span)
+    .await;
 
+    telemetry.shutdown(exit_code);
     std::process::exit(exit_code);
 }

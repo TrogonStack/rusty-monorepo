@@ -1401,7 +1401,7 @@ mod fake_runner {
 
         let transient = state
             .transient_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
             .is_ok();
         if state.log_mock_calls.load(Ordering::SeqCst) {
             use std::io::Write;

@@ -24,6 +24,7 @@ use serde_json::json;
 
 use crate::config::{self, LoadedExec};
 use crate::output::{print_json, OutputFormat};
+use crate::telemetry::{propagation, Telemetry};
 
 #[derive(Subcommand)]
 pub enum ExecCommands {
@@ -109,7 +110,7 @@ fn report_names(names: &[String], format: OutputFormat) -> i32 {
     0
 }
 
-pub fn run(loaded: LoadedExec, args: &ExecArgs) -> i32 {
+pub fn run(loaded: LoadedExec, args: &ExecArgs, telemetry: &Telemetry) -> i32 {
     // The entry's own `unset` and a caller's `--unset` answer the same
     // question — which inherited vars must not reach the child — so both are
     // applied before anything is layered back on, in the order they arrived.
@@ -121,7 +122,7 @@ pub fn run(loaded: LoadedExec, args: &ExecArgs) -> i32 {
     let mut command_args = loaded.args;
     command_args.extend(args.extra_args.iter().cloned());
 
-    let message = launch(&loaded.command, &command_args, env);
+    let message = launch(&loaded.command, &command_args, env, telemetry);
     report_failure(&message, args.output_format)
 }
 
@@ -157,9 +158,20 @@ fn merge_env(
 /// starting `Command` from its own default inherit-everything and layering
 /// `env` on top would mean an `unset` var reappeared underneath it instead of
 /// staying gone.
+///
+/// The trace context is injected into `env` directly rather than through
+/// `propagation::inject_std_command`, since the launched `Command` clears
+/// its environment and the carrier pairs must survive that. `telemetry` is
+/// flushed just before `exec(2)`: on success nothing runs afterward in this
+/// process to flush it instead.
 #[cfg(unix)]
-fn launch(command: &str, args: &[String], env: HashMap<String, String>) -> String {
+fn launch(command: &str, args: &[String], mut env: HashMap<String, String>, telemetry: &Telemetry) -> String {
     use std::os::unix::process::CommandExt;
+
+    for (key, value) in propagation::carrier_pairs() {
+        env.insert(key, value);
+    }
+    telemetry.flush();
 
     let err = std::process::Command::new(command)
         .args(args)
@@ -170,7 +182,7 @@ fn launch(command: &str, args: &[String], env: HashMap<String, String>) -> Strin
 }
 
 #[cfg(not(unix))]
-fn launch(_command: &str, _args: &[String], _env: HashMap<String, String>) -> String {
+fn launch(_command: &str, _args: &[String], _env: HashMap<String, String>, _telemetry: &Telemetry) -> String {
     "trg exec replaces this process with exec(2), which only exists on unix".to_string()
 }
 
@@ -333,7 +345,12 @@ mod tests {
     #[test]
     fn a_launch_failure_names_the_command_and_never_the_env() {
         let env = map(&[("TOKEN", "super-secret-value")]);
-        let message = launch("trg-exec-test-command-that-does-not-exist", &[], env);
+        let message = launch(
+            "trg-exec-test-command-that-does-not-exist",
+            &[],
+            env,
+            &Telemetry::noop(),
+        );
         assert!(
             message.contains("trg-exec-test-command-that-does-not-exist"),
             "{message}"

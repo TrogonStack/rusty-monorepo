@@ -5,7 +5,7 @@
 //! invocation printed in the docs is checked against it, which is only
 //! meaningful if there is one definition rather than two.
 
-use clap::Parser;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
 use crate::commands::Commands;
 
@@ -16,6 +16,39 @@ use crate::commands::Commands;
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+impl Cli {
+    /// Parses the real process arguments once, returning both the typed
+    /// `Cli` and the subcommand path it resolved to (`mcp proxy`, `ai skills
+    /// eval run`, ...), for the `trg.command` resource attribute.
+    ///
+    /// `Cli::parse()` followed by a second `Cli::command().get_matches()`
+    /// would parse argv twice: harmless for a well-formed command line, but
+    /// it means `--help`/`--version`/a parse error gets evaluated and acted
+    /// on (printed, process exited) twice over, and the two parses could in
+    /// principle disagree. Parsing once into `ArgMatches`, reading the
+    /// subcommand path off it, then building `Cli` from those same matches
+    /// keeps exactly clap's error/help/exit behaviour while only ever
+    /// touching argv once.
+    pub fn parse_with_command_identity() -> (Self, String) {
+        let mut matches = Self::command().get_matches();
+        let identity = Self::identity_from_matches(&matches);
+        let cli = Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|e| e.exit());
+        (cli, identity)
+    }
+
+    /// Walks `ArgMatches` rather than matching `Commands` by hand, so a new
+    /// subcommand doesn't also need a case added here to be named correctly.
+    fn identity_from_matches(matches: &ArgMatches) -> String {
+        let mut parts = Vec::new();
+        let mut current = matches;
+        while let Some((name, sub_matches)) = current.subcommand() {
+            parts.push(name.to_string());
+            current = sub_matches;
+        }
+        parts.join(" ")
+    }
 }
 
 /// Every `trg` invocation printed in the docs, handed to the real parser.

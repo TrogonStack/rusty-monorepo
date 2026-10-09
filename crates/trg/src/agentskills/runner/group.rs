@@ -169,6 +169,11 @@ fn handle_unless_ignored(signal: i32) {
     }
 }
 
+// Deliberately does not flush telemetry: this runs as a raw `sa_sigaction`
+// handler in an async-signal-context, where taking a lock or doing network
+// IO (both of which `Telemetry::flush` does) is undefined behaviour, not
+// merely risky. A span open when the signal lands is simply lost; there is
+// no async-signal-safe way to export it from here.
 extern "C" fn on_termination(signal: i32) {
     for slot in TRACKED_GROUPS.iter() {
         let pgid = slot.load(Ordering::SeqCst);
