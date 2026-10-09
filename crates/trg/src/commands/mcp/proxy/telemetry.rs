@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use http::{HeaderName, HeaderValue};
 use opentelemetry::{
-    metrics::Histogram,
+    metrics::{Histogram, Meter},
     propagation::{Extractor, Injector, TextMapCompositePropagator, TextMapPropagator},
     trace::TraceContextExt,
     Context, KeyValue,
@@ -248,6 +248,7 @@ pub(super) struct RequestSpan {
     span: Span,
     method: String,
     target: Option<Target>,
+    opened: Instant,
 }
 
 impl RequestSpan {
@@ -318,7 +319,12 @@ impl RequestSpan {
             span.add_link(parent.context().span().span_context().clone());
         }
 
-        Self { span, method, target }
+        Self {
+            span,
+            method,
+            target,
+            opened: Instant::now(),
+        }
     }
 
     /// Points `_meta.traceparent` at this span. Leaves the request untouched
@@ -343,9 +349,18 @@ impl RequestSpan {
         code
     }
 
-    /// Records a refusal the proxy answered itself.
-    pub(super) fn refuse(self, error: &ErrorData) {
-        self.fail_rpc(error);
+    /// Records a refusal the proxy answered itself, on the span and on the
+    /// operation duration a forwarded request would have fed.
+    pub(super) fn refuse(self, error: &ErrorData, connection: &Connection, operation: &Histogram<f64>) {
+        let error_type = self.fail_rpc(error);
+        self.record_duration(operation, connection, Some(&error_type));
+    }
+
+    fn record_duration(&self, operation: &Histogram<f64>, connection: &Connection, error_type: Option<&str>) {
+        operation.record(
+            self.opened.elapsed().as_secs_f64(),
+            &self.metric_attributes(connection, error_type),
+        );
     }
 
     fn metric_attributes(&self, connection: &Connection, error_type: Option<&str>) -> Vec<KeyValue> {
@@ -376,26 +391,27 @@ fn to_json(value: &impl Serialize) -> Option<String> {
     serde_json::to_string(value).ok()
 }
 
-struct Operation {
-    request: RequestSpan,
-    started: Instant,
-}
-
 struct ProxyMetrics {
     operation: Histogram<f64>,
     session: Histogram<f64>,
+}
+
+/// `mcp.client.operation.duration`, which every request the proxy answers
+/// feeds, forwarded or refused.
+pub(super) fn operation_duration(meter: &Meter) -> Histogram<f64> {
+    meter
+        .f64_histogram(MCP_CLIENT_OPERATION_DURATION)
+        .with_unit("s")
+        .with_description("Duration of an MCP request as observed by the sender of the request.")
+        .with_boundaries(DURATION_BUCKETS.to_vec())
+        .build()
 }
 
 impl ProxyMetrics {
     fn new() -> Self {
         let meter = opentelemetry::global::meter("trg");
         Self {
-            operation: meter
-                .f64_histogram(MCP_CLIENT_OPERATION_DURATION)
-                .with_unit("s")
-                .with_description("Duration of an MCP request as observed by the sender of the request.")
-                .with_boundaries(DURATION_BUCKETS.to_vec())
-                .build(),
+            operation: operation_duration(&meter),
             session: meter
                 .f64_histogram(MCP_CLIENT_SESSION_DURATION)
                 .with_unit("s")
@@ -412,7 +428,7 @@ pub(super) struct Session {
     span: Span,
     started: Instant,
     connection: Connection,
-    in_flight: HashMap<RequestId, Operation>,
+    in_flight: HashMap<RequestId, RequestSpan>,
     content: ContentCapture,
     metrics: ProxyMetrics,
 }
@@ -473,13 +489,7 @@ impl Session {
                     self.content,
                 );
                 operation.inject(&mut request.request);
-                self.in_flight.insert(
-                    request.id.clone(),
-                    Operation {
-                        request: operation,
-                        started: Instant::now(),
-                    },
-                );
+                self.in_flight.insert(request.id.clone(), operation);
             }
             JsonRpcMessage::Notification(notification) => {
                 self.notification(&notification.notification, Direction::HostToRemote);
@@ -495,14 +505,14 @@ impl Session {
                 let Some(operation) = self.in_flight.remove(&response.id) else {
                     return;
                 };
-                let error_type = self.succeeded(&operation.request, &response.result);
+                let error_type = self.succeeded(&operation, &response.result);
                 self.close(operation, error_type.as_deref());
             }
             JsonRpcMessage::Error(error) => {
                 let Some(operation) = error.id.as_ref().and_then(|id| self.in_flight.remove(id)) else {
                     return;
                 };
-                let error_type = operation.request.fail_rpc(&error.error);
+                let error_type = operation.fail_rpc(&error.error);
                 self.close(operation, Some(&error_type));
             }
             JsonRpcMessage::Notification(notification) => {
@@ -539,14 +549,11 @@ impl Session {
         None
     }
 
-    fn close(&self, operation: Operation, error_type: Option<&str>) {
+    fn close(&self, operation: RequestSpan, error_type: Option<&str>) {
         if let Some(id) = self.connection.session_id.get() {
-            operation.request.span.record(MCP_SESSION_ID, id.as_str());
+            operation.span.record(MCP_SESSION_ID, id.as_str());
         }
-        self.metrics.operation.record(
-            operation.started.elapsed().as_secs_f64(),
-            &operation.request.metric_attributes(&self.connection, error_type),
-        );
+        operation.record_duration(&self.metrics.operation, &self.connection, error_type);
     }
 
     fn notification(&self, notification: &impl Serialize, direction: Direction) {
@@ -570,7 +577,7 @@ impl Session {
             SessionEnd::Failed(error_type) => error_type,
         };
         for (_, operation) in std::mem::take(&mut self.in_flight) {
-            operation.request.fail(abandoned);
+            operation.fail(abandoned);
             self.close(operation, Some(abandoned));
         }
 
@@ -740,7 +747,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::telemetry::testing::{capture, CapturedTrace};
+    use crate::telemetry::testing::{capture, capture_metrics, CapturedTrace};
 
     const HOST_TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
     const HOST_SPAN: &str = "b7ad6b7169203331";
@@ -1080,6 +1087,42 @@ mod tests {
             Some("remote_closed")
         );
         assert!(failed(&trace, "mcp session"));
+    }
+
+    #[test]
+    fn a_refused_request_records_its_operation_duration_with_the_error_code() {
+        let JsonRpcMessage::Request(request) = host(tool_call(3)) else {
+            panic!("a tools/call is a request");
+        };
+        let error = ErrorData::new(rmcp::model::ErrorCode::INTERNAL_ERROR, "no backend", None);
+
+        let (((), trace), points) = capture_metrics(|meter| {
+            capture(|| {
+                let connection = Connection::default();
+                RequestSpan::open(
+                    &request.request,
+                    &request.id,
+                    &Span::current(),
+                    &connection,
+                    ContentCapture::NoContent,
+                )
+                .refuse(&error, &connection, &operation_duration(meter));
+            })
+        });
+
+        let code = error.code.0.to_string();
+        assert_eq!(
+            string(&trace, "tools/call get_weather", ERROR_TYPE).as_deref(),
+            Some(code.as_str())
+        );
+        let point = points
+            .iter()
+            .find(|point| point.name == MCP_CLIENT_OPERATION_DURATION)
+            .expect("a refused request still has a duration");
+        assert_eq!(point.count, 1);
+        assert_eq!(point.attribute(ERROR_TYPE).as_deref(), Some(code.as_str()));
+        assert_eq!(point.attribute(MCP_METHOD_NAME).as_deref(), Some("tools/call"));
+        assert_eq!(point.attribute(GEN_AI_TOOL_NAME).as_deref(), Some("get_weather"));
     }
 
     #[test]

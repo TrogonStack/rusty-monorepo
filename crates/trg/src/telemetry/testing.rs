@@ -3,9 +3,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use opentelemetry::metrics::{Meter, MeterProvider as _};
 use opentelemetry::trace::{SpanId, TracerProvider as _};
-use opentelemetry::Value;
+use opentelemetry::{KeyValue, Value};
 use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData, SpanExporter};
 use tracing_subscriber::prelude::*;
 
@@ -39,6 +42,53 @@ pub(crate) fn capture<T>(work: impl FnOnce() -> T) -> (T, CapturedTrace) {
         .get_finished_spans()
         .expect("in-memory exporter is never shut down here");
     (output, CapturedTrace { spans })
+}
+
+/// One histogram series a [`capture_metrics`] run exported.
+#[derive(Debug, Clone)]
+pub(crate) struct HistogramPoint {
+    pub name: String,
+    pub attributes: Vec<KeyValue>,
+    pub count: u64,
+}
+
+impl HistogramPoint {
+    pub fn attribute(&self, key: &str) -> Option<String> {
+        self.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    }
+}
+
+/// Runs `work` against a meter exporting to memory, returning every `f64`
+/// histogram series it recorded.
+pub(crate) fn capture_metrics<T>(work: impl FnOnce(&Meter) -> T) -> (T, Vec<HistogramPoint>) {
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter.clone()).build())
+        .build();
+    let output = work(&provider.meter("trg"));
+    provider.force_flush().expect("in-memory metrics flush");
+    let points = exporter
+        .get_finished_metrics()
+        .expect("in-memory exporter is never shut down here")
+        .iter()
+        .flat_map(|resource| resource.scope_metrics())
+        .flat_map(|scope| scope.metrics())
+        .flat_map(|metric| match metric.data() {
+            AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                .data_points()
+                .map(|point| HistogramPoint {
+                    name: metric.name().to_string(),
+                    attributes: point.attributes().cloned().collect(),
+                    count: point.count(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    (output, points)
 }
 
 /// An exporter whose spans survive the provider shutting down, unlike
