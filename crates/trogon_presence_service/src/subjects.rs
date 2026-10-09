@@ -12,6 +12,8 @@ pub const QUEUE_GROUP: &str = "trogon-presence";
 pub const ANY_SHARD: &str = "_";
 pub const SNAPSHOT_REPLY_OP: &str = "snapshot-reply";
 pub const INTERNAL_WRITE: &str = "internal.write";
+pub const INTERNAL_REPLY: &str = "internal.reply";
+pub const INTERNAL: &str = "internal";
 pub const HEARTBEAT_MANY_OP: &str = "heartbeat-many";
 pub const DIFF_OP: &str = "diff";
 pub const EPOCH_OP: &str = "epoch";
@@ -223,8 +225,32 @@ pub fn epoch_any_filter() -> String {
     format!("{DOMAIN}.{EPOCH_OP}.{ANY_TOKEN}")
 }
 
-pub fn internal_write_any_filter() -> String {
-    format!("{DOMAIN}.{INTERNAL_WRITE}.{ANY_TAIL}")
+/// The reply subject of one request the service sends to itself. It lives under the service's own
+/// namespace so a runtime user granted only `presence.v1.>` can answer it, unlike the client's
+/// default `_INBOX` mux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InternalReplyInbox(String);
+
+impl InternalReplyInbox {
+    pub fn generate() -> Result<Self, getrandom::Error> {
+        let high = getrandom::u64()?;
+        let low = getrandom::u64()?;
+        Ok(Self(format!("{DOMAIN}.{INTERNAL_REPLY}.{high:016x}{low:016x}")))
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for InternalReplyInbox {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+pub fn internal_any_filter() -> String {
+    format!("{DOMAIN}.{INTERNAL}.{ANY_TAIL}")
 }
 
 pub fn snapshot_reply_any_filter() -> String {
@@ -447,6 +473,21 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn internal_reply_inboxes_are_distinct_and_inside_the_internal_namespace() -> Result<(), getrandom::Error> {
+        let first = InternalReplyInbox::generate()?.into_string();
+        let second = InternalReplyInbox::generate()?.into_string();
+        assert_ne!(first, second);
+        let namespace = internal_any_filter();
+        let prefix = namespace.trim_end_matches('>');
+        for inbox in [&first, &second] {
+            assert!(inbox.starts_with(&format!("{DOMAIN}.{INTERNAL_REPLY}.")), "{inbox}");
+            assert!(inbox.starts_with(prefix), "{inbox} is outside {namespace}");
+            assert_eq!(inbox.split('.').count(), DOMAIN.split('.').count() + 3, "{inbox}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn builds_and_parses_read_subjects() -> TestResult {

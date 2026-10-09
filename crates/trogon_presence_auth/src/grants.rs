@@ -6,7 +6,7 @@ use serde::Serialize;
 use trogon_presence::{ConnectionId, ShardCount, Topic, TopicError, ViewShard};
 use trogon_presence_service::subjects::{
     diff_any_filter, diff_prefix_filter, diff_subject, epoch_any_filter, epoch_subject, heartbeat_many_filter,
-    internal_write_any_filter, snapshot_grant, snapshot_prefix_grant, snapshot_reply_any_filter, HolderOp, ReadOp,
+    internal_any_filter, snapshot_grant, snapshot_prefix_grant, snapshot_reply_any_filter, HolderOp, ReadOp,
     SnapshotReplySubject, WriteOp,
 };
 use trogon_presence_service::ReplyInbox;
@@ -212,7 +212,7 @@ impl GrantPolicy {
                 diff_any_filter(),
                 epoch_any_filter(),
                 snapshot_reply_any_filter(),
-                internal_write_any_filter(),
+                internal_any_filter(),
                 heartbeat_many_filter(),
                 PLAIN_INBOX_DENY.to_owned(),
             ])
@@ -221,7 +221,7 @@ impl GrantPolicy {
             .iter()
             .map(|subject| (*subject).to_owned())
             .chain([
-                internal_write_any_filter(),
+                internal_any_filter(),
                 heartbeat_many_filter(),
                 PLAIN_INBOX_DENY.to_owned(),
             ])
@@ -237,6 +237,7 @@ impl GrantPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trogon_presence_service::subjects::InternalReplyInbox;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -299,13 +300,51 @@ mod tests {
             "presence.v1.diff.>",
             "presence.v1.epoch.*",
             "presence.v1.snapshot-reply.>",
-            "presence.v1.internal.write.>",
+            "presence.v1.internal.>",
             "presence.v1.heartbeat-many.*",
             "$JS.>",
         ] {
             assert!(deny.contains(&subject.to_owned()), "{subject}");
         }
         assert!(!deny.iter().any(|s| s.starts_with("presence.v1.snapshot.")));
+        Ok(())
+    }
+
+    fn covers(pattern: &str, subject: &str) -> bool {
+        let mut pattern = pattern.split('.');
+        let mut subject = subject.split('.');
+        loop {
+            match (pattern.next(), subject.next()) {
+                (Some(">"), Some(_)) | (None, None) => return true,
+                (Some(want), Some(got)) if want == "*" || want == got => {}
+                _ => return false,
+            }
+        }
+    }
+
+    #[test]
+    fn a_browser_can_neither_publish_nor_subscribe_to_internal_replies() -> TestResult {
+        let policy = GrantPolicy {
+            public_prefixes: vec!["room".parse()?],
+            ..GrantPolicy::default()
+        };
+        let (_, plan) = plan(&policy, &sub("ana")?, &topics(&["room:lobby", "room", "dm:1"])?)?;
+        let reply = InternalReplyInbox::generate()
+            .map_err(|err| err.to_string())?
+            .into_string();
+        for (direction, rules) in [
+            ("publish", &plan.permissions.publish),
+            ("subscribe", &plan.permissions.subscribe),
+        ] {
+            assert!(
+                rules.deny.iter().any(|pattern| covers(pattern, &reply)),
+                "{direction} deny misses {reply}"
+            );
+            assert!(
+                !rules.allow.iter().any(|pattern| covers(pattern, &reply)),
+                "{direction} allow covers {reply}"
+            );
+        }
         Ok(())
     }
 

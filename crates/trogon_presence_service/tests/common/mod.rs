@@ -93,11 +93,57 @@ pub async fn wait_for_writers(handle: &ServiceHandle, expected: usize, within: D
 pub struct NatsServer {
     child: Child,
     url: String,
+    access: Access,
+    port: u16,
     _store: TempDir,
 }
 
+/// Who may connect to a test server and what the service's runtime user may publish.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub enum Access {
+    Open,
+    /// The runtime user may publish anywhere except the plain `_INBOX.>` space, mirroring the
+    /// least-privilege runtime grant a deployment hands the service. Callers connect as a second,
+    /// unrestricted user.
+    RuntimeDeniedPlainInbox,
+}
+
+const RUNTIME_USER: &str = "runtime";
+const CALLER_USER: &str = "caller";
+
+impl Access {
+    fn config(self, port: u16, store: &Path) -> Option<String> {
+        match self {
+            Self::Open => None,
+            Self::RuntimeDeniedPlainInbox => Some(format!(
+                "listen: \"127.0.0.1:{port}\"\njetstream {{\n  store_dir: \"{store}\"\n}}\nauthorization {{\n  users: [\n    {{ user: {RUNTIME_USER}, password: {RUNTIME_USER}, permissions: {{ publish: {{ allow: [\">\"], deny: [\"_INBOX.>\"] }}, subscribe: {{ allow: [\">\"] }} }} }}\n    {{ user: {CALLER_USER}, password: {CALLER_USER} }}\n  ]\n}}\n",
+                store = store.display(),
+            )),
+        }
+    }
+
+    async fn connect(self, port: u16, user: &str) -> Result<async_nats::Client, async_nats::ConnectError> {
+        let address = format!("nats://127.0.0.1:{port}");
+        match self {
+            Self::Open => async_nats::connect(address).await,
+            Self::RuntimeDeniedPlainInbox => {
+                async_nats::ConnectOptions::with_user_and_password(user.to_owned(), user.to_owned())
+                    .connect(address)
+                    .await
+            }
+        }
+    }
+}
+
 impl NatsServer {
+    #[allow(dead_code)]
     pub async fn start() -> Option<Self> {
+        Self::start_with(Access::Open).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn start_with(access: Access) -> Option<Self> {
         let binary = match std::env::var_os(SERVER_BINARY_ENV) {
             Some(pinned) => Binary::Pinned(PathBuf::from(pinned)),
             None => match locate_binary() {
@@ -112,7 +158,7 @@ impl NatsServer {
         };
         let mut last_failure = String::new();
         for _ in 0..START_ATTEMPTS {
-            match Self::launch(binary.path()).await {
+            match Self::launch(binary.path(), access).await {
                 Ok(server) => return Some(server),
                 Err(Launch::Retry(reason)) => last_failure = reason,
                 Err(Launch::Fatal(reason)) => {
@@ -125,15 +171,26 @@ impl NatsServer {
         None
     }
 
-    async fn launch(binary: &Path) -> Result<Self, Launch> {
+    async fn launch(binary: &Path, access: Access) -> Result<Self, Launch> {
         let store = tempfile::tempdir().map_err(|err| Launch::Fatal(format!("no store dir: {err}")))?;
         let port = TcpListener::bind("127.0.0.1:0")
             .and_then(|listener| listener.local_addr())
             .map_err(|err| Launch::Fatal(format!("no free port: {err}")))?
             .port();
-        let child = Command::new(binary)
-            .args(["-js", "-a", "127.0.0.1", "-p", &port.to_string(), "-sd"])
-            .arg(store.path())
+        let mut command = Command::new(binary);
+        match access.config(port, store.path()) {
+            Some(config) => {
+                let path = store.path().join("server.conf");
+                std::fs::write(&path, config).map_err(|err| Launch::Fatal(format!("no server config: {err}")))?;
+                command.arg("-c").arg(path);
+            }
+            None => {
+                command
+                    .args(["-js", "-a", "127.0.0.1", "-p", &port.to_string(), "-sd"])
+                    .arg(store.path());
+            }
+        }
+        let child = command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -141,6 +198,8 @@ impl NatsServer {
         let mut server = Self {
             child,
             url: format!("nats://127.0.0.1:{port}"),
+            access,
+            port,
             _store: store,
         };
         for _ in 0..READY_ATTEMPTS {
@@ -149,7 +208,7 @@ impl NatsServer {
                     "nats-server exited early on port {port} with {status}"
                 )));
             }
-            if let Ok(client) = async_nats::connect(&server.url).await {
+            if let Ok(client) = access.connect(port, CALLER_USER).await {
                 if async_nats::jetstream::new(client).query_account().await.is_ok() {
                     return Ok(server);
                 }
@@ -164,9 +223,19 @@ impl NatsServer {
     }
 
     pub async fn client(&self) -> async_nats::Client {
-        match async_nats::connect(&self.url).await {
+        match self.access.connect(self.port, CALLER_USER).await {
             Ok(client) => client,
             Err(err) => panic!("connect to {}: {err}", self.url),
+        }
+    }
+
+    /// A connection as the service's runtime user, which differs from [`Self::client`] only when
+    /// the server restricts that user.
+    #[allow(dead_code)]
+    pub async fn runtime_client(&self) -> async_nats::Client {
+        match self.access.connect(self.port, RUNTIME_USER).await {
+            Ok(client) => client,
+            Err(err) => panic!("connect as {RUNTIME_USER}: {err}"),
         }
     }
 

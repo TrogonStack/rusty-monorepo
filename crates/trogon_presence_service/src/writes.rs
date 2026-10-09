@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use async_nats::{HeaderMap, Message, RequestError, RequestErrorKind, Subject};
+use async_nats::{HeaderMap, Message, Request, RequestError, RequestErrorKind, Subject};
 use futures_util::stream::{select_all, StreamExt};
 use serde::Deserialize;
 use tokio::sync::{watch, Semaphore};
@@ -21,7 +21,7 @@ use crate::reply::{ErrorReply, ReplyCode, Response, HEADER_TOPIC};
 use crate::shard_owner::parse_required;
 use crate::subjects::{
     caller_token, heartbeat_many_filter, internal_write_subject, parse_snapshot, snapshot_any_shard_filter,
-    snapshot_scope, HolderOp, ReadOp, WriteOp, WriteTarget, QUEUE_GROUP,
+    snapshot_scope, HolderOp, InternalReplyInbox, ReadOp, WriteOp, WriteTarget, QUEUE_GROUP,
 };
 
 pub const HEARTBEAT_MAX_ENTRIES: usize = 64;
@@ -146,10 +146,6 @@ impl Writes {
                 reply_deadline: ingress.reply_deadline,
             }),
         }
-    }
-
-    pub(crate) fn client(&self) -> &async_nats::Client {
-        &self.inner.client
     }
 
     pub(crate) fn heartbeat_secs(&self) -> u64 {
@@ -435,7 +431,7 @@ impl Writes {
         let (subject, payload) = tokio::time::timeout_at(deadline, self.envelope(key, reply, command))
             .await
             .map_err(|_| unavailable("could not resolve the writer shard owner within the reply deadline"))??;
-        match tokio::time::timeout_at(deadline, self.inner.client.request(subject, payload.into())).await {
+        match tokio::time::timeout_at(deadline, self.request(subject, payload)).await {
             Ok(Ok(_)) => {
                 self.inner.counters.bump(Counter::Forwarded);
                 Ok(())
@@ -443,6 +439,13 @@ impl Writes {
             Ok(Err(err)) => Err(handoff_failed(&err)),
             Err(_) => Err(handoff_unconfirmed()),
         }
+    }
+
+    pub(crate) async fn request(&self, subject: String, payload: Vec<u8>) -> Result<Message, RequestError> {
+        let inbox = InternalReplyInbox::generate()
+            .map_err(|err| RequestError::with_source(RequestErrorKind::Other, err.to_string()))?;
+        let request = Request::new().payload(payload.into()).inbox(inbox.into_string());
+        self.inner.client.send_request(subject, request).await
     }
 
     pub(crate) fn count(&self, counter: Counter) {

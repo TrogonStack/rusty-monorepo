@@ -115,8 +115,7 @@ impl<'a> HeartbeatMany<'a> {
             entries: group.entries.clone(),
         };
         let (subject, payload) = self.writes.envelope(&group.key, None, command).await.ok()?;
-        let request = self.writes.client().request(subject, payload.into());
-        let message = request.await.ok()?;
+        let message = self.writes.request(subject, payload).await.ok()?;
         self.writes.count(Counter::Forwarded);
         let code_ok = message
             .headers
