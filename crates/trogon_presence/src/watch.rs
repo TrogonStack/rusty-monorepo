@@ -29,7 +29,10 @@ use self::engine::{
 };
 pub use self::engine::{FetchEntry, FetchError};
 pub use self::presences::{Diff, MetaEntry, Presences};
-use self::replay::{RawRecord, RebuildBudget, ReconcileInterval, ReplayConsumer, ReplayError, RetryBackoff};
+use self::replay::{
+    AuditVerdict, RawRecord, RebuildBudget, ReconcileInterval, ReconnectAudit, ReplayConsumer, ReplayError,
+    RetryBackoff,
+};
 
 const DEFAULT_COALESCE_WINDOW: Duration = Duration::from_millis(100);
 const DIFF_BUFFER: usize = 256;
@@ -252,6 +255,7 @@ pub struct TopicWatch {
 impl TopicWatch {
     pub(crate) async fn start<F: MetaFetcher>(
         stream: Stream,
+        audit: ReconnectAudit,
         config: &PresenceConfig,
         generation: StreamGeneration,
         topic: Topic,
@@ -300,6 +304,7 @@ impl TopicWatch {
             cursor,
             inbox,
             pending: Vec::new(),
+            audit,
         };
         runner.render().await;
         runner.publish(None);
@@ -487,6 +492,7 @@ struct Runner<F> {
     cursor: ViewCursor,
     inbox: mpsc::Receiver<BarrierRequest>,
     pending: Vec<BarrierRequest>,
+    audit: ReconnectAudit,
 }
 
 impl<F: MetaFetcher> Runner<F> {
@@ -519,7 +525,16 @@ impl<F: MetaFetcher> Runner<F> {
                     deadline = None;
                     self.flush().await;
                 }
-                _ = sweep.tick() => self.sweep(&replay).await,
+                _ = sweep.tick() => {
+                    self.sweep(&replay).await;
+                    if let AuditVerdict::Stranded { delivered, applied } = self.audit.check(&replay).await {
+                        let err = ReplayError::Stranded { applied, delivered };
+                        tracing::warn!(%err, "presence watch lost deliveries across a reconnect, rebuilding");
+                        replay = self.recover(replay).await;
+                        deadline = None;
+                        self.settle().await;
+                    }
+                }
                 _ = reconcile.tick() => {
                     replay = self.reconcile(replay).await;
                     deadline = None;
@@ -590,6 +605,7 @@ impl<F: MetaFetcher> Runner<F> {
     }
 
     async fn recover(&mut self, failed: ReplayConsumer) -> ReplayConsumer {
+        self.audit.forget();
         self.shared.mark(Readiness::Rebuilding);
         failed.discard();
         let mut backoff = RetryBackoff::default();
@@ -616,6 +632,7 @@ impl<F: MetaFetcher> Runner<F> {
         match self.source.rebuild(&self.shared).await {
             Ok((fresh, replay)) => {
                 current.discard();
+                self.audit.forget();
                 self.shared.reconciles.fetch_add(1, Ordering::Relaxed);
                 self.swap(fresh).await;
                 replay

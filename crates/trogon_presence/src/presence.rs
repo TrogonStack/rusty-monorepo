@@ -24,7 +24,7 @@ use crate::revision::EntryRevision;
 use crate::store::KvWriter;
 use crate::topic::Topic;
 use crate::tracker::{HolderBusy, Tracker, UntrackAllError, UntrackReport};
-use crate::watch::replay::{RebuildBudget, ReplayConsumer, ReplayError};
+use crate::watch::replay::{RebuildBudget, ReconnectAudit, ReplayConsumer, ReplayError};
 use crate::watch::{CoalesceWindow, MetaFetcher, NoopFetcher, TopicWatch, WatchError, WatchOptions};
 
 const SERVER_METADATA_PREFIX: &str = "_nats.";
@@ -313,6 +313,7 @@ impl Presence {
     ) -> Result<TopicWatch, WatchError> {
         TopicWatch::start(
             self.stream.clone(),
+            ReconnectAudit::new(self.client.statistics()),
             &self.config,
             self.generation(),
             topic,

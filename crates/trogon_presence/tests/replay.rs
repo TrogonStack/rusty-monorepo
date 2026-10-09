@@ -2,10 +2,11 @@ mod common;
 
 use std::time::{Duration, SystemTime};
 
+use async_nats::connection::State;
 use async_nats::header::NATS_MESSAGE_TTL;
 use async_nats::jetstream::{self, stream::Stream};
 use async_nats::HeaderMap;
-use common::NatsServer;
+use common::{Cut, NatsServer, SeverableLink};
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
 use trogon_presence::value::StoredValue;
@@ -14,9 +15,9 @@ use trogon_presence::watch::engine::{
 };
 use trogon_presence::watch::replay::{RebuildBudget, ReconcileInterval, ReplayConsumer, ReplayFilters, Watermark};
 use trogon_presence::{
-    BucketName, Diff, EntryKey, EntryRevision, HeartbeatInterval, HolderId, KvKey, LeaseTtl, MarkerTtl, Meta,
-    NoopFetcher, Presence, PresenceConfig, PresenceKey, Presences, ProvisionOptions, ReadBarrier, Readiness,
-    ShardCount, Topic, TopicWatch, UnixMillis, ViewDiff, ViewShard, WatchError, WatchOptions, WriteOutcome,
+    BucketName, CursorStep, Diff, EntryKey, EntryRevision, HeartbeatInterval, HolderId, KvKey, LeaseTtl, MarkerTtl,
+    Meta, NoopFetcher, Presence, PresenceConfig, PresenceKey, Presences, ProvisionOptions, ReadBarrier, Readiness,
+    ShardCount, Topic, TopicWatch, UnixMillis, ViewCursor, ViewDiff, ViewShard, WatchError, WatchOptions, WriteOutcome,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -24,6 +25,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const CONVERGE_TIMEOUT: Duration = Duration::from_secs(10);
 const LONG_TTL: &str = "300s";
+const SLOW_RECONCILE: Duration = Duration::from_secs(600);
 
 macro_rules! server_or_skip {
     () => {
@@ -348,6 +350,98 @@ async fn deleting_the_consumer_rebuilds_and_reconverges() -> TestResult {
     let fresh = consumer_names(&stream).await?;
     assert!(fresh.iter().all(|name| !names.contains(name)));
     Ok(())
+}
+
+#[tokio::test]
+async fn a_watcher_connection_dropped_on_both_sides_resumes_without_gaps_or_duplicates() -> TestResult {
+    resumes_after_a_dropped_watcher_connection(Cut::BothSides).await
+}
+
+#[tokio::test]
+async fn a_watcher_connection_the_server_still_believes_in_resumes_without_gaps_or_duplicates() -> TestResult {
+    resumes_after_a_dropped_watcher_connection(Cut::ClientSideOnly).await
+}
+
+async fn resumes_after_a_dropped_watcher_connection(cut: Cut) -> TestResult {
+    let server = server_or_skip!();
+    let config = PresenceConfig::default();
+    let writer = Presence::provision(server.client().await, config.clone(), ProvisionOptions::default()).await?;
+    let link = server.severable_link().await;
+    let watcher_client = link.client().await;
+    let watcher = Presence::open(watcher_client.clone(), config.clone()).await?;
+    let (topic, ana) = lobby()?;
+    let bob: PresenceKey = "bob@x.io".parse()?;
+    let tracker = writer.tracker()?;
+    tracker.track(&topic, &ana, meta("online")?).await?;
+
+    let options = WatchOptions::default().with_reconcile(ReconcileInterval::try_from(SLOW_RECONCILE)?);
+    let watch = watcher.watch_with_options(topic.clone(), options, NoopFetcher).await?;
+    let (snapshot, mut diffs) = watch.sync_state();
+    let mut chain = DiffChain::from(snapshot.cursor());
+    assert_eq!(watch.get_by_key(&ana).len(), 1);
+
+    link.sever(cut);
+    SeverableLink::reached(&watcher_client, State::Disconnected).await;
+    tracker.track(&topic, &bob, meta("online")?).await?;
+    tracker.update(&topic, &ana, meta("away")?).await?;
+    link.restore();
+    SeverableLink::reached(&watcher_client, State::Connected).await;
+
+    let missed = eventually(|| shows(&watch, &ana, "away") && shows(&watch, &bob, "online")).await;
+    assert!(
+        missed.is_ok(),
+        "{cut:?}: the watch never caught up with writes made while its connection was down: {:?}",
+        watch.state()
+    );
+
+    tracker.untrack(&topic, &bob).await?;
+    let after = eventually(|| watch.get_by_key(&bob).is_empty()).await;
+    assert!(
+        after.is_ok(),
+        "{cut:?}: the watch stopped following after the reconnect: {:?}",
+        watch.state()
+    );
+    assert_eq!(
+        watch.get_by_key(&ana).len(),
+        1,
+        "duplicated presence after the reconnect"
+    );
+    assert_eq!(watch.counters().reconciles(), 0);
+    while let Ok(diff) = diffs.try_recv() {
+        chain.follow(&diff);
+    }
+    assert!(
+        chain.gaps.is_empty(),
+        "the diff chain skipped positions: {:?}",
+        chain.gaps
+    );
+    Ok(())
+}
+
+fn shows(watch: &TopicWatch, key: &PresenceKey, status: &str) -> bool {
+    let entries = watch.get_by_key(key);
+    entries.len() == 1 && meta(status).is_ok_and(|expected| entries[0].meta() == &expected)
+}
+
+struct DiffChain {
+    seen: ViewCursor,
+    gaps: Vec<(ViewCursor, CursorStep)>,
+}
+
+impl From<ViewCursor> for DiffChain {
+    fn from(seen: ViewCursor) -> Self {
+        Self { seen, gaps: Vec::new() }
+    }
+}
+
+impl DiffChain {
+    fn follow(&mut self, diff: &ViewDiff) {
+        match self.seen.follow(&diff.cursor(), diff.prev()) {
+            CursorStep::Next | CursorStep::Rebase => {}
+            step => self.gaps.push((diff.cursor(), step)),
+        }
+        self.seen = diff.cursor();
+    }
 }
 
 #[tokio::test]

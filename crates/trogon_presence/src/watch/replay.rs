@@ -1,4 +1,6 @@
 use std::fmt;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_nats::jetstream::consumer::pull::{self, MessagesError};
@@ -6,7 +8,7 @@ use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, Re
 use async_nats::jetstream::context::ConsumerInfoError;
 use async_nats::jetstream::stream::{ConsumerError, RawMessageError, RawMessageErrorKind, Stream};
 use async_nats::jetstream::Message;
-use async_nats::{HeaderMap, Subject};
+use async_nats::{HeaderMap, Statistics, Subject};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use tokio::time::Instant;
@@ -21,6 +23,7 @@ const REPLAY_INACTIVE_THRESHOLD: Duration = Duration::from_secs(30);
 const REPLAY_NAME_PREFIX: &str = "presence_replay_";
 const DEFAULT_REBUILD_BUDGET: Duration = Duration::from_secs(5);
 const REPLAY_OPEN_ATTEMPT: Duration = Duration::from_secs(1);
+const STRANDING_WINDOW: Duration = Duration::from_secs(5);
 const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(100);
 const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(5);
@@ -47,6 +50,88 @@ impl From<u64> for ConsumerSequence {
 impl fmt::Display for ConsumerSequence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectCount(u64);
+
+impl ConnectCount {
+    pub fn of(statistics: &Statistics) -> Self {
+        Self(statistics.connects.load(Ordering::Relaxed))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Settled,
+    Ahead {
+        delivered: ConsumerSequence,
+        applied: ConsumerSequence,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditVerdict {
+    Clear,
+    Stranded {
+        delivered: ConsumerSequence,
+        applied: ConsumerSequence,
+    },
+}
+
+pub struct ReconnectAudit {
+    statistics: Arc<Statistics>,
+    connects: ConnectCount,
+    until: Option<Instant>,
+    suspect: Option<ConsumerSequence>,
+}
+
+impl ReconnectAudit {
+    pub fn new(statistics: Arc<Statistics>) -> Self {
+        let connects = ConnectCount::of(&statistics);
+        Self {
+            statistics,
+            connects,
+            until: None,
+            suspect: None,
+        }
+    }
+
+    pub async fn check(&mut self, replay: &ReplayConsumer) -> AuditVerdict {
+        let now = Instant::now();
+        let connects = ConnectCount::of(&self.statistics);
+        if connects != self.connects {
+            self.connects = connects;
+            self.until = Some(now + STRANDING_WINDOW);
+        }
+        let Some(until) = self.until else {
+            return AuditVerdict::Clear;
+        };
+        match replay.delivery().await {
+            Delivery::Ahead { delivered, applied } if self.suspect == Some(applied) => {
+                self.forget();
+                AuditVerdict::Stranded { delivered, applied }
+            }
+            Delivery::Ahead { applied, .. } => {
+                self.suspect = Some(applied);
+                AuditVerdict::Clear
+            }
+            Delivery::Settled => {
+                self.suspect = None;
+                if now >= until {
+                    self.until = None;
+                }
+                AuditVerdict::Clear
+            }
+            Delivery::Unknown => AuditVerdict::Clear,
+        }
+    }
+
+    pub fn forget(&mut self) {
+        self.until = None;
+        self.suspect = None;
     }
 }
 
@@ -357,6 +442,11 @@ pub enum ReplayError {
         applied: ConsumerSequence,
         found: ConsumerSequence,
     },
+    #[error("replay deliveries after {applied} up to {delivered} went to a connection that is gone")]
+    Stranded {
+        applied: ConsumerSequence,
+        delivered: ConsumerSequence,
+    },
 }
 
 impl ReplayError {
@@ -475,6 +565,26 @@ impl ReplayConsumer {
         self.applied = record.consumer_seq;
         self.pending = record.pending;
         Ok(record)
+    }
+
+    pub async fn delivery(&self) -> Delivery {
+        match self.consumer.get_info().await {
+            Ok(info) => {
+                let delivered = ConsumerSequence::from(info.delivered.consumer_sequence);
+                if delivered > self.applied {
+                    Delivery::Ahead {
+                        delivered,
+                        applied: self.applied,
+                    }
+                } else {
+                    Delivery::Settled
+                }
+            }
+            Err(err) => {
+                tracing::debug!(%err, "replay delivery audit unavailable");
+                Delivery::Unknown
+            }
+        }
     }
 
     pub async fn watermark(&self) -> Watermark {
