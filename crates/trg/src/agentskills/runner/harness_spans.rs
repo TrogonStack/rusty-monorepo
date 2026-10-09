@@ -131,7 +131,10 @@ impl StepFailure {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepKind {
     Chat {
-        model: Option<String>,
+        /// The model `trg` asked the harness for, absent when the harness chose.
+        request_model: Option<String>,
+        /// The model the harness's stream says answered.
+        response_model: Option<String>,
         response_id: Option<String>,
         usage: TurnUsage,
     },
@@ -155,8 +158,14 @@ pub struct HarnessStep {
 impl HarnessStep {
     pub fn name(&self) -> String {
         match &self.kind {
-            StepKind::Chat { model: Some(model), .. } => format!("{} {model}", gen_ai_operation_name::CHAT),
-            StepKind::Chat { model: None, .. } => gen_ai_operation_name::CHAT.to_string(),
+            StepKind::Chat {
+                request_model,
+                response_model,
+                ..
+            } => match request_model.as_ref().or(response_model.as_ref()) {
+                Some(model) => format!("{} {model}", gen_ai_operation_name::CHAT),
+                None => gen_ai_operation_name::CHAT.to_string(),
+            },
             StepKind::Tool { name, .. } => format!("{} {name}", gen_ai_operation_name::EXECUTE_TOOL),
         }
     }
@@ -221,10 +230,10 @@ pub fn reconstruct(
     content: ContentCapture,
 ) -> Reconstruction {
     let content = ToolContent(content.includes_span());
-    let mut builder = StepBuilder::new(stream.started_at);
+    let mut builder = StepBuilder::new(stream.started_at, request_model);
     match runner {
         Runner::ClaudeCode => claude_code(&mut builder, stream, content),
-        Runner::Codex => codex(&mut builder, stream, request_model, content),
+        Runner::Codex => codex(&mut builder, stream, content),
         Runner::CursorAgent => cursor_agent(&mut builder, stream, content),
     }
     builder.finish(stream.ended)
@@ -239,7 +248,7 @@ struct OpenTool {
 
 struct OpenTurn {
     key: Option<String>,
-    model: Option<String>,
+    response_model: Option<String>,
     response_id: Option<String>,
     usage: TurnUsage,
     start: SystemTime,
@@ -252,16 +261,18 @@ struct StepBuilder {
     turn: Option<OpenTurn>,
     summary: HarnessSummary,
     last_at: SystemTime,
+    request_model: Option<String>,
 }
 
 impl StepBuilder {
-    fn new(started_at: SystemTime) -> Self {
+    fn new(started_at: SystemTime, request_model: Option<&str>) -> Self {
         Self {
             steps: Vec::new(),
             tools: BTreeMap::new(),
             turn: None,
             summary: HarnessSummary::default(),
             last_at: started_at,
+            request_model: request_model.map(str::to_string),
         }
     }
 
@@ -273,7 +284,7 @@ impl StepBuilder {
         self.close_turn(None);
         self.turn = Some(OpenTurn {
             key,
-            model: None,
+            response_model: None,
             response_id: None,
             usage: TurnUsage::default(),
             start,
@@ -283,12 +294,13 @@ impl StepBuilder {
 
     fn close_turn(&mut self, failure: Option<StepFailure>) {
         if let Some(turn) = self.turn.take() {
-            if turn.model.is_some() {
-                self.summary.response_model.clone_from(&turn.model);
+            if turn.response_model.is_some() {
+                self.summary.response_model.clone_from(&turn.response_model);
             }
             self.steps.push(HarnessStep {
                 kind: StepKind::Chat {
-                    model: turn.model,
+                    request_model: self.request_model.clone(),
+                    response_model: turn.response_model,
                     response_id: turn.response_id,
                     usage: turn.usage,
                 },
@@ -412,7 +424,7 @@ fn claude_code(builder: &mut StepBuilder, stream: HarnessStream, content: ToolCo
                 if let Some(turn) = &mut builder.turn {
                     turn.end = at;
                     if let Some(message) = message {
-                        turn.model = string_at(message, "model").or(turn.model.take());
+                        turn.response_model = string_at(message, "model").or(turn.response_model.take());
                         turn.response_id = id.or(turn.response_id.take());
                         if message.get("usage").is_some() {
                             turn.usage = TurnUsage::read(message.get("usage"), CLAUDE_USAGE);
@@ -509,12 +521,13 @@ fn codex_failure(item: &Value) -> Option<StepFailure> {
 /// A codex turn is one or more model calls with tool calls between them, and codex
 /// reports only the tool calls. Every stretch of the turn with no tool running is taken
 /// as a model call: the one that chose the next tool, or the one that ended the turn.
-/// Codex names no model on its stream, so its model calls carry the one the run asked for.
-fn codex(builder: &mut StepBuilder, stream: HarnessStream, request_model: Option<&str>, content: ToolContent) {
+/// Codex names no model on its stream, so its model calls carry only the one the run
+/// asked for.
+fn codex(builder: &mut StepBuilder, stream: HarnessStream, content: ToolContent) {
     let mut turn: Option<CodexTurn> = None;
     for (event, at) in stream.events() {
         match event_type(&event) {
-            Some("turn.started") => turn = Some(CodexTurn::start(builder, request_model, at)),
+            Some("turn.started") => turn = Some(CodexTurn::start(builder, at)),
             Some("turn.completed") => {
                 let usage = TurnUsage::read(event.get("usage"), CODEX_USAGE);
                 if let Some(turn) = turn.take() {
@@ -556,7 +569,7 @@ fn codex(builder: &mut StepBuilder, stream: HarnessStream, request_model: Option
                         at,
                     );
                     if builder.tools.is_empty() && turn.is_some() {
-                        codex_open_chat(builder, request_model, at);
+                        builder.open_turn(None, at);
                     }
                 }
             }
@@ -575,10 +588,10 @@ struct CodexTurn {
 }
 
 impl CodexTurn {
-    fn start(builder: &mut StepBuilder, request_model: Option<&str>, at: SystemTime) -> Self {
+    fn start(builder: &mut StepBuilder, at: SystemTime) -> Self {
         builder.close_turn(None);
         let first_step = builder.steps.len();
-        codex_open_chat(builder, request_model, at);
+        builder.open_turn(None, at);
         Self { first_step }
     }
 
@@ -604,13 +617,6 @@ impl CodexTurn {
             }
             step.failure = step.failure.or(failure);
         }
-    }
-}
-
-fn codex_open_chat(builder: &mut StepBuilder, request_model: Option<&str>, at: SystemTime) {
-    builder.open_turn(None, at);
-    if let Some(chat) = &mut builder.turn {
-        chat.model = request_model.map(str::to_string);
     }
 }
 
@@ -647,7 +653,7 @@ fn cursor_agent(builder: &mut StepBuilder, stream: HarnessStream, content: ToolC
                 }
                 if let Some(turn) = &mut builder.turn {
                     turn.end = at;
-                    turn.model.clone_from(&model);
+                    turn.response_model.clone_from(&model);
                 }
             }
             Some("tool_call") => {
@@ -689,13 +695,16 @@ pub fn emit<T: Tracer>(tracer: &T, parent: &Context, provider: &'static str, ste
         let mut attributes = vec![KeyValue::new(GEN_AI_PROVIDER_NAME, provider)];
         let kind = match &step.kind {
             StepKind::Chat {
-                model,
+                request_model,
+                response_model,
                 response_id,
                 usage,
             } => {
                 attributes.push(KeyValue::new(GEN_AI_OPERATION_NAME, gen_ai_operation_name::CHAT));
-                if let Some(model) = model {
+                if let Some(model) = request_model {
                     attributes.push(KeyValue::new(GEN_AI_REQUEST_MODEL, model.clone()));
+                }
+                if let Some(model) = response_model {
                     attributes.push(KeyValue::new(GEN_AI_RESPONSE_MODEL, model.clone()));
                 }
                 if let Some(id) = response_id {
@@ -854,7 +863,8 @@ mod tests {
         assert_eq!(
             turns[0].kind,
             StepKind::Chat {
-                model: Some("claude-sonnet-4-5".to_string()),
+                request_model: None,
+                response_model: Some("claude-sonnet-4-5".to_string()),
                 response_id: Some("msg_1".to_string()),
                 usage: TurnUsage {
                     input: Some(10),
@@ -1136,10 +1146,72 @@ mod tests {
         let chat = spans.iter().find(|span| span.name == "chat claude-sonnet-4-5").unwrap();
         assert_eq!(chat.span_kind, SpanKind::Client);
         assert_eq!(
-            attribute(chat, GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS).as_deref(),
-            Some("100")
+            value(chat, GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS),
+            Some(opentelemetry::Value::I64(100))
         );
         assert_eq!(attribute(chat, GEN_AI_PROVIDER_NAME).as_deref(), Some("anthropic"));
+    }
+
+    fn value(span: &SpanData, key: &str) -> Option<opentelemetry::Value> {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.clone())
+    }
+
+    fn chat_models(
+        runner: Runner,
+        stdout: &[u8],
+        requested: Option<&str>,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
+        let rebuilt = rebuild(runner, stdout, requested, ContentCapture::NoContent);
+        let (spans, _) = exported(&rebuilt.steps);
+        let text = |span: &SpanData, key: &str| value(span, key).map(|value| value.to_string());
+        spans
+            .iter()
+            .filter(|span| value(span, GEN_AI_OPERATION_NAME) == Some(opentelemetry::Value::from("chat")))
+            .map(|span| {
+                (
+                    span.name.to_string(),
+                    text(span, GEN_AI_REQUEST_MODEL),
+                    text(span, GEN_AI_RESPONSE_MODEL),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chat_span_names_a_request_model_only_when_trg_requested_one() {
+        let unrequested = chat_models(Runner::ClaudeCode, CLAUDE, None);
+        assert!(!unrequested.is_empty());
+        for (name, request, response) in unrequested {
+            assert_eq!(name, "chat claude-sonnet-4-5");
+            assert_eq!(request, None);
+            assert_eq!(response.as_deref(), Some("claude-sonnet-4-5"));
+        }
+
+        for (name, request, response) in chat_models(Runner::ClaudeCode, CLAUDE, Some("sonnet")) {
+            assert_eq!(name, "chat sonnet");
+            assert_eq!(request.as_deref(), Some("sonnet"));
+            assert_eq!(response.as_deref(), Some("claude-sonnet-4-5"));
+        }
+
+        for (name, request, response) in chat_models(Runner::CursorAgent, CURSOR, None) {
+            assert_eq!(name, "chat gpt-5");
+            assert_eq!(request, None);
+            assert_eq!(response.as_deref(), Some("gpt-5"));
+        }
+    }
+
+    #[test]
+    fn a_codex_chat_span_carries_the_requested_model_and_no_response_model_its_stream_never_named() {
+        for (name, request, response) in chat_models(Runner::Codex, CODEX, Some("gpt-5")) {
+            assert_eq!(name, "chat gpt-5");
+            assert_eq!(request.as_deref(), Some("gpt-5"));
+            assert_eq!(response, None);
+        }
+        let rebuilt = rebuild(Runner::Codex, CODEX, Some("gpt-5"), ContentCapture::NoContent);
+        assert_eq!(rebuilt.summary.response_model, None);
     }
 
     #[test]
