@@ -375,8 +375,14 @@ fn instruments() -> Instruments {
     let meter = opentelemetry::global::meter("trg");
     Instruments {
         invoke_agent_duration: meter.f64_histogram(GEN_AI_INVOKE_AGENT_DURATION).with_unit("s").build(),
-        tool_calls: meter.u64_histogram(GEN_AI_INVOKE_AGENT_TOOL_CALLS).build(),
-        inference_calls: meter.u64_histogram(GEN_AI_INVOKE_AGENT_INFERENCE_CALLS).build(),
+        tool_calls: meter
+            .u64_histogram(GEN_AI_INVOKE_AGENT_TOOL_CALLS)
+            .with_unit("{tool_call}")
+            .build(),
+        inference_calls: meter
+            .u64_histogram(GEN_AI_INVOKE_AGENT_INFERENCE_CALLS)
+            .with_unit("{inference_call}")
+            .build(),
         execute_tool_duration: meter.f64_histogram(GEN_AI_EXECUTE_TOOL_DURATION).with_unit("s").build(),
     }
 }
