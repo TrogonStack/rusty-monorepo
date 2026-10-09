@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use super::evals::EvalError;
 use super::graders::ImageMediaType;
 use super::validation::ValidationError;
+use crate::telemetry::ContentCapture;
+
+mod telemetry;
 
 /// The request protocol a judge endpoint speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,11 +351,95 @@ pub fn extract_content(api: JudgeApi, payload: &serde_json::Value) -> Option<Str
         .map(str::to_string)
 }
 
-/// Sends one judging turn and returns the model's raw text reply.
+/// Token counts a judge endpoint reported for one turn, normalized to the
+/// GenAI conventions: `input_tokens` includes the cached tokens, which the
+/// cache fields then break out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JudgeUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+}
+
+impl JudgeUsage {
+    pub fn from_payload(api: JudgeApi, payload: &serde_json::Value) -> Self {
+        let count = |pointer: &str| payload.pointer(pointer).and_then(serde_json::Value::as_u64);
+        match api {
+            JudgeApi::OpenAiChatCompletions => Self {
+                input_tokens: count("/usage/prompt_tokens"),
+                output_tokens: count("/usage/completion_tokens"),
+                cache_read_input_tokens: count("/usage/prompt_tokens_details/cached_tokens"),
+                cache_write_input_tokens: None,
+            },
+            JudgeApi::AnthropicMessages => {
+                let cache_read = count("/usage/cache_read_input_tokens");
+                let cache_write = count("/usage/cache_creation_input_tokens");
+                Self {
+                    input_tokens: count("/usage/input_tokens")
+                        .map(|uncached| uncached + cache_read.unwrap_or(0) + cache_write.unwrap_or(0)),
+                    output_tokens: count("/usage/output_tokens"),
+                    cache_read_input_tokens: cache_read,
+                    cache_write_input_tokens: cache_write,
+                }
+            }
+        }
+    }
+}
+
+/// What a judge endpoint answered one turn with: the text callers parse their
+/// verdict from, and what the endpoint said about the call itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JudgeReply {
+    pub content: String,
+    pub response_model: Option<JudgeModel>,
+    pub response_id: Option<String>,
+    pub finish_reason: Option<String>,
+    pub usage: JudgeUsage,
+}
+
+impl JudgeReply {
+    pub fn from_payload(api: JudgeApi, payload: &serde_json::Value) -> Option<Self> {
+        let text = |pointer: &str| {
+            payload
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let finish_reason = match api {
+            JudgeApi::OpenAiChatCompletions => text("/choices/0/finish_reason"),
+            JudgeApi::AnthropicMessages => text("/stop_reason"),
+        };
+        Some(Self {
+            content: extract_content(api, payload)?,
+            response_model: text("/model").and_then(JudgeModel::new),
+            response_id: text("/id"),
+            finish_reason,
+            usage: JudgeUsage::from_payload(api, payload),
+        })
+    }
+}
+
+/// Sends one judging turn and returns the model's reply.
 ///
 /// Callers parse their own verdict shape out of the reply: a comparison wants a
 /// winner, a grader wants a pass or fail.
-pub fn judge(endpoint: &JudgeEndpoint, request: &JudgeRequest, field: &str) -> Result<String, EvalError> {
+///
+/// A client is built per call. Ballots run one after another and each waits on
+/// a model for seconds, so the connection pool a shared client would keep buys
+/// nothing measurable here.
+pub fn judge(endpoint: &JudgeEndpoint, request: &JudgeRequest, field: &str) -> Result<JudgeReply, EvalError> {
+    let inference = telemetry::InferenceSpan::start(endpoint, request, ContentCapture::from_env());
+    let result = inference.span().in_scope(|| exchange(endpoint, request, &inference));
+    inference.finish(&result);
+    result.map_err(|failure| invalid(field, failure.message))
+}
+
+fn exchange(
+    endpoint: &JudgeEndpoint,
+    request: &JudgeRequest,
+    inference: &telemetry::InferenceSpan,
+) -> Result<JudgeReply, JudgeFailure> {
     let api = endpoint.provider.api();
     let body = build_body(api, &endpoint.model, request);
 
@@ -367,30 +454,85 @@ pub fn judge(endpoint: &JudgeEndpoint, request: &JudgeRequest, field: &str) -> R
             .header("anthropic-version", ANTHROPIC_API_VERSION),
     };
 
-    let response = builder
-        .json(&body)
-        .send()
-        .map_err(|source| invalid(field, source.to_string()))?;
-
-    if !response.status().is_success() {
+    let http = inference.http();
+    let payload = http.span().in_scope(|| {
+        let response = builder
+            .json(&body)
+            .send()
+            .map_err(|source| JudgeFailure::transport(&source))?;
         let status = response.status();
-        let detail = response.text().unwrap_or_default();
-        return Err(invalid(
-            field,
-            format!("judge request to {} failed with {status}: {detail}", endpoint.url()),
-        ));
-    }
+        http.responded(status);
+        if !status.is_success() {
+            let detail = response.text().unwrap_or_default();
+            return Err(JudgeFailure::new(
+                JudgeFailureKind::Status(status),
+                format!("judge request to {} failed with {status}: {detail}", endpoint.url()),
+            ));
+        }
+        response
+            .json::<serde_json::Value>()
+            .map_err(|source| JudgeFailure::new(JudgeFailureKind::InvalidResponse, source.to_string()))
+    });
+    http.finish(&payload);
 
-    let payload: serde_json::Value = response.json().map_err(|source| invalid(field, source.to_string()))?;
-    extract_content(api, &payload).ok_or_else(|| {
-        invalid(
-            field,
+    JudgeReply::from_payload(api, &payload?).ok_or_else(|| {
+        JudgeFailure::new(
+            JudgeFailureKind::NoContent,
             format!(
                 "judge provider '{}' returned no message content",
                 endpoint.provider.as_str()
             ),
         )
     })
+}
+
+/// Why one judging turn produced no reply, kept apart from its message so the
+/// span records a low-cardinality `error.type` while the caller sees the detail.
+#[derive(Debug)]
+struct JudgeFailure {
+    kind: JudgeFailureKind,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum JudgeFailureKind {
+    Timeout,
+    Connect,
+    Transport,
+    Status(reqwest::StatusCode),
+    InvalidResponse,
+    NoContent,
+}
+
+impl JudgeFailure {
+    fn new(kind: JudgeFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    fn transport(source: &reqwest::Error) -> Self {
+        let kind = if source.is_timeout() {
+            JudgeFailureKind::Timeout
+        } else if source.is_connect() {
+            JudgeFailureKind::Connect
+        } else {
+            JudgeFailureKind::Transport
+        };
+        Self::new(kind, source.to_string())
+    }
+
+    fn error_type(&self) -> std::borrow::Cow<'static, str> {
+        match self.kind {
+            JudgeFailureKind::Timeout => "timeout".into(),
+            JudgeFailureKind::Connect => "connect".into(),
+            JudgeFailureKind::Transport => "transport".into(),
+            JudgeFailureKind::Status(status) => status.as_u16().to_string().into(),
+            JudgeFailureKind::InvalidResponse => "invalid_response".into(),
+            JudgeFailureKind::NoContent => "no_content".into(),
+        }
+    }
 }
 
 /// Parses a judge reply that is JSON, tolerating the fenced code block models

@@ -5,11 +5,15 @@ use crate::agentskills::grader_agreement::{
     build_grader_agreement_document, write_grader_agreement, AgreementBucket, AgreementThreshold,
     GraderAgreementDocument,
 };
+use crate::agentskills::grading::telemetry::{phase_span, record_error};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
 
 use super::print_report_dir;
+
+/// `error.type` when the llm agreement floor misses `--min-agreement`.
+const GATE_FAILED: &str = "gate_failed";
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -43,15 +47,19 @@ pub struct GraderAgreementArgs {
 
 impl GraderAgreementArgs {
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
+        let span = phase_span!("grader agreement");
+        let _entered = span.enter();
         let document = match build_grader_agreement_document(&self.report_dir) {
             Ok(document) => document,
             Err(error) => {
+                record_error(&span, error.error_type());
                 eprintln!("Failed to build grader agreement report: {error}");
                 return ExitCode::InfrastructureFailure;
             }
         };
 
         if let Err(error) = write_grader_agreement(&self.report_dir, &document) {
+            record_error(&span, error.error_type());
             eprintln!("Failed to write grader-agreement.json: {error}");
             return ExitCode::InfrastructureFailure;
         }
@@ -76,6 +84,7 @@ impl GraderAgreementArgs {
         match evaluate_gate(&document, threshold) {
             Ok(()) => ExitCode::Success,
             Err(message) => {
+                record_error(&span, GATE_FAILED);
                 eprintln!("grader-agreement: {message}");
                 ExitCode::GateFailed
             }

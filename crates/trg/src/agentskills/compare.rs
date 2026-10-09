@@ -6,9 +6,19 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
+use tracing::field::Empty;
+
 use super::evals::EvalError;
+use super::grading::telemetry::{self, phase, CliSpan, Evaluation};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::report::ScenarioKind;
+use super::span_reference::SpanReference;
+use crate::telemetry::semconv::trg::{EVAL_CASE_ID, EVAL_COMPARISON_PAIR};
+use crate::telemetry::ContentCapture;
+
+/// The `gen_ai.evaluation.name` a pairwise verdict is reported under.
+const COMPARISON_EVALUATION: &str = "comparison";
 
 pub const RUBRIC_ITEMS: &[&str] = &[
     "organization",
@@ -176,6 +186,8 @@ struct LoadedRun {
     attempt: u32,
     status: String,
     paths: LoadedRunPaths,
+    #[serde(default)]
+    trace: Option<SpanReference>,
 }
 
 fn default_loaded_run_attempt() -> u32 {
@@ -209,6 +221,25 @@ struct LlmJudgeResponse {
 }
 
 pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec<ComparisonRecord>, EvalError> {
+    let span = tracing::info_span!("compare", "otel.status_code" = Empty, { ERROR_TYPE } = Empty);
+    let compared = span.in_scope(|| compare_report(report_dir, options));
+    telemetry::record_result(&span, &compared);
+    compared
+}
+
+fn pair_span(eval_case_id: &str, pair: &ScenarioPair) -> tracing::Span {
+    let label = format!("{}:{}", pair.a.as_str(), pair.b.as_str());
+    tracing::info_span!(
+        "compare pair",
+        "otel.name" = format!("compare {label}"),
+        "otel.status_code" = Empty,
+        { ERROR_TYPE } = Empty,
+        { EVAL_CASE_ID } = eval_case_id,
+        { EVAL_COMPARISON_PAIR } = label.as_str(),
+    )
+}
+
+fn compare_report(report_dir: &Path, options: CompareOptions) -> Result<Vec<ComparisonRecord>, EvalError> {
     if options.pairs.is_empty() || options.judge == JudgeKind::None {
         return Ok(Vec::new());
     }
@@ -249,67 +280,23 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
 
     let mut records = Vec::new();
     for eval_case in &report.dimensions.eval_cases {
-        for pair in &options.pairs {
-            let left_output = load_scenario_output(report_dir, &report.runs, &eval_case.id, pair.a)?;
-            let right_output = load_scenario_output(report_dir, &report.runs, &eval_case.id, pair.b)?;
-
-            let (mapping, blind_outputs) = build_blind_pair(&eval_case.id, pair.a, pair.b, left_output, right_output);
-
-            let verdict = match options.judge {
-                JudgeKind::Script => {
-                    let command = options.judge_command.as_deref().unwrap_or_default();
-                    run_script_judge(
-                        command,
-                        &eval_case.id,
-                        &eval_case.prompt,
-                        &eval_case.expected_output,
-                        &blind_outputs,
-                    )?
-                }
-                JudgeKind::Llm => {
-                    let endpoint = endpoint.as_ref().expect("llm judging resolves its endpoint up front");
-                    run_llm_judge(
-                        endpoint,
-                        &eval_case.id,
-                        &eval_case.prompt,
-                        &eval_case.expected_output,
-                        &blind_outputs,
-                    )?
-                }
-                JudgeKind::None => unreachable!(),
-            };
-
-            let winner_scenario = match verdict.winner {
-                ComparisonWinner::A => Some(mapping.label_a),
-                ComparisonWinner::B => Some(mapping.label_b),
-                ComparisonWinner::Tie => None,
-            };
-
-            let record = ComparisonRecord {
-                eval_case_id: eval_case.id.clone(),
-                pair: ScenarioPairRecord { a: pair.a, b: pair.b },
-                mapping,
-                winner: verdict.winner,
-                winner_scenario,
-                evidence: verdict.evidence,
-                rubric: RUBRIC_ITEMS.iter().map(|item| (*item).to_string()).collect(),
-                judge: ComparisonJudgeMetadata {
-                    kind: options.judge,
-                    provider: endpoint.as_ref().map(|endpoint| endpoint.provider.as_str().to_string()),
-                    model: endpoint
-                        .as_ref()
-                        .map(|endpoint| endpoint.model.to_string())
-                        .or_else(|| options.judge_model.clone()),
-                    command: options.judge_command.clone(),
-                },
-            };
-
-            if options.emit_comparison_json {
-                write_comparison_json(report_dir, &record)?;
+        let case_span = tracing::info_span!(
+            "compare case",
+            "otel.name" = format!("compare case {}", eval_case.id),
+            "otel.status_code" = Empty,
+            { ERROR_TYPE } = Empty,
+            { EVAL_CASE_ID } = eval_case.id.as_str(),
+        );
+        let compared = phase(case_span, || {
+            for pair in &options.pairs {
+                let record = phase(pair_span(&eval_case.id, pair), || {
+                    compare_pair(report_dir, &report.runs, eval_case, pair, &options, endpoint.as_ref())
+                })?;
+                records.push(record);
             }
-
-            records.push(record);
-        }
+            Ok(())
+        });
+        compared?;
     }
 
     report.comparisons = records
@@ -317,9 +304,123 @@ pub fn run_comparisons(report_dir: &Path, options: CompareOptions) -> Result<Vec
         .map(|record| serde_json::to_value(record).expect("comparison record serializes"))
         .collect();
 
-    merge_comparisons_into_report(&report_path, &content, &report.comparisons)?;
+    phase(
+        tracing::info_span!("write report", "otel.status_code" = Empty, { ERROR_TYPE } = Empty),
+        || merge_comparisons_into_report(&report_path, &content, &report.comparisons),
+    )?;
 
     Ok(records)
+}
+
+fn compare_pair(
+    report_dir: &Path,
+    runs: &[LoadedRun],
+    eval_case: &LoadedEvalCase,
+    pair: &ScenarioPair,
+    options: &CompareOptions,
+    endpoint: Option<&JudgeEndpoint>,
+) -> Result<ComparisonRecord, EvalError> {
+    let (left, right) = phase(
+        tracing::info_span!("load outputs", "otel.status_code" = Empty, { ERROR_TYPE } = Empty),
+        || {
+            Ok((
+                load_scenario_output(report_dir, runs, &eval_case.id, pair.a)?,
+                load_scenario_output(report_dir, runs, &eval_case.id, pair.b)?,
+            ))
+        },
+    )?;
+    let pair_span = tracing::Span::current();
+    for loaded in [&left, &right] {
+        telemetry::link_to(&pair_span, loaded.trace.as_ref());
+    }
+
+    let (mapping, blind_outputs) = tracing::info_span!("build blind pair")
+        .in_scope(|| build_blind_pair(&eval_case.id, pair.a, pair.b, left.text, right.text));
+
+    let verdict = match options.judge {
+        JudgeKind::Script => {
+            let command = options.judge_command.as_deref().unwrap_or_default();
+            run_script_judge(
+                command,
+                &eval_case.id,
+                &eval_case.prompt,
+                &eval_case.expected_output,
+                &blind_outputs,
+            )?
+        }
+        JudgeKind::Llm => {
+            let endpoint = endpoint.expect("llm judging resolves its endpoint up front");
+            run_llm_judge(
+                endpoint,
+                &eval_case.id,
+                &eval_case.prompt,
+                &eval_case.expected_output,
+                &blind_outputs,
+            )?
+        }
+        JudgeKind::None => unreachable!(),
+    };
+
+    let winner_scenario = match verdict.winner {
+        ComparisonWinner::A => Some(mapping.label_a),
+        ComparisonWinner::B => Some(mapping.label_b),
+        ComparisonWinner::Tie => None,
+    };
+
+    let record = ComparisonRecord {
+        eval_case_id: eval_case.id.clone(),
+        pair: ScenarioPairRecord { a: pair.a, b: pair.b },
+        mapping,
+        winner: verdict.winner,
+        winner_scenario,
+        evidence: verdict.evidence,
+        rubric: RUBRIC_ITEMS.iter().map(|item| (*item).to_string()).collect(),
+        judge: ComparisonJudgeMetadata {
+            kind: options.judge,
+            provider: endpoint.map(|endpoint| endpoint.provider.as_str().to_string()),
+            model: endpoint
+                .map(|endpoint| endpoint.model.to_string())
+                .or_else(|| options.judge_model.clone()),
+            command: options.judge_command.clone(),
+        },
+    };
+
+    emit_verdict(&record, pair);
+
+    if options.emit_comparison_json {
+        phase(
+            tracing::info_span!("write comparison", "otel.status_code" = Empty, { ERROR_TYPE } = Empty),
+            || write_comparison_json(report_dir, &record),
+        )?;
+    }
+
+    Ok(record)
+}
+
+/// The verdict as an evaluation of the pair's first scenario against its
+/// second: 1 when the first won, 0 when the second did, 0.5 on a tie. The
+/// label names the winning scenario, or `tie`.
+fn emit_verdict(record: &ComparisonRecord, pair: &ScenarioPair) {
+    let (label, score) = match record.winner_scenario {
+        Some(winner) if winner == pair.a => (winner.as_str(), 1.0),
+        Some(winner) => (winner.as_str(), 0.0),
+        None => ("tie", 0.5),
+    };
+    let kind = match record.judge.kind {
+        JudgeKind::Llm => "llm",
+        JudgeKind::Script => "script",
+        JudgeKind::None => "none",
+    };
+    Evaluation {
+        name: COMPARISON_EVALUATION,
+        label: Some(label),
+        score: Some(score),
+        explanation: Some(&record.evidence),
+        grader_kind: Some(kind),
+        case_id: &record.eval_case_id,
+        run_id: None,
+    }
+    .emit(None, ContentCapture::from_env());
 }
 
 fn merge_comparisons_into_report(
@@ -406,12 +507,19 @@ fn select_latest_completed_run<'a>(
         .max_by_key(|run| run.attempt)
 }
 
+/// A scenario's output, with the span its run executed under when the report
+/// recorded one.
+struct LoadedOutput {
+    text: String,
+    trace: Option<SpanReference>,
+}
+
 fn load_scenario_output(
     report_dir: &Path,
     runs: &[LoadedRun],
     eval_case_id: &str,
     scenario: ScenarioKind,
-) -> Result<String, EvalError> {
+) -> Result<LoadedOutput, EvalError> {
     let run = select_latest_completed_run(runs, eval_case_id, scenario).ok_or_else(|| {
         EvalError::Validation(
             super::validation::ValidationError::for_field(
@@ -427,7 +535,10 @@ fn load_scenario_output(
     })?;
 
     let workspace = report_dir.join(&run.paths.workspace);
-    collect_workspace_output(&workspace)
+    Ok(LoadedOutput {
+        text: collect_workspace_output(&workspace)?,
+        trace: run.trace,
+    })
 }
 
 fn collect_workspace_output(workspace: &Path) -> Result<String, EvalError> {
@@ -512,21 +623,35 @@ fn run_script_judge(
     };
 
     let input = serde_json::to_string(&payload)?;
-    let mut child = Command::new("sh")
+    let cli = CliSpan::start("sh");
+    let mut process = Command::new("sh");
+    process
         .arg("-c")
         .arg(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(EvalError::from)?;
+        .stderr(Stdio::piped());
+    cli.inject(&mut process);
+    let mut child = process.spawn().map_err(|source| {
+        cli.spawn_failed();
+        EvalError::from(source)
+    })?;
+    cli.spawned(child.id());
 
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin.write_all(input.as_bytes()).map_err(EvalError::from)?;
+        stdin.write_all(input.as_bytes()).map_err(|source| {
+            cli.failed("write_failed");
+            EvalError::from(source)
+        })?;
     }
 
-    let output = child.wait_with_output().map_err(EvalError::from)?;
+    let output = child.wait_with_output().map_err(|source| {
+        cli.failed("wait_failed");
+        EvalError::from(source)
+    })?;
+    cli.exited(&output.status);
+    drop(cli);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(EvalError::Validation(
@@ -574,7 +699,7 @@ fn run_llm_judge(
     })?;
 
     let reply = judge::judge(endpoint, &JudgeRequest::new(system_prompt, user_prompt), "judge_model")?;
-    let parsed: LlmJudgeResponse = judge::parse_json_reply(&reply, "judge_model")?;
+    let parsed: LlmJudgeResponse = judge::parse_json_reply(&reply.content, "judge_model")?;
 
     Ok(Verdict {
         winner: parse_winner(&parsed.winner)?,
@@ -723,7 +848,7 @@ mod tests {
         write_workspace_output(temp.path(), "runs/run-003/workspace", "attempt-3");
 
         let output = load_scenario_output(temp.path(), &runs, "case-a", ScenarioKind::WithSkill).unwrap();
-        assert_eq!(output, "attempt-2");
+        assert_eq!(output.text, "attempt-2");
     }
 
     #[test]

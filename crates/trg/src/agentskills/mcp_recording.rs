@@ -24,9 +24,20 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use super::grading::telemetry::record_error;
+use super::grading::telemetry::CliSpan;
 use super::mocks::{ExpectConstraint, ExpectPath, JsonTypeName, ServerName, ToolName};
 use super::real_mcp_server::RealServerCommand;
 use super::runner::group::{self, ProcessGroupGuard};
+use crate::telemetry::ContentCapture;
+use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
+use telemetry::{McpRequest, McpRequestSpan, PROTOCOL_VERSION};
+use tracing::field::Empty;
+
+mod telemetry;
+
+/// `error.type` on the server's process span when it overstays `finish` and is killed.
+const TIMEOUT_KILLED: &str = "timeout_killed";
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecordingError {
@@ -108,6 +119,8 @@ pub struct RealMcpServerSession {
     responses: mpsc::Receiver<String>,
     command_label: String,
     next_id: i64,
+    process: CliSpan,
+    content: ContentCapture,
 }
 
 impl Drop for RealMcpServerSession {
@@ -126,10 +139,16 @@ impl RealMcpServerSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         group::lead_own_group(&mut cmd);
-        let mut child = cmd.spawn().map_err(|source| RecordingError::Spawn {
-            command: command_label.clone(),
-            source,
+        let process = CliSpan::start(command.program());
+        process.inject(&mut cmd);
+        let mut child = cmd.spawn().map_err(|source| {
+            process.spawn_failed();
+            RecordingError::Spawn {
+                command: command_label.clone(),
+                source,
+            }
         })?;
+        process.spawned(child.id());
         let group = ProcessGroupGuard::led_by(&child);
 
         let stdin = child.stdin.take().expect("spawned with a piped stdin");
@@ -163,6 +182,8 @@ impl RealMcpServerSession {
             responses: rx,
             command_label,
             next_id: 1,
+            process,
+            content: ContentCapture::from_env(),
         })
     }
 
@@ -171,12 +192,19 @@ impl RealMcpServerSession {
     /// exchange.
     pub fn initialize(&mut self, timeout: Duration) -> Result<(), RecordingError> {
         let id = self.reserve_id();
+        let span = McpRequestSpan::start(self.process.span(), &McpRequest::Initialize, id, self.content);
+        let result = span.span().clone().in_scope(|| self.handshake(id, timeout));
+        span.finish_with(&result);
+        result
+    }
+
+    fn handshake(&mut self, id: i64, timeout: Duration) -> Result<(), RecordingError> {
         let request = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {},
                 "clientInfo": {"name": "trg-record-mcp", "version": env!("CARGO_PKG_VERSION")},
             },
@@ -196,15 +224,33 @@ impl RealMcpServerSession {
         timeout: Duration,
     ) -> Result<RecordedToolAnswer, RecordingError> {
         let id = self.reserve_id();
+        let span = McpRequestSpan::start(
+            self.process.span(),
+            &McpRequest::ToolCall { tool, input },
+            id,
+            self.content,
+        );
         let request = json!({
             "jsonrpc": "2.0",
             "id": id,
             "method": "tools/call",
             "params": {"name": tool.as_str(), "arguments": input},
         });
-        self.send(&request)?;
-        let result = self.await_response(id, "tools/call", timeout)?;
-        Ok(RecordedToolAnswer::from_result(&result))
+        let result = span.span().clone().in_scope(|| {
+            self.send(&request)?;
+            self.await_response(id, "tools/call", timeout)
+        });
+        match result {
+            Ok(result) => {
+                let answer = RecordedToolAnswer::from_result(&result);
+                span.answered(&answer);
+                Ok(answer)
+            }
+            Err(error) => {
+                span.failed(&error);
+                Err(error)
+            }
+        }
     }
 
     /// Close stdin and wait for the server to exit on its own, killing it if it overstays
@@ -212,16 +258,20 @@ impl RealMcpServerSession {
     /// one-shot subprocesses, adapted here for a session that has already had its back and
     /// forth rather than a single run to completion.
     pub fn finish(mut self, timeout: Duration) -> Result<(), RecordingError> {
+        let span = tracing::info_span!(parent: self.process.span(), "finish", "otel.status_code" = Empty, { ERROR_TYPE } = Empty);
+        let _entered = span.enter();
         drop(self.stdin.take());
         let deadline = Instant::now() + timeout;
         loop {
             match self.child.try_wait() {
-                Ok(Some(_)) => {
+                Ok(Some(status)) => {
+                    self.process.exited(&status);
                     self.group.stop_leftovers();
                     return Ok(());
                 }
                 Ok(None) => {
                     if Instant::now() >= deadline {
+                        self.process.failed(TIMEOUT_KILLED);
                         self.group.terminate();
                         let _ = self.child.kill();
                         let _ = self.child.wait();
@@ -230,10 +280,13 @@ impl RealMcpServerSession {
                     thread::sleep(Duration::from_millis(20));
                 }
                 Err(source) => {
-                    return Err(RecordingError::Wait {
+                    let error = RecordingError::Wait {
                         command: self.command_label.clone(),
                         source,
-                    })
+                    };
+                    record_error(&span, &error.error_type());
+                    self.process.failed(&error.error_type());
+                    return Err(error);
                 }
             }
         }
@@ -833,6 +886,53 @@ done
         assert!(content.ends_with("echo: hello"), "content:\n{content}");
 
         session.finish(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn each_request_to_the_real_server_is_an_mcp_client_span_under_its_process_span() {
+        use opentelemetry::trace::SpanKind;
+        use opentelemetry::Value;
+        use opentelemetry_semantic_conventions::attribute::{ERROR_TYPE, PROCESS_EXIT_CODE};
+
+        use crate::telemetry::semconv::generated::attributes::{GEN_AI_TOOL_NAME, MCP_METHOD_NAME};
+
+        let temp = tempdir().unwrap();
+        let command = fixture_server(temp.path());
+
+        let ((), trace) = crate::telemetry::testing::capture(|| {
+            let mut session = RealMcpServerSession::spawn(&command).unwrap();
+            session.initialize(Duration::from_secs(5)).unwrap();
+            session
+                .call_tool(
+                    &ToolName::from("echo"),
+                    &json!({"message": "hello"}),
+                    Duration::from_secs(5),
+                )
+                .unwrap();
+            session
+                .call_tool(&ToolName::from("fail"), &json!({}), Duration::from_secs(5))
+                .unwrap();
+            session.finish(Duration::from_secs(5)).unwrap();
+        });
+
+        let process = "fixture-mcp-server.sh";
+        trace.assert_child_of("initialize", process);
+        trace.assert_child_of("tools/call echo", process);
+        trace.assert_child_of("finish", process);
+        assert_eq!(trace.span("tools/call echo").unwrap().span_kind, SpanKind::Client);
+        assert_eq!(
+            trace.attribute("tools/call echo", MCP_METHOD_NAME),
+            Some(Value::from("tools/call"))
+        );
+        assert_eq!(
+            trace.attribute("tools/call echo", GEN_AI_TOOL_NAME),
+            Some(Value::from("echo"))
+        );
+        assert_eq!(
+            trace.attribute("tools/call fail", ERROR_TYPE),
+            Some(Value::from("tool_error"))
+        );
+        assert_eq!(trace.attribute(process, PROCESS_EXIT_CODE), Some(Value::I64(0)));
     }
 
     #[test]

@@ -16,7 +16,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::feedback::{feedback_path_for_run, grading_path_for_run, load_report, AssertionVerdict, HumanVerdict};
+use super::feedback::{
+    feedback_path_for_run, grading_path_for_run, load_report, AssertionVerdict, HumanVerdict, LoadedReport,
+};
+use super::grading::telemetry::{phase_span, record_error};
 use super::grading::{AssertionGradeResult, GraderKind, GradingFile};
 use super::judge_votes::JudgeVoteTally;
 use super::proportion::{Interval, Proportion};
@@ -36,6 +39,25 @@ pub enum GraderAgreementError {
 }
 
 pub type Result<T> = std::result::Result<T, GraderAgreementError>;
+
+impl GraderAgreementError {
+    pub(crate) fn error_type(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "io",
+            Self::Json(_) => "json",
+            Self::Message(_) => "invalid_report",
+        }
+    }
+}
+
+/// Runs `work` inside `span`, marking it failed when `work` fails.
+fn phase<T>(span: tracing::Span, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    let result = span.in_scope(work);
+    if let Err(error) = &result {
+        record_error(&span, error.error_type());
+    }
+    result
+}
 
 impl From<super::feedback::FeedbackError> for GraderAgreementError {
     fn from(value: super::feedback::FeedbackError) -> Self {
@@ -224,8 +246,13 @@ pub struct GraderAgreementDocument {
 /// ungraded result never rendered a pass/fail call, so there is nothing for a human
 /// verdict to agree or disagree with.
 pub fn build_grader_agreement_document(report_dir: &Path) -> Result<GraderAgreementDocument> {
-    let loaded = load_report(report_dir)?;
+    let loaded = phase(phase_span!("load report"), || Ok(load_report(report_dir)?))?;
+    phase(phase_span!("collect verdicts"), || {
+        collect_agreement(report_dir, &loaded)
+    })
+}
 
+fn collect_agreement(report_dir: &Path, loaded: &LoadedReport) -> Result<GraderAgreementDocument> {
     let mut overall_agreements = 0usize;
     let mut overall_disagreements = 0usize;
     let mut by_kind = AgreementByGraderKind::empty();
@@ -364,9 +391,11 @@ impl AgreementByGraderKind {
 }
 
 pub fn write_grader_agreement(report_dir: &Path, document: &GraderAgreementDocument) -> Result<()> {
-    let path = report_dir.join(GRADER_AGREEMENT_FILE_NAME);
-    std::fs::write(path, serde_json::to_string_pretty(document)?)?;
-    Ok(())
+    phase(phase_span!("write grader agreement"), || {
+        let path = report_dir.join(GRADER_AGREEMENT_FILE_NAME);
+        std::fs::write(path, serde_json::to_string_pretty(document)?)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ use crate::agentskills::benchmark::{
 };
 use crate::agentskills::evals::EvalSplit;
 use crate::agentskills::exit_code::ExitCode;
+use crate::agentskills::grading::telemetry::{eval_error_type, phase_span, record_error};
 use crate::agentskills::headroom::{describe_headroom_warning, HeadroomThreshold};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
@@ -119,15 +120,19 @@ pub(crate) fn benchmark_report_dir_with_document(
     report_dir: &Path,
     options: BenchmarkOptions,
 ) -> (ExitCode, Option<crate::agentskills::benchmark::BenchmarkDocument>) {
+    let span = phase_span!("benchmark");
+    let _entered = span.enter();
     let document = match build_benchmark(report_dir, options) {
         Ok(document) => document,
         Err(e) => {
+            record_error(&span, eval_error_type(&e));
             eprintln!("Failed to build benchmark: {}", e);
             return (ExitCode::InfrastructureFailure, None);
         }
     };
 
     if let Err(e) = write_benchmark(report_dir, &document) {
+        record_error(&span, eval_error_type(&e));
         eprintln!("Failed to write benchmark.json: {}", e);
         return (ExitCode::InfrastructureFailure, None);
     }

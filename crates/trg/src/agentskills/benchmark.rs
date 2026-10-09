@@ -12,6 +12,7 @@ use super::eval_suite_drift::{
     parse_report_iteration, EvalSuiteDriftWarning,
 };
 use super::evals::{EvalError, EvalSplit, Result};
+use super::grading::telemetry::{phase, phase_span};
 use super::headroom::{evaluate_headroom, HeadroomThreshold, HeadroomWarning};
 use super::iteration_summary::detect_previous_report_dir;
 use super::proportion::{self, Interval, Proportion};
@@ -492,10 +493,12 @@ struct ScenarioAccumulator {
 }
 
 pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<BenchmarkDocument> {
-    let report_path = report_dir.join("report.json");
-    let content = std::fs::read_to_string(&report_path)?;
-    let report: ReportForBenchmark = serde_json::from_str(&content)?;
+    let report = phase(phase_span!("read report"), || {
+        let content = std::fs::read_to_string(report_dir.join("report.json"))?;
+        Ok(serde_json::from_str::<ReportForBenchmark>(&content)?)
+    })?;
 
+    let aggregating = tracing::info_span!("aggregate scenarios").entered();
     let (scenario_map, deltas) = aggregate_scenarios(report_dir, report.runs.iter(), options.failed_runs);
 
     let by_split: BTreeMap<EvalSplit, SplitBenchmark> = EvalSplit::ALL
@@ -524,21 +527,25 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
     let iteration_comparison = build_iteration_comparison(report_dir, &report, failed_runs);
     let (by_eval_scenario, flaky_assertions) = build_by_eval_scenario(report_dir, &report.runs, failed_runs);
     let iteration_summary = build_iteration_summary(report_dir, &report.runs, flaky_assertions, failed_runs);
-    let warnings = collect_eval_suite_drift_warnings(
-        report_dir,
-        BenchmarkOptions {
-            failed_runs,
-            allow_eval_suite_drift,
-            previous_report_dir,
-            headroom_threshold,
-        },
-    )?;
+    drop(aggregating);
+    let warnings = phase(phase_span!("check eval suite drift"), || {
+        collect_eval_suite_drift_warnings(
+            report_dir,
+            BenchmarkOptions {
+                failed_runs,
+                allow_eval_suite_drift,
+                previous_report_dir,
+                headroom_threshold,
+            },
+        )
+    })?;
 
     let case_splits: BTreeMap<String, EvalSplit> = report
         .runs
         .iter()
         .map(|run| (run.eval_case_id.clone(), run.split))
         .collect();
+    let headroom_span = tracing::info_span!("build headroom").entered();
     let headroom = build_headroom(headroom_threshold, &scenario_map, &by_eval_scenario, &case_splits, None);
     let by_split: BTreeMap<EvalSplit, SplitBenchmark> = by_split
         .into_iter()
@@ -559,6 +566,7 @@ pub fn build_benchmark(report_dir: &Path, options: BenchmarkOptions) -> Result<B
             )
         })
         .collect();
+    drop(headroom_span);
 
     Ok(BenchmarkDocument {
         report_id: report.report.id,
@@ -601,6 +609,12 @@ fn collect_eval_suite_drift_warnings(
 }
 
 pub fn write_benchmark(report_dir: &Path, document: &BenchmarkDocument) -> Result<PathBuf> {
+    phase(phase_span!("write benchmark"), || {
+        write_benchmark_files(report_dir, document)
+    })
+}
+
+fn write_benchmark_files(report_dir: &Path, document: &BenchmarkDocument) -> Result<PathBuf> {
     sync_iteration_summary_to_report(report_dir, &document.iteration_summary)?;
 
     let output_path = report_dir.join("benchmark.json");
