@@ -15,8 +15,17 @@ const RESYNC_JITTER_MS = 300;
 const MAX_AUTH_BACKOFF_MS = 30_000;
 const DEFAULT_HEARTBEAT_MS = 20_000;
 const COMMAND_TIMEOUT_MS = 5_000;
-const COMMAND_RETRY_ATTEMPTS = 4;
-const COMMAND_RETRY_BASE_MS = 100;
+// Full-jitter retry (AWS-style: random(0, min(cap, base * 2^attempt))), matching the base, cap
+// and deadline the service's own overload-retry tests use (crates/trogon_presence_service/tests/
+// handoff_ack.rs): a shard lease handoff or writer restart is a real transient under host load,
+// not a bug, and a fixed small attempt count gives up well before such a handoff settles.
+const COMMAND_RETRY_ATTEMPTS = 10;
+const COMMAND_RETRY_BASE_MS = 20;
+const COMMAND_RETRY_CAP_MS = 500;
+const COMMAND_RETRY_DEADLINE_MS = 15_000;
+const SNAPSHOT_RETRY_BASE_MS = 20;
+const SNAPSHOT_RETRY_CAP_MS = 500;
+const SNAPSHOT_RETRY_DEADLINE_MS = 15_000;
 const RETRYABLE_CODES = Object.freeze([
   ErrorCode.NotOwner,
   ErrorCode.NotReady,
@@ -37,6 +46,12 @@ function assertSafeMeta(meta) {
 
 function jittered(baseMs) {
   return Math.floor(Math.random() * baseMs);
+}
+
+/** Full-jitter backoff (AWS-style): random(0, min(cap, base * 2^attempt)). */
+function fullJitterBackoff(baseMs, capMs, attempt) {
+  const ceiling = Math.min(capMs, baseMs * 2 ** attempt);
+  return Math.floor(Math.random() * ceiling);
 }
 
 function sleep(ms) {
@@ -334,7 +349,15 @@ export class PresenceClient {
     })().catch(() => {});
   }
 
-  async _requestSnapshot(view) {
+  /**
+   * A snapshot request is a plain `publish`, not a `request`: nats-server never reports "no
+   * responders" for it, so a request published while the owning shard is between a lease
+   * handoff and its writer resubscribing is silently lost with no error to react to. The
+   * watchdog below is the only thing that notices and tries again, bounded by a wall-clock
+   * deadline carried across retries (not reset per attempt) so a permanently denied or torn-down
+   * view eventually stops retrying instead of polling forever.
+   */
+  async _requestSnapshot(view, retry = {}) {
     if (view.glue.pending != null) return;
     const requestId = generateRandomId();
     view.glue.beginRequest(requestId);
@@ -342,6 +365,18 @@ export class PresenceClient {
     const subject = this.subjects.snapshotSubject(view.shardToken, this.key, this.connectionId, view.topic);
     const body = new TextEncoder().encode(JSON.stringify({ request_id: requestId }));
     this.connection.publish(subject, body, { reply: inbox });
+    const deadline = retry.deadline ?? Date.now() + SNAPSHOT_RETRY_DEADLINE_MS;
+    this._watchSnapshotRequest(view, requestId, deadline, retry.attempt ?? 0);
+  }
+
+  _watchSnapshotRequest(view, requestId, deadline, attempt) {
+    setTimeout(() => {
+      if (this.views.get(view.topic.raw) !== view) return;
+      if (view.glue.pending?.requestId !== requestId) return;
+      if (Date.now() >= deadline) return;
+      view.glue.abandonPending(requestId);
+      this._requestSnapshot(view, { deadline, attempt: attempt + 1 }).catch(() => {});
+    }, fullJitterBackoff(SNAPSHOT_RETRY_BASE_MS, SNAPSHOT_RETRY_CAP_MS, attempt));
   }
 
   _onDiffMessage(view, msg) {
@@ -384,6 +419,7 @@ export class PresenceClient {
 
   async _command(subject, body) {
     const payload = new TextEncoder().encode(JSON.stringify(body));
+    const deadline = Date.now() + COMMAND_RETRY_DEADLINE_MS;
     for (let attempt = 0; ; attempt += 1) {
       const reply = await this.connection.request(subject, payload, { timeout: COMMAND_TIMEOUT_MS });
       const code = header(reply, HEADER_CODE);
@@ -392,10 +428,10 @@ export class PresenceClient {
         return replyBody;
       }
       const retryable = RETRYABLE_CODES.includes(code);
-      if (!retryable || attempt >= COMMAND_RETRY_ATTEMPTS) {
+      if (!retryable || attempt >= COMMAND_RETRY_ATTEMPTS || Date.now() >= deadline) {
         throw new PresenceError(code ?? ErrorCode.Unavailable, `${subject} replied ${code}`, { topic: subject });
       }
-      await sleep(COMMAND_RETRY_BASE_MS * 2 ** attempt + jittered(COMMAND_RETRY_BASE_MS));
+      await sleep(fullJitterBackoff(COMMAND_RETRY_BASE_MS, COMMAND_RETRY_CAP_MS, attempt));
     }
   }
 

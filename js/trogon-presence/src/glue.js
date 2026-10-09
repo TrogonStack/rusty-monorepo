@@ -72,6 +72,13 @@ export class Glue {
     this.pending = { requestId, assembly: null, stash: [], diffBuffer: [] };
   }
 
+  /** Clears a still-pending request if it matches, so its owner can retry with a fresh one. A
+   * no-op if the request already resolved (installed) or was superseded, since `requestId` then
+   * no longer matches `this.pending`. */
+  abandonPending(requestId) {
+    if (this.pending?.requestId === requestId) this.pending = null;
+  }
+
   async receive(record) {
     switch (record.kind) {
       case "epoch":
