@@ -127,7 +127,7 @@ fn declare_mock_servers(mcp_config: &MaterializedMcpConfig, environment: &RunEnv
 /// nothing of its own and its spans are rebuilt from stdout instead.
 ///
 /// The table can carry exporter headers, credentials included, so the file is kept
-/// readable by its owner alone.
+/// readable by its owner alone until [`scrub_otel_credentials`] removes them.
 fn declare_otel(environment: &RunEnvironment) -> Result<HarnessTraces, RunnerError> {
     let Some(otel) = environment.codex_otel() else {
         return Ok(HarnessTraces::Silent);
@@ -161,6 +161,58 @@ fn declare_otel(environment: &RunEnvironment) -> Result<HarnessTraces, RunnerErr
     std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o600))?;
     file.write_all(format!("{separator}{}", otel.as_str()).as_bytes())?;
     Ok(HarnessTraces::exported(otel.exports_traces()))
+}
+
+/// The run's config home sits inside the report, so exporter credentials must not outlive
+/// the harness, whatever way it ended.
+fn scrub_otel_credentials(environment: &RunEnvironment) -> Result<(), RunnerError> {
+    let Some(config_home) = environment
+        .config_home()
+        .filter(|home| home.origin() == ConfigHomeOrigin::Run)
+    else {
+        return Ok(());
+    };
+    let file_name = Runner::Codex
+        .support(HarnessControl::McpServers)
+        .config_file_name()
+        .unwrap_or("config.toml");
+    let destination = config_home.path().join(file_name);
+    let Ok(contents) = std::fs::read_to_string(&destination) else {
+        return Ok(());
+    };
+    let Ok(mut document) = toml::from_str::<toml::Table>(&contents).map(toml::Value::Table) else {
+        return Ok(());
+    };
+    if !strip_otel_headers(&mut document) {
+        return Ok(());
+    }
+    let rendered = toml::to_string(&document).map_err(|source| RunnerError::InvalidOutput {
+        program: PROGRAM.to_string(),
+        detail: format!(
+            "could not re-render `{}` without its otel headers: {source}",
+            destination.display()
+        ),
+    })?;
+    std::fs::write(&destination, rendered)?;
+    Ok(())
+}
+
+fn strip_otel_headers(document: &mut toml::Value) -> bool {
+    let Some(otel) = document.get_mut("otel").and_then(toml::Value::as_table_mut) else {
+        return false;
+    };
+    let mut scrubbed = false;
+    for key in ["exporter", "trace_exporter", "metrics_exporter"] {
+        let Some(exporter) = otel.get_mut(key).and_then(toml::Value::as_table_mut) else {
+            continue;
+        };
+        for (_, kind) in exporter.iter_mut() {
+            if let Some(kind_table) = kind.as_table_mut() {
+                scrubbed |= kind_table.remove("headers").is_some();
+            }
+        }
+    }
+    scrubbed
 }
 
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
@@ -221,6 +273,9 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         ))
     })?;
     invocation.finish(&captured, &outcome, request.runner_model, traces);
+    in_step("scrub otel credentials", || {
+        scrub_otel_credentials(&prepared.environment)
+    })?;
     persist_runner_io(Runner::Codex, request, &captured)?;
 
     in_step("write outcome", || {
@@ -294,6 +349,8 @@ fn parse_outcome(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::super::RunStatus;
     use super::*;
     use crate::agentskills::report::{CacheTokens, EnvironmentPolicy};
@@ -626,5 +683,104 @@ mod tests {
             std::fs::read_to_string(&operator_config).unwrap(),
             "model = \"the operator's own\""
         );
+    }
+
+    /// The config home a forwarding run writes its `[otel]` table into sits inside the run
+    /// directory a report keeps, so once codex has read the credentials the table carried,
+    /// nothing may still hold them: a report shipped whole, zipped, or copied to a teammate
+    /// would otherwise ship the operator's exporter credentials along with it.
+    #[test]
+    fn scrubbing_drops_the_header_values_but_keeps_the_rest_of_the_otel_table() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = forwarding_environment(EnvironmentPolicy::Isolated, temp.path());
+        let config = materialized_config(temp.path());
+
+        declare_mock_servers(&config, &environment).unwrap();
+        declare_otel(&environment).unwrap();
+        scrub_otel_credentials(&environment).unwrap();
+
+        let written = environment.config_home().unwrap().path().join("config.toml");
+        let contents = std::fs::read_to_string(&written).unwrap();
+        assert!(
+            !contents.contains("Bearer abc") && !contents.contains("evals"),
+            "the otel headers are still present: {contents}"
+        );
+
+        let parsed: toml::Value = toml::from_str(&contents).unwrap();
+        assert!(
+            parsed.get("mcp_servers").is_some(),
+            "mock server declarations survive scrubbing"
+        );
+        assert_eq!(
+            parsed["otel"]["trace_exporter"]["otlp-http"]["endpoint"].as_str(),
+            Some("http://collector:4318/v1/traces"),
+            "the exporter endpoint stays, only its credentials are gone"
+        );
+        assert!(parsed["otel"]["trace_exporter"]["otlp-http"].get("headers").is_none());
+    }
+
+    /// The property the fix exists for: nothing under the run directory a report keeps
+    /// contains the literal header value a forwarding run was handed, once the run is over.
+    #[test]
+    fn no_file_in_the_run_directory_carries_the_otel_header_value_after_scrubbing() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = forwarding_environment(EnvironmentPolicy::Isolated, temp.path());
+        let config = materialized_config(temp.path());
+
+        declare_mock_servers(&config, &environment).unwrap();
+        declare_otel(&environment).unwrap();
+        scrub_otel_credentials(&environment).unwrap();
+
+        let run_dir = temp.path().join("run");
+        for entry in walkdir(&run_dir) {
+            let contents = std::fs::read(&entry).unwrap();
+            let text = String::from_utf8_lossy(&contents);
+            assert!(
+                !text.contains("Bearer abc"),
+                "`{}` still carries the forwarded otel header value",
+                entry.display()
+            );
+        }
+    }
+
+    #[test]
+    fn scrubbing_is_a_no_op_when_no_otel_table_was_ever_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = environment_for(EnvironmentPolicy::Isolated, temp.path());
+
+        scrub_otel_credentials(&environment).unwrap();
+
+        assert!(!environment.config_home().unwrap().path().join("config.toml").exists());
+    }
+
+    #[test]
+    fn scrubbing_never_touches_the_operators_config_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let environment = forwarding_environment(EnvironmentPolicy::Scrubbed, temp.path());
+        let operator_config = environment.config_home().unwrap().path().join("config.toml");
+        std::fs::write(&operator_config, "model = \"the operator's own\"").unwrap();
+
+        scrub_otel_credentials(&environment).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&operator_config).unwrap(),
+            "model = \"the operator's own\""
+        );
+    }
+
+    fn walkdir(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return files;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walkdir(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
     }
 }
