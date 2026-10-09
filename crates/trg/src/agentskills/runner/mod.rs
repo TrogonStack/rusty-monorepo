@@ -276,6 +276,7 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
                 let ended_at = SystemTime::now();
                 group.stop_leftovers();
                 let (stdout, stdout_timeline) = stdout_handle.join().unwrap_or_default();
+                let stdout_timeline = stdout_timeline.clamped_to(ended_at);
                 let stderr = stderr_handle.join().unwrap_or_default();
                 return Ok(CapturedProcess {
                     stdout,
@@ -307,6 +308,7 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
     };
 
     let (stdout, stdout_timeline) = stdout_handle.join().unwrap_or_default();
+    let stdout_timeline = stdout_timeline.clamped_to(ended_at);
     let stderr = stderr_handle.join().unwrap_or_default();
     Ok(CapturedProcess {
         stdout,

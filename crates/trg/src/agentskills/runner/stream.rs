@@ -38,6 +38,15 @@ impl StdoutTimeline {
         })
     }
 
+    /// Restamps lines the reader only got to after the harness ended, so output drained
+    /// late is kept but cannot outlast the process that wrote it.
+    pub(super) fn clamped_to(mut self, end: SystemTime) -> Self {
+        for arrival in &mut self.0 {
+            arrival.at = arrival.at.min(end);
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn stamped(stdout: &[u8], times: &[SystemTime]) -> Self {
         let mut arrivals = Vec::new();
@@ -118,6 +127,28 @@ mod tests {
         let (bytes, timeline) = read_stamped::<Cursor<Vec<u8>>>(None);
         assert!(bytes.is_empty());
         assert_eq!(timeline.lines(&bytes).count(), 0);
+    }
+
+    #[test]
+    fn clamping_restamps_lines_that_arrived_after_the_end() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let stdout = b"one\ntwo\nthree\n";
+        let timeline = StdoutTimeline::stamped(
+            stdout,
+            &[base, base + Duration::from_secs(1), base + Duration::from_secs(2)],
+        );
+
+        let end = base + Duration::from_secs(1);
+        let clamped = timeline.clamped_to(end);
+        let lines: Vec<(&[u8], SystemTime)> = clamped.lines(stdout).map(|line| (line.text, line.at)).collect();
+        assert_eq!(
+            lines,
+            vec![
+                (b"one".as_slice(), base),
+                (b"two".as_slice(), end),
+                (b"three".as_slice(), end)
+            ]
+        );
     }
 
     #[test]
