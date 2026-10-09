@@ -13,12 +13,13 @@ It assumes export already works. If not, start with
 Content capture needs each of these variables, set exactly as shown:
 
 ```sh
-export OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental
+export OTEL_SEMCONV_STABILITY_OPT_IN="${OTEL_SEMCONV_STABILITY_OPT_IN:+$OTEL_SEMCONV_STABILITY_OPT_IN,}gen_ai_latest_experimental"
 export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=SPAN_ONLY
 ```
 
 - `OTEL_SEMCONV_STABILITY_OPT_IN` is a comma-separated list. It must contain
-  `gen_ai_latest_experimental`; other entries are left alone.
+  `gen_ai_latest_experimental`; other entries are left alone. The command
+  above appends it to any value you already set.
 - `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` must be one of
   `SPAN_ONLY`, `EVENT_ONLY`, or `SPAN_AND_EVENT`, in upper case. Any other
   value, including `true` or `span_only`, captures nothing.

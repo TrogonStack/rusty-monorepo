@@ -71,9 +71,11 @@ replayed one.
 
 ## Decide whether to replay runs already traced live
 
-A run whose `trace` field in `report.json` is set was exported when it ran.
-By default `eval export` skips such runs, so a backend that still holds the
-live trace does not count their token usage and cost twice. The text output
+A run whose `trace` field in `report.json` is set had a live span when it ran.
+The field records that the span existed, not that the backend received it: a
+failed or timed-out export leaves it set all the same. By default `eval export`
+skips such runs, so a backend that still holds the live trace does not count
+their token usage and cost twice. The text output
 says how many it skipped, and the JSON lists them under `skipped_runs`.
 
 Grading is decided separately, from each run's `grade_trace` field:

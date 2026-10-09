@@ -54,7 +54,7 @@ service:
 Start it with the upstream collector image:
 
 ```sh
-docker run --rm -p 4318:4318 \
+docker run --rm -p 127.0.0.1:4318:4318 \
   -v "$PWD/otel-collector.yaml:/etc/otelcol/config.yaml" \
   otel/opentelemetry-collector:latest
 ```
