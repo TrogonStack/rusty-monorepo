@@ -97,8 +97,16 @@ mise run presence:cluster
 mise run presence:domain
 '''
 
+[tasks."presence:shim:deps"]
+description = "Fetch the Elixir presence shim dependencies when mix.lock changes"
+dir = "elixir/trogon_presence"
+sources = ["mix.exs", "mix.lock"]
+outputs = ["deps/.mix-lock-stamp"]
+run = "mise exec -- mix deps.get && touch deps/.mix-lock-stamp"
+
 [tasks."presence:shim"]
 description = "Run the Elixir presence shim tests once per supported nats-server version"
+depends = ["presence:shim:deps"]
 run = '''
 set -eu
 cargo build -p trogon_presence_service --bin trogon-presence
@@ -144,8 +152,16 @@ for version in 2.12.15 2.14.7; do
 done
 '''
 
+[tasks."presence:glue:deps"]
+description = "Install the js/trogon-presence dependencies when package-lock.json changes"
+dir = "js/trogon-presence"
+sources = ["package.json", "package-lock.json"]
+outputs = ["node_modules/.package-lock.json"]
+run = "mise exec -- npm ci"
+
 [tasks."presence:glue"]
 description = "Run the browser glue test against the js/trogon-presence package once per supported nats-server version"
+depends = ["presence:glue:deps"]
 run = '''
 set -eu
 for version in 2.12.15 2.14.7; do
