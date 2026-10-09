@@ -2008,13 +2008,13 @@ mod tests {
             let recorded = fs::read_to_string(run_dir.join(record)).unwrap();
             assert!(recorded.contains("OTEL_EXPORTER_OTLP_ENDPOINT"), "{record}");
             assert!(!recorded.contains("api-key=secret"), "{record}");
+            assert!(!recorded.contains("BEGIN PRIVATE KEY"), "{record}");
         }
         for handed in [config.json(), config.toml()] {
             assert_ne!(handed.parent(), Some(run_dir.as_path()));
-            assert!(
-                fs::read_to_string(handed).unwrap().contains("api-key=secret"),
-                "{handed:?}"
-            );
+            let handed_text = fs::read_to_string(handed).unwrap();
+            assert!(handed_text.contains("api-key=secret"), "{handed:?}");
+            assert!(handed_text.contains("BEGIN PRIVATE KEY"), "{handed:?}");
             let mode = fs::metadata(handed).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{handed:?}");
         }
@@ -2053,6 +2053,11 @@ mod tests {
             assert!(
                 !text.contains("api-key=secret"),
                 "`{}` still carries the forwarded otel header value",
+                entry.display()
+            );
+            assert!(
+                !text.contains("BEGIN PRIVATE KEY"),
+                "`{}` still carries the forwarded otel client key",
                 entry.display()
             );
         }
