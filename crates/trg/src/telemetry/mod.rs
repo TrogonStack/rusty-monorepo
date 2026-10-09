@@ -67,6 +67,10 @@ const DEFAULT_FILE_FILTER: &str = "info,trg=debug,rmcp=debug";
 /// that produced it, and an export failure would then feed itself.
 const EXPORT_PIPELINE_TARGETS: [&str; 7] = ["opentelemetry", "reqwest", "hyper", "h2", "tower", "rustls", "tonic"];
 
+/// Events emitted under this target reach the logs signal and never become span
+/// events, for log-based events whose attributes may carry content a trace must not.
+pub(crate) const LOGS_ONLY_TARGET: &str = "trg::logs_only";
+
 /// The providers [`init`] built, reachable from the termination path so a
 /// signal can flush them before re-raising.
 static INTERRUPT_TARGET: OnceLock<InterruptTarget> = OnceLock::new();
@@ -508,11 +512,13 @@ fn file_filter(env: &impl EnvLookup) -> EnvFilter {
         .unwrap_or_else(|| EnvFilter::new(DEFAULT_FILE_FILTER))
 }
 
-fn trace_filter() -> Targets {
-    Targets::new().with_target("trg", LevelFilter::INFO)
+pub(crate) fn trace_filter() -> Targets {
+    Targets::new()
+        .with_target("trg", LevelFilter::INFO)
+        .with_target(LOGS_ONLY_TARGET, LevelFilter::OFF)
 }
 
-fn log_filter() -> Targets {
+pub(crate) fn log_filter() -> Targets {
     EXPORT_PIPELINE_TARGETS.into_iter().fold(
         Targets::new()
             .with_default(LevelFilter::WARN)
