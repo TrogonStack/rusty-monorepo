@@ -109,3 +109,8 @@ pub const MANAGED_RELEASE_MAX_TARGETS: usize = BATCH_MAX_MESSAGES - 2;
 pub const MANAGED_HEARTBEAT_MAX_ENTRIES: usize = HEARTBEAT_ENTRIES_PER_BATCH;
 pub const GUARD_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 pub const GUARD_SELF_FENCE: std::time::Duration = std::time::Duration::from_secs(8);
+
+pub const JETSTREAM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const DEFAULT_READ_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+pub const MIN_READ_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+pub const MAX_READ_REQUEST_TIMEOUT: std::time::Duration = JETSTREAM_REQUEST_TIMEOUT;

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_nats::jetstream;
-use async_nats::jetstream::stream::StorageType;
+use async_nats::jetstream::stream::{LastRawMessageErrorKind, StorageType};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
@@ -44,6 +44,13 @@ const QUORUM_REFUSAL: Wait = Wait::new("a typed refusal without quorum", Duratio
 const WATCH_CATCHES_UP: Wait = Wait::new("the watcher to see every write", Duration::from_secs(60));
 const EXPIRY_MARGIN: Duration = Duration::from_secs(5);
 const UNAVAILABLE: [&str; 3] = ["unavailable", "not_ready", "not_owner"];
+const RENEWAL_SAMPLE: Duration = Duration::from_secs(30);
+const RENEWAL_SAMPLE_ENV: &str = "TROGON_PRESENCE_RENEWAL_SAMPLE_SECS";
+const RENEWAL_PROBE_KEY: &str = "renewal-probe";
+const WATCHERS_AFTER_CRASH: usize = 12;
+const LEADER_READ_PROBE: Duration = Duration::from_millis(100);
+const LEADER_PROBE_SUBJECT: &str = "presence.leader-probe";
+const RETRIED_PLACEMENT: Duration = Duration::from_millis(400);
 
 macro_rules! cluster_or_skip {
     () => {
@@ -493,10 +500,28 @@ async fn losing_the_stream_leader_pauses_writes_and_keeps_receipts_exact() -> Te
         landed.push((writer.land_once(&format!("k{index}")).await?.0, Instant::now()));
     }
 
+    let reads = jetstream::new(client.clone()).get_stream(&stream).await?;
     cluster.stop(leader);
     let killed = Instant::now();
+    let answered = tokio::spawn(async move {
+        loop {
+            match tokio::time::timeout(
+                LEADER_READ_PROBE,
+                reads.get_last_raw_message_by_subject(LEADER_PROBE_SUBJECT),
+            )
+            .await
+            {
+                Ok(Err(err)) if matches!(err.kind(), LastRawMessageErrorKind::Other) => {
+                    tokio::time::sleep(LEADER_READ_PROBE).await
+                }
+                Ok(_) => return killed.elapsed(),
+                Err(_) => {}
+            }
+        }
+    });
     writer.first_landing("resumed", WRITES_RECOVER).await?;
     let window = killed.elapsed();
+    let answered = answered.await?;
     steady(&client, &handle).await?;
     let sampler = ChurnSampler::spawn(handle.clone());
     let written = Instant::now();
@@ -511,7 +536,10 @@ async fn losing_the_stream_leader_pauses_writes_and_keeps_receipts_exact() -> Te
     let elected = Cluster::wait_for_leader(&client, &stream, Some(leader), NEW_LEADER).await?;
     cluster.restart(leader).await?;
     Cluster::wait_for_replicas(&client, &stream, REPLICAS_CURRENT).await?;
-    eprintln!("stream leader loss: {leader} to {elected}, writes resumed after {window:?}");
+    eprintln!(
+        "stream leader loss: {leader} to {elected}, leader reads answered after {answered:?}, writes resumed after {window:?}, {:?} later",
+        window.saturating_sub(answered)
+    );
 
     let presence = Presence::open(client.clone(), presence_config()?).await?;
     let view = presence.watch(TOPIC.parse()?).await?;
@@ -681,4 +709,162 @@ async fn a_watcher_replays_through_a_leader_change_without_gaps_or_duplicates() 
     assert_eq!(view.generation(), generation, "the watcher changed generation");
     assert_eq!(presence.generation(), generation, "the stream changed generation");
     shutdown(handle).await
+}
+
+/// Sorted samples of one latency, read out at the quantiles the fence decision needs.
+struct Latencies(Vec<Duration>);
+
+impl Latencies {
+    fn new(mut samples: Vec<Duration>) -> Self {
+        samples.sort_unstable();
+        Self(samples)
+    }
+
+    fn quantile(&self, permille: usize) -> Duration {
+        let rank = (self.0.len() * permille).div_ceil(1000).saturating_sub(1);
+        self.0.get(rank).copied().unwrap_or_default()
+    }
+
+    fn max(&self) -> Duration {
+        self.0.last().copied().unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for Latencies {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "n={} p50={:.1?} p99={:.1?} p99.9={:.1?} max={:.1?}",
+            self.0.len(),
+            self.quantile(500),
+            self.quantile(990),
+            self.quantile(999),
+            self.max()
+        )
+    }
+}
+
+fn renewal_sample() -> Result<Duration, BoxError> {
+    Ok(match std::env::var(RENEWAL_SAMPLE_ENV) {
+        Ok(secs) => Duration::from_secs(secs.parse()?),
+        Err(_) => RENEWAL_SAMPLE,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "three-node cluster fault test, run through `mise run presence:cluster`"]
+async fn shard_lease_renewals_land_inside_the_renewal_slack() -> TestResult {
+    let cluster = cluster_or_skip!();
+    let client = cluster.client(Peer::N1).await?;
+    provision(&client).await?;
+    let handle = Arc::new(start(client.clone(), "edge-a").await?);
+    owning_all(&handle).await?;
+    let config = service_config("probe")?;
+    let lease_bucket = config.lease_bucket().clone();
+    let ttl = config.lease_ttl();
+    let probe_subject = format!("$KV.{lease_bucket}.{RENEWAL_PROBE_KEY}");
+    let observer = cluster.client(Peer::N2).await?;
+    let mut renewals = observer.subscribe(lease_bucket.subjects_filter()).await?;
+    observer.flush().await?;
+    let context = jetstream::new(cluster.client(Peer::N1).await?);
+    let sample = renewal_sample()?;
+    let churn = ChurnSampler::spawn(handle.clone());
+    let deadline = tokio::time::Instant::now() + sample;
+    let watch_renewals = async {
+        let mut last_seen: BTreeMap<String, Instant> = BTreeMap::new();
+        let mut lateness = Vec::new();
+        loop {
+            let message = match tokio::time::timeout_at(deadline, renewals.next()).await {
+                Ok(Some(message)) => message,
+                Ok(None) | Err(_) => return lateness,
+            };
+            let subject = message.subject.to_string();
+            if subject == probe_subject {
+                continue;
+            }
+            let now = Instant::now();
+            if let Some(previous) = last_seen.insert(subject, now) {
+                lateness.push(now.duration_since(previous).saturating_sub(ttl.renew_every()));
+            }
+        }
+    };
+    let probe_acks = async {
+        let mut round_trips = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            let sent = Instant::now();
+            if let Ok(ack) = context.publish(probe_subject.clone(), "probe".into()).await {
+                if ack.await.is_ok() {
+                    round_trips.push(sent.elapsed());
+                }
+            }
+            tokio::time::sleep(ttl.renew_every()).await;
+        }
+        round_trips
+    };
+    let (lateness, round_trips) = tokio::join!(watch_renewals, probe_acks);
+    let churn = churn.finish().await?;
+    let lateness = Latencies::new(lateness);
+    let round_trips = Latencies::new(round_trips);
+    let needed = lateness.quantile(999) + round_trips.quantile(999);
+    eprintln!(
+        "renewals over {sample:?} with ttl {:?}, renew every {:?}, fence after {:?}, slack {:?}",
+        ttl.get(),
+        ttl.renew_every(),
+        ttl.fence_after(),
+        ttl.renewal_slack()
+    );
+    eprintln!("renewal lateness: {lateness}");
+    eprintln!("lease write round trip: {round_trips}");
+    eprintln!(
+        "p99.9 lateness plus p99.9 round trip {needed:?} against slack {:?}; {churn}",
+        ttl.renewal_slack()
+    );
+    assert!(
+        lateness.0.len() > shard_count(),
+        "too few renewals observed: {lateness}"
+    );
+    assert_eq!(churn.drops, 0, "a shard was fenced on a steady cluster: {churn}");
+    assert!(
+        needed < ttl.renewal_slack(),
+        "renewals need {needed:?}, more than the {:?} slack",
+        ttl.renewal_slack()
+    );
+    shutdown(handle).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "three-node cluster fault test, run through `mise run presence:cluster`"]
+async fn watchers_opened_after_a_crash_retry_past_replay_consumers_placed_on_the_dead_peer() -> TestResult {
+    let mut cluster = cluster_or_skip!();
+    let admin = cluster.client(Peer::N1).await?;
+    provision(&admin).await?;
+    let stream_name = presence_stream()?;
+    let leader = Cluster::wait_for_replicas(&admin, &stream_name, REPLICAS_CURRENT).await?;
+    let survivor = leader.others().next().ok_or("no surviving peer")?;
+    let client = cluster.client(survivor).await?;
+    cluster.stop(leader);
+    Cluster::wait_for_leader(&client, &stream_name, Some(leader), NEW_LEADER).await?;
+
+    let presence = Presence::open(client.clone(), presence_config()?).await?;
+    let mut views = Vec::new();
+    let mut readiness = Vec::new();
+    for index in 0..WATCHERS_AFTER_CRASH {
+        let opened = Instant::now();
+        let view = presence.watch(format!("room:crash-{index}").parse()?).await?;
+        assert_eq!(
+            view.readiness(),
+            Readiness::Ready,
+            "watcher {index} opened without being ready"
+        );
+        readiness.push(opened.elapsed());
+        views.push(view);
+    }
+    let retried = readiness.iter().filter(|took| **took >= RETRIED_PLACEMENT).count();
+    eprintln!(
+        "replay after crash: {WATCHERS_AFTER_CRASH} watchers ready with {leader} stopped, {retried} retried past a placement on it, readiness {}",
+        Latencies::new(readiness)
+    );
+    drop(views);
+    cluster.restart(leader).await?;
+    Ok(())
 }

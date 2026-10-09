@@ -20,6 +20,7 @@ mod phx_ref;
 mod position;
 mod presence;
 mod rate_limit;
+mod read;
 mod receipt;
 mod revision;
 mod shard;
@@ -75,6 +76,7 @@ pub use position::{
 };
 pub use presence::{Incompatible, OpenError, Presence, ProvisionError, TrackerError, UnreadyReason};
 pub use rate_limit::{Admission, IdentityBound, IdentityBoundError, RateBurst, RateLimit, RateLimitError, RateLimiter};
+pub use read::{ReadRequestTimeout, ReadRequestTimeoutError};
 pub use receipt::{
     GuardBody, GuardKind, Liveness, Receipt, ReceiptError, ReceiptTarget, ReleasedTarget, SchemaTag, WriteReceipt,
 };

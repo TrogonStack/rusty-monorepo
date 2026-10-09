@@ -169,6 +169,7 @@ impl Presence {
             config.lease_ttl(),
             config.marker_ttl(),
             config.route().clone(),
+            config.read_timeout(),
         );
         let heartbeat = Heartbeat::new(writer, config.heartbeat());
         Ok(Self {

@@ -144,7 +144,8 @@ pub async fn start_with_clock(
         config.lease_ttl(),
         LeaseValue::new(owner, generation),
     )
-    .await?;
+    .await?
+    .with_read_timeout(config.presence().read_timeout());
     let owned = OwnedShards::default();
     let writers = WriterShards::default();
     let counters = Arc::new(AdmissionCounters::default());

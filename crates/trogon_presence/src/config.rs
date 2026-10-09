@@ -14,6 +14,7 @@ use crate::constants::{
 };
 use crate::domain::{JetStreamDomain, JetStreamRoute};
 use crate::kv_key::KvKey;
+use crate::read::ReadRequestTimeout;
 use crate::shard::ShardCount;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -329,6 +330,7 @@ pub struct PresenceConfig {
     writer_mode: WriterMode,
     route: JetStreamRoute,
     inflight_batches: InflightBatchLimit,
+    read_timeout: ReadRequestTimeout,
 }
 
 impl PresenceConfig {
@@ -360,6 +362,7 @@ impl PresenceConfig {
             writer_mode: WriterMode::default(),
             route: JetStreamRoute::local(),
             inflight_batches: InflightBatchLimit::default(),
+            read_timeout: ReadRequestTimeout::default(),
         })
     }
 
@@ -379,6 +382,14 @@ impl PresenceConfig {
             inflight_batches,
             ..self
         }
+    }
+
+    pub fn with_read_timeout(self, read_timeout: ReadRequestTimeout) -> Self {
+        Self { read_timeout, ..self }
+    }
+
+    pub fn read_timeout(&self) -> ReadRequestTimeout {
+        self.read_timeout
     }
 
     pub fn route(&self) -> &JetStreamRoute {
@@ -525,6 +536,17 @@ mod tests {
         assert_eq!(limited.route(), config.route());
         assert!(InflightBatchLimit::try_from(0).is_err());
         assert!("0".parse::<InflightBatchLimit>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_config_carries_its_read_request_timeout() -> TestResult {
+        let config = PresenceConfig::default();
+        assert_eq!(config.read_timeout(), ReadRequestTimeout::default());
+        let timeout: ReadRequestTimeout = "250ms".parse()?;
+        let shortened = config.clone().with_read_timeout(timeout);
+        assert_eq!(shortened.read_timeout(), timeout);
+        assert_eq!(shortened.inflight_batches(), config.inflight_batches());
         Ok(())
     }
 

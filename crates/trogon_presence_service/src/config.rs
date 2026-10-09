@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use trogon_presence::watch::replay::{RebuildBudget, ReconcileInterval};
 use trogon_presence::{
-    BucketName, CoalesceWindow, InflightBatchLimit, ManagedLimits, PresenceConfig, SelfFenceBound, WriterMode,
+    BucketName, CoalesceWindow, InflightBatchLimit, ManagedLimits, PresenceConfig, ReadRequestTimeout, SelfFenceBound,
+    WriterMode,
 };
 use trogon_presence_hooks::HookConfig;
 
@@ -15,8 +16,7 @@ pub const DEFAULT_LEASE_BUCKET: &str = "PRESENCE_LEASE_V1";
 const DEFAULT_SHARD_LEASE_TTL_SECS: u64 = 15;
 const SHARD_LEASE_TTL_MIN_SECS: u64 = 3;
 const SHARD_LEASE_RENEW_DIVISOR: u32 = 3;
-const SHARD_LEASE_FENCE_NUMERATOR: u32 = 8;
-const SHARD_LEASE_FENCE_DENOMINATOR: u32 = 15;
+const SHARD_LEASE_RENEWAL_SLACK_DIVISOR: u32 = 5;
 const DEFAULT_KEEPALIVE_SECS: u64 = 30;
 const DEFAULT_WRITER_REPLY_DEADLINE_SECS: u64 = 3;
 const NODE_ID_MAX_BYTES: usize = 64;
@@ -38,7 +38,11 @@ impl ShardLeaseTtl {
     }
 
     pub fn fence_after(self) -> Duration {
-        self.0 * SHARD_LEASE_FENCE_NUMERATOR / SHARD_LEASE_FENCE_DENOMINATOR
+        self.renew_every() + self.renewal_slack()
+    }
+
+    pub fn renewal_slack(self) -> Duration {
+        self.0 / SHARD_LEASE_RENEWAL_SLACK_DIVISOR
     }
 
     pub fn self_fence(self) -> SelfFenceBound {
@@ -248,6 +252,17 @@ impl ServiceConfig {
         self.presence.inflight_batches()
     }
 
+    pub fn with_read_timeout(self, read_timeout: ReadRequestTimeout) -> Self {
+        Self {
+            presence: self.presence.clone().with_read_timeout(read_timeout),
+            ..self
+        }
+    }
+
+    pub fn read_timeout(&self) -> ReadRequestTimeout {
+        self.presence.read_timeout()
+    }
+
     pub fn with_lease_bucket(self, lease_bucket: BucketName) -> Self {
         Self { lease_bucket, ..self }
     }
@@ -345,10 +360,15 @@ mod tests {
         let ttl = ShardLeaseTtl::default();
         assert_eq!(ttl.renew_every(), Duration::from_secs(5));
         assert_eq!(ttl.fence_after(), Duration::from_secs(8));
+        assert_eq!(ttl.renewal_slack(), Duration::from_secs(3));
         assert_eq!(ttl.header_value(), "15s");
         assert!(ShardLeaseTtl::try_from(Duration::from_secs(2)).is_err());
         assert!(ShardLeaseTtl::try_from(Duration::from_millis(3500)).is_err());
-        ShardLeaseTtl::try_from(Duration::from_secs(3)).map(|_| ())
+        let shortest = ShardLeaseTtl::try_from(Duration::from_secs(3))?;
+        assert_eq!(shortest.renew_every(), Duration::from_secs(1));
+        assert_eq!(shortest.renewal_slack(), Duration::from_millis(600));
+        assert_eq!(shortest.fence_after(), Duration::from_millis(1600));
+        Ok(())
     }
 
     #[test]
@@ -383,6 +403,18 @@ mod tests {
         assert_eq!(limited.inflight_batches(), limit);
         assert_eq!(limited.presence().inflight_batches(), limit);
         assert_eq!(limited.presence().writer_mode(), WriterMode::Managed);
+        Ok(())
+    }
+
+    #[test]
+    fn read_timeout_defaults_and_overrides() -> Result<(), Box<dyn std::error::Error>> {
+        let config = ServiceConfig::new(PresenceConfig::default(), "edge-1".parse()?);
+        assert_eq!(config.read_timeout(), ReadRequestTimeout::default());
+        let timeout: ReadRequestTimeout = "500ms".parse()?;
+        let shortened = config.with_read_timeout(timeout);
+        assert_eq!(shortened.read_timeout(), timeout);
+        assert_eq!(shortened.presence().read_timeout(), timeout);
+        assert_eq!(shortened.presence().writer_mode(), WriterMode::Managed);
         Ok(())
     }
 

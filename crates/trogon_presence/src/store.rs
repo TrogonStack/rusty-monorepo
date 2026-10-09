@@ -11,6 +11,7 @@ use crate::config::{BucketName, GuardTtl, LeaseTtl, MarkerTtl, ReceiptTtl};
 use crate::constants::{KV_OPERATION_DELETE, KV_OPERATION_HEADER, KV_OPERATION_PURGE};
 use crate::domain::JetStreamRoute;
 use crate::kv_key::KvKey;
+use crate::read::ReadRequestTimeout;
 use crate::receipt::{GuardBody, Receipt, ReceiptError};
 use crate::revision::EntryRevision;
 use crate::value::{StoredValue, Tombstone, ValueError};
@@ -78,6 +79,7 @@ pub(crate) struct KvWriter {
     lease_ttl: LeaseTtl,
     marker_ttl: MarkerTtl,
     route: JetStreamRoute,
+    read_timeout: ReadRequestTimeout,
 }
 
 enum Raw {
@@ -94,6 +96,7 @@ impl KvWriter {
         lease_ttl: LeaseTtl,
         marker_ttl: MarkerTtl,
         route: JetStreamRoute,
+        read_timeout: ReadRequestTimeout,
     ) -> Self {
         Self {
             client,
@@ -102,6 +105,7 @@ impl KvWriter {
             lease_ttl,
             marker_ttl,
             route,
+            read_timeout,
         }
     }
 
@@ -155,8 +159,8 @@ impl KvWriter {
     async fn read_raw(&self, key: &KvKey) -> Result<Raw, StoreError> {
         let started = std::time::Instant::now();
         let read = self
-            .stream
-            .get_last_raw_message_by_subject(&self.bucket.subject_for(key))
+            .read_timeout
+            .last_message(&self.stream, &self.bucket.subject_for(key))
             .await;
         if started.elapsed() > SLOW_CALL {
             tracing::warn!(elapsed = ?started.elapsed(), error = ?read.as_ref().err(), "slow last-message read");

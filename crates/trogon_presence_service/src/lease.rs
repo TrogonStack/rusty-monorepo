@@ -10,7 +10,7 @@ use async_nats::{HeaderMap, Subject};
 use serde::{Deserialize, Serialize};
 use trogon_presence::{
     BucketField, BucketName, BucketReport, DriftSeverity, FieldCheck, JetStreamRoute, OwnerId, ProvisionOptions,
-    Revision, ShardCount, StreamGeneration, ViewShard, WriterShard,
+    ReadRequestTimeout, Revision, ShardCount, StreamGeneration, ViewShard, WriterShard,
 };
 
 use crate::config::ShardLeaseTtl;
@@ -122,6 +122,7 @@ pub struct LeaseStore {
     ttl: ShardLeaseTtl,
     value: LeaseValue,
     route: JetStreamRoute,
+    read_timeout: ReadRequestTimeout,
 }
 
 pub async fn provision_lease_bucket(
@@ -262,7 +263,12 @@ impl LeaseStore {
             ttl,
             value,
             route,
+            read_timeout: ReadRequestTimeout::default(),
         })
+    }
+
+    pub fn with_read_timeout(self, read_timeout: ReadRequestTimeout) -> Self {
+        Self { read_timeout, ..self }
     }
 
     pub fn ttl(&self) -> ShardLeaseTtl {
@@ -360,7 +366,7 @@ impl LeaseStore {
     }
 
     async fn current(&self, shard: LeaseKey) -> Result<Current, LeaseError> {
-        match self.stream.get_last_raw_message_by_subject(&self.subject(shard)).await {
+        match self.read_timeout.last_message(&self.stream, &self.subject(shard)).await {
             Ok(message) => {
                 let freed = message.headers.get(NATS_MARKER_REASON).is_some()
                     || message
