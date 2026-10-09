@@ -516,6 +516,24 @@ impl MaterializedMcpConfig {
     pub fn toml(&self) -> &Path {
         &self.toml
     }
+
+    /// Remove the `mcp-launch` copy once the harness that was handed it has exited, whatever
+    /// way it ended.
+    ///
+    /// A mock server reads its own environment, not this file: the harness reads it only to
+    /// learn what to spawn, and does so once, at its own startup. Nothing still depends on it
+    /// once the harness process is gone, so the credentials it carries do not need to survive
+    /// into the report the run directory becomes.
+    pub fn scrub(&self) -> io::Result<()> {
+        let Some(dir) = self.json.parent() else {
+            return Ok(());
+        };
+        match fs::remove_dir_all(dir) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(source),
+        }
+    }
 }
 
 /// Materialize a resolved mock set for a run: one JSON file per declared tool, plus the
@@ -2000,6 +2018,123 @@ mod tests {
             let mode = fs::metadata(handed).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "{handed:?}");
         }
+    }
+
+    /// The property the fix exists for: once a harness that was handed the `mcp-launch`
+    /// copy has exited, nothing under the run directory a report keeps carries the literal
+    /// header value it was given.
+    #[test]
+    fn no_file_in_the_run_directory_carries_the_otel_header_value_after_scrubbing() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\nok\n",
+        );
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "case").unwrap();
+        let env = MockServerEnv::from_parts(traceparent(), exporter_env(), TelemetryForwarding::On);
+        let run_dir = temp.path().join("run");
+
+        let config = materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &env,
+        )
+        .unwrap();
+
+        config.scrub().unwrap();
+
+        for entry in walkdir(&run_dir) {
+            let contents = fs::read(&entry).unwrap();
+            let text = String::from_utf8_lossy(&contents);
+            assert!(
+                !text.contains("api-key=secret"),
+                "`{}` still carries the forwarded otel header value",
+                entry.display()
+            );
+        }
+    }
+
+    #[test]
+    fn scrubbing_removes_the_whole_launch_directory_so_nothing_handed_to_a_harness_survives() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\nok\n",
+        );
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "case").unwrap();
+        let env = MockServerEnv::from_parts(traceparent(), exporter_env(), TelemetryForwarding::On);
+        let run_dir = temp.path().join("run");
+
+        let config = materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &env,
+        )
+        .unwrap();
+        let launch_dir = config.json().parent().unwrap().to_path_buf();
+        assert!(launch_dir.exists());
+
+        config.scrub().unwrap();
+
+        assert!(
+            !launch_dir.exists(),
+            "the mcp-launch directory must not survive the harness"
+        );
+        for record in [MCP_CONFIG_FILE_NAME, MCP_CONFIG_TOML_FILE_NAME] {
+            assert!(
+                run_dir.join(record).exists(),
+                "the record a report keeps beside the run is untouched by scrubbing"
+            );
+        }
+    }
+
+    #[test]
+    fn scrubbing_twice_is_a_no_op() {
+        let temp = tempdir().unwrap();
+        let skill = temp.path().join("skill");
+        write_mock(
+            &skill.join("evals/mocks"),
+            "github",
+            "create_issue",
+            "---\ntype: fixed\n---\nok\n",
+        );
+        let mock_set = resolve_mock_set(&skill, &EvalDirName::default(), "case").unwrap();
+        let run_dir = temp.path().join("run");
+
+        let config = materialize_mock_set(
+            &mock_set,
+            &run_dir,
+            &MockServerBinary::at("/usr/local/bin/trg").unwrap(),
+            &MockServerEnv::none(),
+        )
+        .unwrap();
+
+        config.scrub().unwrap();
+        config.scrub().unwrap();
+    }
+
+    fn walkdir(dir: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let Ok(entries) = fs::read_dir(dir) else {
+            return files;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(walkdir(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
     }
 
     #[test]
