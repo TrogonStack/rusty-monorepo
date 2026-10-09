@@ -85,6 +85,12 @@ impl fmt::Display for BucketName {
     }
 }
 
+impl serde::Serialize for BucketName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("{what} must be a whole number of seconds and at least one second, got {value:?}")]
 pub struct WholeSecondsError {

@@ -5,6 +5,7 @@ use tokio::sync::Semaphore;
 
 use async_nats::jetstream::context::GetStreamError;
 use futures_util::future::join_all;
+use futures_util::StreamExt;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use trogon_presence::watch::engine::{RetirementWindow, StalePolicy};
@@ -16,9 +17,12 @@ use trogon_presence_hooks::{HookLoadError, HookRuntime};
 
 use crate::admission::{AdmissionCounters, AdmissionStats};
 use crate::config::ServiceConfig;
+use crate::drain::{DrainReply, DrainRequest};
 use crate::lease::{provision_lease_bucket, LeaseError, LeaseKey, LeaseStore, LeaseValue};
+use crate::reply::{ErrorReply, ReplyCode, Response};
 use crate::shard_owner::{OwnedShards, OwnerExit, OwnerShared, ShardOwner};
 use crate::snapshot::AssemblyGate;
+use crate::subjects::drain_subject;
 use crate::writer::{WriterContext, WriterHost, WriterShards};
 use crate::writes::{Ingress, Writes};
 
@@ -38,6 +42,8 @@ pub enum ServiceError {
     Hook(#[from] HookLoadError),
     #[error(transparent)]
     Clock(#[from] ClockError),
+    #[error("could not listen for drain requests: {0}")]
+    Drain(#[from] async_nats::SubscribeError),
 }
 
 pub async fn provision(
@@ -60,6 +66,7 @@ pub async fn provision(
 }
 
 pub struct ServiceHandle {
+    owner: OwnerId,
     owned: OwnedShards,
     writers: WriterShards,
     counters: Arc<AdmissionCounters>,
@@ -68,6 +75,10 @@ pub struct ServiceHandle {
 }
 
 impl ServiceHandle {
+    pub fn owner(&self) -> OwnerId {
+        self.owner
+    }
+
     pub fn owned_shards(&self) -> Vec<ViewShard> {
         self.owned
             .lock()
@@ -176,6 +187,7 @@ pub async fn start_with_clock(
         generation,
         clock,
     });
+    let drains = client.subscribe(drain_subject(owner)).await?;
     let (stop, stop_rx) = watch::channel(false);
     let writes = Writes::new(Ingress {
         client,
@@ -187,8 +199,9 @@ pub async fn start_with_clock(
         reply_deadline: config.writer_reply_deadline(),
     });
     let front = tokio::spawn(writes.run(stop_rx.clone()));
-    let task = tokio::spawn(manage(shared, host, presence, front, stop_rx));
+    let task = tokio::spawn(manage(shared, host, presence, front, drains, stop_rx));
     Ok(ServiceHandle {
+        owner,
         owned,
         writers,
         counters,
@@ -199,20 +212,80 @@ pub async fn start_with_clock(
 
 type Front = JoinHandle<Result<(), async_nats::SubscribeError>>;
 
+type Owners = HashMap<ViewShard, JoinHandle<OwnerExit>>;
+
+async fn release_owners(owners: &mut Owners, stop: &watch::Sender<bool>) -> usize {
+    let _ = stop.send(true);
+    let mut released = 0;
+    for (_, owner) in owners.drain() {
+        match owner.await {
+            Ok(OwnerExit::Shutdown) => released += 1,
+            Ok(_) => {}
+            Err(err) => tracing::warn!(%err, "shard owner task failed"),
+        }
+    }
+    released
+}
+
+async fn drain(
+    shared: &OwnerShared,
+    host: &mut Option<WriterHost>,
+    owners: &mut Owners,
+    owner_stop: &watch::Sender<bool>,
+    message: &async_nats::Message,
+) -> Response {
+    let request: DrainRequest = match serde_json::from_slice(&message.payload) {
+        Ok(request) => request,
+        Err(err) => return ErrorReply::new(ReplyCode::InvalidRequest).detail(err).into(),
+    };
+    if request.instance() != shared.owner {
+        return ErrorReply::new(ReplyCode::InvalidRequest)
+            .detail("drain request names another instance")
+            .into();
+    }
+    let Some(writers) = host.take() else {
+        return Response::ok_json(&DrainReply {
+            instance: shared.owner,
+            released_views: 0,
+            released_writers: 0,
+            already_draining: true,
+        });
+    };
+    let released_writers = writers.shutdown().await;
+    let released_views = release_owners(owners, owner_stop).await;
+    tracing::info!(released_views, released_writers, "drained shard leases on request");
+    Response::ok_json(&DrainReply {
+        instance: shared.owner,
+        released_views,
+        released_writers,
+        already_draining: false,
+    })
+}
+
 async fn manage(
     shared: Arc<OwnerShared>,
-    mut host: WriterHost,
+    host: WriterHost,
     presence: Presence,
     front: Front,
+    mut drains: async_nats::Subscriber,
     mut stop: watch::Receiver<bool>,
 ) {
-    let mut owners: HashMap<ViewShard, JoinHandle<OwnerExit>> = HashMap::new();
+    let mut host = Some(host);
+    let (owner_stop, owner_stop_rx) = watch::channel(false);
+    let mut owners: Owners = HashMap::new();
     let mut tick = tokio::time::interval(shared.leases.ttl().renew_every());
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = stop.changed() => break,
+            Some(message) = drains.next() => {
+                let response = drain(&shared, &mut host, &mut owners, &owner_stop, &message).await;
+                response.send(&shared.client, &message).await;
+            }
             _ = tick.tick() => {
+                let Some(host) = host.as_mut() else {
+                    continue;
+                };
                 host.acquire_free().await;
                 owners.retain(|_, owner| !owner.is_finished());
                 let free: Vec<ViewShard> = (0..shared.shards.get())
@@ -231,7 +304,7 @@ async fn manage(
                             match SelfFence::confirm(sent, shared.clock.now(), bound) {
                                 Ok(fence) => {
                                     let owner = ShardOwner::new(shared.clone(), shard, revision, fence);
-                                    owners.insert(shard, tokio::spawn(owner.run(stop.clone())));
+                                    owners.insert(shard, tokio::spawn(owner.run(owner_stop_rx.clone())));
                                 }
                                 Err(breach) => {
                                     tracing::warn!(%breach, "shard lease acquired too late, releasing it");
@@ -248,12 +321,10 @@ async fn manage(
             }
         }
     }
-    host.shutdown().await;
-    for owner in owners.into_values() {
-        if let Err(err) = owner.await {
-            tracing::warn!(%err, "shard owner task failed");
-        }
+    if let Some(host) = host {
+        host.shutdown().await;
     }
+    release_owners(&mut owners, &owner_stop).await;
     match front.await {
         Ok(Ok(())) => {}
         Ok(Err(err)) => tracing::warn!(%err, "front subscriptions failed"),

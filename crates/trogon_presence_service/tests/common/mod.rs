@@ -222,6 +222,11 @@ impl NatsServer {
         )))
     }
 
+    #[allow(dead_code)]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     pub async fn client(&self) -> async_nats::Client {
         match self.access.connect(self.port, CALLER_USER).await {
             Ok(client) => client,

@@ -204,7 +204,8 @@ impl WriterHost {
         Ok(Tenure { stop, keeper, intake })
     }
 
-    pub(crate) async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) -> usize {
+        let released = self.tenures.len();
         for (shard, tenure) in self.tenures {
             let _ = tenure.stop.send(true);
             if let Err(err) = tenure.keeper.await {
@@ -217,6 +218,7 @@ impl WriterHost {
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&shard);
         }
+        released
     }
 }
 

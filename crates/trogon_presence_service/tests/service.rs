@@ -17,10 +17,10 @@ use trogon_presence_service::reply::{
     HEADER_CODE, HEADER_GENERATION, HEADER_KIND, HEADER_OWNER_ID, HEADER_OWNER_REV, HEADER_PREV, HEADER_SEQ,
     HEADER_SHARD, HEADER_TOPIC,
 };
-use trogon_presence_service::subjects::epoch_subject;
+use trogon_presence_service::subjects::{drain_subject, epoch_subject};
 use trogon_presence_service::{
-    KeepaliveInterval, NodeId, PayloadBudget, PresenceReader, ReadOp, ReaderIdentity, ReaderOptions, ServiceConfig,
-    ServiceHandle, ShardLeaseTtl, SnapshotLimits, WriteOp,
+    DrainReply, DrainRequest, KeepaliveInterval, NodeId, PayloadBudget, PresenceReader, ReadOp, ReaderIdentity,
+    ReaderOptions, ServiceConfig, ServiceHandle, ShardLeaseTtl, SnapshotLimits, WriteOp,
 };
 
 use common::NatsServer;
@@ -526,5 +526,44 @@ async fn list_waits_for_a_per_entry_barrier() -> TestResult {
 
     presence.close();
     handle.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn drain_request_releases_every_lease_of_the_named_instance() -> TestResult {
+    let server = server_or_skip!();
+    let handle = start_owning_all(&server, service_config("edge-a")?).await?;
+    let client = server.client().await;
+    let shards = usize::from(ShardCount::DEFAULT.get());
+
+    let stranger = DrainRequest::new(OwnerId::generate()?);
+    let refused = client
+        .request(drain_subject(handle.owner()), serde_json::to_vec(&stranger)?.into())
+        .await?;
+    assert_eq!(header(refused.headers.as_ref(), HEADER_CODE), Some("invalid_request"));
+    assert_eq!(handle.owned_shards().len(), shards);
+
+    let request = DrainRequest::new(handle.owner());
+    let drained = client
+        .request(request.subject(), serde_json::to_vec(&request)?.into())
+        .await?;
+    assert_eq!(header(drained.headers.as_ref(), HEADER_CODE), Some("ok"));
+    let reply: DrainReply = serde_json::from_slice(&drained.payload)?;
+    assert_eq!(reply.instance, handle.owner());
+    assert_eq!(reply.released_views, shards);
+    assert_eq!(reply.released_writers, shards);
+    assert!(!reply.already_draining);
+    assert!(handle.owned_shards().is_empty());
+    assert!(handle.writer_shards().is_empty());
+
+    let peer = trogon_presence_service::start(server.client().await, service_config("edge-b")?).await?;
+    wait_for_owned(&peer, shards).await?;
+    assert!(
+        handle.owned_shards().is_empty(),
+        "a drained instance must not take shards back"
+    );
+
+    handle.shutdown().await;
+    peer.shutdown().await;
     Ok(())
 }

@@ -389,7 +389,7 @@ impl Classifier {
     }
 }
 
-fn is_leave(headers: Option<&HeaderMap>) -> bool {
+pub(crate) fn is_leave(headers: Option<&HeaderMap>) -> bool {
     let Some(headers) = headers else {
         return false;
     };

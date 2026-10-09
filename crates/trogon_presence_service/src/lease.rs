@@ -1,14 +1,16 @@
 use std::time::Duration;
 
 use async_nats::header::{NATS_EXPECTED_LAST_SUBJECT_SEQUENCE, NATS_MARKER_REASON, NATS_MESSAGE_TTL, NATS_ROLLUP};
-use async_nats::jetstream::context::{CreateStreamErrorKind, GetStreamError, PublishError, PublishErrorKind};
+use async_nats::jetstream::context::{
+    CreateStreamErrorKind, GetStreamError, GetStreamErrorKind, PublishError, PublishErrorKind,
+};
 use async_nats::jetstream::stream::{self, LastRawMessageError, LastRawMessageErrorKind, Stream};
 use async_nats::jetstream::{Context, ErrorCode};
 use async_nats::{HeaderMap, Subject};
 use serde::{Deserialize, Serialize};
 use trogon_presence::{
-    BucketName, JetStreamRoute, OwnerId, ProvisionOptions, Revision, ShardCount, StreamGeneration, ViewShard,
-    WriterShard,
+    BucketField, BucketName, BucketReport, DriftSeverity, FieldCheck, JetStreamRoute, OwnerId, ProvisionOptions,
+    Revision, ShardCount, StreamGeneration, ViewShard, WriterShard,
 };
 
 use crate::config::ShardLeaseTtl;
@@ -27,6 +29,8 @@ const LEASE_MARKER_TTL: Duration = Duration::from_secs(60);
 pub enum LeaseError {
     #[error("could not create lease bucket {bucket}: {detail}")]
     Create { bucket: BucketName, detail: String },
+    #[error("lease bucket {bucket} has an incompatible {field}")]
+    Incompatible { bucket: BucketName, field: BucketField },
     #[error("lease bucket {bucket} is missing or unreadable: {source}")]
     Open { bucket: BucketName, source: GetStreamError },
     #[error("lease publish failed: {0}")]
@@ -127,8 +131,36 @@ pub async fn provision_lease_bucket(
     ttl: ShardLeaseTtl,
     options: ProvisionOptions,
 ) -> Result<(), LeaseError> {
-    let context = route.context(client);
-    let config = stream::Config {
+    let context = route.context(client.clone());
+    let config = lease_stream_config(bucket, ttl, &options);
+    match context.create_stream(config).await {
+        Ok(_) => Ok(()),
+        Err(err) => match err.kind() {
+            CreateStreamErrorKind::JetStream(ref js) if js.error_code() == ErrorCode::STREAM_NAME_EXIST => {
+                match inspect_lease_bucket(client, route, bucket, ttl, Some(&options)).await? {
+                    Some(report) => match report.any_drift() {
+                        Some(field) => Err(LeaseError::Incompatible {
+                            bucket: bucket.clone(),
+                            field,
+                        }),
+                        None => Ok(()),
+                    },
+                    None => Err(LeaseError::Create {
+                        bucket: bucket.clone(),
+                        detail: err.to_string(),
+                    }),
+                }
+            }
+            _ => Err(LeaseError::Create {
+                bucket: bucket.clone(),
+                detail: err.to_string(),
+            }),
+        },
+    }
+}
+
+fn lease_stream_config(bucket: &BucketName, ttl: ShardLeaseTtl, options: &ProvisionOptions) -> stream::Config {
+    stream::Config {
         name: bucket.stream_name(),
         subjects: vec![bucket.subjects_filter()],
         max_messages_per_subject: 1,
@@ -141,17 +173,58 @@ pub async fn provision_lease_bucket(
         allow_message_ttl: true,
         subject_delete_marker_ttl: Some(LEASE_MARKER_TTL),
         ..Default::default()
-    };
-    match context.create_stream(config).await {
-        Ok(_) => Ok(()),
-        Err(err) => match err.kind() {
-            CreateStreamErrorKind::JetStream(ref js) if js.error_code() == ErrorCode::STREAM_NAME_EXIST => Ok(()),
-            _ => Err(LeaseError::Create {
-                bucket: bucket.clone(),
-                detail: err.to_string(),
-            }),
-        },
     }
+}
+
+pub async fn inspect_lease_bucket(
+    client: async_nats::Client,
+    route: &JetStreamRoute,
+    bucket: &BucketName,
+    ttl: ShardLeaseTtl,
+    placement: Option<&ProvisionOptions>,
+) -> Result<Option<BucketReport>, LeaseError> {
+    let context = route.context(client);
+    let stream = match context.get_stream(bucket.stream_name()).await {
+        Ok(stream) => stream,
+        Err(source) if matches!(source.kind(), GetStreamErrorKind::JetStream(ref js) if js.error_code() == ErrorCode::STREAM_NOT_FOUND) => {
+            return Ok(None)
+        }
+        Err(source) => {
+            return Err(LeaseError::Open {
+                bucket: bucket.clone(),
+                source,
+            })
+        }
+    };
+    let found = &stream.cached_info().config;
+    let expected = lease_stream_config(bucket, ttl, &ProvisionOptions::default());
+    let hard = |holds: bool, field: BucketField| FieldCheck::new(field, holds, DriftSeverity::Hard);
+    let mut checks = vec![
+        hard(found.subjects == expected.subjects, BucketField::Subjects),
+        hard(found.retention == expected.retention, BucketField::Retention),
+        hard(
+            found.max_messages_per_subject == expected.max_messages_per_subject,
+            BucketField::History,
+        ),
+        hard(found.max_age == expected.max_age, BucketField::MaxAge),
+        hard(found.allow_rollup, BucketField::Rollup),
+        hard(found.deny_delete, BucketField::DenyDelete),
+        hard(found.allow_direct, BucketField::DirectGet),
+        hard(found.allow_message_ttl, BucketField::MessageTtl),
+        hard(
+            found.subject_delete_marker_ttl == expected.subject_delete_marker_ttl,
+            BucketField::MarkerTtl,
+        ),
+    ];
+    if let Some(options) = placement {
+        let advisory = |holds: bool, field: BucketField| FieldCheck::new(field, holds, DriftSeverity::Advisory);
+        checks.push(advisory(found.storage == options.storage, BucketField::Storage));
+        checks.push(advisory(
+            found.num_replicas == usize::from(options.replicas.get()),
+            BucketField::Replicas,
+        ));
+    }
+    Ok(Some(BucketReport::new(found.name.clone(), checks)))
 }
 
 impl LeaseStore {

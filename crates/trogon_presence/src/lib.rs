@@ -10,6 +10,7 @@ mod entropy;
 mod error_code;
 mod heartbeat;
 mod holder;
+mod inventory;
 mod key;
 mod kv_key;
 mod managed;
@@ -34,7 +35,10 @@ pub use batch::{
     BatchPublishError, BatchRecord, BatchRejection, BatchRevisionError, Expected, InflightBatchLimit, InflightBatches,
     RecordOp, Unpaced,
 };
-pub use bucket::{BucketField, BucketMetadata, ProbeError, StreamFingerprint, StreamIdentity, WriterMode};
+pub use bucket::{
+    BucketField, BucketMetadata, BucketReport, DriftSeverity, FieldCheck, FieldStatus, ProbeError, StreamFingerprint,
+    StreamIdentity, WriterMode,
+};
 pub use canonical_json::{CanonicalJsonError, CanonicalJsonV1, FingerprintError, OperationFingerprint};
 pub use clock::{
     ClockControl, ClockError, ClockSource, Elapsed, FenceBreach, SelfFence, SelfFenceBound, SuspendAwareClock,
@@ -49,6 +53,7 @@ pub use entropy::EntropyError;
 pub use error_code::ErrorCode;
 pub use heartbeat::PresenceEvent;
 pub use holder::{HolderId, HolderIdError};
+pub use inventory::{EntryScope, Inventory, PresenceCount, StoredPresence};
 pub use key::{KeyError, PresenceKey};
 pub use kv_key::{AuthorityId, ControlKey, EntryKey, KvKey, KvKeyError};
 pub use managed::{

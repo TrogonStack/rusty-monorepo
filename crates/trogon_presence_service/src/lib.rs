@@ -1,6 +1,8 @@
+pub mod admin;
 pub mod admission;
 pub mod command;
 pub mod config;
+pub mod drain;
 pub mod heartbeat;
 pub mod inbox;
 pub mod lease;
@@ -21,8 +23,11 @@ pub use config::{
     KeepaliveInterval, KeepaliveIntervalError, NodeId, NodeIdError, ServiceConfig, ShardLeaseTtl, ShardLeaseTtlError,
     WriterReplyDeadline, WriterReplyDeadlineError,
 };
+pub use drain::{DrainReply, DrainRequest};
 pub use inbox::{ReplyInbox, ReplyInboxError, CALLER_INBOX_PREFIX};
-pub use lease::{provision_lease_bucket, LeaseError, LeaseHolder, LeaseKey, LeaseStore, LeaseValue, Renewal};
+pub use lease::{
+    inspect_lease_bucket, provision_lease_bucket, LeaseError, LeaseHolder, LeaseKey, LeaseStore, LeaseValue, Renewal,
+};
 pub use reader::{
     AppliedDiff, PresenceReader, ReaderError, ReaderEvent, ReaderIdentity, ReaderOptions, ResnapshotInterval,
     ResnapshotIntervalError,

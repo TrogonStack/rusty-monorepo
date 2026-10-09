@@ -7,14 +7,15 @@ use tokio::sync::broadcast;
 
 use crate::batch::InflightBatches;
 use crate::bucket::{
-    check_placement, check_settings, data_stream_config, probe_atomic_batch, BucketField, BucketMetadata, ProbeError,
-    StreamFingerprint, StreamIdentity, WriterMode,
+    check_placement, check_settings, data_stream_config, probe_atomic_batch, BucketField, BucketMetadata, BucketReport,
+    ProbeError, StreamFingerprint, StreamIdentity, WriterMode,
 };
 use crate::config::{BucketName, PresenceConfig, ProvisionOptions};
 use crate::constants::FINGERPRINT_METADATA_KEY;
 use crate::entropy::EntropyError;
 use crate::heartbeat::{Heartbeat, PresenceEvent};
 use crate::holder::HolderId;
+use crate::inventory::{EntryScope, Inventory};
 use crate::key::PresenceKey;
 use crate::kv_key::KvKeyError;
 use crate::managed::{KeyCoordinator, ManagedLimits, OwnerDeadline};
@@ -23,6 +24,7 @@ use crate::revision::EntryRevision;
 use crate::store::KvWriter;
 use crate::topic::Topic;
 use crate::tracker::{HolderBusy, Tracker, UntrackAllError, UntrackReport};
+use crate::watch::replay::{RebuildBudget, ReplayConsumer, ReplayError};
 use crate::watch::{CoalesceWindow, MetaFetcher, NoopFetcher, TopicWatch, WatchError, WatchOptions};
 
 const SERVER_METADATA_PREFIX: &str = "_nats.";
@@ -178,6 +180,32 @@ impl Presence {
             _scheduler: Arc::new(SchedulerGuard(heartbeat.clone())),
             heartbeat,
         })
+    }
+
+    pub async fn inspect_bucket(
+        client: async_nats::Client,
+        config: &PresenceConfig,
+        placement: Option<&ProvisionOptions>,
+    ) -> Result<BucketReport, OpenError> {
+        let context = config.context(client);
+        let bucket = config.bucket().clone();
+        match context.get_stream(bucket.stream_name()).await {
+            Ok(stream) => Ok(BucketReport::of_data_stream(stream.cached_info(), config, placement)),
+            Err(source) if is_stream_missing(&source) => Err(OpenError::BucketMissing(bucket)),
+            Err(source) => Err(OpenError::Lookup { bucket, source }),
+        }
+    }
+
+    pub async fn entries(&self, scope: EntryScope) -> Result<Inventory, ReplayError> {
+        let mut inventory = Inventory::default();
+        let filters = scope.filters(self.config.bucket(), self.config.shards());
+        let replay = ReplayConsumer::rebuild(&self.stream, &filters, RebuildBudget::default(), |record| {
+            inventory.absorb(&scope, &self.config, &record);
+        })
+        .await?;
+        replay.discard();
+        inventory.sort();
+        Ok(inventory)
     }
 
     pub async fn verify_ready(&self) -> Result<(), OpenError> {

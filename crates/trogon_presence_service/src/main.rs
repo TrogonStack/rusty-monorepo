@@ -5,10 +5,11 @@ use std::time::Duration;
 use async_nats::jetstream::stream::StorageType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use trogon_presence::{
-    BucketName, CoalesceWindow, HeartbeatInterval, InflightBatchLimit, JetStreamDomain, LeaseTtl, MarkerTtl,
-    PresenceConfig, ProvisionOptions, Replicas, ShardCount,
+    BucketName, CoalesceWindow, HeartbeatInterval, HolderId, InflightBatchLimit, JetStreamDomain, LeaseTtl, MarkerTtl,
+    OwnerId, PresenceConfig, PresenceKey, ProvisionOptions, Replicas, ShardCount, Topic,
 };
 use trogon_presence_hooks::{AllowedHost, HookConfig, HookDeadline, HookMemoryLimit, HookPolicy};
+use trogon_presence_service::admin::{render, Admin, OutputFormat, Report};
 use trogon_presence_service::config::default_lease_bucket;
 use trogon_presence_service::{KeepaliveInterval, NodeId, PayloadBudget, ServiceConfig, ShardLeaseTtl, SnapshotLimits};
 
@@ -20,14 +21,68 @@ use trogon_presence_service::{KeepaliveInterval, NodeId, PayloadBudget, ServiceC
 struct Cli {
     #[command(flatten)]
     options: Options,
+    #[arg(long, global = true, help = "Print machine readable JSON instead of a table")]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Provision,
+    #[command(subcommand, about = "Manage the presence and lease buckets")]
+    Bucket(BucketCommand),
+    #[command(subcommand, about = "Validate the deployed configuration")]
+    Config(ConfigCommand),
+    #[command(about = "Print the stored entries of a topic")]
+    Inspect(InspectArgs),
+    #[command(about = "Print the live presence count of a topic")]
+    Count(TopicArgs),
+    #[command(about = "List shards with their view and writer lease owners")]
+    Shards,
+    #[command(about = "Expire every entry of a holder through the managed writer path")]
+    Expire(ExpireArgs),
+    #[command(about = "Ask a running instance to release its shard leases")]
+    Drain(DrainArgs),
+    #[command(about = "Run the presence service")]
     Run(RunArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum BucketCommand {
+    #[command(about = "Create the buckets or verify they match the flags, refusing any drift")]
+    Apply,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    #[command(about = "Report each bucket field as ok or drift, failing on a hard violation")]
+    Check,
+}
+
+#[derive(Debug, Args)]
+struct InspectArgs {
+    #[arg(long)]
+    topic: Topic,
+    #[arg(long)]
+    key: Option<PresenceKey>,
+}
+
+#[derive(Debug, Args)]
+struct TopicArgs {
+    #[arg(long)]
+    topic: Topic,
+}
+
+#[derive(Debug, Args)]
+struct ExpireArgs {
+    #[arg(long)]
+    holder: HolderId,
+}
+
+#[derive(Debug, Args)]
+struct DrainArgs {
+    #[arg(long)]
+    instance: OwnerId,
 }
 
 #[derive(Debug, Args)]
@@ -212,14 +267,40 @@ impl Options {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("configuration check found a hard violation")]
+struct HardViolation;
+
+fn print<R: Report>(report: &R, format: OutputFormat) -> Result<(), BoxError> {
+    print!("{}", render(report, format)?);
+    Ok(())
+}
+
 async fn execute(cli: Cli) -> Result<(), BoxError> {
     let config = cli.options.service()?;
     let client = cli.options.connect().await?;
+    let format = OutputFormat::json_if(cli.json);
+    let admin = || -> Result<Admin, BoxError> {
+        Ok(Admin::new(
+            client.clone(),
+            config.clone(),
+            cli.options.provision_options()?,
+        ))
+    };
     match cli.command {
-        Command::Provision => {
-            trogon_presence_service::provision(client, &config, cli.options.provision_options()?).await?;
-            tracing::info!(bucket = %config.presence().bucket(), lease_bucket = %config.lease_bucket(), "provisioned");
+        Command::Bucket(BucketCommand::Apply) => print(&admin()?.bucket_apply().await?, format)?,
+        Command::Config(ConfigCommand::Check) => {
+            let report = admin()?.config_check().await?;
+            print(&report, format)?;
+            if report.has_hard_violation() {
+                return Err(HardViolation.into());
+            }
         }
+        Command::Inspect(args) => print(&admin()?.inspect(args.topic, args.key).await?, format)?,
+        Command::Count(args) => print(&admin()?.count(args.topic).await?, format)?,
+        Command::Shards => print(&admin()?.shards().await?, format)?,
+        Command::Expire(args) => print(&admin()?.expire(args.holder).await?, format)?,
+        Command::Drain(args) => print(&admin()?.drain(args.instance).await?, format)?,
         Command::Run(run) => {
             let config = match run.hook()? {
                 Some(hook) => config.with_hook(hook),
@@ -240,7 +321,10 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let filter = tracing_subscriber::EnvFilter::try_new(&cli.options.log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
     match execute(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -292,6 +376,42 @@ mod tests {
         assert!(Cli::try_parse_from(["trogon-presence", "run", "--hook-policy", "fail-open"]).is_err());
         let plain = Cli::try_parse_from(["trogon-presence", "run"])?;
         assert!(matches!(plain.command, Command::Run(run) if run.hook()?.is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_admin_subcommands() -> Result<(), BoxError> {
+        let id = "AAAAAAAAAAAAAAAAAAAAAA";
+        let cli = Cli::try_parse_from(["trogon-presence", "--json", "bucket", "apply"])?;
+        assert!(cli.json);
+        assert!(matches!(cli.command, Command::Bucket(BucketCommand::Apply)));
+        let cli = Cli::try_parse_from(["trogon-presence", "config", "check", "--json"])?;
+        assert!(cli.json);
+        assert!(matches!(cli.command, Command::Config(ConfigCommand::Check)));
+        let cli = Cli::try_parse_from(["trogon-presence", "inspect", "--topic", "room:1", "--key", "user-1"])?;
+        let Command::Inspect(args) = cli.command else {
+            return Err("expected the inspect subcommand".into());
+        };
+        assert_eq!(args.topic, "room:1".parse::<Topic>()?);
+        assert_eq!(args.key, Some("user-1".parse::<PresenceKey>()?));
+        assert!(matches!(
+            Cli::try_parse_from(["trogon-presence", "count", "--topic", "room:1"])?.command,
+            Command::Count(_)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["trogon-presence", "shards"])?.command,
+            Command::Shards
+        ));
+        let Command::Expire(args) = Cli::try_parse_from(["trogon-presence", "expire", "--holder", id])?.command else {
+            return Err("expected the expire subcommand".into());
+        };
+        assert_eq!(args.holder, id.parse::<HolderId>()?);
+        let Command::Drain(args) = Cli::try_parse_from(["trogon-presence", "drain", "--instance", id])?.command else {
+            return Err("expected the drain subcommand".into());
+        };
+        assert_eq!(args.instance, id.parse::<OwnerId>()?);
+        assert!(Cli::try_parse_from(["trogon-presence", "expire", "--holder", "short"]).is_err());
+        assert!(Cli::try_parse_from(["trogon-presence", "provision"]).is_err());
         Ok(())
     }
 }

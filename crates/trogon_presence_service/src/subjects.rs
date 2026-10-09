@@ -1,7 +1,8 @@
 use std::fmt;
 
 use trogon_presence::{
-    ConnectionId, KeyError, PresenceKey, ShardCount, ShardError, SnapshotId, Topic, TopicError, ViewShard, WriterShard,
+    ConnectionId, KeyError, OwnerId, PresenceKey, ShardCount, ShardError, SnapshotId, Topic, TopicError, ViewShard,
+    WriterShard,
 };
 
 use crate::config::NodeId;
@@ -13,6 +14,7 @@ pub const ANY_SHARD: &str = "_";
 pub const SNAPSHOT_REPLY_OP: &str = "snapshot-reply";
 pub const INTERNAL_WRITE: &str = "internal.write";
 pub const INTERNAL_REPLY: &str = "internal.reply";
+pub const INTERNAL_DRAIN: &str = "internal.drain";
 pub const INTERNAL: &str = "internal";
 pub const HEARTBEAT_MANY_OP: &str = "heartbeat-many";
 pub const DIFF_OP: &str = "diff";
@@ -247,6 +249,10 @@ impl fmt::Display for InternalReplyInbox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+pub fn drain_subject(instance: OwnerId) -> String {
+    format!("{DOMAIN}.{INTERNAL_DRAIN}.{instance}")
 }
 
 pub fn internal_any_filter() -> String {

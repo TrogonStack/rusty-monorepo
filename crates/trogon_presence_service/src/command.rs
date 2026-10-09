@@ -77,6 +77,10 @@ pub struct ReleaseWire {
 }
 
 impl ReleaseWire {
+    pub fn new(topic: Topic, lifetime: LifetimeId) -> Self {
+        Self { topic, lifetime }
+    }
+
     pub fn target(&self) -> ReleaseTarget {
         ReleaseTarget::new(self.topic.clone(), self.lifetime)
     }

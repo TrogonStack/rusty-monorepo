@@ -306,9 +306,9 @@ fn data_max_age(config: &PresenceConfig) -> Duration {
     Duration::from_secs(BUCKET_MAX_AGE_SECS).max(config.marker_ttl().get() * 2)
 }
 
-pub(crate) fn check_settings(found: &stream::Config, config: &PresenceConfig) -> Result<(), BucketField> {
+fn settings_checks(found: &stream::Config, config: &PresenceConfig) -> [(bool, BucketField); 12] {
     let bucket = config.bucket();
-    let checks = [
+    [
         (found.subjects == [bucket.subjects_filter()], BucketField::Subjects),
         (found.retention == RetentionPolicy::Limits, BucketField::Retention),
         (found.max_messages_per_subject == 1, BucketField::History),
@@ -327,21 +327,167 @@ pub(crate) fn check_settings(found: &stream::Config, config: &PresenceConfig) ->
         (found.allow_rollup, BucketField::Rollup),
         (found.deny_delete, BucketField::DenyDelete),
         (found.allow_atomic_publish, BucketField::AtomicPublish),
-    ];
-    match checks.into_iter().find(|(ok, _)| !ok) {
+    ]
+}
+
+pub(crate) fn check_settings(found: &stream::Config, config: &PresenceConfig) -> Result<(), BucketField> {
+    first_failure(settings_checks(found, config))
+}
+
+pub(crate) fn check_placement(found: &stream::Config, options: &ProvisionOptions) -> Result<(), BucketField> {
+    first_failure(placement_checks(found, options))
+}
+
+fn first_failure(checks: impl IntoIterator<Item = (bool, BucketField)>) -> Result<(), BucketField> {
+    match checks.into_iter().find(|(holds, _)| !holds) {
         Some((_, field)) => Err(field),
         None => Ok(()),
     }
 }
 
-pub(crate) fn check_placement(found: &stream::Config, options: &ProvisionOptions) -> Result<(), BucketField> {
-    if found.storage != options.storage {
-        return Err(BucketField::Storage);
+fn placement_checks(found: &stream::Config, options: &ProvisionOptions) -> [(bool, BucketField); 2] {
+    [
+        (found.storage == options.storage, BucketField::Storage),
+        (
+            found.num_replicas == usize::from(options.replicas.get()),
+            BucketField::Replicas,
+        ),
+    ]
+}
+
+fn metadata_checks(info: &stream::Info, config: &PresenceConfig) -> [(bool, BucketField); 6] {
+    let map = &info.config.metadata;
+    let raw = |key: &str| map.get(key).map(String::as_str);
+    let shards = config.shards();
+    [
+        (
+            raw(SCHEMA_METADATA_KEY) == Some(BucketSchema::V1.0),
+            BucketField::Schema,
+        ),
+        (
+            raw(GENERATION_METADATA_KEY).is_some_and(|value| value.parse::<StreamGeneration>().is_ok()),
+            BucketField::Generation,
+        ),
+        (
+            raw(SHARD_COUNT_METADATA_KEY).and_then(|value| value.parse::<u16>().ok()) == Some(shards.get()),
+            BucketField::ShardCount,
+        ),
+        (
+            raw(TOKEN_WIDTH_METADATA_KEY).and_then(|value| value.parse::<usize>().ok()) == Some(shards.token_width()),
+            BucketField::TokenWidth,
+        ),
+        (
+            raw(WRITER_MODE_METADATA_KEY).and_then(|value| value.parse::<WriterMode>().ok())
+                == Some(config.writer_mode()),
+            BucketField::WriterMode,
+        ),
+        (
+            StreamFingerprint::recorded(map) == Some(StreamFingerprint::of(&[StreamIdentity::of(info)])),
+            BucketField::Fingerprint,
+        ),
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldStatus {
+    Ok,
+    Drift,
+}
+
+impl fmt::Display for FieldStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Ok => "ok",
+            Self::Drift => "drift",
+        })
     }
-    if found.num_replicas != usize::from(options.replicas.get()) {
-        return Err(BucketField::Replicas);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriftSeverity {
+    Hard,
+    Advisory,
+}
+
+impl fmt::Display for DriftSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Hard => "hard",
+            Self::Advisory => "advisory",
+        })
     }
-    Ok(())
+}
+
+impl serde::Serialize for BucketField {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct FieldCheck {
+    pub field: BucketField,
+    pub status: FieldStatus,
+    pub severity: DriftSeverity,
+}
+
+impl FieldCheck {
+    pub fn new(field: BucketField, holds: bool, severity: DriftSeverity) -> Self {
+        let status = if holds { FieldStatus::Ok } else { FieldStatus::Drift };
+        Self {
+            field,
+            status,
+            severity,
+        }
+    }
+
+    pub fn is_drift(&self) -> bool {
+        self.status == FieldStatus::Drift
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BucketReport {
+    pub stream: String,
+    pub checks: Vec<FieldCheck>,
+}
+
+impl BucketReport {
+    pub fn new(stream: String, checks: Vec<FieldCheck>) -> Self {
+        Self { stream, checks }
+    }
+
+    pub fn of_data_stream(info: &stream::Info, config: &PresenceConfig, placement: Option<&ProvisionOptions>) -> Self {
+        let mut checks: Vec<FieldCheck> = settings_checks(&info.config, config)
+            .into_iter()
+            .chain(metadata_checks(info, config))
+            .map(|(holds, field)| FieldCheck::new(field, holds, DriftSeverity::Hard))
+            .collect();
+        if let Some(options) = placement {
+            checks.extend(
+                placement_checks(&info.config, options)
+                    .into_iter()
+                    .map(|(holds, field)| FieldCheck::new(field, holds, DriftSeverity::Advisory)),
+            );
+        }
+        Self::new(info.config.name.clone(), checks)
+    }
+
+    pub fn hard_drift(&self) -> Option<BucketField> {
+        self.checks
+            .iter()
+            .find(|check| check.is_drift() && check.severity == DriftSeverity::Hard)
+            .map(|check| check.field)
+    }
+
+    pub fn any_drift(&self) -> Option<BucketField> {
+        self.checks
+            .iter()
+            .find(|check| check.is_drift())
+            .map(|check| check.field)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
