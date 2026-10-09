@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_nats::header::{
@@ -10,6 +12,7 @@ use async_nats::jetstream::ErrorCode;
 use async_nats::{HeaderMap, Request, RequestErrorKind, Subject};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 use crate::config::MessageTtl;
@@ -191,6 +194,114 @@ impl BatchRejection {
     pub fn is_wrong_last_sequence(&self) -> bool {
         self.code == ErrorCode::STREAM_WRONG_LAST_SEQUENCE
     }
+
+    /// True only for the server's inflight-pressure rejections, which commit nothing and assign no sequence.
+    pub(crate) fn is_inflight_pressure(&self) -> bool {
+        INFLIGHT_PRESSURE_DESCRIPTIONS.contains(&self.description.as_str())
+    }
+}
+
+const INFLIGHT_PRESSURE_DESCRIPTIONS: [&str; 2] =
+    ["atomic publish too many inflight", "atomic publish batch is incomplete"];
+const DEFAULT_INFLIGHT_BATCH_LIMIT: usize = 16;
+const MAX_INFLIGHT_BATCH_LIMIT: usize = 1024;
+const PRESSURE_MAX_ATTEMPTS: u32 = 5;
+const PRESSURE_BACKOFF_BASE: Duration = Duration::from_millis(20);
+const PRESSURE_BACKOFF_CAP: Duration = Duration::from_millis(250);
+
+/// How many atomic batches one process keeps open against JetStream at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InflightBatchLimit(usize);
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum InflightBatchLimitError {
+    #[error("inflight batch limit must be between 1 and {MAX_INFLIGHT_BATCH_LIMIT}, got {0}")]
+    OutOfRange(usize),
+    #[error("inflight batch limit must be a whole number, got {0:?}")]
+    NotANumber(String),
+}
+
+impl InflightBatchLimit {
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for InflightBatchLimit {
+    fn default() -> Self {
+        Self(DEFAULT_INFLIGHT_BATCH_LIMIT)
+    }
+}
+
+impl TryFrom<usize> for InflightBatchLimit {
+    type Error = InflightBatchLimitError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        if (1..=MAX_INFLIGHT_BATCH_LIMIT).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(InflightBatchLimitError::OutOfRange(value))
+        }
+    }
+}
+
+impl FromStr for InflightBatchLimit {
+    type Err = InflightBatchLimitError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        raw.trim()
+            .parse::<usize>()
+            .map_err(|_| InflightBatchLimitError::NotANumber(raw.to_owned()))
+            .and_then(Self::try_from)
+    }
+}
+
+impl std::fmt::Display for InflightBatchLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A shared gate that caps the atomic batches a process has open; clones share the same permits.
+#[derive(Debug, Clone)]
+pub struct InflightBatches {
+    limit: InflightBatchLimit,
+    permits: Arc<Semaphore>,
+}
+
+impl InflightBatches {
+    pub fn new(limit: InflightBatchLimit) -> Self {
+        Self {
+            limit,
+            permits: Arc::new(Semaphore::new(limit.get())),
+        }
+    }
+
+    /// The gate every sink built without an explicit gate shares, sized by the default limit.
+    pub fn process_default() -> Self {
+        static PROCESS: OnceLock<InflightBatches> = OnceLock::new();
+        PROCESS.get_or_init(|| Self::new(InflightBatchLimit::default())).clone()
+    }
+
+    pub fn limit(&self) -> InflightBatchLimit {
+        self.limit
+    }
+
+    async fn admit(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.permits).acquire_owned().await.ok()
+    }
+}
+
+fn pressure_backoff(retry: u32) -> Duration {
+    let ceiling = PRESSURE_BACKOFF_BASE
+        .saturating_mul(1u32.checked_shl(retry).unwrap_or(u32::MAX))
+        .min(PRESSURE_BACKOFF_CAP);
+    let mut bytes = [0u8; 8];
+    if getrandom::fill(&mut bytes).is_err() {
+        return ceiling;
+    }
+    let ceiling_micros = u64::try_from(ceiling.as_micros()).unwrap_or(u64::MAX);
+    Duration::from_micros(u64::from_le_bytes(bytes) % ceiling_micros.saturating_add(1))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,8 +506,69 @@ impl AtomicBatch {
     }
 
     /// Publishes every record on the subject `route` maps its stored subject to.
+    ///
+    /// A batch the server turns away for inflight pressure committed nothing, so it is resent under a fresh
+    /// batch id with jittered backoff, a bounded number of times and only within the total budget.
     pub async fn publish_routed<P: BatchPacer>(
         self,
+        client: &async_nats::Client,
+        route: &JetStreamRoute,
+        budget: BatchBudget,
+        pacer: &P,
+    ) -> Result<BatchOutcome, BatchPublishError> {
+        self.publish_paced(client, route, budget, pacer, None).await
+    }
+
+    /// Like [`AtomicBatch::publish_routed`], holding one permit of `gate` while each attempt is open.
+    pub async fn publish_gated<P: BatchPacer>(
+        self,
+        client: &async_nats::Client,
+        route: &JetStreamRoute,
+        budget: BatchBudget,
+        pacer: &P,
+        gate: &InflightBatches,
+    ) -> Result<BatchOutcome, BatchPublishError> {
+        self.publish_paced(client, route, budget, pacer, Some(gate)).await
+    }
+
+    async fn publish_paced<P: BatchPacer>(
+        mut self,
+        client: &async_nats::Client,
+        route: &JetStreamRoute,
+        budget: BatchBudget,
+        pacer: &P,
+        gate: Option<&InflightBatches>,
+    ) -> Result<BatchOutcome, BatchPublishError> {
+        let mut retries = 0u32;
+        let mut deadline = None;
+        loop {
+            let permit = match gate {
+                Some(gate) => gate.admit().await,
+                None => None,
+            };
+            let retry_by = *deadline.get_or_insert_with(|| Instant::now() + budget.total);
+            let outcome = self.attempt(client, route, budget, pacer).await;
+            drop(permit);
+            let rejection = match outcome {
+                Ok(BatchOutcome::Rejected(rejection)) if rejection.is_inflight_pressure() => rejection,
+                other => return other,
+            };
+            retries += 1;
+            let delay = pressure_backoff(retries - 1);
+            if retries >= PRESSURE_MAX_ATTEMPTS || Instant::now() + delay > retry_by {
+                return Ok(BatchOutcome::Rejected(rejection));
+            }
+            let Ok(fresh) = BatchId::generate() else {
+                return Ok(BatchOutcome::Rejected(rejection));
+            };
+            tracing::debug!(batch = %self.id, retry = retries, ?delay, reason = rejection.description(), "atomic batch turned away for inflight pressure, resending");
+            tokio::time::sleep(delay).await;
+            self.id = fresh;
+        }
+    }
+
+    async fn attempt<P: BatchPacer>(
+        &self,
         client: &async_nats::Client,
         route: &JetStreamRoute,
         budget: BatchBudget,
@@ -666,6 +838,88 @@ mod tests {
             underflow.revision_of(BatchPosition::FIRST),
             Err(BatchRevisionError::Overflow(_))
         ));
+    }
+
+    fn rejection(code: u64, description: &str) -> BatchRejection {
+        BatchRejection {
+            code: ErrorCode(code),
+            description: description.to_owned(),
+        }
+    }
+
+    #[test]
+    fn only_the_two_inflight_pressure_descriptions_are_retried() {
+        assert!(rejection(10211, "atomic publish too many inflight").is_inflight_pressure());
+        assert!(rejection(10176, "atomic publish batch is incomplete").is_inflight_pressure());
+        for other in [
+            "wrong last sequence: 4",
+            "atomic publish batch is incomplete, try later",
+            "Atomic publish too many inflight",
+            "atomic publish is disabled",
+            "atomic publish batch is too large",
+            "",
+        ] {
+            assert!(!rejection(10071, other).is_inflight_pressure(), "{other}");
+        }
+    }
+
+    #[test]
+    fn inflight_batch_limit_is_bounded_and_parsed() -> TestResult {
+        assert_eq!(InflightBatchLimit::default().get(), DEFAULT_INFLIGHT_BATCH_LIMIT);
+        assert_eq!(InflightBatchLimit::try_from(1)?.get(), 1);
+        assert_eq!(
+            InflightBatchLimit::try_from(MAX_INFLIGHT_BATCH_LIMIT)?.get(),
+            MAX_INFLIGHT_BATCH_LIMIT
+        );
+        assert_eq!(
+            InflightBatchLimit::try_from(0),
+            Err(InflightBatchLimitError::OutOfRange(0))
+        );
+        assert!(InflightBatchLimit::try_from(MAX_INFLIGHT_BATCH_LIMIT + 1).is_err());
+        assert_eq!(" 8 ".parse::<InflightBatchLimit>()?.get(), 8);
+        assert!(matches!(
+            "eight".parse::<InflightBatchLimit>(),
+            Err(InflightBatchLimitError::NotANumber(_))
+        ));
+        assert!("0".parse::<InflightBatchLimit>().is_err());
+        assert_eq!(
+            InflightBatchLimit::default()
+                .to_string()
+                .parse::<InflightBatchLimit>()?,
+            InflightBatchLimit::default()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inflight_gate_clones_share_permits() -> TestResult {
+        let gate = InflightBatches::new(InflightBatchLimit::try_from(2)?);
+        let shared = gate.clone();
+        let first = gate.admit().await;
+        let second = shared.admit().await;
+        assert!(first.is_some() && second.is_some());
+        assert!(tokio::time::timeout(Duration::from_millis(20), gate.admit())
+            .await
+            .is_err());
+        drop(first);
+        assert!(tokio::time::timeout(Duration::from_millis(200), shared.admit())
+            .await?
+            .is_some());
+        assert_eq!(
+            InflightBatches::process_default().limit(),
+            InflightBatchLimit::default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pressure_backoff_stays_under_its_ceiling() {
+        for retry in 0..40 {
+            let ceiling = PRESSURE_BACKOFF_BASE
+                .saturating_mul(1u32.checked_shl(retry).unwrap_or(u32::MAX))
+                .min(PRESSURE_BACKOFF_CAP);
+            assert!(pressure_backoff(retry) <= ceiling, "retry {retry}");
+        }
     }
 
     #[test]

@@ -481,6 +481,42 @@ fn spawn_worker(
     })
 }
 
+struct RefreshTask(JoinHandle<()>);
+
+impl Drop for RefreshTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_refresh(
+    coordinator: &KeyCoordinator,
+    deadline: OwnerDeadline,
+    reply_deadline: WriterReplyDeadline,
+) -> RefreshTask {
+    let mut refresher = coordinator.refresher();
+    RefreshTask(tokio::spawn(async move {
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + WORKER_TICK, WORKER_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            if !deadline.is_live() {
+                return;
+            }
+            if refresher.is_idle() {
+                continue;
+            }
+            let key = refresher.key().clone();
+            let started = tokio::time::Instant::now();
+            if let Err(err) = refresher.refresh().await {
+                tracing::warn!(%key, %err, elapsed = ?started.elapsed(), "writer guard refresh failed");
+            } else if started.elapsed() > reply_deadline.get() {
+                tracing::warn!(%key, elapsed = ?started.elapsed(), "writer guard refresh outlived the reply deadline");
+            }
+        }
+    }))
+}
+
 async fn work(
     context: Arc<WriterContext>,
     workers: Workers,
@@ -490,6 +526,7 @@ async fn work(
     mut jobs: mpsc::Receiver<Job>,
     deadline: OwnerDeadline,
 ) {
+    let refreshing = spawn_refresh(&coordinator, deadline.clone(), context.reply_deadline);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + WORKER_TICK, WORKER_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -517,17 +554,11 @@ async fn work(
                         }
                         return;
                     }
-                } else {
-                    let started = tokio::time::Instant::now();
-                    if let Err(err) = coordinator.refresh().await {
-                        tracing::warn!(%key, %err, elapsed = ?started.elapsed(), "writer guard refresh failed");
-                    } else if started.elapsed() > context.reply_deadline.get() {
-                        tracing::warn!(%key, elapsed = ?started.elapsed(), "writer guard refresh outlived the reply deadline");
-                    }
                 }
             }
         }
     }
+    drop(refreshing);
     {
         let mut map = workers.lock().unwrap_or_else(PoisonError::into_inner);
         if map.get(&key).is_some_and(|slot| slot.id == id) {

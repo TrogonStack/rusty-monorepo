@@ -5,6 +5,7 @@ use async_nats::jetstream::stream;
 use async_nats::jetstream::{self, ErrorCode};
 use tokio::sync::broadcast;
 
+use crate::batch::InflightBatches;
 use crate::bucket::{
     check_placement, check_settings, data_stream_config, probe_atomic_batch, BucketField, BucketMetadata, ProbeError,
     StreamFingerprint, StreamIdentity, WriterMode,
@@ -33,6 +34,7 @@ pub struct Presence {
     stream: stream::Stream,
     binding: Arc<StreamBinding>,
     heartbeat: Heartbeat,
+    inflight: InflightBatches,
     _scheduler: Arc<SchedulerGuard>,
 }
 
@@ -168,6 +170,7 @@ impl Presence {
         );
         let heartbeat = Heartbeat::new(writer, config.heartbeat());
         Ok(Self {
+            inflight: InflightBatches::new(config.inflight_batches()),
             config,
             client,
             stream: watch_stream,
@@ -256,6 +259,7 @@ impl Presence {
             owner,
             deadline,
             limits,
+            self.inflight.clone(),
         )
     }
 

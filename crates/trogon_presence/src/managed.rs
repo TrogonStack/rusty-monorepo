@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 use crate::batch::{
-    AtomicBatch, BatchBudget, BatchError, BatchOutcome, BatchPublishError, BatchRecord, BatchRevisionError, Unpaced,
+    AtomicBatch, BatchBudget, BatchError, BatchOutcome, BatchPublishError, BatchRecord, BatchRevisionError,
+    InflightBatches, Unpaced,
 };
 use crate::clock::{Elapsed, FenceBreach, SelfFence, SelfFenceBound, SuspendAwareClock, SuspendAwareInstant};
 use crate::constants::{
@@ -187,6 +189,7 @@ pub struct NatsBatchSink {
     client: async_nats::Client,
     budget: BatchBudget,
     route: JetStreamRoute,
+    gate: InflightBatches,
 }
 
 impl NatsBatchSink {
@@ -195,11 +198,16 @@ impl NatsBatchSink {
             client,
             budget: BatchBudget::default(),
             route: JetStreamRoute::local(),
+            gate: InflightBatches::process_default(),
         }
     }
 
     pub fn with_route(self, route: JetStreamRoute) -> Self {
         Self { route, ..self }
+    }
+
+    pub fn with_inflight_batches(self, gate: InflightBatches) -> Self {
+        Self { gate, ..self }
     }
 }
 
@@ -207,7 +215,7 @@ impl BatchSink for NatsBatchSink {
     fn publish(&self, batch: AtomicBatch) -> SinkFuture<'_> {
         Box::pin(async move {
             batch
-                .publish_routed(&self.client, &self.route, self.budget, &Unpaced)
+                .publish_gated(&self.client, &self.route, self.budget, &Unpaced, &self.gate)
                 .await
         })
     }
@@ -508,6 +516,18 @@ impl GuardIndex {
         }
     }
 
+    fn retire(&mut self, holder: &HolderId, topic: &Topic, lifetime: LifetimeId) -> bool {
+        let held = self
+            .holders
+            .get(holder)
+            .and_then(|topics| topics.get(topic))
+            .is_some_and(|slot| slot.lifetime == lifetime);
+        if held {
+            self.remove(holder, topic);
+        }
+        held
+    }
+
     fn renew(&mut self, holder: &HolderId, topic: &Topic, expires: UnixMillis) {
         if let Some(slot) = self.holders.get_mut(holder).and_then(|topics| topics.get_mut(topic)) {
             slot.expires = expires;
@@ -564,6 +584,187 @@ enum State {
     Ready { guard: EntryRevision, fence: SelfFence },
 }
 
+#[derive(Debug)]
+struct GuardSlot {
+    state: State,
+    index: GuardIndex,
+    abandoned: Option<EntryRevision>,
+}
+
+impl Default for GuardSlot {
+    fn default() -> Self {
+        Self {
+            state: State::Rebuilding,
+            index: GuardIndex::default(),
+            abandoned: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardSighting {
+    Ours(EntryRevision),
+    Foreign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Confirmation {
+    Unchanged,
+    Adopt(EntryRevision),
+    Superseded,
+}
+
+impl Confirmation {
+    fn of(abandoned: EntryRevision, sighting: GuardSighting) -> Self {
+        match sighting {
+            GuardSighting::Ours(revision) if revision == abandoned => Self::Unchanged,
+            GuardSighting::Ours(revision) => Self::Adopt(revision),
+            GuardSighting::Foreign => Self::Superseded,
+        }
+    }
+}
+
+fn needs_refresh(fence: SelfFence, now: SuspendAwareInstant) -> bool {
+    !matches!(
+        fence.confirmed_at().elapsed_until(now),
+        Elapsed::Steady(elapsed) if elapsed < GUARD_REFRESH_INTERVAL
+    )
+}
+
+/// Guard state shared by a key coordinator and its refresher, with the turn that serialises guard writes.
+#[derive(Debug, Default)]
+struct GuardCell {
+    slot: Mutex<GuardSlot>,
+    cas: tokio::sync::Mutex<()>,
+    rebuild: tokio::sync::Mutex<()>,
+    preempt: Notify,
+    waiting: AtomicUsize,
+}
+
+struct Waiting<'a>(&'a AtomicUsize);
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl GuardCell {
+    fn slot(&self) -> MutexGuard<'_, GuardSlot> {
+        self.slot.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn state(&self) -> State {
+        self.slot().state
+    }
+
+    fn set_state(&self, state: State) {
+        self.slot().state = state;
+    }
+
+    fn index(&self) -> GuardIndex {
+        self.slot().index.clone()
+    }
+
+    fn set_index(&self, index: GuardIndex) {
+        self.slot().index = index;
+    }
+
+    fn with_index<R>(&self, change: impl FnOnce(&mut GuardIndex) -> R) -> R {
+        change(&mut self.slot().index)
+    }
+
+    fn abandoned(&self) -> Option<EntryRevision> {
+        self.slot().abandoned
+    }
+
+    fn abandon(&self, guard: EntryRevision) {
+        self.slot().abandoned = Some(guard);
+    }
+
+    fn settle_abandoned(&self) {
+        self.slot().abandoned = None;
+    }
+
+    async fn job_turn(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let _waiting = Waiting(&self.waiting);
+        self.preempt.notify_waiters();
+        self.cas.lock().await
+    }
+
+    fn contended(&self) -> bool {
+        self.waiting.load(Ordering::SeqCst) > 0
+    }
+}
+
+/// How long a refresh may hold the guard turn on a single publish before it abandons it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RefreshPublishBound(Duration);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("refresh publish bound must be greater than zero")]
+pub struct RefreshPublishBoundError;
+
+impl RefreshPublishBound {
+    pub fn get(self) -> Duration {
+        self.0
+    }
+}
+
+impl Default for RefreshPublishBound {
+    fn default() -> Self {
+        Self(GUARD_REFRESH_INTERVAL)
+    }
+}
+
+impl TryFrom<Duration> for RefreshPublishBound {
+    type Error = RefreshPublishBoundError;
+
+    fn try_from(bound: Duration) -> Result<Self, Self::Error> {
+        if bound.is_zero() {
+            Err(RefreshPublishBoundError)
+        } else {
+            Ok(Self(bound))
+        }
+    }
+}
+
+/// Refreshes a key guard off the job path, reading and writing the guard state its coordinator acts on.
+#[derive(Debug)]
+pub struct GuardRefresher {
+    coordinator: KeyCoordinator,
+    bound: RefreshPublishBound,
+}
+
+impl GuardRefresher {
+    pub fn with_publish_bound(self, bound: RefreshPublishBound) -> Self {
+        Self { bound, ..self }
+    }
+
+    pub fn key(&self) -> &PresenceKey {
+        self.coordinator.key()
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.coordinator.is_idle()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.coordinator.is_ready()
+    }
+
+    pub async fn refresh(&mut self) -> Result<(), ManagedError> {
+        self.coordinator.refresh_guard(self.bound).await
+    }
+}
+
+enum Raced {
+    Published(Result<(BatchOutcome, SuspendAwareInstant), ManagedError>),
+    Preempted,
+    Stalled,
+}
+
 enum Committed<T> {
     Done(T),
     Retry,
@@ -580,8 +781,7 @@ pub struct KeyCoordinator {
     limits: ManagedLimits,
     budget: RebuildBudget,
     guard_key: KvKey,
-    state: State,
-    index: GuardIndex,
+    cell: Arc<GuardCell>,
 }
 
 impl std::fmt::Debug for KeyCoordinator {
@@ -589,7 +789,7 @@ impl std::fmt::Debug for KeyCoordinator {
         f.debug_struct("KeyCoordinator")
             .field("key", &self.key)
             .field("owner", &self.owner)
-            .field("state", &self.state)
+            .field("state", &self.cell.state())
             .finish_non_exhaustive()
     }
 }
@@ -616,11 +816,16 @@ impl KeyCoordinator {
         owner: OwnerId,
         deadline: OwnerDeadline,
         limits: ManagedLimits,
+        gate: InflightBatches,
     ) -> Result<Self, KvKeyError> {
         let guard_key = ControlKey::WriterGuard(key.clone()).encode()?;
         Ok(Self {
             window: RetryWindow::for_ttl(writer.lease_ttl()),
-            sink: Arc::new(NatsBatchSink::new(writer.client().clone()).with_route(writer.route().clone())),
+            sink: Arc::new(
+                NatsBatchSink::new(writer.client().clone())
+                    .with_route(writer.route().clone())
+                    .with_inflight_batches(gate),
+            ),
             key,
             owner,
             shards,
@@ -629,9 +834,27 @@ impl KeyCoordinator {
             limits,
             budget: RebuildBudget::default(),
             guard_key,
-            state: State::Rebuilding,
-            index: GuardIndex::default(),
+            cell: Arc::default(),
         })
+    }
+
+    pub fn refresher(&self) -> GuardRefresher {
+        GuardRefresher {
+            coordinator: Self {
+                key: self.key.clone(),
+                owner: self.owner,
+                shards: self.shards,
+                window: self.window,
+                writer: self.writer.clone(),
+                sink: self.sink.clone(),
+                deadline: self.deadline.clone(),
+                limits: self.limits,
+                budget: self.budget,
+                guard_key: self.guard_key.clone(),
+                cell: self.cell.clone(),
+            },
+            bound: RefreshPublishBound::default(),
+        }
     }
 
     pub fn with_sink(self, sink: Arc<dyn BatchSink>) -> Self {
@@ -655,19 +878,19 @@ impl KeyCoordinator {
     }
 
     pub fn is_ready(&self) -> bool {
-        matches!(self.state, State::Ready { .. })
+        matches!(self.cell.state(), State::Ready { .. })
     }
 
     pub fn is_idle(&self) -> bool {
-        self.index.holder_count() == 0
+        self.cell.slot().index.holder_count() == 0
     }
 
     pub fn holder_count(&self) -> usize {
-        self.index.holder_count()
+        self.cell.slot().index.holder_count()
     }
 
     pub fn topic_count(&self, holder: &HolderId) -> usize {
-        self.index.topic_count(holder)
+        self.cell.slot().index.topic_count(holder)
     }
 
     fn check_lease(&mut self) -> Result<(), ManagedError> {
@@ -675,7 +898,7 @@ impl KeyCoordinator {
             Ok(()) => Ok(()),
             Err(lapse) => {
                 tracing::debug!(key = %self.key, %lapse, "writer tenure lapsed, fencing the coordinator");
-                self.state = State::Rebuilding;
+                self.cell.set_state(State::Rebuilding);
                 Err(ManagedError::Fenced)
             }
         }
@@ -683,10 +906,10 @@ impl KeyCoordinator {
 
     fn check_live(&mut self) -> Result<(), ManagedError> {
         self.check_lease()?;
-        if let State::Ready { fence, .. } = self.state {
+        if let State::Ready { fence, .. } = self.cell.state() {
             if let Err(breach) = fence.remaining(self.deadline.clock().now()) {
                 tracing::warn!(key = %self.key, %breach, "key guard ownership lapsed, rebuilding before the next batch");
-                self.state = State::Rebuilding;
+                self.cell.set_state(State::Rebuilding);
                 return Err(ManagedError::SelfFenced(breach));
             }
         }
@@ -700,12 +923,16 @@ impl KeyCoordinator {
     fn adopt(&mut self, guard: EntryRevision, sent: SuspendAwareInstant) -> Result<(), FenceBreach> {
         match SelfFence::confirm(sent, self.now(), SelfFenceBound::from(GUARD_SELF_FENCE)) {
             Ok(fence) => {
-                self.state = State::Ready { guard, fence };
+                let mut slot = self.cell.slot();
+                slot.state = State::Ready { guard, fence };
+                if slot.abandoned.is_some_and(|abandoned| abandoned != guard) {
+                    slot.abandoned = None;
+                }
                 Ok(())
             }
             Err(breach) => {
                 tracing::warn!(key = %self.key, %breach, "refusing a guard renewal, ownership must be reacquired");
-                self.state = State::Rebuilding;
+                self.cell.set_state(State::Rebuilding);
                 Err(breach)
             }
         }
@@ -732,7 +959,7 @@ impl KeyCoordinator {
     }
 
     fn ready_guard(&self) -> Result<EntryRevision, ManagedError> {
-        match self.state {
+        match self.cell.state() {
             State::Ready { guard, .. } => Ok(guard),
             State::Rebuilding => Err(ManagedError::Rebuilding),
         }
@@ -760,36 +987,69 @@ impl KeyCoordinator {
         })
     }
 
+    async fn confirm_before_cas(&mut self) -> Result<(), ManagedError> {
+        let Some(abandoned) = self.cell.abandoned() else {
+            return Ok(());
+        };
+        let sent = self.now();
+        let sighting = match self.read_guard().await? {
+            Some((revision, body)) if body.owner == self.owner && body.state == GuardState::Ready => {
+                GuardSighting::Ours(revision)
+            }
+            _ => GuardSighting::Foreign,
+        };
+        match Confirmation::of(abandoned, sighting) {
+            Confirmation::Unchanged => Ok(()),
+            Confirmation::Adopt(revision) => self.adopt(revision, sent).map_err(ManagedError::SelfFenced),
+            Confirmation::Superseded => {
+                self.cell.settle_abandoned();
+                self.cell.set_state(State::Rebuilding);
+                Err(ManagedError::Superseded)
+            }
+        }
+    }
+
     async fn confirm_guard(&mut self, sent: SuspendAwareInstant) -> Result<(), ManagedError> {
         match self.read_guard().await {
             Ok(Some((revision, body))) if body.owner == self.owner && body.state == GuardState::Ready => {
                 self.adopt(revision, sent).map_err(ManagedError::SelfFenced)
             }
             Ok(_) => {
-                self.state = State::Rebuilding;
+                self.cell.set_state(State::Rebuilding);
                 Err(ManagedError::Superseded)
             }
             Err(err) => {
-                self.state = State::Rebuilding;
+                self.cell.set_state(State::Rebuilding);
                 Err(err)
             }
         }
     }
 
+    fn holds_live_guard(&self) -> bool {
+        matches!(self.cell.state(), State::Ready { fence, .. } if fence.remaining(self.now()).is_ok())
+    }
+
     pub async fn ensure_ready(&mut self) -> Result<(), ManagedError> {
         self.check_lease()?;
-        let now = self.now();
-        match self.state {
-            State::Ready { fence, .. } if fence.remaining(now).is_ok() => Ok(()),
-            State::Ready { .. } | State::Rebuilding => {
-                self.state = State::Rebuilding;
-                self.rebuild().await
-            }
+        if self.holds_live_guard() {
+            return Ok(());
         }
+        let cell = self.cell.clone();
+        let _rebuilding = cell.rebuild.lock().await;
+        if self.holds_live_guard() {
+            return Ok(());
+        }
+        self.rebuild_held().await
     }
 
     pub async fn rebuild(&mut self) -> Result<(), ManagedError> {
-        self.state = State::Rebuilding;
+        let cell = self.cell.clone();
+        let _rebuilding = cell.rebuild.lock().await;
+        self.rebuild_held().await
+    }
+
+    async fn rebuild_held(&mut self) -> Result<(), ManagedError> {
+        self.cell.set_state(State::Rebuilding);
         let fenced = self.acquire_rebuilding().await?;
         let index = self.scan().await?;
         self.check_live()?;
@@ -801,8 +1061,8 @@ impl KeyCoordinator {
             BatchOutcome::Committed(ack) => {
                 self.adopt(ack.revision_of(position)?, sent)
                     .map_err(ManagedError::SelfFenced)?;
-                self.index = index;
-                tracing::debug!(key = %self.key, holders = self.index.holder_count(), "managed key guard is ready");
+                self.cell.set_index(index);
+                tracing::debug!(key = %self.key, holders = self.cell.slot().index.holder_count(), "managed key guard is ready");
                 Ok(())
             }
             BatchOutcome::Rejected(rejection) if !rejection.is_wrong_last_sequence() => {
@@ -810,7 +1070,7 @@ impl KeyCoordinator {
             }
             BatchOutcome::Rejected(_) | BatchOutcome::Unknown => {
                 self.confirm_guard(sent).await?;
-                self.index = index;
+                self.cell.set_index(index);
                 Ok(())
             }
         }
@@ -902,22 +1162,62 @@ impl KeyCoordinator {
     }
 
     pub async fn refresh(&mut self) -> Result<(), ManagedError> {
-        self.ensure_ready().await?;
+        self.refresh_guard(RefreshPublishBound::default()).await
+    }
+
+    async fn refresh_guard(&mut self, bound: RefreshPublishBound) -> Result<(), ManagedError> {
+        let cell = self.cell.clone();
+        self.check_lease()?;
+        if !self.holds_live_guard() {
+            let Ok(_rebuilding) = cell.rebuild.try_lock() else {
+                tracing::debug!(key = %self.key, "a job is rebuilding the key guard, skipping this refresh");
+                return Ok(());
+            };
+            let Ok(turn) = cell.cas.try_lock() else {
+                tracing::debug!(key = %self.key, "a job holds the key guard turn, skipping this refresh");
+                return Ok(());
+            };
+            self.cell.set_state(State::Rebuilding);
+            drop(turn);
+            self.rebuild_held().await?;
+        }
         let pruned = self.prune_stale().await?;
-        let State::Ready { guard, fence } = self.state else {
-            return Err(ManagedError::Rebuilding);
+        let Ok(_turn) = cell.cas.try_lock() else {
+            tracing::debug!(key = %self.key, "a job holds the key guard turn, skipping this refresh");
+            return Ok(());
         };
-        let fresh = matches!(
-            fence.confirmed_at().elapsed_until(self.now()),
-            Elapsed::Steady(elapsed) if elapsed < GUARD_REFRESH_INTERVAL
-        );
-        if !pruned && fresh {
+        let preempted = cell.preempt.notified();
+        tokio::pin!(preempted);
+        preempted.as_mut().enable();
+        if cell.contended() {
             return Ok(());
         }
-        let record = self.guard_record(&self.index, GuardState::Ready, Expected::At(guard))?;
+        let State::Ready { guard, fence } = self.cell.state() else {
+            return Err(ManagedError::Rebuilding);
+        };
+        if !pruned && !needs_refresh(fence, self.now()) {
+            return Ok(());
+        }
+        let record = self.guard_record(&self.cell.index(), GuardState::Ready, Expected::At(guard))?;
         let mut batch = AtomicBatch::new()?;
         let position = batch.push(record)?;
-        let (outcome, sent) = self.publish(batch).await?;
+        let raced = tokio::select! {
+            published = self.publish(batch) => Raced::Published(published),
+            () = &mut preempted => Raced::Preempted,
+            () = tokio::time::sleep(bound.get()) => Raced::Stalled,
+        };
+        let (outcome, sent) = match raced {
+            Raced::Published(published) => published?,
+            Raced::Preempted => {
+                cell.abandon(guard);
+                tracing::debug!(key = %self.key, "a job preempted a guard refresh, the next guard write confirms first");
+                return Ok(());
+            }
+            Raced::Stalled => {
+                cell.abandon(guard);
+                return Err(ManagedError::OutcomeUnknown);
+            }
+        };
         match outcome {
             BatchOutcome::Committed(ack) => self
                 .adopt(ack.revision_of(position)?, sent)
@@ -930,10 +1230,12 @@ impl KeyCoordinator {
     }
 
     pub async fn relinquish(&mut self) -> Result<(), ManagedError> {
-        let State::Ready { guard, .. } = self.state else {
+        let cell = self.cell.clone();
+        let _turn = cell.job_turn().await;
+        let State::Ready { guard, .. } = self.cell.state() else {
             return Ok(());
         };
-        self.state = State::Rebuilding;
+        self.cell.set_state(State::Rebuilding);
         let mut batch = AtomicBatch::new()?;
         batch.push(
             BatchRecord::purge(
@@ -949,7 +1251,8 @@ impl KeyCoordinator {
 
     async fn prune_stale(&mut self) -> Result<bool, ManagedError> {
         let mut pruned = false;
-        for (holder, topic, lifetime) in self.index.stale(UnixMillis::now()) {
+        let stale = self.cell.slot().index.stale(UnixMillis::now());
+        for (holder, topic, lifetime) in stale {
             let kv_key = EntryKey::new(topic.clone(), self.key.clone(), holder).encode(self.shards)?;
             let read = match self.writer.read_entry(&kv_key).await {
                 Ok(read) => read,
@@ -962,11 +1265,10 @@ impl KeyCoordinator {
             match read {
                 EntryRead::Live { value, .. } if value.lifetime() == lifetime => {
                     let expires = self.expiry();
-                    self.index.renew(&holder, &topic, expires);
+                    self.cell.with_index(|index| index.renew(&holder, &topic, expires));
                 }
                 _ => {
-                    self.index.remove(&holder, &topic);
-                    pruned = true;
+                    pruned |= self.cell.with_index(|index| index.retire(&holder, &topic, lifetime));
                 }
             }
         }
@@ -974,7 +1276,7 @@ impl KeyCoordinator {
     }
 
     async fn admit_new(&mut self, holder: HolderId, topic: &Topic) -> Result<(), ManagedError> {
-        if self.index.contains(&holder, topic) {
+        if self.cell.slot().index.contains(&holder, topic) {
             return Ok(());
         }
         let over = |index: &GuardIndex, limits: ManagedLimits| {
@@ -984,11 +1286,11 @@ impl KeyCoordinator {
                 (index.holder_count() >= limits.holders.get()).then_some(ManagedError::HolderLimit(limits.holders))
             }
         };
-        if over(&self.index, self.limits).is_none() {
+        if over(&self.cell.index(), self.limits).is_none() {
             return Ok(());
         }
         self.prune_stale().await?;
-        match over(&self.index, self.limits) {
+        match over(&self.cell.index(), self.limits) {
             Some(err) => Err(err),
             None => Ok(()),
         }
@@ -1031,13 +1333,16 @@ impl KeyCoordinator {
                 Planned::Done(outcome) => return Ok(outcome),
                 Planned::Write(change) => change,
             };
-            let mut next = self.index.clone();
+            let mut next = self.cell.index();
             match &change {
                 Change::Put { value, .. } => {
                     next.insert(holder, intent.topic().clone(), Slot::of(value, self.expiry()))
                 }
                 Change::Purge { .. } => next.remove(&holder, intent.topic()),
             }
+            let cell = self.cell.clone();
+            let _turn = cell.job_turn().await;
+            self.confirm_before_cas().await?;
             let guard = self.guard_record(&next, GuardState::Ready, Expected::At(self.ready_guard()?))?;
             let data = change.record(&self.writer, &kv_key)?;
             let mut batch = AtomicBatch::new()?;
@@ -1058,7 +1363,7 @@ impl KeyCoordinator {
             let (outcome, sent_at) = self.publish(batch).await?;
             match self.settle(outcome, guard_position, sent_at).await? {
                 Committed::Done(guard_revision) => {
-                    self.index = next;
+                    self.cell.set_index(next);
                     return Ok(WriteOutcome::Applied(receipt.write_receipt(
                         revision_after(guard_revision, receipt_position, guard_position)?,
                         &kv_key,
@@ -1086,20 +1391,32 @@ impl KeyCoordinator {
                 let _ = self.adopt(guard, sent);
                 Ok(Committed::Done(guard))
             }
-            BatchOutcome::Rejected(rejection) if rejection.is_wrong_last_sequence() => match self.read_guard().await? {
-                Some((revision, body))
-                    if body.owner == self.owner && self.ready_guard().is_ok_and(|guard| guard == revision) =>
-                {
-                    Ok(Committed::Retry)
+            BatchOutcome::Rejected(rejection) if rejection.is_wrong_last_sequence() => {
+                let read_at = self.now();
+                match self.read_guard().await? {
+                    Some((revision, body))
+                        if body.owner == self.owner && self.ready_guard().is_ok_and(|guard| guard == revision) =>
+                    {
+                        Ok(Committed::Retry)
+                    }
+                    Some((revision, body))
+                        if body.owner == self.owner
+                            && body.state == GuardState::Ready
+                            && self.cell.abandoned().is_some() =>
+                    {
+                        self.cell.settle_abandoned();
+                        self.adopt(revision, read_at).map_err(ManagedError::SelfFenced)?;
+                        Ok(Committed::Retry)
+                    }
+                    _ => {
+                        self.cell.set_state(State::Rebuilding);
+                        Err(ManagedError::Superseded)
+                    }
                 }
-                _ => {
-                    self.state = State::Rebuilding;
-                    Err(ManagedError::Superseded)
-                }
-            },
+            }
             BatchOutcome::Rejected(rejection) => Err(WriteError::Rejected(rejection).into()),
             BatchOutcome::Unknown => {
-                self.state = State::Rebuilding;
+                self.cell.set_state(State::Rebuilding);
                 Ok(Committed::Retry)
             }
         }
@@ -1120,7 +1437,7 @@ impl KeyCoordinator {
                 self.check_live()?;
                 let written = receipt.write_receipt(revision, kv_key)?;
                 self.confirm_guard(sent).await?;
-                self.index = next.clone();
+                self.cell.set_index(next.clone());
                 Ok(Some(WriteOutcome::Applied(written)))
             }
             ReceiptRead::Absent(_) => Err(ManagedError::OutcomeUnknown),
@@ -1143,11 +1460,12 @@ impl KeyCoordinator {
                     value.mutation_seq(),
                     revision,
                 );
-                if !self.index.contains(&holder, intent.topic()) {
+                let known = self.cell.slot().index.contains(&holder, intent.topic());
+                if !known {
                     self.admit_new(holder, intent.topic()).await?;
                     let expires = self.expiry();
-                    self.index
-                        .insert(holder, intent.topic().clone(), Slot::of(&value, expires));
+                    self.cell
+                        .with_index(|index| index.insert(holder, intent.topic().clone(), Slot::of(&value, expires)));
                 }
                 Ok(Planned::Done(WriteOutcome::AlreadyLive(receipt)))
             }
@@ -1164,7 +1482,7 @@ impl KeyCoordinator {
                 IntentBody::Update { .. } | IntentBody::Untrack { .. },
                 EntryRead::Missing | EntryRead::Removed { .. },
             ) => {
-                self.index.remove(&holder, intent.topic());
+                self.cell.with_index(|index| index.remove(&holder, intent.topic()));
                 Ok(Planned::Done(WriteOutcome::Gone))
             }
             (IntentBody::Update { target, client_meta }, EntryRead::Live { revision, value }) => {
@@ -1279,15 +1597,8 @@ impl KeyCoordinator {
                 }
                 Ok(EntryRead::Live { .. }) => statuses[slot] = BeatStatus::Gone,
                 Ok(EntryRead::Missing | EntryRead::Removed { .. }) => {
-                    if self
-                        .index
-                        .holders
-                        .get(&entry.holder)
-                        .and_then(|topics| topics.get(&entry.topic))
-                        .is_some_and(|slot| slot.lifetime == entry.lifetime)
-                    {
-                        self.index.remove(&entry.holder, &entry.topic);
-                    }
+                    self.cell
+                        .with_index(|index| index.retire(&entry.holder, &entry.topic, entry.lifetime));
                     statuses[slot] = BeatStatus::Gone;
                 }
             }
@@ -1296,7 +1607,7 @@ impl KeyCoordinator {
             return Ok(Committed::Done(()));
         }
         let expires = self.expiry();
-        let mut next = self.index.clone();
+        let mut next = self.cell.index();
         for (slot, _, _, value) in &staged {
             let entry = &chunk[*slot];
             if next.contains(&entry.holder, &entry.topic) {
@@ -1305,6 +1616,9 @@ impl KeyCoordinator {
                 next.insert(entry.holder, entry.topic.clone(), Slot::of(value, expires));
             }
         }
+        let cell = self.cell.clone();
+        let _turn = cell.job_turn().await;
+        self.confirm_before_cas().await?;
         let guard = self.guard_record(&next, GuardState::Ready, Expected::At(self.ready_guard()?))?;
         let mut batch = AtomicBatch::new()?;
         let guard_position = batch.push(guard)?;
@@ -1323,13 +1637,20 @@ impl KeyCoordinator {
         let (outcome, sent) = self.publish(batch).await?;
         let committed = match outcome {
             BatchOutcome::Unknown => match self.read_guard().await? {
+                Some((revision, body))
+                    if body.owner == self.owner && revision != before && self.cell.abandoned().is_some() =>
+                {
+                    self.cell.settle_abandoned();
+                    let _ = self.adopt(revision, sent);
+                    false
+                }
                 Some((revision, body)) if body.owner == self.owner && revision != before => {
                     let _ = self.adopt(revision, sent);
                     true
                 }
                 Some((revision, body)) if body.owner == self.owner && revision == before => false,
                 _ => {
-                    self.state = State::Rebuilding;
+                    self.cell.set_state(State::Rebuilding);
                     return Err(ManagedError::Superseded);
                 }
             },
@@ -1338,7 +1659,7 @@ impl KeyCoordinator {
         if !committed {
             return Ok(Committed::Retry);
         }
-        self.index = next;
+        self.cell.set_index(next);
         for (slot, ..) in staged {
             statuses[slot] = BeatStatus::Ok;
         }
@@ -1370,7 +1691,7 @@ impl KeyCoordinator {
             let mut purges = Vec::new();
             let mut released = Vec::with_capacity(intent.targets().len());
             let mut entries = Vec::with_capacity(intent.targets().len());
-            let mut next = self.index.clone();
+            let mut next = self.cell.index();
             for target in intent.targets() {
                 let kv_key = EntryKey::new(target.topic().clone(), self.key.clone(), holder).encode(self.shards)?;
                 let read = self.writer.read_entry(&kv_key).await?;
@@ -1422,15 +1743,18 @@ impl KeyCoordinator {
                     }
                 }
             }
-            let holder_freed = self.index.topic_count(&holder) > 0 && next.topic_count(&holder) == 0;
+            let holder_freed = self.cell.slot().index.topic_count(&holder) > 0 && next.topic_count(&holder) == 0;
             if purges.is_empty() {
-                self.index = next;
+                self.cell.set_index(next);
                 return Ok(ReleaseOutcome {
                     entries,
                     replayed: false,
                     holder_freed,
                 });
             }
+            let cell = self.cell.clone();
+            let _turn = cell.job_turn().await;
+            self.confirm_before_cas().await?;
             let guard = self.guard_record(&next, GuardState::Ready, Expected::At(self.ready_guard()?))?;
             let mut batch = AtomicBatch::new()?;
             let guard_position = batch.push(guard)?;
@@ -1448,7 +1772,7 @@ impl KeyCoordinator {
             }
             let (outcome, sent) = self.publish(batch).await?;
             if let Committed::Done(_) = self.settle(outcome, guard_position, sent).await? {
-                self.index = next;
+                self.cell.set_index(next);
                 return Ok(ReleaseOutcome {
                     entries,
                     replayed: false,
@@ -1460,7 +1784,7 @@ impl KeyCoordinator {
                     ReceiptRead::Found { receipt, .. } => {
                         self.check_live()?;
                         self.confirm_guard(sent).await?;
-                        self.index = next;
+                        self.cell.set_index(next);
                         let mut outcome = self.replay_release(&intent, &receipt, false)?;
                         outcome.holder_freed = holder_freed;
                         Ok(outcome)
@@ -1560,5 +1884,52 @@ mod tests {
         assert!(GuardCapacity::try_from(MANAGED_GUARD_CAPACITY_MIN - 1).is_err());
         assert_eq!(HolderLimit::default().get(), 32);
         assert_eq!(TopicLimit::default().get(), 64);
+    }
+
+    #[test]
+    fn a_guard_adopted_inside_the_refresh_interval_skips_the_refresh() -> TestResult {
+        let (clock, control) = SuspendAwareClock::controlled();
+        let adopted = clock.now();
+        let fence = SelfFence::confirm(adopted, adopted, SelfFenceBound::from(GUARD_SELF_FENCE))?;
+        control.advance(GUARD_REFRESH_INTERVAL - Duration::from_millis(1));
+        assert!(!needs_refresh(fence, clock.now()));
+        control.advance(Duration::from_millis(1));
+        assert!(needs_refresh(fence, clock.now()));
+        Ok(())
+    }
+
+    #[test]
+    fn an_abandoned_refresh_is_confirmed_before_the_next_guard_write() {
+        let abandoned = EntryRevision::from(7);
+        assert_eq!(
+            Confirmation::of(abandoned, GuardSighting::Ours(abandoned)),
+            Confirmation::Unchanged
+        );
+        assert_eq!(
+            Confirmation::of(abandoned, GuardSighting::Ours(EntryRevision::from(8))),
+            Confirmation::Adopt(EntryRevision::from(8))
+        );
+        assert_eq!(
+            Confirmation::of(abandoned, GuardSighting::Foreign),
+            Confirmation::Superseded
+        );
+    }
+
+    #[test]
+    fn a_refresh_publish_bound_rejects_zero() {
+        assert_eq!(RefreshPublishBound::default().get(), GUARD_REFRESH_INTERVAL);
+        assert!(RefreshPublishBound::try_from(Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn retiring_an_index_slot_only_drops_the_matching_lifetime() -> TestResult {
+        let mut index = GuardIndex::default();
+        let holder = HolderId::from([1; 16]);
+        index.insert(holder, "room:a".parse()?, slot(1));
+        assert!(!index.retire(&holder, &"room:a".parse()?, LifetimeId::from([2; 16])));
+        assert_eq!(index.holder_count(), 1);
+        assert!(index.retire(&holder, &"room:a".parse()?, LifetimeId::from([1; 16])));
+        assert_eq!(index.holder_count(), 0);
+        Ok(())
     }
 }

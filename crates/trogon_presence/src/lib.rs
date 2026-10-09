@@ -31,7 +31,8 @@ pub mod watch;
 
 pub use batch::{
     AtomicBatch, BatchAck, BatchBudget, BatchBudgetError, BatchError, BatchOutcome, BatchPacer, BatchPosition,
-    BatchPublishError, BatchRecord, BatchRejection, BatchRevisionError, Expected, RecordOp, Unpaced,
+    BatchPublishError, BatchRecord, BatchRejection, BatchRevisionError, Expected, InflightBatchLimit, InflightBatches,
+    RecordOp, Unpaced,
 };
 pub use bucket::{BucketField, BucketMetadata, ProbeError, StreamFingerprint, StreamIdentity, WriterMode};
 pub use canonical_json::{CanonicalJsonError, CanonicalJsonV1, FingerprintError, OperationFingerprint};
@@ -51,9 +52,10 @@ pub use holder::{HolderId, HolderIdError};
 pub use key::{KeyError, PresenceKey};
 pub use kv_key::{AuthorityId, ControlKey, EntryKey, KvKey, KvKeyError};
 pub use managed::{
-    write_error_code, BatchSink, BeatEntry, BeatStatus, GuardCapacity, GuardCapacityError, HolderLimit,
+    write_error_code, BatchSink, BeatEntry, BeatStatus, GuardCapacity, GuardCapacityError, GuardRefresher, HolderLimit,
     HolderLimitError, KeyCoordinator, ManagedError, ManagedLimits, NatsBatchSink, OwnerDeadline, OwnerLapse,
-    ReleaseOutcome, ReleaseStatus, ReleasedEntry, SinkFuture, TopicLimit, TopicLimitError,
+    RefreshPublishBound, RefreshPublishBoundError, ReleaseOutcome, ReleaseStatus, ReleasedEntry, SinkFuture,
+    TopicLimit, TopicLimitError,
 };
 pub use meta::{Meta, MetaError};
 pub use operation::{

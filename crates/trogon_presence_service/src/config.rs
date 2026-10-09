@@ -3,7 +3,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use trogon_presence::watch::replay::{RebuildBudget, ReconcileInterval};
-use trogon_presence::{BucketName, CoalesceWindow, ManagedLimits, PresenceConfig, SelfFenceBound, WriterMode};
+use trogon_presence::{
+    BucketName, CoalesceWindow, InflightBatchLimit, ManagedLimits, PresenceConfig, SelfFenceBound, WriterMode,
+};
 use trogon_presence_hooks::HookConfig;
 
 use crate::admission::AdmissionLimits;
@@ -235,6 +237,17 @@ impl ServiceConfig {
         self.admission
     }
 
+    pub fn with_inflight_batches(self, inflight_batches: InflightBatchLimit) -> Self {
+        Self {
+            presence: self.presence.clone().with_inflight_batches(inflight_batches),
+            ..self
+        }
+    }
+
+    pub fn inflight_batches(&self) -> InflightBatchLimit {
+        self.presence.inflight_batches()
+    }
+
     pub fn with_lease_bucket(self, lease_bucket: BucketName) -> Self {
         Self { lease_bucket, ..self }
     }
@@ -359,6 +372,18 @@ mod tests {
     fn default_lease_bucket_is_versioned() {
         assert_eq!(default_lease_bucket().as_str(), DEFAULT_LEASE_BUCKET);
         assert_eq!(default_lease_bucket().stream_name(), "KV_PRESENCE_LEASE_V1");
+    }
+
+    #[test]
+    fn inflight_batch_limit_defaults_and_overrides() -> Result<(), Box<dyn std::error::Error>> {
+        let config = ServiceConfig::new(PresenceConfig::default(), "edge-1".parse()?);
+        assert_eq!(config.inflight_batches(), InflightBatchLimit::default());
+        let limit = InflightBatchLimit::try_from(4)?;
+        let limited = config.with_inflight_batches(limit);
+        assert_eq!(limited.inflight_batches(), limit);
+        assert_eq!(limited.presence().inflight_batches(), limit);
+        assert_eq!(limited.presence().writer_mode(), WriterMode::Managed);
+        Ok(())
     }
 
     #[test]

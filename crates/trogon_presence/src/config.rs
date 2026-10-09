@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_nats::jetstream::stream::StorageType;
 
+use crate::batch::InflightBatchLimit;
 use crate::bucket::WriterMode;
 use crate::constants::{
     BATCH_PROBE_STREAM_PREFIX, BATCH_PROBE_SUBJECT_PREFIX, DEFAULT_BUCKET, DEFAULT_GUARD_TTL_SECS,
@@ -321,6 +322,7 @@ pub struct PresenceConfig {
     shards: ShardCount,
     writer_mode: WriterMode,
     route: JetStreamRoute,
+    inflight_batches: InflightBatchLimit,
 }
 
 impl PresenceConfig {
@@ -351,6 +353,7 @@ impl PresenceConfig {
             shards,
             writer_mode: WriterMode::default(),
             route: JetStreamRoute::local(),
+            inflight_batches: InflightBatchLimit::default(),
         })
     }
 
@@ -365,8 +368,19 @@ impl PresenceConfig {
         }
     }
 
+    pub fn with_inflight_batches(self, inflight_batches: InflightBatchLimit) -> Self {
+        Self {
+            inflight_batches,
+            ..self
+        }
+    }
+
     pub fn route(&self) -> &JetStreamRoute {
         &self.route
+    }
+
+    pub fn inflight_batches(&self) -> InflightBatchLimit {
+        self.inflight_batches
     }
 
     pub fn context(&self, client: async_nats::Client) -> async_nats::jetstream::Context {
@@ -492,6 +506,19 @@ mod tests {
         assert_eq!(routed.route(), &JetStreamRoute::through(domain));
         assert_eq!(routed.route().api_prefix(), "$JS.hub.API");
         assert_eq!(routed.bucket(), local.bucket());
+        Ok(())
+    }
+
+    #[test]
+    fn a_config_carries_its_inflight_batch_limit() -> TestResult {
+        let config = PresenceConfig::default();
+        assert_eq!(config.inflight_batches(), InflightBatchLimit::default());
+        let limit = InflightBatchLimit::try_from(4)?;
+        let limited = config.clone().with_inflight_batches(limit);
+        assert_eq!(limited.inflight_batches(), limit);
+        assert_eq!(limited.route(), config.route());
+        assert!(InflightBatchLimit::try_from(0).is_err());
+        assert!("0".parse::<InflightBatchLimit>().is_err());
         Ok(())
     }
 

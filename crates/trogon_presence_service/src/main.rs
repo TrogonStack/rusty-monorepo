@@ -5,8 +5,8 @@ use std::time::Duration;
 use async_nats::jetstream::stream::StorageType;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use trogon_presence::{
-    BucketName, CoalesceWindow, HeartbeatInterval, JetStreamDomain, LeaseTtl, MarkerTtl, PresenceConfig,
-    ProvisionOptions, Replicas, ShardCount,
+    BucketName, CoalesceWindow, HeartbeatInterval, InflightBatchLimit, JetStreamDomain, LeaseTtl, MarkerTtl,
+    PresenceConfig, ProvisionOptions, Replicas, ShardCount,
 };
 use trogon_presence_hooks::{AllowedHost, HookConfig, HookDeadline, HookMemoryLimit, HookPolicy};
 use trogon_presence_service::config::default_lease_bucket;
@@ -128,6 +128,8 @@ struct Options {
     payload_budget_bytes: Option<usize>,
     #[arg(long, global = true, env = "TROGON_PRESENCE_NODE_ID")]
     node_id: Option<NodeId>,
+    #[arg(long, global = true, env = "TROGON_PRESENCE_INFLIGHT_BATCHES", default_value_t = InflightBatchLimit::default())]
+    inflight_batches: InflightBatchLimit,
     #[arg(long, global = true, env = "TROGON_PRESENCE_LOG_LEVEL", default_value = "info")]
     log_level: String,
 }
@@ -175,7 +177,9 @@ impl Options {
             Some(node) => node.clone(),
             None => NodeId::generate()?,
         };
-        let mut config = ServiceConfig::new(self.presence()?, node).with_lease_bucket(self.lease_bucket.clone());
+        let mut config = ServiceConfig::new(self.presence()?, node)
+            .with_lease_bucket(self.lease_bucket.clone())
+            .with_inflight_batches(self.inflight_batches);
         if let Some(ttl) = self.shard_lease_ttl {
             config = config.with_lease_ttl(ShardLeaseTtl::try_from(ttl)?);
         }
