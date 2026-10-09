@@ -352,9 +352,9 @@ impl StepBuilder {
     fn finish(mut self, ended: StreamEnd) -> Reconstruction {
         let end = ended.at();
         if let Some(turn) = &mut self.turn {
-            turn.end = turn.end.max(turn.start);
+            turn.end = end.max(turn.start);
         }
-        self.close_turn(None);
+        self.close_turn(Some(ended.unfinished()));
         for (_, tool) in std::mem::take(&mut self.tools) {
             self.steps.push(HarnessStep {
                 kind: StepKind::Tool {
@@ -1038,6 +1038,37 @@ mod tests {
         let turns = chats(&rebuilt);
         assert_eq!(turns.len(), 1);
         assert_eq!((turns[0].start, turns[0].end), (at(1), at(3)));
+    }
+
+    const CODEX_CUT_OFF_AFTER_TOOL: &[u8] = br#"{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"system","subtype":"status"}
+"#;
+
+    #[test]
+    fn a_codex_chat_cut_off_by_the_time_limit_ends_when_the_harness_was_killed_and_is_a_timeout() {
+        let ended = StreamEnd::TimedOut(at(30));
+        let rebuilt = rebuild_ending(
+            Runner::Codex,
+            CODEX_CUT_OFF_AFTER_TOOL,
+            Some("gpt-5"),
+            ContentCapture::NoContent,
+            ended,
+        );
+        let last_chat = chats(&rebuilt).into_iter().last().unwrap();
+        assert_eq!(last_chat.end, at(30));
+        assert_eq!(last_chat.failure, Some(StepFailure::TimedOut));
+
+        let (spans, _) = exported(&rebuilt.steps);
+        let span = spans.iter().rfind(|span| span.name == "chat gpt-5").unwrap();
+        assert_eq!(span.end_time, at(30));
+        let error_type = span
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == ERROR_TYPE)
+            .map(|kv| kv.value.clone());
+        assert_eq!(error_type, Some(opentelemetry::Value::from("timeout")));
     }
 
     #[test]
