@@ -68,6 +68,25 @@ impl CapturedTrace {
         self.spans.iter().filter(|span| span.name == name).collect()
     }
 
+    /// The span named `name` whose string attribute `key` is `value`, for the spans
+    /// that share one low-cardinality name and tell instances apart by attribute.
+    pub fn span_where(&self, name: &str, key: &str, value: &str) -> Option<&SpanData> {
+        self.spans.iter().find(|span| {
+            span.name == name
+                && span
+                    .attributes
+                    .iter()
+                    .any(|kv| kv.key.as_str() == key && kv.value.as_str() == value)
+        })
+    }
+
+    pub fn children_named<'a>(&'a self, parent: &SpanData, name: &str) -> Vec<&'a SpanData> {
+        self.children_of(parent)
+            .into_iter()
+            .filter(|span| span.name == name)
+            .collect()
+    }
+
     pub fn attribute(&self, span: &str, key: &str) -> Option<Value> {
         self.span(span)?
             .attributes
