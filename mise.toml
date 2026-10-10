@@ -16,6 +16,21 @@ run = [
   "git diff --exit-code crates/trg/schemas/",
 ]
 
+[tasks."semconv:generate"]
+description = "Regenerate the trg semconv module from semantic-conventions-genai via Weaver"
+run = [
+  "mise exec github:open-telemetry/weaver@0.26.1 -- weaver registry generate --registry 'https://github.com/open-telemetry/semantic-conventions-genai.git@06ec68e722c45a7218e23ea1bc1339fe4e21ecae[model]' --skip-policies -t crates/trg/templates/registry rust crates/trg/src/telemetry/semconv/generated",
+  "rustfmt --edition 2021 crates/trg/src/telemetry/semconv/generated/*.rs",
+]
+
+[tasks."semconv:check"]
+description = "Verify the checked-in trg semconv module matches Weaver's output"
+run = [
+  "mise run semconv:generate",
+  "git diff --exit-code crates/trg/src/telemetry/semconv/generated/",
+  "test -z \"$(git status --porcelain -- crates/trg/src/telemetry/semconv/generated/)\"",
+]
+
 [tasks."lints:toolchain"]
 description = "Install the nightly toolchain that crates/trogon_dylint_lints pins"
 dir = "crates/trogon_dylint_lints"
