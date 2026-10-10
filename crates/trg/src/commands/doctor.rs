@@ -19,6 +19,8 @@
 
 use clap::Args;
 use serde::Serialize;
+use tracing::field::Empty;
+use tracing::Instrument;
 
 use crate::output::OutputFormat;
 use crate::secrets::onepassword;
@@ -26,6 +28,7 @@ use crate::secrets::openbao::{Health, TokenSource};
 use crate::secrets::{
     Backend, BackendError, BackendKind, KeychainBackend, OnePasswordBackend, OpenBaoBackend, Registry, SecretsError,
 };
+use crate::telemetry::semconv::trg::{DOCTOR_HEALTHY, SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME};
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -132,19 +135,38 @@ impl Report {
     }
 }
 
+/// The span one backend's diagnosis runs under. An unhealthy backend is the
+/// diagnosis succeeding at its job, so it is recorded as a finding rather
+/// than as the span failing.
+fn diagnosis_span(name: &str, kind: &str) -> tracing::Span {
+    tracing::info_span!(
+        "diagnose backend",
+        { SECRETS_BACKEND_NAME } = name,
+        { SECRETS_BACKEND_KIND } = kind,
+        { DOCTOR_HEALTHY } = Empty,
+    )
+}
+
 pub async fn diagnose(name: &str, backend: &Backend) -> Report {
-    match backend {
-        Backend::OpenBao(bao) => openbao(name, bao).await,
-        Backend::Keychain(kc) => keychain(name, kc),
-        Backend::OnePassword(op) => onepassword(name, op).await,
-        #[cfg(test)]
-        Backend::Fake(_) => Report {
-            backend: name.to_string(),
-            kind: backend.kind(),
-            target: backend.describe(),
-            checks: Vec::new(),
-        },
+    let span = diagnosis_span(name, backend.kind());
+    let report = async {
+        match backend {
+            Backend::OpenBao(bao) => openbao(name, bao).await,
+            Backend::Keychain(kc) => keychain(name, kc),
+            Backend::OnePassword(op) => onepassword(name, op).await,
+            #[cfg(test)]
+            Backend::Fake(_) => Report {
+                backend: name.to_string(),
+                kind: backend.kind(),
+                target: backend.describe(),
+                checks: Vec::new(),
+            },
+        }
     }
+    .instrument(span.clone())
+    .await;
+    span.record(DOCTOR_HEALTHY, report.is_healthy());
+    report
 }
 
 async fn openbao(name: &str, bao: &OpenBaoBackend) -> Report {
@@ -494,6 +516,8 @@ pub async fn diagnose_all(registry: &Registry, only: Option<&str>) -> Result<Dia
 /// A backend that could not be built at all still gets a report, so one broken
 /// entry does not hide the state of every entry after it.
 fn unbuildable(name: &str, kind: Option<&'static str>, e: &BackendError) -> Report {
+    let span = diagnosis_span(name, kind.unwrap_or("unknown"));
+    span.record(DOCTOR_HEALTHY, false);
     Report {
         backend: name.to_string(),
         kind: kind.unwrap_or("unknown"),
@@ -910,5 +934,54 @@ mod tests {
         assert!(text.contains("FAILED"), "{text}");
         assert!(text.contains("gone"), "{text}");
         assert!(text.contains("put it back"), "{text}");
+    }
+
+    #[test]
+    fn a_diagnosis_is_a_span_over_the_requests_it_makes() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+
+        let stub = Stub::start((200, SERVING), (200, TWO_KEYS));
+        let backend = Backend::OpenBao(stub.backend(literal()));
+        let (report, trace) = crate::telemetry::testing::capture(|| current_thread(diagnose("live", &backend)));
+        assert!(report.is_healthy());
+
+        let attribute = |key: &str| trace.attribute("diagnose backend", key).map(|v| v.to_string());
+        assert_eq!(attribute("trg.secrets.backend.name").as_deref(), Some("live"));
+        assert_eq!(attribute("trg.secrets.backend.kind").as_deref(), Some("openbao"));
+        assert_eq!(attribute("trg.doctor.healthy").as_deref(), Some("true"));
+        trace.assert_child_of("GET /v1/sys/health", "diagnose backend");
+        trace.assert_child_of("HTTP /v1/{mount}/metadata/{path}", "diagnose backend");
+
+        assert_never_recorded(&trace, &["s.not-a-real-token", "yordis"]);
+    }
+
+    /// A sealed instance answers `sys/health` with `503`, which is the state
+    /// being reported rather than a failed request.
+    #[test]
+    fn a_sealed_instance_is_unhealthy_without_failing_the_health_request() {
+        use crate::secrets::telemetry::testing::current_thread;
+        use opentelemetry::trace::Status;
+
+        let stub = Stub::start((503, SEALED), (200, TWO_KEYS));
+        let backend = Backend::OpenBao(stub.backend(literal()));
+        let (report, trace) = crate::telemetry::testing::capture(|| current_thread(diagnose("live", &backend)));
+        assert!(!report.is_healthy());
+
+        assert_eq!(
+            trace
+                .attribute("diagnose backend", "trg.doctor.healthy")
+                .map(|v| v.to_string())
+                .as_deref(),
+            Some("false")
+        );
+        let health = trace.span("GET /v1/sys/health").expect("the health request");
+        assert!(!matches!(health.status, Status::Error { .. }), "{:?}", health.status);
+        assert_eq!(
+            trace
+                .attribute("GET /v1/sys/health", "http.response.status_code")
+                .map(|v| v.to_string())
+                .as_deref(),
+            Some("503")
+        );
     }
 }

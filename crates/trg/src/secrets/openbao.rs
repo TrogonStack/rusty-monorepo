@@ -35,8 +35,11 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use tracing::Instrument;
+
 use super::kv_v2::{Envelope, ErrorBody, ListPayload, ReadPayload};
-use super::{SecretKey, SecretMap, SecretPath, SecretsError};
+use super::telemetry::{HttpSpan, ServerAddress, UrlTemplate};
+use super::{BackendKind, SecretKey, SecretMap, SecretPath, SecretsError};
 use crate::config::{FetchedSecrets, RawVarSource, VarResolveError};
 
 /// Total request budget when the backend does not override it.
@@ -73,6 +76,10 @@ const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 2_000;
 /// Matches reqwest's own default. Named here only because following redirects
 /// at all is a deliberate choice once a token rides along.
 const MAX_REDIRECTS: usize = 10;
+
+const HEALTH_ROUTE: UrlTemplate = UrlTemplate::new("/v1/sys/health");
+const DATA_ROUTE: UrlTemplate = UrlTemplate::new("/v1/{mount}/data/{path}");
+const METADATA_ROUTE: UrlTemplate = UrlTemplate::new("/v1/{mount}/metadata/{path}");
 
 /// Where the token comes from. Exactly one is declared per backend.
 #[derive(Clone, Debug)]
@@ -258,6 +265,7 @@ pub enum OpenBaoBuildError {
 pub struct OpenBaoBackend {
     client: reqwest::Client,
     addr: String,
+    server: ServerAddress,
     mount: String,
     path_prefix: String,
     owner: String,
@@ -309,6 +317,7 @@ impl OpenBaoBackend {
         Ok(Self {
             client,
             addr,
+            server: ServerAddress::of(&parsed),
             mount: settings.mount,
             path_prefix,
             owner: settings.owner,
@@ -362,24 +371,40 @@ impl OpenBaoBackend {
     /// perfectly healthy standby as unreachable, so only a transport failure
     /// is an error here.
     pub async fn health(&self) -> Result<Health, SecretsError> {
+        let call = HttpSpan::start(BackendKind::Openbao, &reqwest::Method::GET, HEALTH_ROUTE, &self.server);
         let path = SecretPath::parse("sys/health").expect("static path is valid");
-        let response = self
-            .client
-            .get(format!("{}/v1/sys/health", self.addr))
-            .send()
-            .await
-            .map_err(|e| self.transport_error(&path, &e))?;
+        let result = async {
+            let response = self
+                .client
+                .get(format!("{}/v1/sys/health", self.addr))
+                .send()
+                .await
+                .map_err(|e| self.transport_error(&path, &e))?;
 
-        let status = response.status().as_u16();
-        // A body that never finished arriving is a transport failure, not a
-        // health report the instance got wrong.
-        let body = response.text().await.map_err(|e| self.transport_error(&path, &e))?;
+            let status = response.status();
+            call.responded(status);
+            // A body that never finished arriving is a transport failure, not a
+            // health report the instance got wrong.
+            let body = response.text().await.map_err(|e| self.transport_error(&path, &e))?;
 
-        serde_json::from_str(&body).map_err(|e| SecretsError::Malformed {
-            path,
-            cause: format!("`sys/health` answered {status} with something other than a health report: {e}"),
-            raw: None,
-        })
+            serde_json::from_str(&body).map_err(|e| SecretsError::Malformed {
+                path: path.clone(),
+                cause: format!(
+                    "`sys/health` answered {} with something other than a health report: {e}",
+                    status.as_u16()
+                ),
+                raw: None,
+            })
+        }
+        .instrument(call.span().clone())
+        .await;
+
+        // Health reports state through its status (`429` standby, `503`
+        // sealed), so only a failure to get a report marks the span failed.
+        if let Err(e) = &result {
+            call.failed(e.error_type());
+        }
+        result
     }
 
     pub fn machine_id(&self) -> Option<&str> {
@@ -481,26 +506,35 @@ impl OpenBaoBackend {
 
     pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
         let url = self.data_url(path)?;
-        let response = self.send(reqwest::Method::GET, &url, path, None).await?;
+        let read = self
+            .exchange(
+                reqwest::Method::GET,
+                DATA_ROUTE,
+                &url,
+                path,
+                None,
+                Absence::IsAMiss,
+                |body| {
+                    let read: Envelope<ReadPayload> =
+                        serde_json::from_value(body).map_err(|e| SecretsError::Malformed {
+                            path: path.clone(),
+                            cause: format!("response is not a KV v2 read: {e}"),
+                            raw: None,
+                        })?;
 
-        let Some(body) = self.read_body(response, path, Absence::IsAMiss).await? else {
-            return Ok(None);
-        };
+                    // Defensive. A soft-deleted version answers 404 with a null
+                    // `data`, which `read_body` already turns into a miss, so this
+                    // only catches a 200 shaped the same way.
+                    let Some(data) = read.data.data else {
+                        return Ok(None);
+                    };
 
-        let read: Envelope<ReadPayload> = serde_json::from_value(body).map_err(|e| SecretsError::Malformed {
-            path: path.clone(),
-            cause: format!("response is not a KV v2 read: {e}"),
-            raw: None,
-        })?;
+                    map_from_json(&data, path).map(Some)
+                },
+            )
+            .await?;
 
-        // Defensive. A soft-deleted version answers 404 with a null `data`,
-        // which `read_body` already turns into a miss, so this only catches a
-        // 200 shaped the same way.
-        let Some(data) = read.data.data else {
-            return Ok(None);
-        };
-
-        map_from_json(&data, path).map(Some)
+        Ok(read.flatten())
     }
 
     pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {
@@ -519,15 +553,31 @@ impl OpenBaoBackend {
             raw: None,
         })?;
 
-        let response = self.send(reqwest::Method::POST, &url, path, Some(body)).await?;
-        self.read_body(response, path, Absence::IsAFailure).await?;
+        self.exchange(
+            reqwest::Method::POST,
+            DATA_ROUTE,
+            &url,
+            path,
+            Some(body),
+            Absence::IsAFailure,
+            Ok,
+        )
+        .await?;
         Ok(())
     }
 
     pub async fn delete(&self, path: &SecretPath) -> Result<(), SecretsError> {
         let url = self.metadata_url(path)?;
-        let response = self.send(reqwest::Method::DELETE, &url, path, None).await?;
-        self.read_body(response, path, Absence::IsAMiss).await?;
+        self.exchange(
+            reqwest::Method::DELETE,
+            METADATA_ROUTE,
+            &url,
+            path,
+            None,
+            Absence::IsAMiss,
+            Ok,
+        )
+        .await?;
         Ok(())
     }
 
@@ -540,17 +590,20 @@ impl OpenBaoBackend {
         let anchor = prefix.cloned().unwrap_or_else(|| prefix_anchor(&self.storage_prefix()));
 
         let method = reqwest::Method::from_bytes(b"LIST").expect("LIST is a valid method token");
-        let response = self.send(method, &url, &anchor, None).await?;
-
-        let Some(body) = self.read_body(response, &anchor, Absence::IsAMiss).await? else {
+        let Some(listing) = self
+            .exchange(method, METADATA_ROUTE, &url, &anchor, None, Absence::IsAMiss, |body| {
+                let listing: Envelope<ListPayload> =
+                    serde_json::from_value(body).map_err(|e| SecretsError::Malformed {
+                        path: anchor.clone(),
+                        cause: format!("response is not a KV v2 listing: {e}"),
+                        raw: None,
+                    })?;
+                Ok(listing)
+            })
+            .await?
+        else {
             return Ok(Vec::new());
         };
-
-        let listing: Envelope<ListPayload> = serde_json::from_value(body).map_err(|e| SecretsError::Malformed {
-            path: anchor.clone(),
-            cause: format!("response is not a KV v2 listing: {e}"),
-            raw: None,
-        })?;
 
         let mut out = listing.data.keys;
         out.sort();
@@ -604,6 +657,40 @@ impl OpenBaoBackend {
             )),
             TokenSource::File(path) => read_token_file(path),
         }
+    }
+
+    /// One request and its classified answer, under an HTTP client span that
+    /// covers reading the body, validating it against the KV v2 shape the
+    /// caller expects, and the round trip itself. `validate` runs inside the
+    /// span so a 200 with an invalid envelope or a non-string secret value
+    /// finishes the span failed rather than succeeding before the caller
+    /// discovers the problem.
+    #[allow(clippy::too_many_arguments)]
+    async fn exchange<T>(
+        &self,
+        method: reqwest::Method,
+        route: UrlTemplate,
+        url: &str,
+        path: &SecretPath,
+        body: Option<Value>,
+        absence: Absence,
+        validate: impl FnOnce(Value) -> Result<T, SecretsError>,
+    ) -> Result<Option<T>, SecretsError> {
+        let call = HttpSpan::start(BackendKind::Openbao, &method, route, &self.server);
+        let mut answered = None;
+        let result = async {
+            let response = self.send(method, url, path, body).await?;
+            answered = Some(response.status());
+            call.responded(response.status());
+            match self.read_body(response, path, absence).await? {
+                Some(body) => validate(body).map(Some),
+                None => Ok(None),
+            }
+        }
+        .instrument(call.span().clone())
+        .await;
+        call.finish(answered, &result);
+        result
     }
 
     async fn send(
@@ -2072,6 +2159,163 @@ mod tests {
         assert!(
             matches!(err, SecretsError::Unavailable(_)),
             "should be unavailable, got {err:?}"
+        );
+    }
+
+    const SPAN_TOKEN: &str = "hvs.span-test-token-7f3a";
+    const SPAN_SECRET: &str = "span-test-secret-value-91c2";
+
+    fn traced_backend(stub: &StubBao) -> OpenBaoBackend {
+        let mut s = settings(&stub.addr);
+        s.timeout = Duration::from_secs(2);
+        s.token = TokenSource::Var(RawVarSource::Literal(SPAN_TOKEN.to_string()));
+        OpenBaoBackend::new(s).expect("build")
+    }
+
+    fn port_of(addr: &str) -> i64 {
+        reqwest::Url::parse(addr)
+            .expect("stub addr")
+            .port()
+            .map(i64::from)
+            .expect("stub port")
+    }
+
+    #[test]
+    fn a_read_is_an_http_client_span_naming_only_its_route() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+        use opentelemetry::trace::SpanKind;
+
+        let stub = StubBao::start(vec![Reply::hit(&[("api", SPAN_SECRET)])]);
+        let backend = traced_backend(&stub);
+        let (read, trace) = crate::telemetry::testing::capture(|| current_thread(backend.get(&path("deploy-keys"))));
+        assert!(read.expect("get").is_some());
+
+        let name = "GET /v1/{mount}/data/{path}";
+        let span = trace.span(name).expect("a span per request");
+        assert_eq!(span.span_kind, SpanKind::Client);
+        let attribute = |key: &str| trace.attribute(name, key).map(|v| v.to_string());
+        assert_eq!(attribute("http.request.method").as_deref(), Some("GET"));
+        assert_eq!(attribute("url.template").as_deref(), Some("/v1/{mount}/data/{path}"));
+        assert_eq!(attribute("server.address").as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            trace.attribute(name, "server.port"),
+            Some(opentelemetry::Value::I64(port_of(&stub.addr)))
+        );
+        assert_eq!(
+            trace.attribute(name, "http.response.status_code"),
+            Some(opentelemetry::Value::I64(200))
+        );
+        assert_eq!(attribute("trg.secrets.backend.kind").as_deref(), Some("openbao"));
+        assert_eq!(attribute("error.type"), None);
+
+        assert_never_recorded(&trace, &[SPAN_SECRET, SPAN_TOKEN, "deploy-keys", "yordis", &stub.addr]);
+    }
+
+    #[test]
+    fn a_list_reports_its_nonstandard_method_as_other() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+
+        let stub = StubBao::start(vec![Reply::listed(&["deploy-keys"])]);
+        let backend = traced_backend(&stub);
+        let (listed, trace) = crate::telemetry::testing::capture(|| current_thread(backend.list(None)));
+        assert_eq!(listed.expect("list"), ["deploy-keys"]);
+
+        let name = "HTTP /v1/{mount}/metadata/{path}";
+        let attribute = |key: &str| trace.attribute(name, key).map(|v| v.to_string());
+        assert_eq!(attribute("http.request.method").as_deref(), Some("_OTHER"));
+        assert_eq!(attribute("http.request.method_original").as_deref(), Some("LIST"));
+
+        assert_never_recorded(&trace, &[SPAN_TOKEN, "yordis"]);
+    }
+
+    #[test]
+    fn a_refused_request_is_a_failed_span_typed_by_its_status() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+        use opentelemetry::trace::Status;
+
+        let stub = StubBao::start(vec![Reply::refused(403, &["permission denied"])]);
+        let backend = traced_backend(&stub);
+        let (read, trace) = crate::telemetry::testing::capture(|| current_thread(backend.get(&path("deploy-keys"))));
+        assert!(matches!(read, Err(SecretsError::Unauthorized { .. })), "{read:?}");
+
+        let name = "GET /v1/{mount}/data/{path}";
+        let span = trace.span(name).expect("a span per request");
+        assert!(matches!(span.status, Status::Error { .. }), "{:?}", span.status);
+        assert_eq!(
+            trace.attribute(name, "error.type").map(|v| v.to_string()).as_deref(),
+            Some("403")
+        );
+
+        assert_never_recorded(&trace, &[SPAN_TOKEN, "deploy-keys"]);
+    }
+
+    /// A `200` whose body is not a KV v2 envelope is only caught once `get`
+    /// parses it, so the span must not finish until that parse has run.
+    #[test]
+    fn a_200_with_an_invalid_envelope_is_a_failed_span() {
+        use crate::secrets::telemetry::testing::current_thread;
+        use opentelemetry::trace::Status;
+
+        let stub = StubBao::start(vec![Reply::verbatim(200, r#"{"not":"a kv v2 envelope"}"#)]);
+        let backend = traced_backend(&stub);
+        let (read, trace) = crate::telemetry::testing::capture(|| current_thread(backend.get(&path("x"))));
+        assert!(matches!(read, Err(SecretsError::Malformed { .. })), "{read:?}");
+
+        let name = "GET /v1/{mount}/data/{path}";
+        let span = trace.span(name).expect("a span per request");
+        assert!(matches!(span.status, Status::Error { .. }), "{:?}", span.status);
+        assert_eq!(
+            trace.attribute(name, "error.type").map(|v| v.to_string()).as_deref(),
+            Some("malformed")
+        );
+        assert_eq!(
+            trace.attribute(name, "http.response.status_code"),
+            Some(opentelemetry::Value::I64(200))
+        );
+    }
+
+    /// Same shape, for a non-string value under an otherwise valid envelope:
+    /// `exchange` only hands back a parsed `Value`, so the span must still be
+    /// finished by what `map_from_json` makes of it.
+    #[test]
+    fn a_200_with_a_non_string_secret_value_is_a_failed_span() {
+        use crate::secrets::telemetry::testing::current_thread;
+        use opentelemetry::trace::Status;
+
+        let stub = StubBao::start(vec![Reply::verbatim(
+            200,
+            r#"{"data":{"data":{"credentials":1},"metadata":{"version":1}}}"#,
+        )]);
+        let backend = traced_backend(&stub);
+        let (read, trace) = crate::telemetry::testing::capture(|| current_thread(backend.get(&path("x"))));
+        assert!(matches!(read, Err(SecretsError::Malformed { .. })), "{read:?}");
+
+        let name = "GET /v1/{mount}/data/{path}";
+        let span = trace.span(name).expect("a span per request");
+        assert!(matches!(span.status, Status::Error { .. }), "{:?}", span.status);
+        assert_eq!(
+            trace.attribute(name, "error.type").map(|v| v.to_string()).as_deref(),
+            Some("malformed")
+        );
+    }
+
+    #[test]
+    fn an_unreachable_backend_types_the_span_by_the_failure() {
+        use crate::secrets::telemetry::testing::current_thread;
+
+        let (server, addr) = bind_loopback();
+        drop(server);
+        let mut s = settings(&addr);
+        s.timeout = Duration::from_millis(500);
+        let backend = OpenBaoBackend::new(s).expect("build");
+        let (read, trace) = crate::telemetry::testing::capture(|| current_thread(backend.get(&path("x"))));
+        assert!(read.is_err());
+
+        let name = "GET /v1/{mount}/data/{path}";
+        assert_eq!(trace.attribute(name, "http.response.status_code"), None);
+        assert_eq!(
+            trace.attribute(name, "error.type").map(|v| v.to_string()).as_deref(),
+            Some("unavailable")
         );
     }
 }

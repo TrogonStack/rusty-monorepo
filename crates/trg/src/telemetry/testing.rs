@@ -13,10 +13,20 @@ pub(crate) struct CapturedTrace {
     pub spans: Vec<SpanData>,
 }
 
+/// While a single dispatcher exists, tracing caches a callsite's interest
+/// from whichever thread reaches it first, so a test thread without a
+/// subscriber can disable a span for every capturing thread. Keeping a second
+/// dispatcher alive makes each callsite ask the current one instead.
+pub(crate) fn consult_every_dispatcher() {
+    static PINNED: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+    PINNED.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+}
+
 /// Runs `work` with a thread-local subscriber exporting to memory. Work on
 /// other threads is only captured when it re-enters this subscriber, for
 /// example through [`super::propagation::LaneParent`].
 pub(crate) fn capture<T>(work: impl FnOnce() -> T) -> (T, CapturedTrace) {
+    consult_every_dispatcher();
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
         .with_simple_exporter(exporter.clone())

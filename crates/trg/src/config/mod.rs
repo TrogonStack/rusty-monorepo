@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use http::HeaderName;
 pub use secrecy::SecretString;
 use serde::Deserialize;
+use tracing::field::Empty;
 pub use var::{
     EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretVar, SecretVarError, Segment, VarRef,
     VarResolveError, VarSite, VarSource, VarTemplate,
@@ -74,6 +75,39 @@ pub enum ConfigError {
 
     #[error("{0}")]
     SecretVar(#[from] SecretVarError),
+}
+
+impl ConfigError {
+    /// A low-cardinality name for this failure, for `error.type`.
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::Toml(_) => "toml",
+            Self::NotFound(_) => "not_found",
+            Self::Unreadable { .. } => "unreadable",
+            Self::NoMcpServers => "no_mcp_servers",
+            Self::UnknownServer { .. } => "unknown_server",
+            Self::InvalidHeaderValue { .. } => "invalid_header_value",
+            Self::EmptyUrl => "empty_url",
+            Self::VarResolve(_) => "var_resolve",
+            Self::InvalidHeaderName(..) => "invalid_header_name",
+            Self::DuplicateHeader { .. } => "duplicate_header",
+            Self::NoExecEntries => "no_exec_entries",
+            Self::UnknownExecEntry { .. } => "unknown_exec_entry",
+            Self::SecretVar(_) => "secret_var",
+        }
+    }
+}
+
+/// Reads, parses and validates the config under one span, since that is the
+/// whole of what loading it costs. The file path is not recorded: it sits
+/// under the operator's home directory.
+fn traced_load<T>(load: impl FnOnce() -> Result<T, ConfigError>) -> Result<T, ConfigError> {
+    let span = tracing::info_span!("load config", "error.type" = Empty, "otel.status_code" = Empty);
+    let result = span.in_scope(load);
+    if let Err(e) = &result {
+        crate::secrets::telemetry::record_error(&span, e.error_type());
+    }
+    result
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,11 +349,11 @@ fn sorted_distinct(vars: impl Iterator<Item = SecretVar>) -> Vec<SecretVar> {
 }
 
 pub fn load_mcp(selected_name: &str) -> Result<PendingMcp, ConfigError> {
-    load_mcp_at(&trg_config_path(), selected_name)
+    traced_load(|| load_mcp_at(&trg_config_path(), selected_name))
 }
 
 pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
-    load_exec_at(&trg_config_path(), name)
+    traced_load(|| load_exec_at(&trg_config_path(), name))
 }
 
 /// Every `[exec.<name>]` name declared in the config, sorted.
@@ -330,7 +364,7 @@ pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
 /// that — it is the ordinary state of a config nobody has written an entry
 /// into.
 pub fn list_exec_names() -> Result<Vec<String>, ConfigError> {
-    list_exec_names_at(&trg_config_path())
+    traced_load(|| list_exec_names_at(&trg_config_path()))
 }
 
 fn list_exec_names_at(path: &Path) -> Result<Vec<String>, ConfigError> {
@@ -348,7 +382,7 @@ fn list_exec_names_at(path: &Path) -> Result<Vec<String>, ConfigError> {
 /// one for a command that only inspects a backend. Declaring a backend before
 /// declaring anything that uses it is an ordinary order to do things in.
 pub fn load_secrets() -> Result<SecretsSection, ConfigError> {
-    load_secrets_at(&trg_config_path())
+    traced_load(|| load_secrets_at(&trg_config_path()))
 }
 
 fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
@@ -1535,5 +1569,47 @@ api  = "v1"
         assert_eq!(loaded.env["DIR"], "/home/tester/app/state");
 
         std::env::remove_var(&key);
+    }
+
+    #[test]
+    fn loading_is_one_span_that_names_no_path_and_no_literal() {
+        use crate::secrets::telemetry::testing::assert_never_recorded;
+
+        const TOKEN: &str = "config-span-token-6e0b";
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            &format!(
+                r#"
+            [secrets.backends.work]
+            kind = "openbao"
+            addr = "https://bao.example.com:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            owner = "yordis"
+            token = "{TOKEN}"
+
+            [exec.claude]
+            command = "claude"
+            "#
+            ),
+        );
+
+        let (loaded, trace) = crate::telemetry::testing::capture(|| traced_load(|| load_exec_at(&path, "claude")));
+        loaded.expect("load");
+        assert!(trace.span("load config").is_some());
+        assert_eq!(trace.attribute("load config", "error.type"), None);
+        assert_never_recorded(&trace, &[TOKEN, &dir.path().display().to_string()]);
+
+        let (missing, trace) = crate::telemetry::testing::capture(|| traced_load(|| load_exec_at(&path, "nope")));
+        assert!(missing.is_err());
+        assert_eq!(
+            trace
+                .attribute("load config", "error.type")
+                .map(|v| v.to_string())
+                .as_deref(),
+            Some("unknown_exec_entry")
+        );
     }
 }

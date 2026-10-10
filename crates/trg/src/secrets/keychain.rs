@@ -77,11 +77,15 @@
 //! exactly as auditable.
 
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use secrecy::SecretString;
 use tokio::process::Command;
+use tracing::Instrument;
 
-use super::{SecretKey, SecretMap, SecretPath, SecretsError};
+use super::telemetry::CliSpan;
+use super::{BackendKind, SecretKey, SecretMap, SecretPath, SecretsError};
+use crate::telemetry::propagation;
 
 /// The keychain service attribute every item written by `trg` carries.
 pub const DEFAULT_SERVICE: &str = "trg MCP Credentials";
@@ -160,7 +164,10 @@ impl KeychainBackend {
     pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
         self.guard_platform()?;
         let out = self
-            .run(&["find-generic-password", "-s", &self.service, "-a", path.as_str(), "-w"])
+            .run(
+                "find-generic-password",
+                &["-s", &self.service, "-a", path.as_str(), "-w"],
+            )
             .await?;
 
         if !out.status.success() {
@@ -191,17 +198,10 @@ impl KeychainBackend {
         })?;
 
         let out = self
-            .run(&[
+            .run(
                 "add-generic-password",
-                "-U",
-                "-A",
-                "-s",
-                &self.service,
-                "-a",
-                path.as_str(),
-                "-w",
-                &payload,
-            ])
+                &["-U", "-A", "-s", &self.service, "-a", path.as_str(), "-w", &payload],
+            )
             .await?;
 
         if !out.status.success() {
@@ -214,7 +214,7 @@ impl KeychainBackend {
     pub async fn delete(&self, path: &SecretPath) -> Result<(), SecretsError> {
         self.guard_platform()?;
         let out = self
-            .run(&["delete-generic-password", "-s", &self.service, "-a", path.as_str()])
+            .run("delete-generic-password", &["-s", &self.service, "-a", path.as_str()])
             .await?;
 
         if !out.status.success() {
@@ -247,12 +247,39 @@ impl KeychainBackend {
         }
     }
 
-    async fn run(&self, args: &[&str]) -> Result<std::process::Output, SecretsError> {
-        Command::new(&self.bin)
+    /// Runs `security <operation> <args>` under a CLI client span that names
+    /// the operation and none of the arguments, which carry the account and,
+    /// for `add-generic-password`, the payload itself.
+    async fn run(&self, operation: &'static str, args: &[&str]) -> Result<std::process::Output, SecretsError> {
+        let call = CliSpan::start(BackendKind::Keychain, "security", operation);
+        let mut command = Command::new(&self.bin);
+        command
+            .arg(operation)
             .args(args)
-            .output()
-            .await
-            .map_err(|e| SecretsError::Transport(format!("security {}: {e}", args[0])))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        call.span().in_scope(|| propagation::inject_tokio_command(&mut command));
+
+        let result = async {
+            let child = command.spawn()?;
+            call.spawned(child.id());
+            child.wait_with_output().await
+        }
+        .instrument(call.span().clone())
+        .await;
+
+        match result {
+            Ok(output) => {
+                call.exited(&output.status);
+                Ok(output)
+            }
+            Err(e) => {
+                let error = SecretsError::Transport(format!("security {operation}: {e}"));
+                call.failed(error.error_type());
+                Err(error)
+            }
+        }
     }
 }
 
@@ -291,8 +318,10 @@ mod tests {
             let dir = tempfile::tempdir().expect("tempdir");
             let bin = dir.path().join("security");
             let argv = dir.path().join("argv");
+            let traceparent = dir.path().join("traceparent");
             let script = format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {argv}; done\nprintf '%s' {stdout}\nprintf '%s' {stderr} >&2\nexit {exit}\n",
+                "#!/bin/sh\nprintf '%s' \"${{TRACEPARENT:-}}\" > {traceparent}\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> {argv}; done\nprintf '%s' {stdout}\nprintf '%s' {stderr} >&2\nexit {exit}\n",
+                traceparent = sh_quote(&traceparent.display().to_string()),
                 argv = sh_quote(&argv.display().to_string()),
                 stdout = sh_quote(stdout),
                 stderr = sh_quote(stderr),
@@ -309,6 +338,10 @@ mod tests {
 
         fn backend(&self) -> KeychainBackend {
             KeychainBackend::with_bin("svc", self.dir.path().join("security"))
+        }
+
+        fn traceparent(&self) -> String {
+            std::fs::read_to_string(self.dir.path().join("traceparent")).unwrap_or_default()
         }
 
         fn argv(&self) -> Vec<String> {
@@ -508,5 +541,80 @@ mod tests {
         backend.delete(&path).await.expect("delete");
         assert!(backend.get(&path).await.expect("get").is_none());
         backend.delete(&path).await.expect("delete again");
+    }
+
+    #[test]
+    fn each_call_is_a_cli_span_that_the_child_continues() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+        use opentelemetry::trace::SpanKind;
+
+        let stub = StubSecurity::ok("{\"credentials\":\"{}\"}\n");
+        let backend = stub.backend();
+        let (read, trace) =
+            crate::telemetry::testing::capture(|| current_thread(backend.get(&SecretPath::parse("github").unwrap())));
+        assert!(read.expect("get").is_some());
+
+        let span = trace.span("security").expect("a span per call");
+        assert_eq!(span.span_kind, SpanKind::Client);
+        let attribute = |key: &str| trace.attribute("security", key).map(|v| v.to_string());
+        assert_eq!(attribute("process.executable.name").as_deref(), Some("security"));
+        assert_eq!(attribute("process.exit.code").as_deref(), Some("0"));
+        assert!(matches!(
+            trace.attribute("security", "process.pid"),
+            Some(opentelemetry::Value::I64(_))
+        ));
+        assert_eq!(
+            attribute("trg.secrets.operation").as_deref(),
+            Some("find-generic-password")
+        );
+        assert_eq!(attribute("trg.secrets.backend.kind").as_deref(), Some("keychain"));
+
+        let traceparent = stub.traceparent();
+        assert_eq!(
+            traceparent,
+            format!("00-{}-{}-01", span.span_context.trace_id(), span.span_context.span_id()),
+            "the child continues the call's span"
+        );
+        assert_never_recorded(&trace, &["github", "svc"]);
+    }
+
+    #[test]
+    fn a_write_never_records_the_payload_it_hands_security() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+
+        const SECRET: &str = "keychain-span-secret-5b7c";
+        let stub = StubSecurity::ok("");
+        let backend = stub.backend();
+        let (written, trace) = crate::telemetry::testing::capture(|| {
+            current_thread(backend.set(&SecretPath::parse("github").unwrap(), &map_of(&[("token", SECRET)])))
+        });
+        written.expect("set");
+
+        assert_eq!(
+            trace
+                .attribute("security", "trg.secrets.operation")
+                .map(|v| v.to_string())
+                .as_deref(),
+            Some("add-generic-password")
+        );
+        assert_never_recorded(&trace, &[SECRET, "github", "token"]);
+    }
+
+    #[test]
+    fn a_failing_call_is_typed_by_its_exit() {
+        use crate::secrets::telemetry::testing::current_thread;
+        use opentelemetry::trace::Status;
+
+        let stub = StubSecurity::answering(44, "", NOT_FOUND);
+        let backend = stub.backend();
+        let (read, trace) =
+            crate::telemetry::testing::capture(|| current_thread(backend.get(&SecretPath::parse("github").unwrap())));
+        assert!(read.expect("a miss is not an error").is_none());
+
+        let span = trace.span("security").expect("a span per call");
+        assert!(matches!(span.status, Status::Error { .. }));
+        let attribute = |key: &str| trace.attribute("security", key).map(|v| v.to_string());
+        assert_eq!(attribute("process.exit.code").as_deref(), Some("44"));
+        assert_eq!(attribute("error.type").as_deref(), Some("nonzero_exit"));
     }
 }

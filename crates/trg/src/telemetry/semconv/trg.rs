@@ -45,3 +45,24 @@ pub const EVAL_HARNESS_DURATION_MS: &str = "trg.eval.harness.duration_ms";
 
 /// The grader's name, on a `grade` span's children.
 pub const EVAL_GRADER_NAME: &str = "trg.eval.grader.name";
+
+/// The `kind` of the secrets backend an operation addressed (`keychain`,
+/// `openbao`, `onepassword`).
+pub const SECRETS_BACKEND_KIND: &str = "trg.secrets.backend.kind";
+
+/// The `[secrets.backends.<name>]` entry an operation addressed. A config
+/// name, never a path or a value.
+pub const SECRETS_BACKEND_NAME: &str = "trg.secrets.backend.name";
+
+/// The fixed subcommand a backend CLI was driven with
+/// (`find-generic-password`, `item get`, ...). Never its arguments.
+pub const SECRETS_OPERATION: &str = "trg.secrets.operation";
+
+/// How many config vars one secrets fetch served.
+pub const SECRETS_VAR_COUNT: &str = "trg.secrets.var.count";
+
+/// How many variables the launched command's environment holds.
+pub const EXEC_ENV_VAR_COUNT: &str = "trg.exec.env.var.count";
+
+/// Whether every check a `trg doctor` backend diagnosis ran passed.
+pub const DOCTOR_HEALTHY: &str = "trg.doctor.healthy";
