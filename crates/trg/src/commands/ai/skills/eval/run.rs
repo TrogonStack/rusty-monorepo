@@ -1,7 +1,14 @@
+use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
+use std::time::Instant;
+
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
+use tracing::field::Empty;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::agentskills::budget::{Admission, CostCeiling, CostLedger, FAILURE_KIND_BUDGET};
 use crate::agentskills::cache::{
@@ -10,6 +17,10 @@ use crate::agentskills::cache::{
 };
 use crate::agentskills::case_selection::{CaseSelection, SplitArg};
 use crate::agentskills::concurrency::RunConcurrency;
+use crate::agentskills::eval_telemetry::{
+    exit_error_type, record_attempt, record_cache_lookup, record_failure, record_run, record_workflow_duration,
+    step_span, AttemptOutcome,
+};
 use crate::agentskills::evals::{
     effective_model, effective_model_source, effective_timeout_secs, missing_expected_output_warnings, EvalCase,
     EvalCheckOptions, EvalDirName, EvalSuite,
@@ -17,8 +28,8 @@ use crate::agentskills::evals::{
 use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::mocks::{
-    materialize_mock_set, resolve_mock_set, MaterializedMcpConfig, MockCallLogEntry, MockServerBinary, MockSet,
-    MOCK_CALLS_LOG_NAME,
+    materialize_mock_set, resolve_mock_set, MaterializedMcpConfig, MockCallLogEntry, MockServerBinary, MockServerEnv,
+    MockSet, MOCK_CALLS_LOG_NAME,
 };
 use crate::agentskills::model_name::ModelName;
 use crate::agentskills::outputs::index_output_artifacts;
@@ -31,14 +42,26 @@ use crate::agentskills::report::{
 use crate::agentskills::runner::capabilities::{ControlSupport, HarnessControl};
 use crate::agentskills::runner::{
     availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
-    SkillDigest,
+    SkillDigest, TelemetryForwarding,
 };
 use crate::agentskills::sampling::AttemptCount;
 use crate::agentskills::scenario_selection::ScenarioSelection;
+use crate::agentskills::span_reference::SpanReference;
 use crate::agentskills::tool_grant::{effective_tool_grant, ToolGrant};
 use crate::agentskills::workspace_scaffold::ScaffoldPermission;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
+use crate::telemetry::propagation::LaneParent;
+use crate::telemetry::semconv::generated::attributes::{
+    gen_ai_operation_name, GEN_AI_OPERATION_NAME, GEN_AI_WORKFLOW_NAME,
+};
+use crate::telemetry::semconv::trg::{
+    EVAL_ATTEMPT, EVAL_ATTEMPT_OUTCOME, EVAL_ATTEMPT_TRANSIENT, EVAL_CACHE_HIT, EVAL_CACHE_RESTORED_BYTES,
+    EVAL_CACHE_RESTORED_FILES, EVAL_CASE_ID, EVAL_CASE_SPLIT, EVAL_CONCURRENCY, EVAL_GRADING_STRATEGY, EVAL_ITERATION,
+    EVAL_LANE, EVAL_MODEL_CONFIG, EVAL_RUNNER_KIND, EVAL_RUNNER_MODEL, EVAL_RUNNER_VERSION, EVAL_RUN_COUNT,
+    EVAL_RUN_ID, EVAL_RUN_STATUS, EVAL_SCENARIO, EVAL_SCENARIOS, EVAL_SKILL_REVISION, EVAL_SKILL_TAMPERED,
+    EVAL_TOOL_GRANT,
+};
 use clap::Args;
 
 use super::benchmark::benchmark_report_dir_with_document;
@@ -276,56 +299,79 @@ pub struct RunArgs {
     )]
     pub trust_skill: bool,
 
+    #[arg(
+        long,
+        help = "Hand each run's harness trg's own OpenTelemetry settings, so a harness that exports telemetry sends its spans to the same collector under this pass's trace. Off by default because it lets a run reach a collector its --environment would otherwise keep from it"
+    )]
+    pub forward_telemetry: bool,
+
     #[command(flatten)]
     pub ci: EvalCiArgs,
 }
 
 impl RunArgs {
     pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
-        let props = match crate::agentskills::validator::validate_skill(fs, &self.skill_dir) {
-            Ok(props) => props,
-            Err(e) => {
+        let started = Instant::now();
+        let suite = SuiteSpan::start(self.grade, self.concurrency);
+        let code = suite
+            .span
+            .in_scope(|| self.run_suite(fs, &suite))
+            .unwrap_or_else(|code| code);
+        suite.finish(started.elapsed(), code);
+        code
+    }
+
+    fn run_suite(self, fs: &impl FileSystem, suite: &SuiteSpan) -> Result<ExitCode, ExitCode> {
+        let props = step("validate skill", || {
+            crate::agentskills::validator::validate_skill(fs, &self.skill_dir).map_err(|e| {
                 eprintln!("Skill validation failed: {}", e);
-                return ExitCode::GateFailed;
-            }
-        };
+                ExitCode::GateFailed
+            })
+        })?;
+        suite.named(&props.name);
 
         let eval_dir = self.eval_dir.clone().unwrap_or_default();
 
-        if let Err(e) = crate::agentskills::evals::check_eval_suite(
-            fs,
-            &self.skill_dir,
-            &eval_dir,
-            &props.name,
-            EvalCheckOptions {
-                require_graders: self.require_graders,
-                ..EvalCheckOptions::default()
-            },
-        ) {
-            eprintln!("Skill eval validation failed: {}", e);
-            return ExitCode::GateFailed;
-        }
+        step("check suite", || {
+            crate::agentskills::evals::check_eval_suite(
+                fs,
+                &self.skill_dir,
+                &eval_dir,
+                &props.name,
+                EvalCheckOptions {
+                    require_graders: self.require_graders,
+                    ..EvalCheckOptions::default()
+                },
+            )
+            .map_err(|e| {
+                eprintln!("Skill eval validation failed: {}", e);
+                ExitCode::GateFailed
+            })
+        })?;
 
         if self.lint_evals {
-            match crate::agentskills::evals::load_eval_suite(fs, &self.skill_dir, &eval_dir) {
-                Ok(suite) => {
-                    crate::agentskills::evals::print_eval_lint_warnings(
-                        &crate::agentskills::evals::lint_eval_suite_fixtures(
-                            fs,
-                            &self.skill_dir,
-                            &suite,
-                            crate::agentskills::evals::EvalLintOptions {
-                                allow_empty_graders: self.require_graders,
-                                ..crate::agentskills::evals::EvalLintOptions::default()
-                            },
-                        ),
-                    );
+            step("lint fixtures", || {
+                match crate::agentskills::evals::load_eval_suite(fs, &self.skill_dir, &eval_dir) {
+                    Ok(suite) => {
+                        crate::agentskills::evals::print_eval_lint_warnings(
+                            &crate::agentskills::evals::lint_eval_suite_fixtures(
+                                fs,
+                                &self.skill_dir,
+                                &suite,
+                                crate::agentskills::evals::EvalLintOptions {
+                                    allow_empty_graders: self.require_graders,
+                                    ..crate::agentskills::evals::EvalLintOptions::default()
+                                },
+                            ),
+                        );
+                        Ok(())
+                    }
+                    Err(error) => {
+                        eprintln!("Failed to load eval manifest for linting: {error}");
+                        Err(ExitCode::InfrastructureFailure)
+                    }
                 }
-                Err(error) => {
-                    eprintln!("Failed to load eval manifest for linting: {error}");
-                    return ExitCode::InfrastructureFailure;
-                }
-            }
+            })?;
         }
 
         if !self.skill_staging.withholds_the_answer_key() {
@@ -335,86 +381,82 @@ impl RunArgs {
             );
         }
 
-        let iteration = self
-            .iteration
-            .unwrap_or_else(|| detect_next_iteration(&self.out_dir, &props.name));
+        let iteration = step("detect iteration", || {
+            Ok(self
+                .iteration
+                .unwrap_or_else(|| detect_next_iteration(&self.out_dir, &props.name)))
+        })?;
+        suite.span.record(EVAL_ITERATION, i64::from(iteration));
 
-        let scenario_selection = match ScenarioSelection::resolve(&self.scenario, self.reuse_completed) {
-            Ok(selection) => selection,
-            Err(error) => {
+        let scenario_selection = step("resolve scenarios", || {
+            let selection = ScenarioSelection::resolve(&self.scenario, self.reuse_completed).map_err(|error| {
                 eprintln!("{error}");
-                return ExitCode::InfrastructureFailure;
+                ExitCode::InfrastructureFailure
+            })?;
+            if selection.contains(ScenarioKind::OldSkill) && self.old_skill_dir.is_none() {
+                eprintln!("--old-skill-dir is required when --scenario old_skill is included");
+                return Err(ExitCode::InfrastructureFailure);
             }
-        };
-
-        if scenario_selection.contains(ScenarioKind::OldSkill) && self.old_skill_dir.is_none() {
-            eprintln!("--old-skill-dir is required when --scenario old_skill is included");
-            return ExitCode::InfrastructureFailure;
-        }
+            Ok(selection)
+        })?;
+        suite.scenarios(scenario_selection.scenarios());
 
         if let Some(old_skill_dir) = &self.old_skill_dir {
-            match crate::agentskills::validator::validate_skill(fs, old_skill_dir) {
-                Ok(old_props) => {
-                    if old_props.name != props.name && !self.allow_skill_name_mismatch {
-                        eprintln!(
-                            "Old skill name '{}' does not match current skill name '{}' (pass --allow-skill-name-mismatch to override)",
-                            old_props.name, props.name
-                        );
-                        return ExitCode::InfrastructureFailure;
+            step(
+                "validate old skill",
+                || match crate::agentskills::validator::validate_skill(fs, old_skill_dir) {
+                    Ok(old_props) => {
+                        if old_props.name != props.name && !self.allow_skill_name_mismatch {
+                            eprintln!(
+                                "Old skill name '{}' does not match current skill name '{}' (pass --allow-skill-name-mismatch to override)",
+                                old_props.name, props.name
+                            );
+                            return Err(ExitCode::InfrastructureFailure);
+                        }
+                        Ok(())
                     }
-                }
-                Err(e) => {
-                    eprintln!("Old skill validation failed: {}", e);
-                    return ExitCode::GateFailed;
-                }
-            }
+                    Err(e) => {
+                        eprintln!("Old skill validation failed: {}", e);
+                        Err(ExitCode::GateFailed)
+                    }
+                },
+            )?;
         }
 
-        let runner_probe = if let Some(runner) = self.runner {
-            if cfg!(test) {
-                None
-            } else {
-                match availability::check_runner_available(runner) {
-                    Ok(probe) => Some(probe),
-                    Err(unavailable) => {
+        let runner_probe = match self.runner {
+            Some(runner) if !cfg!(test) => step("check runner availability", || {
+                availability::check_runner_available(runner)
+                    .map(Some)
+                    .map_err(|unavailable| {
                         availability::eprint_runner_unavailable(&unavailable);
-                        return ExitCode::InfrastructureFailure;
-                    }
-                }
-            }
-        } else {
-            None
+                        ExitCode::InfrastructureFailure
+                    })
+            })?,
+            _ => None,
         };
 
         let cost_ledger = match self.runner {
-            Some(runner) => match CostLedger::open(self.max_cost_usd, runner.pricing()) {
-                Ok(ledger) => Some(ledger),
-                Err(error) => {
+            Some(runner) => Some(step("open cost ledger", || {
+                CostLedger::open(self.max_cost_usd, runner.pricing()).map_err(|error| {
                     eprintln!("{error}");
-                    return ExitCode::InfrastructureFailure;
-                }
-            },
+                    ExitCode::InfrastructureFailure
+                })
+            })?),
             None => None,
         };
 
-        let cases = match CaseSelection::parse(&self.cases, &self.tags, self.split.narrowing()) {
-            Ok(cases) => cases,
-            Err(error) => {
-                eprintln!("{error}");
-                return ExitCode::InfrastructureFailure;
-            }
-        };
+        let cases = CaseSelection::parse(&self.cases, &self.tags, self.split.narrowing()).map_err(|error| {
+            eprintln!("{error}");
+            ExitCode::InfrastructureFailure
+        })?;
 
         let allowed_tools = if self.allowed_tools.is_empty() {
             None
         } else {
-            match ToolGrant::parse(self.allowed_tools.clone()) {
-                Ok(grant) => Some(grant),
-                Err(error) => {
-                    eprintln!("--allowed-tools: {error}");
-                    return ExitCode::InfrastructureFailure;
-                }
-            }
+            Some(ToolGrant::parse(self.allowed_tools.clone()).map_err(|error| {
+                eprintln!("--allowed-tools: {error}");
+                ExitCode::InfrastructureFailure
+            })?)
         };
 
         let build_options = BuildReportOptions {
@@ -439,47 +481,55 @@ impl RunArgs {
             allowed_tools: allowed_tools.clone(),
             cases,
             eval_dir,
+            telemetry_forwarding: TelemetryForwarding::requested(self.forward_telemetry),
             ..BuildReportOptions::default()
         };
 
-        let operator = crate::agentskills::skill_trust::SkillTrust::granted(self.trust_skill);
-        for dir in std::iter::once(&self.skill_dir).chain(self.old_skill_dir.iter()) {
-            if let Err(e) = crate::agentskills::skill_trust::admit(dir, operator) {
-                eprintln!("{e}");
-                return ExitCode::GateFailed;
+        step("admit skill", || {
+            let operator = crate::agentskills::skill_trust::SkillTrust::granted(self.trust_skill);
+            for dir in std::iter::once(&self.skill_dir).chain(self.old_skill_dir.iter()) {
+                if let Err(e) = crate::agentskills::skill_trust::admit(dir, operator) {
+                    eprintln!("{e}");
+                    return Err(ExitCode::GateFailed);
+                }
             }
-        }
+            Ok(())
+        })?;
 
-        let bundle = match build_report_bundle(
-            fs,
-            &self.skill_dir,
-            &self.skill_dir,
-            &props.name,
-            &self.model_config,
-            scenario_selection.scenarios(),
-            build_options,
-        ) {
-            Ok(bundle) => bundle,
-            Err(e) => {
+        let mut bundle = step("build report bundle", || {
+            build_report_bundle(
+                fs,
+                &self.skill_dir,
+                &self.skill_dir,
+                &props.name,
+                &self.model_config,
+                scenario_selection.scenarios(),
+                build_options,
+            )
+            .map_err(|e| {
                 eprintln!("Failed to build eval report bundle: {}", e);
-                return ExitCode::InfrastructureFailure;
-            }
-        };
+                ExitCode::InfrastructureFailure
+            })
+        })?;
+        suite
+            .span
+            .record(EVAL_SKILL_REVISION, bundle.document.suite.skill_hash.as_str());
+        bundle.document.report.trace = SpanReference::of(&suite.span);
 
-        let report_dir = match write_report_bundle(
-            &self.out_dir,
-            &bundle,
-            WriteReportOptions {
-                force: self.force,
-                iteration,
-            },
-        ) {
-            Ok(dir) => dir,
-            Err(e) => {
+        let report_dir = step("write report bundle", || {
+            write_report_bundle(
+                &self.out_dir,
+                &bundle,
+                WriteReportOptions {
+                    force: self.force,
+                    iteration,
+                },
+            )
+            .map_err(|e| {
                 eprintln!("Failed to write eval report bundle: {}", e);
-                return ExitCode::InfrastructureFailure;
-            }
-        };
+                ExitCode::InfrastructureFailure
+            })
+        })?;
 
         let mut budget_exhausted = false;
         if let (Some(runner), Some(cost_ledger)) = (self.runner, cost_ledger.as_ref()) {
@@ -487,7 +537,7 @@ impl RunArgs {
                 enabled: !self.no_cache,
                 reuse_completed: self.reuse_completed,
             };
-            match execute_runs(
+            let runs_skipped = execute_runs(
                 runner,
                 self.runner_model.as_ref(),
                 self.timeout_secs,
@@ -503,12 +553,11 @@ impl RunArgs {
                 self.permission,
                 allowed_tools,
                 ScaffoldPermission::granted(self.allow_scaffold),
+                TelemetryForwarding::requested(self.forward_telemetry),
                 self.concurrency,
                 cost_ledger,
-            ) {
-                Ok(runs_skipped) => budget_exhausted = runs_skipped > 0 || cost_ledger.overspent(),
-                Err(code) => return code,
-            }
+            )?;
+            budget_exhausted = runs_skipped > 0 || cost_ledger.overspent();
         }
 
         let grade_options = GradeOptions {
@@ -526,12 +575,12 @@ impl RunArgs {
             if last_stage {
                 let exit_code = code.or_budget_exhausted(budget_exhausted);
                 if self.output_format.is_json() {
-                    return print_json(
+                    return Ok(print_json(
                         &GradeJsonOutput::new(&report_dir, exit_code, grade_report.as_ref()),
                         exit_code,
-                    );
+                    ));
                 }
-                return exit_code;
+                return Ok(exit_code);
             }
         }
 
@@ -540,21 +589,89 @@ impl RunArgs {
             let exit_code = code.or_budget_exhausted(budget_exhausted);
             if self.output_format.is_json() {
                 if let Some(document) = benchmark_doc {
-                    return print_json(&BenchmarkJsonOutput::new(&report_dir, exit_code, &document), exit_code);
+                    return Ok(print_json(
+                        &BenchmarkJsonOutput::new(&report_dir, exit_code, &document),
+                        exit_code,
+                    ));
                 }
             }
-            return exit_code;
+            return Ok(exit_code);
         }
 
-        finish_eval_output(
-            &report_dir,
-            self.output_format,
-            self.ci.policy(),
-            &self.ci.thresholds(),
-            None,
-            budget_exhausted,
-        )
+        step("finish suite", || {
+            Ok(finish_eval_output(
+                &report_dir,
+                self.output_format,
+                self.ci.policy(),
+                &self.ci.thresholds(),
+                None,
+                budget_exhausted,
+            ))
+        })
     }
+}
+
+/// The `invoke_workflow` span one pass runs under.
+struct SuiteSpan {
+    span: tracing::Span,
+    workflow: OnceCell<String>,
+}
+
+impl SuiteSpan {
+    fn start(grade: bool, concurrency: RunConcurrency) -> Self {
+        let grading = if grade { GRADING_AUTO } else { GRADING_NONE };
+        let span = tracing::info_span!(
+            "invoke_workflow",
+            "otel.status_code" = Empty,
+            { GEN_AI_OPERATION_NAME } = gen_ai_operation_name::INVOKE_WORKFLOW,
+            { GEN_AI_WORKFLOW_NAME } = Empty,
+            { EVAL_SKILL_REVISION } = Empty,
+            { EVAL_ITERATION } = Empty,
+            { EVAL_SCENARIOS } = Empty,
+            { EVAL_GRADING_STRATEGY } = grading,
+            { EVAL_CONCURRENCY } = i64::try_from(concurrency.lanes()).unwrap_or(i64::MAX),
+            { ERROR_TYPE } = Empty,
+        );
+        Self {
+            span,
+            workflow: OnceCell::new(),
+        }
+    }
+
+    fn named(&self, workflow: &str) {
+        self.span
+            .context()
+            .span()
+            .update_name(format!("{} {workflow}", gen_ai_operation_name::INVOKE_WORKFLOW));
+        self.span.record(GEN_AI_WORKFLOW_NAME, workflow);
+        let _ = self.workflow.set(workflow.to_string());
+    }
+
+    fn scenarios(&self, scenarios: &[ScenarioKind]) {
+        let names = scenarios.iter().map(|scenario| scenario.as_str()).collect::<Vec<_>>();
+        self.span.record(EVAL_SCENARIOS, names.join(",").as_str());
+    }
+
+    fn finish(&self, elapsed: std::time::Duration, code: ExitCode) {
+        if let Some(error_type) = exit_error_type(code) {
+            record_failure(&self.span, error_type);
+        }
+        record_workflow_duration(self.workflow.get().map(String::as_str), elapsed, code);
+    }
+}
+
+const GRADING_AUTO: &str = "auto";
+const GRADING_NONE: &str = "none";
+
+/// Runs one setup or teardown step of a pass in its own span, marking it failed when the
+/// step stops the pass.
+fn step<T>(name: &'static str, work: impl FnOnce() -> Result<T, ExitCode>) -> Result<T, ExitCode> {
+    let span = step_span(name);
+    let result = span.in_scope(work);
+    if let Some(error_type) = result.as_ref().err().and_then(|code| exit_error_type(*code)) {
+        record_failure(&span, error_type);
+    }
+    result
 }
 
 /// The chained-benchmark shape, alongside the chained-grade shape that
@@ -597,38 +714,34 @@ fn execute_runs(
     permission: PermissionGrant,
     allowed_tools: Option<ToolGrant>,
     scaffold_permission: ScaffoldPermission,
+    telemetry_forwarding: TelemetryForwarding,
     concurrency: RunConcurrency,
     cost_ledger: &CostLedger,
 ) -> std::result::Result<usize, ExitCode> {
-    let skill_md = match std::fs::read_to_string(skill_path.join("SKILL.md")) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to read SKILL.md: {}", e);
-            return Err(ExitCode::InfrastructureFailure);
-        }
-    };
-
-    let old_skill_md = if let Some(old_path) = old_skill_path {
-        match std::fs::read_to_string(old_path.join("SKILL.md")) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("Failed to read old skill SKILL.md: {}", e);
-                return Err(ExitCode::InfrastructureFailure);
-            }
-        }
-    } else {
-        None
-    };
-
     let eval_dir = bundle.document.suite.eval_dir.clone();
-    let suite: EvalSuite =
-        match crate::agentskills::case_directories::resolve_eval_suite(&crate::fs::RealFS, skill_path, &eval_dir) {
-            Ok(compiled) => compiled.suite,
-            Err(err) => {
-                eprintln!("Failed to load eval suite: {}", err);
-                return Err(ExitCode::InfrastructureFailure);
-            }
+    let (skill_md, old_skill_md, suite) = step("load run inputs", || {
+        let skill_md = std::fs::read_to_string(skill_path.join("SKILL.md")).map_err(|e| {
+            eprintln!("Failed to read SKILL.md: {}", e);
+            ExitCode::InfrastructureFailure
+        })?;
+
+        let old_skill_md = match old_skill_path {
+            Some(old_path) => Some(std::fs::read_to_string(old_path.join("SKILL.md")).map_err(|e| {
+                eprintln!("Failed to read old skill SKILL.md: {}", e);
+                ExitCode::InfrastructureFailure
+            })?),
+            None => None,
         };
+
+        let suite: EvalSuite =
+            crate::agentskills::case_directories::resolve_eval_suite(&crate::fs::RealFS, skill_path, &eval_dir)
+                .map(|compiled| compiled.suite)
+                .map_err(|err| {
+                    eprintln!("Failed to load eval suite: {}", err);
+                    ExitCode::InfrastructureFailure
+                })?;
+        Ok((skill_md, old_skill_md, suite))
+    })?;
 
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
     let runner_version = bundle.document.report.runner_version.clone();
@@ -649,6 +762,7 @@ fn execute_runs(
         permission,
         allowed_tools,
         scaffold_permission,
+        telemetry_forwarding,
         skill_md: &skill_md,
         old_skill_md: old_skill_md.as_deref(),
         case_index: &case_index,
@@ -660,37 +774,42 @@ fn execute_runs(
         eval_dir,
         cost_ledger,
     };
-    execution.execute_all(&mut bundle.document.runs, concurrency);
+    tracing::info_span!(
+        "eval step",
+        "otel.name" = "execute runs",
+        { EVAL_CONCURRENCY } = i64::try_from(concurrency.lanes()).unwrap_or(i64::MAX),
+        { EVAL_RUN_COUNT } = i64::try_from(bundle.document.runs.len()).unwrap_or(i64::MAX),
+    )
+    .in_scope(|| execution.execute_all(&mut bundle.document.runs, concurrency));
 
-    rebuild_summaries(&mut bundle);
-    recompute_model_capture_status(&mut bundle.document);
+    step("rewrite report", || {
+        rebuild_summaries(&mut bundle);
+        recompute_model_capture_status(&mut bundle.document);
 
-    let runs_skipped = bundle
-        .document
-        .runs
-        .iter()
-        .filter(|run| run.failure_kind.as_deref() == Some(FAILURE_KIND_BUDGET))
-        .count();
-    bundle.document.budget = Some(BudgetReport {
-        ceiling_usd: cost_ledger.ceiling().map(CostCeiling::usd),
-        spent: cost_ledger.spend(),
-        exhausted: cost_ledger.exhausted(),
-        runs_skipped,
-    });
+        let runs_skipped = bundle
+            .document
+            .runs
+            .iter()
+            .filter(|run| run.failure_kind.as_deref() == Some(FAILURE_KIND_BUDGET))
+            .count();
+        bundle.document.budget = Some(BudgetReport {
+            ceiling_usd: cost_ledger.ceiling().map(CostCeiling::usd),
+            spent: cost_ledger.spend(),
+            exhausted: cost_ledger.exhausted(),
+            runs_skipped,
+        });
 
-    let report_json = match serde_json::to_string_pretty(&bundle.document) {
-        Ok(s) => s,
-        Err(e) => {
+        let report_json = serde_json::to_string_pretty(&bundle.document).map_err(|e| {
             eprintln!("Failed to re-serialize report.json: {}", e);
-            return Err(ExitCode::InfrastructureFailure);
-        }
-    };
-    if let Err(e) = std::fs::write(report_dir.join("report.json"), report_json) {
-        eprintln!("Failed to write updated report.json: {}", e);
-        return Err(ExitCode::InfrastructureFailure);
-    }
+            ExitCode::InfrastructureFailure
+        })?;
+        std::fs::write(report_dir.join("report.json"), report_json).map_err(|e| {
+            eprintln!("Failed to write updated report.json: {}", e);
+            ExitCode::InfrastructureFailure
+        })?;
 
-    Ok(runs_skipped)
+        Ok(runs_skipped)
+    })
 }
 
 /// When the skill directory is hashed to see whether a run rewrote it.
@@ -724,6 +843,7 @@ struct RunExecution<'a> {
     permission: PermissionGrant,
     allowed_tools: Option<ToolGrant>,
     scaffold_permission: ScaffoldPermission,
+    telemetry_forwarding: TelemetryForwarding,
     skill_md: &'a str,
     old_skill_md: Option<&'a str>,
     case_index: &'a HashMap<String, &'a EvalCase>,
@@ -748,34 +868,35 @@ impl RunExecution<'_> {
         let lanes = concurrency.lanes_for(runs.len());
         if concurrency.is_serial() || lanes <= 1 {
             for run in runs.iter_mut() {
-                self.execute(run, IntegrityWindow::Run);
+                self.execute(run, IntegrityWindow::Run, Lane::SERIAL);
             }
             return;
         }
 
-        let baseline = self.skill_digests();
+        let baseline = step_span("hash skills").in_scope(|| self.skill_digests());
         {
             let queue = &Mutex::new(runs.iter_mut().collect::<VecDeque<&mut RunRecord>>());
             thread::scope(|scope| {
-                for _ in 0..lanes {
+                for lane in (0..lanes).map(Lane) {
                     let lane_context = lane_context();
+                    let parent = LaneParent::capture();
                     scope.spawn(move || {
                         adopt_lane_context(lane_context);
-                        loop {
+                        parent.in_scope(|| loop {
                             let next = queue
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .pop_front();
                             match next {
-                                Some(run) => self.execute(run, IntegrityWindow::Pass),
+                                Some(run) => self.execute(run, IntegrityWindow::Pass, lane),
                                 None => break,
                             }
-                        }
+                        });
                     });
                 }
             });
         }
-        self.record_pass_integrity(runs, &baseline);
+        step_span("check skill tampering").in_scope(|| self.record_pass_integrity(runs, &baseline));
     }
 
     /// The directory whose contents answer for a scenario's skill.
@@ -911,7 +1032,43 @@ impl RunExecution<'_> {
         effective_tool_grant(self.allowed_tools.as_ref(), case.allowed_tools.as_ref())
     }
 
-    fn execute(&self, run: &mut RunRecord, integrity: IntegrityWindow) {
+    fn execute(&self, run: &mut RunRecord, integrity: IntegrityWindow, lane: Lane) {
+        let span = tracing::info_span!(
+            "run",
+            "otel.status_code" = Empty,
+            { EVAL_RUN_ID } = run.id.as_str(),
+            { EVAL_CASE_ID } = run.eval_case_id.as_str(),
+            { EVAL_CASE_SPLIT } = run.split.as_str(),
+            { EVAL_SCENARIO } = run.scenario_id.as_str(),
+            { EVAL_ITERATION } = i64::from(run.iteration),
+            { EVAL_MODEL_CONFIG } = run.model_config_id.as_str(),
+            { EVAL_RUNNER_KIND } = self.runner_kind.as_str(),
+            { EVAL_RUNNER_VERSION } = self.runner_version.as_deref(),
+            { EVAL_RUNNER_MODEL } = Empty,
+            { EVAL_TOOL_GRANT } = Empty,
+            { EVAL_LANE } = i64::try_from(lane.0).unwrap_or(i64::MAX),
+            { EVAL_CACHE_HIT } = Empty,
+            { EVAL_RUN_STATUS } = Empty,
+            { ERROR_TYPE } = Empty,
+        );
+        run.trace = SpanReference::of(&span);
+        span.in_scope(|| self.execute_run(run, integrity));
+
+        span.record(EVAL_CACHE_HIT, run.cache.is_some());
+        span.record(EVAL_RUN_STATUS, run.status.as_str());
+        if let Some(model) = &run.runner_model {
+            span.record(EVAL_RUNNER_MODEL, model.as_str());
+        }
+        if let Some(grant) = &run.tool_grant {
+            span.record(EVAL_TOOL_GRANT, grant.to_string().as_str());
+        }
+        if run.status == "failed" {
+            record_failure(&span, run.failure_kind.as_deref().unwrap_or(RUN_FAILED));
+        }
+        record_run(run);
+    }
+
+    fn execute_run(&self, run: &mut RunRecord, integrity: IntegrityWindow) {
         let case = match self.case_index.get(&run.eval_case_id) {
             Some(case) => *case,
             None => {
@@ -950,9 +1107,11 @@ impl RunExecution<'_> {
         let transcript_path = run_dir.join("transcript.jsonl");
         let stderr_path = run_dir.join("stderr.log");
 
+        let resolving = step_span("resolve mocks").entered();
         let mock_set = match resolve_mock_set(self.skill_path, &self.eval_dir, &run.eval_case_id) {
             Ok(set) => set,
             Err(e) => {
+                record_failure(&resolving, STEP_FAILED);
                 eprintln!("Run {}: failed to resolve mcp mocks: {}", run.id, e);
                 run.status = "failed".to_string();
                 return;
@@ -977,16 +1136,21 @@ impl RunExecution<'_> {
                 return;
             }
         }
+        drop(resolving);
 
+        let hashing = step_span("hash fixtures").entered();
         let fixture_hash = match compute_fixture_hash(self.skill_path, &self.eval_dir, &run.eval_case_id) {
             Ok(hash) => hash.as_str().to_string(),
             Err(e) => {
+                record_failure(&hashing, STEP_FAILED);
                 eprintln!("Run {}: failed to hash fixtures: {}", run.id, e);
                 run.status = "failed".to_string();
                 return;
             }
         };
+        drop(hashing);
 
+        let keying = step_span("compute cache key").entered();
         let skill_hash = match scenario {
             ScenarioKind::OldSkill => self.old_skill_hash.clone().unwrap_or_else(|| self.skill_hash.clone()),
             _ => self.skill_hash.clone(),
@@ -1001,6 +1165,7 @@ impl RunExecution<'_> {
             Some(scaffold) => match scaffold.digest(self.skill_path) {
                 Ok(digest) => Some(digest.as_str().to_string()),
                 Err(e) => {
+                    record_failure(&keying, STEP_FAILED);
                     eprintln!("Run {}: {}", run.id, e);
                     run.status = "failed".to_string();
                     return;
@@ -1012,6 +1177,7 @@ impl RunExecution<'_> {
             match crate::agentskills::companion_skills::companion_digest(self.skill_path, &case.companion_skills) {
                 Ok(digest) => digest.map(|digest| digest.as_str().to_string()),
                 Err(e) => {
+                    record_failure(&keying, STEP_FAILED);
                     eprintln!("Run {}: failed to hash companion skills: {}", run.id, e);
                     run.status = "failed".to_string();
                     return;
@@ -1054,17 +1220,33 @@ impl RunExecution<'_> {
         };
         let reuse_input = ReuseKeyInput::of(&key_input);
         let cache_key = CacheKey::from_input(&key_input);
+        drop(keying);
 
-        if let Some(pointer) = try_resolve_cache(self.out_dir, self.cache_options, &key_input, &reuse_input) {
+        let pointer = {
+            let lookup = step_span("look up cache").entered();
+            let pointer = try_resolve_cache(self.out_dir, self.cache_options, &key_input, &reuse_input);
+            lookup.set_attribute(EVAL_CACHE_HIT, pointer.is_some());
+            if self.cache_options.enabled || self.cache_options.reuse_completed {
+                record_cache_lookup(pointer.is_some());
+            }
+            pointer
+        };
+        if let Some(pointer) = pointer {
+            let restoring = step_span("restore from cache").entered();
             match apply_cache_hit(run, &cache_key, &pointer, self.report_dir) {
-                Ok(()) => return,
+                Ok(restored) => {
+                    restoring.set_attribute(EVAL_CACHE_RESTORED_FILES, restored.files() as i64);
+                    restoring.set_attribute(EVAL_CACHE_RESTORED_BYTES, restored.bytes() as i64);
+                    return;
+                }
                 Err(e) => {
+                    record_failure(&restoring, STEP_FAILED);
                     eprintln!("Run {}: cache reuse failed, re-executing: {}", run.id, e);
                 }
             }
         }
 
-        if let Some(reason) = self.refuse_to_start(case) {
+        if let Some(reason) = step_span("admit budget").in_scope(|| self.refuse_to_start(case)) {
             run.not_started(reason);
             return;
         }
@@ -1072,9 +1254,11 @@ impl RunExecution<'_> {
         let mcp_config = if mock_set.is_empty() {
             None
         } else {
-            match materialize_mock_set_for_run(&mock_set, &run_dir) {
+            let materializing = step_span("materialize mocks").entered();
+            match materialize_mock_set_for_run(&mock_set, &run_dir, &MockServerEnv::none()) {
                 Ok(config) => Some(config),
                 Err(e) => {
+                    record_failure(&materializing, STEP_FAILED);
                     eprintln!("Run {}: failed to materialize mcp mocks: {}", run.id, e);
                     run.status = "failed".to_string();
                     return;
@@ -1101,81 +1285,101 @@ impl RunExecution<'_> {
             scaffold_permission: self.scaffold_permission,
             eval_dir: self.eval_dir.clone(),
             mcp_config,
+            telemetry_forwarding: self.telemetry_forwarding,
         };
 
         let digest_before = match integrity {
             IntegrityWindow::Pass => None,
-            IntegrityWindow::Run => match compute_skill_digest(integrity_path) {
+            IntegrityWindow::Run => step_span("hash skill").in_scope(|| match compute_skill_digest(integrity_path) {
                 Ok(digest) => Some(digest),
                 Err(e) => {
+                    record_failure(&tracing::Span::current(), STEP_FAILED);
                     eprintln!("Run {}: failed to hash skill before invoke: {}", run.id, e);
                     None
                 }
-            },
+            }),
         };
 
         let max_attempts = self.retries.saturating_add(1);
         let mut invocations = 0u32;
-        let mut last_outcome = None;
+        let mut final_outcome = None;
 
         for _ in 0..max_attempts {
             invocations += 1;
-            discard_mock_calls_from_earlier_attempts(&run_dir, &run.id);
-            match invoke_runner(self.runner, &request) {
-                Ok(outcome) => {
+            let attempt = tracing::info_span!(
+                "attempt",
+                "otel.status_code" = Empty,
+                { EVAL_ATTEMPT } = i64::from(invocations),
+                { EVAL_ATTEMPT_OUTCOME } = Empty,
+                { EVAL_ATTEMPT_TRANSIENT } = Empty,
+                { ERROR_TYPE } = Empty,
+            );
+            let result = attempt.in_scope(|| {
+                discard_mock_calls_from_earlier_attempts(&run_dir, &run.id);
+                trace_mock_servers(&mock_set, &run_dir, self.telemetry_forwarding);
+                let result = invoke_runner(self.runner, &request);
+                if let Ok(outcome) = &result {
                     self.cost_ledger.record(outcome.cost.as_ref());
-                    if !outcome.is_transient_failure() || invocations >= max_attempts {
-                        apply_outcome(
-                            run,
-                            case,
-                            &outcome,
-                            &transcript_path,
-                            &stderr_path,
-                            self.report_dir,
-                            &workspace_dir,
-                        );
-                        run.runner_invocations = invocations;
-                        last_outcome = None;
+                }
+                result
+            });
+            match result {
+                Ok(outcome) => {
+                    let ended = if outcome.is_transient_failure() {
+                        AttemptOutcome::TransientFailure
+                    } else {
+                        AttemptOutcome::Completed
+                    };
+                    finish_attempt(&attempt, ended);
+                    final_outcome = Some(outcome);
+                    if !ended.is_transient() {
                         break;
                     }
-                    last_outcome = Some(outcome);
                 }
                 Err(e) => {
+                    finish_attempt(&attempt, AttemptOutcome::RunnerError);
                     eprintln!("Run {} failed: {}", run.id, e);
                     run.status = "failed".to_string();
                     run.failure_kind = Some(crate::agentskills::runner::FAILURE_KIND_RUNNER.to_string());
-                    run.runner_invocations = invocations;
-                    last_outcome = None;
+                    final_outcome = None;
                     break;
                 }
             }
         }
 
-        if let Some(outcome) = last_outcome {
-            apply_outcome(
-                run,
-                case,
-                &outcome,
-                &transcript_path,
-                &stderr_path,
-                self.report_dir,
-                &workspace_dir,
-            );
-            run.runner_invocations = invocations;
+        if let Some(outcome) = final_outcome {
+            step_span("apply outcome").in_scope(|| {
+                apply_outcome(
+                    run,
+                    case,
+                    &outcome,
+                    &transcript_path,
+                    &stderr_path,
+                    self.report_dir,
+                    &workspace_dir,
+                )
+            });
         }
+        run.runner_invocations = invocations;
 
         if self.cache_options.enabled && run.status == "completed" {
+            let recording = step_span("record cache entry").entered();
             if let Err(e) = record_completion(self.out_dir, &cache_key, &key_input, self.report_dir, &run.id) {
+                record_failure(&recording, STEP_FAILED);
                 eprintln!("Run {}: failed to record cache entry: {}", run.id, e);
             }
         }
 
         if let Some(before) = digest_before {
+            let checking = step_span("check skill tampering").entered();
             match compute_skill_digest(integrity_path) {
                 Ok(after) => {
-                    run.skill_integrity = Some(SkillIntegrityReport::changed(detect_tampering(&before, &after)));
+                    let tampered = detect_tampering(&before, &after);
+                    checking.set_attribute(EVAL_SKILL_TAMPERED, !tampered.is_empty());
+                    run.skill_integrity = Some(SkillIntegrityReport::changed(tampered));
                 }
                 Err(e) => {
+                    record_failure(&checking, STEP_FAILED);
                     eprintln!("Run {}: failed to hash skill after invoke: {}", run.id, e);
                     run.warnings.push(format!(
                         "the skill directory could not be read after the run, so what it holds now is unknown: {e}"
@@ -1401,7 +1605,7 @@ mod fake_runner {
 
         let transient = state
             .transient_failures
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1))
             .is_ok();
         if state.log_mock_calls.load(Ordering::SeqCst) {
             use std::io::Write;
@@ -1477,10 +1681,49 @@ mod fake_runner {
 /// `current_exe` is looked up per run rather than once for the whole pass because a pass
 /// can run for long enough that re-reading it costs nothing worth caching, and caching it
 /// would be one more piece of state a test has to seed.
-fn materialize_mock_set_for_run(mock_set: &MockSet, run_dir: &Path) -> Result<MaterializedMcpConfig, String> {
+fn materialize_mock_set_for_run(
+    mock_set: &MockSet,
+    run_dir: &Path,
+    server_env: &MockServerEnv,
+) -> Result<MaterializedMcpConfig, String> {
     let trg_binary = MockServerBinary::locate().map_err(|e| e.to_string())?;
-    materialize_mock_set(mock_set, run_dir, &trg_binary).map_err(|e| e.to_string())
+    materialize_mock_set(mock_set, run_dir, &trg_binary, server_env).map_err(|e| e.to_string())
 }
+
+/// Rewrite the run's mcp config so the mock servers this attempt starts continue its
+/// trace. The config already written stays in place when this fails, since a mock server
+/// that starts a trace of its own still answers every call.
+fn trace_mock_servers(mock_set: &MockSet, run_dir: &Path, forwarding: TelemetryForwarding) {
+    if mock_set.is_empty() {
+        return;
+    }
+    let server_env = MockServerEnv::from_current_trace(forwarding);
+    if !server_env.is_empty() {
+        let _ = materialize_mock_set_for_run(mock_set, run_dir, &server_env);
+    }
+}
+
+fn finish_attempt(span: &tracing::Span, outcome: AttemptOutcome) {
+    span.record(EVAL_ATTEMPT_OUTCOME, outcome.as_str());
+    span.record(EVAL_ATTEMPT_TRANSIENT, outcome.is_transient());
+    record_attempt(outcome);
+    if outcome != AttemptOutcome::Completed {
+        record_failure(span, outcome.as_str());
+    }
+}
+
+/// Which lane of a concurrent pass executed a run; `0` for a serial pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Lane(usize);
+
+impl Lane {
+    const SERIAL: Self = Self(0);
+}
+
+/// `error.type` for a run step that stopped the run, or a run that failed without saying
+/// which way.
+const STEP_FAILED: &str = "step_failed";
+const RUN_FAILED: &str = "run_failed";
 
 fn invoke_runner(runner: Runner, request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     #[cfg(test)]
@@ -1805,6 +2048,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -1915,6 +2159,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2048,6 +2293,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2097,6 +2343,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2162,6 +2409,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2311,6 +2559,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2425,6 +2674,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2482,6 +2732,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2539,6 +2790,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2588,6 +2840,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2639,6 +2892,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2707,6 +2961,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -2859,6 +3114,7 @@ mod tests {
             concurrency: RunConcurrency::serial(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             force: true,
             iteration: None,
             old_skill_dir: None,
@@ -3160,6 +3416,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3196,6 +3453,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3249,6 +3507,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3285,6 +3544,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3335,6 +3595,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3414,6 +3675,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3487,6 +3749,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3627,6 +3890,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3696,6 +3960,7 @@ mod tests {
                 allowed_tools: Vec::new(),
                 allow_scaffold: false,
                 trust_skill: true,
+                forward_telemetry: false,
                 cases: Vec::new(),
                 tags: Vec::new(),
                 split: SplitArg::All,
@@ -3770,6 +4035,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -3823,6 +4089,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -4357,6 +4624,7 @@ mod tests {
             allowed_tools: Vec::new(),
             allow_scaffold: false,
             trust_skill: true,
+            forward_telemetry: false,
             cases: Vec::new(),
             tags: Vec::new(),
             split: SplitArg::All,
@@ -4651,5 +4919,205 @@ mod tests {
 
         assert_eq!(report["runs"][0]["status"], "completed");
         assert_eq!(report["runs"][0]["failure_kind"], serde_json::Value::Null);
+    }
+
+    mod telemetry {
+        use super::*;
+        use crate::telemetry::testing::{capture, CapturedTrace};
+        use opentelemetry::trace::SpanKind;
+        use opentelemetry_sdk::trace::SpanData;
+
+        const SUITE: &str = "invoke_workflow lane-skill";
+
+        fn traced_pass(concurrency: usize) -> (serde_json::Value, CapturedTrace) {
+            super::super::fake_runner::reset();
+            if concurrency > 1 {
+                super::super::fake_runner::expect_lanes(concurrency);
+            }
+            let temp = tempfile::tempdir().unwrap();
+            let skill_dir = write_two_case_skill(temp.path());
+            let mut args = base_run_args(&skill_dir, &temp.path().join("artifacts"));
+            args.concurrency = RunConcurrency::parse(concurrency).unwrap();
+            let (report_dir, trace) = capture(|| run_with_fake_runner(args));
+            (read_report(&report_dir), trace)
+        }
+
+        fn names(spans: &[&SpanData]) -> Vec<String> {
+            let mut spans = spans.to_vec();
+            spans.sort_by_key(|span| span.start_time);
+            spans.iter().map(|span| span.name.to_string()).collect()
+        }
+
+        fn string_attribute(span: &SpanData, key: &str) -> Option<String> {
+            value_attribute(span, key).map(|value| value.to_string())
+        }
+
+        fn value_attribute(span: &SpanData, key: &str) -> Option<opentelemetry::Value> {
+            span.attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == key)
+                .map(|kv| kv.value.clone())
+        }
+
+        #[test]
+        fn a_pass_puts_its_setup_steps_in_order_under_the_workflow_span() {
+            let (_, trace) = traced_pass(1);
+            let suite = trace.span(SUITE).expect("workflow span exported");
+            assert_eq!(suite.span_kind, SpanKind::Internal);
+            assert_eq!(
+                string_attribute(suite, GEN_AI_OPERATION_NAME).as_deref(),
+                Some(gen_ai_operation_name::INVOKE_WORKFLOW)
+            );
+            assert_eq!(
+                string_attribute(suite, GEN_AI_WORKFLOW_NAME).as_deref(),
+                Some("lane-skill")
+            );
+            assert_eq!(string_attribute(suite, EVAL_SCENARIOS).as_deref(), Some("with_skill"));
+            assert_eq!(string_attribute(suite, EVAL_GRADING_STRATEGY).as_deref(), Some("none"));
+            assert!(string_attribute(suite, EVAL_SKILL_REVISION).is_some());
+
+            assert_eq!(
+                names(&trace.children_of(suite)),
+                [
+                    "validate skill",
+                    "check suite",
+                    "detect iteration",
+                    "resolve scenarios",
+                    "open cost ledger",
+                    "admit skill",
+                    "build report bundle",
+                    "write report bundle",
+                    "load run inputs",
+                    "execute runs",
+                    "rewrite report",
+                    "finish suite",
+                ]
+            );
+        }
+
+        #[test]
+        fn each_run_and_its_attempts_nest_under_execute_runs() {
+            let (report, trace) = traced_pass(1);
+            let execute = trace.span("execute runs").expect("execute runs exported");
+            let runs = trace.spans_named("run");
+            assert_eq!(runs.len(), 2);
+            for run in &runs {
+                assert_eq!(run.parent_span_id, execute.span_context.span_id());
+                assert_eq!(
+                    names(&trace.children_of(run)),
+                    [
+                        "resolve mocks",
+                        "hash fixtures",
+                        "compute cache key",
+                        "look up cache",
+                        "admit budget",
+                        "hash skill",
+                        "attempt",
+                        "apply outcome",
+                        "check skill tampering",
+                    ]
+                );
+                assert_eq!(value_attribute(run, EVAL_LANE), Some(opentelemetry::Value::I64(0)));
+                assert_eq!(string_attribute(run, EVAL_RUN_STATUS).as_deref(), Some("completed"));
+            }
+            let attempt = trace.span("attempt").expect("attempt exported");
+            assert_eq!(
+                value_attribute(attempt, EVAL_ATTEMPT),
+                Some(opentelemetry::Value::I64(1))
+            );
+            assert_eq!(
+                string_attribute(attempt, EVAL_ATTEMPT_OUTCOME).as_deref(),
+                Some("completed")
+            );
+
+            let first = runs
+                .iter()
+                .find(|run| string_attribute(run, EVAL_CASE_ID).as_deref() == Some("one"))
+                .unwrap();
+            assert_eq!(
+                report["runs"][0]["trace"]["span_id"],
+                first.span_context.span_id().to_string()
+            );
+            let suite = trace.span(SUITE).unwrap();
+            assert_eq!(
+                report["report"]["trace"]["span_id"],
+                suite.span_context.span_id().to_string()
+            );
+            assert_eq!(
+                report["report"]["trace"]["trace_id"],
+                suite.span_context.trace_id().to_string()
+            );
+        }
+
+        #[test]
+        fn lanes_keep_their_runs_under_execute_runs() {
+            let (_, trace) = traced_pass(2);
+            assert_eq!(super::super::fake_runner::peak_lanes(), 2);
+            let execute = trace.span("execute runs").expect("execute runs exported");
+            let runs = trace.spans_named("run");
+            assert_eq!(runs.len(), 2);
+            for run in &runs {
+                assert_eq!(run.parent_span_id, execute.span_context.span_id());
+                assert!(trace.children_of(run).iter().any(|child| child.name == "attempt"));
+            }
+            let mut lanes = runs
+                .iter()
+                .filter_map(|run| string_attribute(run, EVAL_LANE))
+                .collect::<Vec<_>>();
+            lanes.sort();
+            lanes.dedup();
+            assert_eq!(lanes.len(), 2, "each lane records which lane it was: {lanes:?}");
+            assert_eq!(
+                names(&trace.children_of(execute))
+                    .into_iter()
+                    .filter(|name| name != "run")
+                    .collect::<Vec<_>>(),
+                ["hash skills", "check skill tampering"]
+            );
+        }
+
+        #[test]
+        fn the_workflow_spans_children_account_for_nearly_all_of_it() {
+            // The first pass on a thread pays for registering every callsite, which is
+            // not time the pass itself spends anywhere.
+            traced_pass(1);
+            // Scheduling noise only ever adds time no child covers, so the best of a few
+            // passes is the one that shows whether the pass leaves any of its own work
+            // untraced.
+            let (covered, total) = (0..5)
+                .map(|_| {
+                    let (_, trace) = traced_pass(1);
+                    let suite = trace.span(SUITE).unwrap();
+                    let total = suite.end_time.duration_since(suite.start_time).unwrap();
+                    let covered: std::time::Duration = trace
+                        .children_of(suite)
+                        .iter()
+                        .map(|child| child.end_time.duration_since(child.start_time).unwrap())
+                        .sum();
+                    (covered, total)
+                })
+                .max_by(|(a_covered, a_total), (b_covered, b_total)| {
+                    (a_covered.as_secs_f64() / a_total.as_secs_f64())
+                        .total_cmp(&(b_covered.as_secs_f64() / b_total.as_secs_f64()))
+                })
+                .unwrap();
+            assert!(
+                covered.as_secs_f64() >= total.as_secs_f64() * 0.9,
+                "children cover {covered:?} of {total:?}"
+            );
+        }
+
+        #[test]
+        fn an_untraced_pass_writes_no_trace_reference() {
+            super::super::fake_runner::reset();
+            let temp = tempfile::tempdir().unwrap();
+            let skill_dir = write_two_case_skill(temp.path());
+            let report = read_report(&run_with_fake_runner(base_run_args(
+                &skill_dir,
+                &temp.path().join("artifacts"),
+            )));
+            assert!(report["report"].get("trace").is_none());
+            assert!(report["runs"][0].get("trace").is_none());
+        }
     }
 }

@@ -4,7 +4,11 @@ pub mod claude_code;
 pub mod codex;
 pub mod cursor_agent;
 pub mod environment;
+pub mod forwarding;
 pub mod group;
+mod harness_spans;
+pub mod stream;
+pub(crate) mod telemetry;
 pub mod usage;
 
 #[cfg(test)]
@@ -13,11 +17,10 @@ mod fake;
 mod tests;
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,6 +43,9 @@ use super::transcript::{
 };
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
 use environment::{RecordedEnvironment, RunEnvironment};
+pub use forwarding::TelemetryForwarding;
+use stream::{read_stamped, StdoutTimeline};
+use telemetry::{in_step, CliProcessSpan, FailureType};
 use usage::HarnessTokenUsage;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -53,15 +59,29 @@ pub enum Runner {
 
 impl Runner {
     pub fn invoke(self, request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
-        let mut outcome = match self {
+        let result = match self {
             Self::CursorAgent => cursor_agent::run(request),
             Self::ClaudeCode => claude_code::run(request),
             Self::Codex => codex::run(request),
-        }?;
+        };
+        // Run unconditionally, regardless of which backend ran or whether it succeeded,
+        // failed, or timed out: the harness has exited either way, and the `mcp-launch`
+        // copy it was handed is a run-directory file this crate controls, so this is the
+        // one place that can scrub it before the result is handed back.
+        let scrub_result = request.mcp_config.as_ref().map(|mcp_config| {
+            telemetry::in_step("scrub mcp launch config", || {
+                mcp_config.scrub().map_err(RunnerError::from)
+            })
+        });
+        let mut outcome = result?;
+        if let Some(scrub_result) = scrub_result {
+            scrub_result?;
+        }
         // Checked here, once, regardless of which backend ran: permissions are only a
         // courtesy (an agent can delete a read-only file and recreate it in its place),
         // so content is re-verified against the source after every invocation.
-        outcome.read_only_fixture_violations = verify_read_only_fixtures(request);
+        outcome.read_only_fixture_violations =
+            telemetry::step_span("verify read-only fixtures").in_scope(|| verify_read_only_fixtures(request));
         Ok(outcome)
     }
 
@@ -153,6 +173,8 @@ pub struct EvalRunRequest<'a> {
     /// drive that control simply ignore it; a case that declares mocks against one of those
     /// runners is refused earlier, before a runner is ever invoked.
     pub mcp_config: Option<MaterializedMcpConfig>,
+    /// Whether the harness is handed what it needs to export its own telemetry.
+    pub telemetry_forwarding: TelemetryForwarding,
 }
 
 impl EvalRunRequest<'_> {
@@ -211,9 +233,15 @@ impl EvalRunOutcome {
 #[derive(Debug)]
 pub struct CapturedProcess {
     pub stdout: Vec<u8>,
+    /// When each line of `stdout` arrived.
+    pub stdout_timeline: StdoutTimeline,
+    pub started_at: SystemTime,
+    pub pid: u32,
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// When the harness was seen exiting, or was killed at its time limit.
+    pub ended_at: SystemTime,
     pub duration_ms: u64,
 }
 
@@ -242,67 +270,75 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
         .stderr(Stdio::piped());
     group::lead_own_group(command);
     let start = Instant::now();
+    let started_at = SystemTime::now();
     let mut child = command.spawn().map_err(|source| RunnerError::Spawn {
         program: command.get_program().to_string_lossy().into_owned(),
         source,
     })?;
+    let pid = child.id();
     let mut group = group::ProcessGroupGuard::led_by(&child);
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let stdout_handle = thread::spawn(move || read_pipe(stdout_pipe));
-    let stderr_handle = thread::spawn(move || read_pipe_stderr(stderr_pipe));
+    let stdout_handle = thread::spawn(move || read_stamped(stdout_pipe));
+    let stderr_handle = thread::spawn(move || read_child_stream(stderr_pipe));
 
-    loop {
+    let ended_at = loop {
         match child.try_wait()? {
             Some(status) => {
+                let ended_at = SystemTime::now();
                 group.stop_leftovers();
-                let stdout = stdout_handle.join().unwrap_or_default();
+                let (stdout, stdout_timeline) = stdout_handle.join().unwrap_or_default();
+                let stdout_timeline = stdout_timeline.clamped_to(ended_at);
                 let stderr = stderr_handle.join().unwrap_or_default();
                 return Ok(CapturedProcess {
                     stdout,
+                    stdout_timeline,
+                    started_at,
+                    pid,
                     stderr,
                     exit_code: status.code(),
                     timed_out: false,
+                    ended_at,
                     duration_ms: start.elapsed().as_millis() as u64,
                 });
             }
             None => {
                 if let Some(limit) = timeout {
                     if start.elapsed() >= limit {
+                        tracing::info!(timeout_ms = limit.as_millis() as u64, "SIGTERM");
+                        let terminating = Instant::now();
                         group.terminate();
+                        tracing::info!(grace_ms = terminating.elapsed().as_millis() as u64, "SIGKILL");
                         let _ = child.kill();
                         let _ = child.wait();
-                        break;
+                        break SystemTime::now();
                     }
                 }
                 thread::sleep(Duration::from_millis(50));
             }
         }
-    }
+    };
 
-    let stdout = stdout_handle.join().unwrap_or_default();
+    let (stdout, stdout_timeline) = stdout_handle.join().unwrap_or_default();
+    let stdout_timeline = stdout_timeline.clamped_to(ended_at);
     let stderr = stderr_handle.join().unwrap_or_default();
     Ok(CapturedProcess {
         stdout,
+        stdout_timeline,
+        started_at,
+        pid,
         stderr,
         exit_code: None,
         timed_out: true,
+        ended_at,
         duration_ms: timeout
             .map(|limit| limit.as_millis() as u64)
             .unwrap_or_else(|| start.elapsed().as_millis() as u64),
     })
 }
 
-fn read_pipe(pipe: Option<std::process::ChildStdout>) -> Vec<u8> {
-    read_child_stream(pipe)
-}
-
-fn read_pipe_stderr(pipe: Option<std::process::ChildStderr>) -> Vec<u8> {
-    read_child_stream(pipe)
-}
-
-fn read_child_stream<R: Read>(pipe: Option<R>) -> Vec<u8> {
+fn read_child_stream<R: std::io::Read>(pipe: Option<R>) -> Vec<u8> {
     let mut buf = Vec::new();
     if let Some(mut reader) = pipe {
         let _ = reader.read_to_end(&mut buf);
@@ -445,26 +481,41 @@ pub fn persist_runner_io(
     request: &EvalRunRequest,
     captured: &CapturedProcess,
 ) -> Result<(), RunnerError> {
-    let stdout = redact_transcript_bytes(&captured.stdout);
-    write_transcript(request.transcript_path, &stdout)?;
-    write_stderr(request.stderr_path, &captured.stderr)?;
-    let normalized = runner
-        .transcript_format()
-        .normalize(
-            runner.program_name(),
-            &stdout,
-            &WorkspaceBoundary::at(request.workspace_dir),
-        )
-        .staged_at(staged_skill(request)?);
-    write_normalized_transcript(request.transcript_path, &normalized)?;
-    Ok(())
+    in_step("persist runner io", || {
+        let stdout = telemetry::step_span("redact transcript").in_scope(|| redact_transcript_bytes(&captured.stdout));
+        in_step("write transcript", || {
+            Ok(write_transcript(request.transcript_path, &stdout)?)
+        })?;
+        in_step("write stderr", || {
+            Ok(write_stderr(request.stderr_path, &captured.stderr)?)
+        })?;
+        in_step("normalize transcript", || {
+            let normalized = runner
+                .transcript_format()
+                .normalize(
+                    runner.program_name(),
+                    &stdout,
+                    &WorkspaceBoundary::at(request.workspace_dir),
+                )
+                .staged_at(staged_skill(request)?);
+            Ok(write_normalized_transcript(request.transcript_path, &normalized)?)
+        })
+    })
 }
 
 pub fn check_runner_version(program: &str, install_hint: &str) -> Result<(), EvalError> {
-    let output = Command::new(program)
-        .arg("--version")
-        .output()
-        .map_err(EvalError::from)?;
+    let probe = CliProcessSpan::start(program);
+    let output = probe.span().in_scope(|| {
+        let mut command = Command::new(program);
+        command.arg("--version");
+        crate::telemetry::propagation::inject_std_command(&mut command);
+        command.output()
+    });
+    let output = output.map_err(|error| {
+        probe.failed(FailureType::SpawnFailed);
+        EvalError::from(error)
+    })?;
+    probe.exited(output.status.code());
     if output.status.success() {
         return Ok(());
     }
@@ -489,65 +540,84 @@ pub struct PreparedRun {
 }
 
 pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<PreparedRun, RunnerError> {
-    reset_workspace(request.workspace_dir)?;
-    ensure_outputs_dir(request.workspace_dir)?;
+    in_step("prepare workspace", || {
+        in_step("reset workspace", || {
+            reset_workspace(request.workspace_dir)?;
+            ensure_outputs_dir(request.workspace_dir)?;
+            Ok(())
+        })?;
 
-    // The scaffold goes first because it describes the directory the case is asking about,
-    // and the skill and the case's fixtures are then staged into that directory. Running it
-    // last would let it overwrite what the case declared, which is the opposite of what a
-    // declaration is for.
-    scaffold_workspace(
-        request.eval.scaffold.as_ref(),
-        request.scaffold_permission,
-        request.skill_path,
-        request.workspace_dir,
-    )
-    .map_err(scaffold_error_to_runner)?;
-
-    if let Some(plan) = skill_to_stage(request)? {
-        stage_skill_into_workspace(
-            plan.source,
+        // The scaffold goes first because it describes the directory the case is asking about,
+        // and the skill and the case's fixtures are then staged into that directory. Running it
+        // last would let it overwrite what the case declared, which is the opposite of what a
+        // declaration is for.
+        scaffold_workspace(
+            request.eval.scaffold.as_ref(),
+            request.scaffold_permission,
+            request.skill_path,
             request.workspace_dir,
-            plan.directory.as_str(),
-            request.skill_staging,
-            &request.eval_dir,
-        )?;
-    }
+        )
+        .map_err(scaffold_error_to_runner)?;
 
-    for companion in companions_to_stage(request)? {
-        stage_skill_into_workspace(
-            companion.source(),
-            request.workspace_dir,
-            companion.directory().as_str(),
-            request.skill_staging,
-            &request.eval_dir,
-        )?;
-    }
+        in_step("stage skill", || {
+            if let Some(plan) = skill_to_stage(request)? {
+                stage_skill_into_workspace(
+                    plan.source,
+                    request.workspace_dir,
+                    plan.directory.as_str(),
+                    request.skill_staging,
+                    &request.eval_dir,
+                )?;
+            }
+            Ok(())
+        })?;
 
-    for fixture in &request.eval.files {
-        stage_eval_file(request.skill_path, request.workspace_dir, fixture.as_str())?;
-        if fixture.is_read_only() {
-            lock_fixture_permissions(&request.workspace_dir.join(fixture.as_path()))?;
-        }
-    }
+        in_step("stage companions", || {
+            for companion in companions_to_stage(request)? {
+                stage_skill_into_workspace(
+                    companion.source(),
+                    request.workspace_dir,
+                    companion.directory().as_str(),
+                    request.skill_staging,
+                    &request.eval_dir,
+                )?;
+            }
+            Ok(())
+        })?;
 
-    let prompt = build_eval_prompt(EvalPromptInput {
-        scenario: request.scenario,
-        eval: request.eval,
-        skill_md: skill_source(request)?.map(|(_, skill_md)| skill_md),
-    })
-    .map_err(skill_error_to_runner)?;
+        in_step("stage fixtures", || {
+            for fixture in &request.eval.files {
+                stage_eval_file(request.skill_path, request.workspace_dir, fixture.as_str())?;
+                if fixture.is_read_only() {
+                    lock_fixture_permissions(&request.workspace_dir.join(fixture.as_path()))?;
+                }
+            }
+            Ok(())
+        })?;
 
-    let environment = RunEnvironment::prepare(
-        runner,
-        request.run_dir(),
-        request.environment,
-        request.eval.env.as_ref(),
-    )?;
+        let prompt = in_step("build prompt", || {
+            build_eval_prompt(EvalPromptInput {
+                scenario: request.scenario,
+                eval: request.eval,
+                skill_md: skill_source(request)?.map(|(_, skill_md)| skill_md),
+            })
+            .map_err(skill_error_to_runner)
+        })?;
 
-    Ok(PreparedRun {
-        prompt: prompt.into_string(),
-        environment,
+        let environment = in_step("prepare environment", || {
+            Ok(RunEnvironment::prepare(
+                runner,
+                request.run_dir(),
+                request.environment,
+                request.eval.env.as_ref(),
+                request.telemetry_forwarding,
+            )?)
+        })?;
+
+        Ok(PreparedRun {
+            prompt: prompt.into_string(),
+            environment,
+        })
     })
 }
 
@@ -1244,6 +1314,7 @@ mod workspace_tests {
             scaffold_permission: ScaffoldPermission::Withheld,
             tool_grant: None,
             mcp_config: None,
+            telemetry_forwarding: TelemetryForwarding::Off,
         }
     }
 

@@ -24,6 +24,8 @@ use serde_json::json;
 
 use crate::config::{self, LoadedExec};
 use crate::output::{print_json, OutputFormat};
+use crate::telemetry::semconv::trg::EXEC_ENV_VAR_COUNT;
+use crate::telemetry::{propagation, Telemetry};
 
 #[derive(Subcommand)]
 pub enum ExecCommands {
@@ -109,20 +111,39 @@ fn report_names(names: &[String], format: OutputFormat) -> i32 {
     0
 }
 
-pub fn run(loaded: LoadedExec, args: &ExecArgs) -> i32 {
+/// Resolves everything the launched command needs, including the trace
+/// context it continues, which is why this runs inside the root span. The
+/// `exec(2)` itself is left to [`PreparedLaunch::exec`], outside it.
+pub fn run(loaded: LoadedExec, args: &ExecArgs) -> PreparedLaunch {
     // The entry's own `unset` and a caller's `--unset` answer the same
     // question — which inherited vars must not reach the child — so both are
     // applied before anything is layered back on, in the order they arrived.
     let unset: Vec<String> = loaded.unset.iter().cloned().chain(args.unset.iter().cloned()).collect();
 
     let parent: HashMap<String, String> = std::env::vars().collect();
-    let env = merge_env(&parent, &unset, &loaded.env, &args.env);
+    let env = traced_merge_env(&parent, &unset, &loaded.env, &args.env);
 
     let mut command_args = loaded.args;
     command_args.extend(args.extra_args.iter().cloned());
 
-    let message = launch(&loaded.command, &command_args, env);
-    report_failure(&message, args.output_format)
+    PreparedLaunch::new(loaded.command, command_args, env, args.output_format)
+}
+
+/// [`merge_env`] under a span recording how many variables the launched
+/// command receives, and never which ones or what they hold: the entry's own
+/// `env` is where its resolved secrets live.
+fn traced_merge_env(
+    parent: &HashMap<String, String>,
+    unset: &[String],
+    entry_env: &HashMap<String, String>,
+    cli_env: &[(String, String)],
+) -> HashMap<String, String> {
+    let span = tracing::info_span!("merge env", { EXEC_ENV_VAR_COUNT } = tracing::field::Empty);
+    span.in_scope(|| {
+        let env = merge_env(parent, unset, entry_env, cli_env);
+        span.record(EXEC_ENV_VAR_COUNT, i64::try_from(env.len()).unwrap_or(i64::MAX));
+        env
+    })
 }
 
 /// The environment the launched command actually sees: everything this
@@ -150,28 +171,65 @@ fn merge_env(
     out
 }
 
-/// Replace this process with `command`, never returning on success.
+/// A command ready to replace this process, built while the root span was
+/// current so its environment carries that span as the parent.
 ///
-/// `env_clear` before `envs` is not optional: `merge_env`'s output already
-/// includes everything this process inherited that was worth keeping, so
-/// starting `Command` from its own default inherit-everything and layering
-/// `env` on top would mean an `unset` var reappeared underneath it instead of
-/// staying gone.
-#[cfg(unix)]
-fn launch(command: &str, args: &[String], env: HashMap<String, String>) -> String {
-    use std::os::unix::process::CommandExt;
-
-    let err = std::process::Command::new(command)
-        .args(args)
-        .env_clear()
-        .envs(env)
-        .exec();
-    format!("could not start `{command}`: {err}")
+/// The replacement happens outside the root span on purpose: the span only
+/// exports once it ends, and nothing runs in this process after a
+/// successful `exec(2)` to end it.
+pub struct PreparedLaunch {
+    command: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    output_format: OutputFormat,
 }
 
-#[cfg(not(unix))]
-fn launch(_command: &str, _args: &[String], _env: HashMap<String, String>) -> String {
-    "trg exec replaces this process with exec(2), which only exists on unix".to_string()
+impl PreparedLaunch {
+    /// The trace context is injected into `env` directly rather than
+    /// through `propagation::inject_std_command`, since the launched
+    /// `Command` clears its environment and the carrier pairs must survive
+    /// that.
+    fn new(command: String, args: Vec<String>, mut env: HashMap<String, String>, output_format: OutputFormat) -> Self {
+        env.extend(propagation::carrier_pairs());
+        Self {
+            command,
+            args,
+            env,
+            output_format,
+        }
+    }
+
+    /// Ends `telemetry`, then replaces this process with the command, never
+    /// returning on success. On failure, reports why and returns the exit
+    /// code to leave with.
+    pub fn exec(self, telemetry: Telemetry) -> i32 {
+        use std::os::unix::process::CommandExt;
+        self.exec_with(telemetry, |command| command.exec())
+    }
+
+    /// `env_clear` before `envs` is not optional: `merge_env`'s output
+    /// already includes everything this process inherited that was worth
+    /// keeping, so starting `Command` from its own default
+    /// inherit-everything and layering `env` on top would mean an `unset`
+    /// var reappeared underneath it instead of staying gone.
+    fn exec_with(
+        self,
+        telemetry: Telemetry,
+        replace: impl FnOnce(&mut std::process::Command) -> std::io::Error,
+    ) -> i32 {
+        telemetry.end_before_exec();
+        let message = self.replace_with(replace);
+        report_failure(&message, self.output_format)
+    }
+
+    /// Returns only when `replace` failed, with a message naming the command
+    /// and never its environment, which holds the entry's resolved secrets.
+    fn replace_with(&self, replace: impl FnOnce(&mut std::process::Command) -> std::io::Error) -> String {
+        let mut command = std::process::Command::new(&self.command);
+        command.args(&self.args).env_clear().envs(&self.env);
+        let err = replace(&mut command);
+        format!("could not start `{}`: {err}", self.command)
+    }
 }
 
 fn report_failure(message: &str, format: OutputFormat) -> i32 {
@@ -333,7 +391,16 @@ mod tests {
     #[test]
     fn a_launch_failure_names_the_command_and_never_the_env() {
         let env = map(&[("TOKEN", "super-secret-value")]);
-        let message = launch("trg-exec-test-command-that-does-not-exist", &[], env);
+        let launch = PreparedLaunch::new(
+            "trg-exec-test-command-that-does-not-exist".to_string(),
+            Vec::new(),
+            env,
+            OutputFormat::Text,
+        );
+        let message = launch.replace_with(|command| {
+            use std::os::unix::process::CommandExt;
+            command.exec()
+        });
         assert!(
             message.contains("trg-exec-test-command-that-does-not-exist"),
             "{message}"
@@ -358,5 +425,62 @@ mod tests {
             report_names(&["alpha".to_string(), "zebra".to_string()], OutputFormat::Text),
             0
         );
+    }
+
+    #[test]
+    fn merging_records_how_many_variables_and_never_which() {
+        use crate::secrets::telemetry::testing::assert_never_recorded;
+
+        const SECRET: &str = "exec-span-secret-2a9f";
+        let parent = HashMap::from([("PATH".to_string(), "/bin".to_string())]);
+        let entry_env = HashMap::from([("ANTHROPIC_API_KEY".to_string(), SECRET.to_string())]);
+        let (env, trace) = crate::telemetry::testing::capture(|| traced_merge_env(&parent, &[], &entry_env, &[]));
+        assert_eq!(env.len(), 2);
+
+        assert_eq!(
+            trace.attribute("merge env", "trg.exec.env.var.count"),
+            Some(opentelemetry::Value::I64(2))
+        );
+        assert_never_recorded(&trace, &[SECRET, "ANTHROPIC_API_KEY", "/bin"]);
+    }
+
+    #[test]
+    fn the_root_span_is_exported_before_exec_and_parents_the_launched_command() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+        use tracing_subscriber::prelude::*;
+
+        let exporter = crate::telemetry::testing::KeptSpans::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(provider.tracer("trg")));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let root = tracing::info_span!("trg");
+        let launch =
+            root.in_scope(|| PreparedLaunch::new("true".to_string(), Vec::new(), HashMap::new(), OutputFormat::Text));
+        let telemetry = Telemetry::exporting_traces_to(provider, root);
+
+        let code = launch.exec_with(telemetry, |command| {
+            let traceparent = command
+                .get_envs()
+                .find(|(key, _)| *key == "TRACEPARENT")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+                .expect("the launched command continues the trace");
+            let spans = exporter.spans();
+            let root = spans
+                .iter()
+                .find(|span| span.name == "trg")
+                .expect("root span exported before exec");
+            assert!(
+                traceparent.contains(&root.span_context.span_id().to_string()),
+                "{traceparent}"
+            );
+            std::io::Error::other("exec refused in test")
+        });
+        assert_eq!(code, 1);
     }
 }

@@ -10,10 +10,12 @@ use std::process::Command;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::forwarding::{is_exporter_header_var, CodexOtelConfig, HarnessPassthrough, TelemetryForwarding};
 use super::Runner;
 use crate::agentskills::case_env::CaseEnv;
 use crate::agentskills::redact::is_secret_env_key;
 use crate::agentskills::report::EnvironmentPolicy;
+use crate::telemetry::ContentCapture;
 
 /// Directory, relative to a run directory, used as `HOME` under
 /// [`EnvironmentPolicy::Isolated`].
@@ -317,6 +319,10 @@ pub struct RunEnvironment {
     /// operator happened not to be inheriting.
     case_vars: BTreeMap<String, String>,
     config_home: Option<RecordedConfigHome>,
+    /// Held apart because, unlike `vars`, they reach the harness under `Inherited` too.
+    telemetry_vars: BTreeMap<String, String>,
+    forwards_traces: bool,
+    codex_otel: Option<CodexOtelConfig>,
 }
 
 impl RunEnvironment {
@@ -325,8 +331,39 @@ impl RunEnvironment {
         run_dir: &Path,
         policy: EnvironmentPolicy,
         case_env: Option<&CaseEnv>,
+        forwarding: TelemetryForwarding,
     ) -> std::io::Result<Self> {
-        Self::prepare_from(runner, run_dir, policy, case_env, &host_environment())
+        let host = host_environment();
+        let mut environment = Self::prepare_from(runner, run_dir, policy, case_env, &host)?;
+        environment.forward_telemetry(runner, forwarding, &host, ContentCapture::from_env());
+        Ok(environment)
+    }
+
+    pub(crate) fn forward_telemetry(
+        &mut self,
+        runner: Runner,
+        forwarding: TelemetryForwarding,
+        host: &BTreeMap<String, String>,
+        content: ContentCapture,
+    ) {
+        self.telemetry_vars = forwarding.harness_vars(runner, self.policy, host, content);
+        self.forwards_traces = forwarding.forwards_traces(runner, host);
+        self.codex_otel = (matches!(forwarding, TelemetryForwarding::On)
+            && runner.telemetry_passthrough() == HarnessPassthrough::CodexConfig)
+            .then(|| CodexOtelConfig::render(host, content))
+            .flatten();
+    }
+
+    /// The `[otel]` table to hand a codex run, when the operator forwarded telemetry
+    /// and configured somewhere to send it.
+    pub fn codex_otel(&self) -> Option<&CodexOtelConfig> {
+        self.codex_otel.as_ref()
+    }
+
+    /// Whether a harness configured through its environment was handed somewhere to
+    /// export spans of its own, which makes rebuilding them from its stdout a duplicate.
+    pub fn harness_exports_traces(&self) -> bool {
+        self.forwards_traces
     }
 
     pub(crate) fn prepare_from(
@@ -352,6 +389,9 @@ impl RunEnvironment {
                 vars,
                 case_vars,
                 config_home,
+                telemetry_vars: BTreeMap::new(),
+                forwards_traces: false,
+                codex_otel: None,
             });
         }
 
@@ -390,6 +430,9 @@ impl RunEnvironment {
             vars,
             case_vars,
             config_home,
+            telemetry_vars: BTreeMap::new(),
+            forwards_traces: false,
+            codex_otel: None,
         })
     }
 
@@ -412,19 +455,20 @@ impl RunEnvironment {
     }
 
     pub fn apply(&self, command: &mut Command) {
-        if matches!(self.policy, EnvironmentPolicy::Inherited) {
-            command.envs(&self.case_vars);
-            return;
+        if !matches!(self.policy, EnvironmentPolicy::Inherited) {
+            command.env_clear();
+            command.envs(&self.vars);
         }
-        command.env_clear();
-        command.envs(&self.vars);
+        command.envs(&self.telemetry_vars);
+        command.envs(&self.case_vars);
     }
 
     /// What the run saw, for `env.json`, with secret-looking values left out.
     pub fn recorded_vars(&self) -> BTreeMap<String, String> {
         self.vars
             .iter()
-            .filter(|(key, _)| !is_secret_env_key(key))
+            .chain(&self.telemetry_vars)
+            .filter(|(key, _)| !is_secret_env_key(key) && !is_exporter_header_var(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
@@ -958,6 +1002,129 @@ mod tests {
         assert_eq!(
             record.config_home.map(|home| home.path().to_path_buf()),
             Some(PathBuf::from("/host/home/.codex"))
+        );
+    }
+
+    fn otel_host() -> BTreeMap<String, String> {
+        let mut host = host();
+        host.insert(
+            "OTEL_EXPORTER_OTLP_ENDPOINT".to_string(),
+            "http://collector:4318".to_string(),
+        );
+        host.insert(
+            "OTEL_EXPORTER_OTLP_HEADERS".to_string(),
+            "authorization=Bearer abc".to_string(),
+        );
+        host
+    }
+
+    fn applied(env: &RunEnvironment) -> BTreeMap<String, String> {
+        let mut command = Command::new("true");
+        env.apply(&mut command);
+        command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?.to_string(), value?.to_str()?.to_string())))
+            .collect()
+    }
+
+    fn forwarded(runner: Runner, policy: EnvironmentPolicy, forwarding: TelemetryForwarding) -> RunEnvironment {
+        let temp = tempdir().unwrap();
+        let host = otel_host();
+        let mut env = RunEnvironment::prepare_from(runner, &temp.path().join("run"), policy, None, &host).unwrap();
+        env.forward_telemetry(runner, forwarding, &host, ContentCapture::NoContent);
+        env
+    }
+
+    #[test]
+    fn telemetry_stays_out_of_every_policy_unless_forwarded() {
+        for policy in [
+            EnvironmentPolicy::Inherited,
+            EnvironmentPolicy::Scrubbed,
+            EnvironmentPolicy::Isolated,
+        ] {
+            let vars = applied(&forwarded(Runner::ClaudeCode, policy, TelemetryForwarding::Off));
+            assert!(!vars.contains_key("CLAUDE_CODE_ENABLE_TELEMETRY"), "{policy:?}");
+            assert!(!vars.contains_key("OTEL_EXPORTER_OTLP_ENDPOINT"), "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn forwarded_telemetry_reaches_claude_code_under_every_policy() {
+        for policy in [
+            EnvironmentPolicy::Inherited,
+            EnvironmentPolicy::Scrubbed,
+            EnvironmentPolicy::Isolated,
+        ] {
+            let vars = applied(&forwarded(Runner::ClaudeCode, policy, TelemetryForwarding::On));
+            assert_eq!(
+                vars.get("CLAUDE_CODE_ENABLE_TELEMETRY").map(String::as_str),
+                Some("1"),
+                "{policy:?}"
+            );
+            if !matches!(policy, EnvironmentPolicy::Inherited) {
+                assert_eq!(
+                    vars.get("OTEL_EXPORTER_OTLP_ENDPOINT").map(String::as_str),
+                    Some("http://collector:4318"),
+                    "{policy:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forwarded_exporter_headers_stay_out_of_the_record() {
+        for policy in [EnvironmentPolicy::Inherited, EnvironmentPolicy::Isolated] {
+            let env = forwarded(Runner::ClaudeCode, policy, TelemetryForwarding::On);
+            let recorded = env.recorded_vars();
+            assert!(!recorded.contains_key("OTEL_EXPORTER_OTLP_HEADERS"), "{policy:?}");
+            assert!(recorded.contains_key("CLAUDE_CODE_ENABLE_TELEMETRY"), "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn claude_code_exports_its_own_traces_only_when_forwarded_a_traces_endpoint() {
+        for policy in [EnvironmentPolicy::Inherited, EnvironmentPolicy::Isolated] {
+            assert!(
+                forwarded(Runner::ClaudeCode, policy, TelemetryForwarding::On).harness_exports_traces(),
+                "{policy:?}"
+            );
+            assert!(
+                !forwarded(Runner::ClaudeCode, policy, TelemetryForwarding::Off).harness_exports_traces(),
+                "{policy:?}"
+            );
+
+            let temp = tempdir().unwrap();
+            let host = host();
+            let mut env =
+                RunEnvironment::prepare_from(Runner::ClaudeCode, &temp.path().join("run"), policy, None, &host)
+                    .unwrap();
+            env.forward_telemetry(
+                Runner::ClaudeCode,
+                TelemetryForwarding::On,
+                &host,
+                ContentCapture::NoContent,
+            );
+            assert!(applied(&env).contains_key("CLAUDE_CODE_ENABLE_TELEMETRY"), "{policy:?}");
+            assert!(!env.harness_exports_traces(), "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_forwarding_codex_run_gets_an_otel_table() {
+        assert!(
+            forwarded(Runner::Codex, EnvironmentPolicy::Isolated, TelemetryForwarding::On)
+                .codex_otel()
+                .is_some()
+        );
+        assert!(
+            forwarded(Runner::Codex, EnvironmentPolicy::Isolated, TelemetryForwarding::Off)
+                .codex_otel()
+                .is_none()
+        );
+        assert!(
+            forwarded(Runner::ClaudeCode, EnvironmentPolicy::Isolated, TelemetryForwarding::On)
+                .codex_otel()
+                .is_none()
         );
     }
 }

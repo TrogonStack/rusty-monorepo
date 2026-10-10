@@ -3,11 +3,12 @@ use std::path::Path;
 use std::process::Command;
 
 use super::capabilities::HarnessControl;
+use super::telemetry::{in_step, AgentInvocation, HarnessTraces};
 use super::usage::{HarnessTokenUsage, UsageFieldNames};
 use super::{
-    capture_subprocess, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
-    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
-    EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
+    check_runner_version, completed_outcome, persist_runner_io, prepare_workspace, runner_failure_outcome,
+    timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file, EvalRunOutcome,
+    EvalRunRequest, RunStatus, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::mocks::MaterializedMcpConfig;
@@ -121,39 +122,56 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     let mut command = Command::new(PROGRAM);
     command.current_dir(request.workspace_dir).args(&args);
 
-    if let Some(run_dir) = request.transcript_path.parent() {
-        let recorded: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        let borrowed: Vec<&str> = recorded.iter().map(String::as_str).collect();
-        write_runner_invocation_metadata(
-            run_dir,
-            redact_command_args(PROGRAM, &borrowed),
-            prepared.environment.record(),
-        )?;
-    }
+    in_step("write runner invocation", || {
+        if let Some(run_dir) = request.transcript_path.parent() {
+            let recorded: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+            let borrowed: Vec<&str> = recorded.iter().map(String::as_str).collect();
+            write_runner_invocation_metadata(
+                run_dir,
+                redact_command_args(PROGRAM, &borrowed),
+                prepared.environment.record(),
+            )?;
+        }
+        Ok(())
+    })?;
 
     prepared.environment.apply(&mut command);
 
-    let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
+    let invocation = AgentInvocation::begin(Runner::ClaudeCode, request.runner_model);
+    let captured = invocation.capture(&mut command, timeout_duration(request.timeout_secs))?;
+    let outcome = in_step("parse outcome", || {
+        if captured.timed_out {
+            let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
+            return Ok(timeout_outcome(Runner::ClaudeCode, timeout_ms, captured.exit_code));
+        }
+        let exit_ok = captured.exit_code == Some(0);
+        Ok(parse_outcome(
+            &captured.stdout,
+            captured.duration_ms,
+            exit_ok,
+            captured.exit_code,
+        ))
+    })?;
+    invocation.finish(
+        &captured,
+        &outcome,
+        request.runner_model,
+        HarnessTraces::exported(prepared.environment.harness_exports_traces()),
+    );
     persist_runner_io(Runner::ClaudeCode, request, &captured)?;
 
-    if captured.timed_out {
-        let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
-        let outcome = timeout_outcome(Runner::ClaudeCode, timeout_ms, captured.exit_code);
+    in_step("write outcome", || {
+        if matches!(outcome.status, RunStatus::Completed) {
+            persist_final_markdown(request.workspace_dir, &outcome.final_text).map_err(|e| {
+                RunnerError::InvalidOutput {
+                    program: PROGRAM.to_string(),
+                    detail: e.to_string(),
+                }
+            })?;
+        }
         cleanup_runner_temp_files(request.workspace_dir)?;
-        write_timing(request, &outcome)?;
-        return Ok(outcome);
-    }
-
-    let exit_ok = captured.exit_code == Some(0);
-    let outcome = parse_outcome(&captured.stdout, captured.duration_ms, exit_ok, captured.exit_code);
-    if matches!(outcome.status, RunStatus::Completed) {
-        persist_final_markdown(request.workspace_dir, &outcome.final_text).map_err(|e| RunnerError::InvalidOutput {
-            program: PROGRAM.to_string(),
-            detail: e.to_string(),
-        })?;
-    }
-    cleanup_runner_temp_files(request.workspace_dir)?;
-    write_timing(request, &outcome)?;
+        write_timing(request, &outcome)
+    })?;
     Ok(outcome)
 }
 
@@ -316,6 +334,17 @@ mod tests {
             "unexpected warning: {}",
             warnings[0]
         );
+    }
+
+    #[test]
+    fn the_result_total_is_the_runs_usage_even_when_per_message_usage_sums_to_something_else() {
+        let stdout = br#"{"type":"assistant","message":{"id":"msg_1","content":[],"usage":{"input_tokens":10,"output_tokens":6}}}
+{"type":"assistant","message":{"id":"msg_2","content":[],"usage":{"input_tokens":20,"output_tokens":4}}}
+{"type":"result","is_error":false,"duration_ms":10,"usage":{"input_tokens":500,"output_tokens":90}}
+"#;
+        let outcome = parse_outcome(stdout, 0, true, Some(0));
+        assert_eq!(outcome.tokens.input_tokens(), Some(500));
+        assert_eq!(outcome.tokens.output_tokens(), Some(90));
     }
 
     #[test]

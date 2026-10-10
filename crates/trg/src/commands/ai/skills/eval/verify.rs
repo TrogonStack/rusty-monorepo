@@ -9,6 +9,7 @@ use crate::agentskills::evals::{
     EvalDirName, EvalLintOptions, WorkspaceCheckOptions,
 };
 use crate::agentskills::exit_code::ExitCode;
+use crate::agentskills::grading::telemetry::{eval_error_type, phase, phase_span, record_error};
 use crate::agentskills::schemas::{validate_report_bundle_schemas, SchemaValidation};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
@@ -16,6 +17,11 @@ use clap::{Args, ValueEnum};
 
 use super::ci_args::EvalCiArgs;
 use super::print_report_dir;
+
+/// `error.type` when the CI gate rejects the bundle.
+const GATE_FAILED: &str = "gate_failed";
+const INVALID_SKILL: &str = "invalid_skill";
+const INVALID_SUITE: &str = "invalid_suite";
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum VerifyMode {
@@ -153,13 +159,15 @@ impl VerifyArgs {
         // which is a bundle no pass without a live runner can produce, so nothing ever held
         // a written bundle against the schemas that describe it.
         if matches!(self.mode, VerifyMode::Strict) {
-            if let Err(error) = validate_report_bundle_schemas(&report_dir) {
+            let span = phase_span!("validate schemas");
+            if let Err(error) = phase(span, || validate_report_bundle_schemas(&report_dir)) {
                 eprintln!("Schema validation failed: {error}");
                 return ExitCode::GateFailed;
             }
         }
 
-        let workspace_report = match check_workspace(&workspace, self.mode.into_workspace_options()) {
+        let span = phase_span!("check workspace");
+        let workspace_report = match phase(span, || check_workspace(&workspace, self.mode.into_workspace_options())) {
             Ok(report) => report,
             Err(e) => {
                 eprintln!("Bundle verification failed: {}", e);
@@ -167,7 +175,8 @@ impl VerifyArgs {
             }
         };
 
-        let metrics = match collect_workspace_metrics(&workspace) {
+        let collect = phase_span!("collect results");
+        let metrics = match phase(collect.clone(), || collect_workspace_metrics(&workspace)) {
             Ok(metrics) => metrics,
             Err(error) => {
                 eprintln!("Failed to collect workspace metrics: {error}");
@@ -176,20 +185,22 @@ impl VerifyArgs {
         };
 
         let mut failed_assertions = Vec::new();
-        if let Err(error) = collect_failed_assertions_in_workspace(
-            &workspace,
-            None,
-            workspace.display().to_string(),
-            &mut failed_assertions,
-        ) {
+        if let Err(error) = phase(collect.clone(), || {
+            collect_failed_assertions_in_workspace(
+                &workspace,
+                None,
+                workspace.display().to_string(),
+                &mut failed_assertions,
+            )
+        }) {
             eprintln!("Failed to collect failed assertions: {error}");
             return ExitCode::InfrastructureFailure;
         }
 
         let mut case_scores = Vec::new();
-        if let Err(error) =
+        if let Err(error) = phase(collect.clone(), || {
             collect_case_scores_in_workspace(&workspace, None, workspace.display().to_string(), &mut case_scores)
-        {
+        }) {
             eprintln!("Failed to collect case scores: {error}");
             return ExitCode::InfrastructureFailure;
         }
@@ -206,15 +217,22 @@ impl VerifyArgs {
             Vec::new()
         };
 
-        let check = run_ci_checks(
-            &metrics,
-            policy,
-            &self.ci.thresholds(),
-            &failed_assertions,
-            &missing_grading,
-            &case_scores,
-        );
-        emit_github_annotations(&check.violations);
+        let gate = phase_span!("run ci checks");
+        let check = gate.in_scope(|| {
+            run_ci_checks(
+                &metrics,
+                policy,
+                &self.ci.thresholds(),
+                &failed_assertions,
+                &missing_grading,
+                &case_scores,
+            )
+        });
+        if !check.passed {
+            record_error(&gate, GATE_FAILED);
+        }
+        drop(gate);
+        tracing::info_span!("emit annotations").in_scope(|| emit_github_annotations(&check.violations));
 
         let exit_code = ExitCode::from_gate(check.passed);
         if self.output_format.is_json() {
@@ -243,9 +261,14 @@ impl VerifyArgs {
     }
 
     fn verify_skill_dir(&self, fs: &impl FileSystem, skill_dir: &Path) -> Option<ExitCode> {
-        let props = match crate::agentskills::validator::validate_skill(fs, skill_dir) {
+        let span = phase_span!("check skill");
+        let _entered = span.enter();
+        let validated = phase_span!("validate skill");
+        let props = match validated.in_scope(|| crate::agentskills::validator::validate_skill(fs, skill_dir)) {
             Ok(props) => props,
             Err(error) => {
+                record_error(&validated, INVALID_SKILL);
+                record_error(&span, INVALID_SKILL);
                 eprintln!("Skill validation failed: {error}");
                 return Some(ExitCode::GateFailed);
             }
@@ -253,36 +276,47 @@ impl VerifyArgs {
 
         let require_graders = self.require_graders || self.mode.requires_graders();
         let eval_dir = self.eval_dir.clone().unwrap_or_default();
-        if let Err(error) = check_eval_suite(
-            fs,
-            skill_dir,
-            &eval_dir,
-            &props.name,
-            EvalCheckOptions {
-                require_graders,
-                ..EvalCheckOptions::default()
-            },
-        ) {
+        let checked = phase_span!("check eval suite");
+        if let Err(error) = phase(checked, || {
+            check_eval_suite(
+                fs,
+                skill_dir,
+                &eval_dir,
+                &props.name,
+                EvalCheckOptions {
+                    require_graders,
+                    ..EvalCheckOptions::default()
+                },
+            )
+        }) {
+            record_error(&span, INVALID_SUITE);
             eprintln!("Eval manifest verification failed: {error}");
             return Some(ExitCode::GateFailed);
         }
 
-        let suite = match crate::agentskills::evals::load_eval_suite(fs, skill_dir, &eval_dir) {
+        let loaded = phase_span!("load eval suite");
+        let suite = match phase(loaded, || {
+            crate::agentskills::evals::load_eval_suite(fs, skill_dir, &eval_dir)
+        }) {
             Ok(suite) => suite,
             Err(error) => {
+                record_error(&span, eval_error_type(&error));
                 eprintln!("Failed to load eval manifest: {error}");
                 return Some(ExitCode::InfrastructureFailure);
             }
         };
-        print_eval_lint_warnings(&lint_eval_suite_fixtures(
-            fs,
-            skill_dir,
-            &suite,
-            EvalLintOptions {
-                allow_empty_graders: require_graders,
-                ..EvalLintOptions::default()
-            },
-        ));
+        let warnings = tracing::info_span!("lint fixtures").in_scope(|| {
+            lint_eval_suite_fixtures(
+                fs,
+                skill_dir,
+                &suite,
+                EvalLintOptions {
+                    allow_empty_graders: require_graders,
+                    ..EvalLintOptions::default()
+                },
+            )
+        });
+        print_eval_lint_warnings(&warnings);
 
         None
     }
@@ -318,5 +352,71 @@ mod tests {
     #[test]
     fn a_build_with_the_feature_on_reports_that_it_can_validate() {
         assert!(SchemaValidation::of_this_build().is_compiled());
+    }
+
+    use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
+
+    fn verify_args(workspace: Option<PathBuf>, skill_dir: Option<PathBuf>) -> VerifyArgs {
+        VerifyArgs {
+            workspace,
+            skill_dir,
+            eval_dir: None,
+            mode: VerifyMode::Lenient,
+            require_graders: false,
+            output_format: OutputFormat::Json,
+            ci: EvalCiArgs::default(),
+        }
+    }
+
+    #[test]
+    fn verifying_a_workspace_records_each_phase_once_under_the_caller() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("run-001").join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut args = verify_args(Some(workspace), None);
+        args.ci.fail_on_missing_grading = true;
+
+        let (status, trace) = crate::telemetry::testing::capture(|| {
+            tracing::info_span!("trg").in_scope(|| args.handle(&crate::fs::RealFS))
+        });
+
+        assert_eq!(status, ExitCode::GateFailed);
+        let root = trace.span("trg").unwrap();
+        let mut phases: Vec<&str> = trace.children_of(root).iter().map(|span| span.name.as_ref()).collect();
+        phases.sort_unstable();
+        assert_eq!(
+            phases,
+            vec![
+                "check workspace",
+                "collect results",
+                "emit annotations",
+                "run ci checks"
+            ],
+            "every collection shares one span"
+        );
+        assert_eq!(
+            trace.attribute("run ci checks", ERROR_TYPE),
+            Some(opentelemetry::Value::from(GATE_FAILED))
+        );
+        assert_eq!(trace.attribute("check workspace", ERROR_TYPE), None);
+    }
+
+    #[test]
+    fn an_invalid_skill_fails_its_validation_under_the_skill_check() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let (status, trace) = crate::telemetry::testing::capture(|| {
+            verify_args(None, Some(temp.path().to_path_buf())).handle(&crate::fs::RealFS)
+        });
+
+        assert_eq!(status, ExitCode::GateFailed);
+        trace.assert_child_of("validate skill", "check skill");
+        let invalid = Some(opentelemetry::Value::from(INVALID_SKILL));
+        assert_eq!(trace.attribute("validate skill", ERROR_TYPE), invalid);
+        assert_eq!(trace.attribute("check skill", ERROR_TYPE), invalid);
+        assert!(
+            trace.span("check eval suite").is_none(),
+            "nothing runs after a skill fails validation"
+        );
     }
 }

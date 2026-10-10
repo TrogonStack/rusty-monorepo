@@ -1049,6 +1049,25 @@
             "string",
             "null"
           ]
+        },
+        "telemetry_forwarding": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/TelemetryForwarding"
+            }
+          ],
+          "description": "Whether each run's harness was handed what it needs to export its own telemetry,\nwhich lets a run reach a collector its environment policy alone would not."
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpanReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The suite span of the pass that produced this report. Absent when tracing was off."
         }
       },
       "required": [
@@ -1252,6 +1271,17 @@
             "null"
           ]
         },
+        "grade_trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpanReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The span this run was last graded under, so a later `compare` can link to it.\nAbsent until graded, or when tracing was off for the grading pass."
+        },
         "id": {
           "type": "string"
         },
@@ -1352,6 +1382,17 @@
             }
           ],
           "description": "The tool grant this run was actually given, once the operator's ceiling and the\ncase's own declaration are combined. `None` means unrestricted."
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpanReference"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The span this run executed under, so a later `grade` or `compare` can link to it.\nAbsent when tracing was off for the pass."
         },
         "warnings": {
           "items": {
@@ -1471,6 +1512,24 @@
       ],
       "type": "object"
     },
+    "SpanReference": {
+      "description": "A span's W3C trace and span id, serialized as lowercase hex.\n\nOnly ever written when the invocation that produced the report exported the span, so\nits absence means \"nothing to link to\" rather than a broken reference, and a link built\nfrom it always names a span a backend received.",
+      "properties": {
+        "span_id": {
+          "pattern": "^[0-9a-f]{16}$",
+          "type": "string"
+        },
+        "trace_id": {
+          "pattern": "^[0-9a-f]{32}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trace_id",
+        "span_id"
+      ],
+      "type": "object"
+    },
     "SuiteSection": {
       "properties": {
         "case_selection": {
@@ -1553,6 +1612,14 @@
         "by_scenario"
       ],
       "type": "object"
+    },
+    "TelemetryForwarding": {
+      "description": "Whether a run hands the harness what it needs to export its own telemetry.",
+      "enum": [
+        "off",
+        "on"
+      ],
+      "type": "string"
     },
     "ToolGrant": {
       "description": "A named, finite set of tools a run's harness may use.\n\nNever parsed as empty: naming zero tools is not how an operator or a case denies\nevery gated tool, since a grant with nothing in it reads in a report exactly like a\ngrant nobody declared. [`ToolGrant::narrowed_by`] is the one place an empty set is\nlegitimate, because it answers \"what do both sides admit\", not \"what was declared\".",

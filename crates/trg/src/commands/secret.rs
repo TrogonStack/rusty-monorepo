@@ -12,11 +12,19 @@ use std::io::{IsTerminal, Read, Write};
 use clap::{Args, Subcommand};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{json, Value};
+use tracing::field::Empty;
+use tracing::Instrument;
 
 use crate::config::{RawSecretVar, SecretVar, VarSite};
 use crate::output::{print_json, OutputFormat};
 use crate::secrets::onepassword::OnePasswordReference;
+use crate::secrets::telemetry::record_error;
 use crate::secrets::{Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
+use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME};
+
+/// `error.type` for a failure this command only has as a message to print,
+/// the conventions' own fallback value.
+const OTHER_ERROR: &str = "_OTHER";
 
 #[derive(Subcommand)]
 pub enum SecretCommands {
@@ -114,24 +122,53 @@ impl PutArgs {
 
 impl SecretCommands {
     pub async fn handle(self, registry: &Registry) -> i32 {
+        let span = self.span();
         let result = match self {
-            SecretCommands::Get(args) => get(registry, &args).await,
-            SecretCommands::Put(args) => put(registry, &args).await,
+            SecretCommands::Get(args) => get(registry, &args).instrument(span.clone()).await,
+            SecretCommands::Put(args) => put(registry, &args).instrument(span.clone()).await,
         };
 
         match result {
             Ok(code) => code,
             Err(message) => {
+                record_error(&span, OTHER_ERROR);
                 eprintln!("{message}");
                 1
             }
         }
     }
+
+    /// Names the backend addressed and its kind, and nothing of the address
+    /// within it or the value read or written there.
+    fn span(&self) -> tracing::Span {
+        match self {
+            SecretCommands::Get(args) => tracing::info_span!(
+                "secret get",
+                { SECRETS_BACKEND_NAME } = args.common.backend.as_str(),
+                { SECRETS_BACKEND_KIND } = Empty,
+                "error.type" = Empty,
+                "otel.status_code" = Empty,
+            ),
+            SecretCommands::Put(args) => tracing::info_span!(
+                "secret put",
+                { SECRETS_BACKEND_NAME } = args.common.backend.as_str(),
+                { SECRETS_BACKEND_KIND } = Empty,
+                "error.type" = Empty,
+                "otel.status_code" = Empty,
+            ),
+        }
+    }
+}
+
+/// Puts the resolved backend's kind on the command span, once it is known.
+fn record_kind(backend: &Backend) {
+    tracing::Span::current().record(SECRETS_BACKEND_KIND, backend.kind());
 }
 
 async fn get(registry: &Registry, args: &GetArgs) -> Result<i32, String> {
     let raw = args.raw();
     let backend = registry.resolve(&raw.backend).map_err(|e| e.to_string())?;
+    record_kind(&backend);
     let var =
         SecretVar::resolve_at(kind_of(registry, &raw.backend)?, &raw, VarSite::Flags).map_err(|e| e.to_string())?;
 
@@ -147,6 +184,7 @@ async fn get(registry: &Registry, args: &GetArgs) -> Result<i32, String> {
 
 async fn put(registry: &Registry, args: &PutArgs) -> Result<i32, String> {
     let backend = registry.resolve(&args.common.backend).map_err(|e| e.to_string())?;
+    record_kind(&backend);
 
     // Checked before stdin is read, so a read-only backend is rejected without
     // first consuming a piped secret or prompting an interactive user for one
@@ -310,9 +348,11 @@ fn read_value() -> Result<SecretString, String> {
     }
 
     let mut buf = String::new();
-    std::io::stdin()
-        .read_to_string(&mut buf)
-        .map_err(|e| format!("could not read the value from stdin: {e}"))?;
+    tracing::info_span!("read stdin").in_scope(|| {
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("could not read the value from stdin: {e}"))
+    })?;
 
     let value = strip_one_line_ending(&buf);
 
@@ -572,5 +612,45 @@ mod tests {
     #[test]
     fn a_lone_carriage_return_is_left_where_it_is() {
         assert_eq!(strip_one_line_ending("secret\r"), "secret\r");
+    }
+
+    #[test]
+    fn a_command_is_one_span_naming_its_backend_and_nothing_it_addressed() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+        use opentelemetry::trace::Status;
+
+        const TOKEN: &str = "secret-span-token-8c3d";
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        let section: crate::secrets::SecretsSection = toml::from_str(&format!(
+            r#"
+            [backends.work]
+            kind = "openbao"
+            addr = "http://127.0.0.1:{port}"
+            mount = "secret"
+            path_prefix = "trg"
+            owner = "yordis"
+            token = "{TOKEN}"
+            timeout_ms = 500
+            "#
+        ))
+        .expect("section");
+        let registry = Registry::new(section);
+        let command = parse(&["get", "--backend", "work", "--path", "deploy-keys", "--key", "token"]).expect("parse");
+
+        let (code, trace) = crate::telemetry::testing::capture(|| current_thread(command.handle(&registry)));
+        assert_eq!(code, 1, "nothing listens there");
+
+        let span = trace.span("secret get").expect("the command span");
+        assert!(matches!(span.status, Status::Error { .. }));
+        let attribute = |key: &str| trace.attribute("secret get", key).map(|v| v.to_string());
+        assert_eq!(attribute("trg.secrets.backend.name").as_deref(), Some("work"));
+        assert_eq!(attribute("trg.secrets.backend.kind").as_deref(), Some("openbao"));
+        trace.assert_child_of("GET /v1/{mount}/data/{path}", "secret get");
+
+        assert_never_recorded(&trace, &[TOKEN, "deploy-keys", "yordis"]);
     }
 }

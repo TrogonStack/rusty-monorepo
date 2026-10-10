@@ -5,11 +5,15 @@ use crate::agentskills::grader_agreement::{
     build_grader_agreement_document, write_grader_agreement, AgreementBucket, AgreementThreshold,
     GraderAgreementDocument,
 };
+use crate::agentskills::grading::telemetry::{phase_span, record_error};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
 
 use super::print_report_dir;
+
+/// `error.type` when the llm agreement floor misses `--min-agreement`.
+const GATE_FAILED: &str = "gate_failed";
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -43,15 +47,19 @@ pub struct GraderAgreementArgs {
 
 impl GraderAgreementArgs {
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
+        let span = phase_span!("grader agreement");
+        let _entered = span.enter();
         let document = match build_grader_agreement_document(&self.report_dir) {
             Ok(document) => document,
             Err(error) => {
+                record_error(&span, error.error_type());
                 eprintln!("Failed to build grader agreement report: {error}");
                 return ExitCode::InfrastructureFailure;
             }
         };
 
         if let Err(error) = write_grader_agreement(&self.report_dir, &document) {
+            record_error(&span, error.error_type());
             eprintln!("Failed to write grader-agreement.json: {error}");
             return ExitCode::InfrastructureFailure;
         }
@@ -76,6 +84,7 @@ impl GraderAgreementArgs {
         match evaluate_gate(&document, threshold) {
             Ok(()) => ExitCode::Success,
             Err(message) => {
+                record_error(&span, GATE_FAILED);
                 eprintln!("grader-agreement: {message}");
                 ExitCode::GateFailed
             }
@@ -272,5 +281,64 @@ mod tests {
         .handle(&crate::fs::RealFS);
 
         assert_eq!(status, ExitCode::GateFailed);
+    }
+
+    #[test]
+    fn grader_agreement_nests_loading_collecting_and_writing_under_one_span() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_run(&report_dir, "run-001", true);
+        record_assertion_verdict(&report_dir, "run-001", "case-a:g0", HumanVerdict::Pass, None, Some("h")).unwrap();
+
+        let (status, trace) = crate::telemetry::testing::capture(|| {
+            GraderAgreementArgs {
+                report_dir: report_dir.clone(),
+                min_agreement: None,
+                output_format: OutputFormat::Json,
+            }
+            .handle(&crate::fs::RealFS)
+        });
+
+        assert_eq!(status, ExitCode::Success);
+        let root = trace.span("grader agreement").expect("the command has its own span");
+        let phases: Vec<&str> = trace.children_of(root).iter().map(|span| span.name.as_ref()).collect();
+        assert_eq!(
+            phases,
+            vec!["load report", "collect verdicts", "write grader agreement"]
+        );
+        assert_eq!(root.status, opentelemetry::trace::Status::Unset);
+    }
+
+    #[test]
+    fn a_failed_gate_marks_the_grader_agreement_span_failed() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = sample_report_dir(&temp);
+        grade_run(&report_dir, "run-001", true);
+
+        let (status, trace) = crate::telemetry::testing::capture(|| {
+            GraderAgreementArgs {
+                report_dir,
+                min_agreement: Some(AgreementThreshold::parse(0.9).unwrap()),
+                output_format: OutputFormat::Json,
+            }
+            .handle(&crate::fs::RealFS)
+        });
+
+        assert_eq!(status, ExitCode::GateFailed);
+        assert_eq!(
+            trace.attribute(
+                "grader agreement",
+                opentelemetry_semantic_conventions::attribute::ERROR_TYPE
+            ),
+            Some(opentelemetry::Value::from(GATE_FAILED))
+        );
+        assert_eq!(
+            trace.attribute(
+                "write grader agreement",
+                opentelemetry_semantic_conventions::attribute::ERROR_TYPE
+            ),
+            None,
+            "the artifact was written before the gate was checked"
+        );
     }
 }

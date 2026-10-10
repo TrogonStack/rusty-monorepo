@@ -1,6 +1,7 @@
 mod benchmark;
 mod ci_args;
 mod compare;
+mod export;
 mod feedback;
 mod grade;
 mod grader_agreement;
@@ -23,6 +24,7 @@ use crate::agentskills::ci::{
     collect_case_scores, collect_failed_assertions, collect_missing_grading_workspaces, collect_report_metrics,
     emit_github_annotations, print_human_summary, run_ci_checks, EvalCommandJsonOutput,
 };
+use crate::agentskills::eval_telemetry::{record_failure, step_span};
 use crate::agentskills::evals::WorkspaceCheckReport;
 use crate::agentskills::exit_code::ExitCode;
 use crate::fs::FileSystem;
@@ -31,6 +33,7 @@ use clap::{Args, Subcommand};
 
 pub use benchmark::BenchmarkArgs;
 pub use compare::CompareArgs;
+pub use export::ExportArgs;
 pub use feedback::FeedbackArgs;
 pub use grade::GradeArgs;
 pub use grader_agreement::GraderAgreementArgs;
@@ -84,6 +87,8 @@ pub enum EvalCommands {
     RecordMcp(RecordMcpArgs),
     /// Check whether a stronger configuration scored higher across ordered report bundles
     Scaling(ScalingArgs),
+    /// Replay a finished report bundle as OpenTelemetry traces and evaluation events
+    Export(ExportArgs),
 }
 
 impl EvalArgs {
@@ -103,6 +108,7 @@ impl EvalArgs {
             EvalCommands::HtmlReport(args) => args.handle(fs),
             EvalCommands::RecordMcp(args) => args.handle(fs),
             EvalCommands::Scaling(args) => args.handle(fs),
+            EvalCommands::Export(args) => args.handle(fs),
         }
     }
 }
@@ -118,25 +124,37 @@ pub(crate) fn eval_output(
     workspace: Option<WorkspaceCheckReport>,
     budget_exhausted: bool,
 ) -> Result<EvalCommandJsonOutput, ExitCode> {
-    let metrics = match collect_report_metrics(report_dir) {
-        Ok(metrics) => metrics,
+    let collecting = step_span("collect report metrics");
+    let collected = collecting.in_scope(|| {
+        collect_report_metrics(report_dir).map(|metrics| {
+            (
+                metrics,
+                collect_failed_assertions(report_dir).unwrap_or_default(),
+                collect_missing_grading_workspaces(report_dir).unwrap_or_default(),
+                collect_case_scores(report_dir).unwrap_or_default(),
+            )
+        })
+    });
+    let (metrics, failed_assertions, missing_grading, case_scores) = match collected {
+        Ok(collected) => collected,
         Err(error) => {
+            record_failure(&collecting, "report_unreadable");
             eprintln!("Failed to collect report metrics: {error}");
             return Err(ExitCode::InfrastructureFailure);
         }
     };
+    drop(collecting);
 
-    let failed_assertions = collect_failed_assertions(report_dir).unwrap_or_default();
-    let missing_grading = collect_missing_grading_workspaces(report_dir).unwrap_or_default();
-    let case_scores = collect_case_scores(report_dir).unwrap_or_default();
-    let check = run_ci_checks(
-        &metrics,
-        policy,
-        thresholds,
-        &failed_assertions,
-        &missing_grading,
-        &case_scores,
-    );
+    let check = step_span("check ci gates").in_scope(|| {
+        run_ci_checks(
+            &metrics,
+            policy,
+            thresholds,
+            &failed_assertions,
+            &missing_grading,
+            &case_scores,
+        )
+    });
 
     Ok(EvalCommandJsonOutput {
         report_dir: report_dir.display().to_string(),
@@ -158,7 +176,7 @@ pub(crate) fn finish_eval_output(
         Ok(output) => output,
         Err(code) => return code,
     };
-    emit_github_annotations(&output.check.violations);
+    step_span("emit github annotations").in_scope(|| emit_github_annotations(&output.check.violations));
 
     if format.is_json() {
         match serde_json::to_string_pretty(&output) {

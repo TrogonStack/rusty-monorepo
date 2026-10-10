@@ -4,13 +4,17 @@ use std::io::{stderr, stdin, IsTerminal};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
 use reqwest::Url;
 use rmcp::transport::auth::{
     AuthError, AuthorizationManager, AuthorizationRequest, AuthorizationSession, OAuthTokenResponse, StoredCredentials,
 };
 use tiny_http::{Header, Response, Server};
+use tracing::{field::Empty, Instrument, Span};
 
+use crate::oauth::telemetry::{auth_error_type, record_error, OAuthStep};
 use crate::shell::quote_for_shell;
+use crate::telemetry::semconv::trg::{MCP_SERVER_NAME, OAUTH_CALLBACK_OUTCOME};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FlowError {
@@ -44,6 +48,20 @@ pub enum FlowError {
     Oauth(#[from] AuthError),
 }
 
+impl FlowError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::NotATerminal { .. } => "not_a_terminal",
+            Self::BindFailed(_) => "bind_failed",
+            Self::BrowserOpenFailed { .. } => "browser_open_failed",
+            Self::CallbackTimeout(_) => "callback_timeout",
+            Self::Provider { .. } => "provider_error",
+            Self::StateMismatch { .. } => "state_mismatch",
+            Self::Oauth(error) => auth_error_type(error),
+        }
+    }
+}
+
 /// Render a server name for the recovery command so it survives a copy-paste into
 /// a shell. Config keys are arbitrary strings, so a name can carry spaces or shell
 /// metacharacters that would otherwise split it into several arguments.
@@ -68,6 +86,22 @@ pub async fn run_authorization(
     scopes: &[&str],
     config: FlowConfig,
 ) -> Result<StoredCredentials, FlowError> {
+    let span = OAuthStep::Authorize.span(server_name);
+    let result = authorize(auth_manager, server_name, scopes, config)
+        .instrument(span.clone())
+        .await;
+    if let Err(error) = &result {
+        record_error(&span, error.error_type());
+    }
+    result
+}
+
+async fn authorize(
+    auth_manager: AuthorizationManager,
+    server_name: &str,
+    scopes: &[&str],
+    config: FlowConfig,
+) -> Result<StoredCredentials, FlowError> {
     if !stdin().is_terminal() || !stderr().is_terminal() {
         return Err(FlowError::NotATerminal {
             server: server_name.to_string(),
@@ -81,9 +115,16 @@ pub async fn run_authorization(
     let redirect_uri = format!("http://127.0.0.1:{port}/oauth/callback");
 
     let request = AuthorizationRequest::new(&redirect_uri).with_scopes(scopes.iter().copied());
-    let session = AuthorizationSession::new(auth_manager, request)
-        .await
-        .map_err(|(_, e)| FlowError::Oauth(e))?;
+    let session = {
+        let register = OAuthStep::RegisterClient.span(server_name);
+        AuthorizationSession::new(auth_manager, request)
+            .instrument(register.clone())
+            .await
+            .map_err(|(_, e)| {
+                record_error(&register, auth_error_type(&e));
+                FlowError::Oauth(e)
+            })?
+    };
 
     let auth_url = session.get_authorization_url().to_string();
     let expected_state = oauth_state_from_authorization_url(&auth_url)
@@ -93,13 +134,21 @@ pub async fn run_authorization(
     let browser_err = open::that(&auth_url).err();
 
     let wait_outcome = {
+        let wait = callback_wait_span(server_name);
         let server = server.clone();
         let timeout = config.callback_timeout;
         let expected_state = expected_state.clone();
         let server_name = server_name.to_string();
-        tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state, server_name))
-            .await
-            .map_err(|e| AuthError::InternalError(format!("OAuth callback task failed to run: {e}")))?
+        let outcome =
+            tokio::task::spawn_blocking(move || wait_for_callback(server, timeout, expected_state, server_name))
+                .instrument(wait.clone())
+                .await
+                .map_err(|e| {
+                    record_error(&wait, "callback_task_failed");
+                    AuthError::InternalError(format!("OAuth callback task failed to run: {e}"))
+                })?;
+        outcome.record_on(&wait);
+        outcome
     };
 
     let (code, state) = match wait_outcome {
@@ -118,7 +167,14 @@ pub async fn run_authorization(
         }
     };
 
-    let token_result = session.handle_callback(&code, &state).await?;
+    let token_result = {
+        let exchange = OAuthStep::ExchangeCode.span(server_name);
+        session
+            .handle_callback(&code, &state)
+            .instrument(exchange.clone())
+            .await
+            .inspect_err(|e| record_error(&exchange, auth_error_type(e)))?
+    };
 
     let granted_scopes = granted_scopes_from_token_response(&token_result);
 
@@ -219,6 +275,36 @@ enum CallbackWait {
     StateMismatch { expected: String, got: String },
     Provider { error: String, description: Option<String> },
     Timeout,
+}
+
+impl CallbackWait {
+    fn outcome(&self) -> &'static str {
+        match self {
+            Self::Success { .. } => "received",
+            Self::StateMismatch { .. } => "state_mismatch",
+            Self::Provider { .. } => "provider_error",
+            Self::Timeout => "timeout",
+        }
+    }
+
+    fn record_on(&self, span: &Span) {
+        span.record(OAUTH_CALLBACK_OUTCOME, self.outcome());
+        if !matches!(self, Self::Success { .. }) {
+            record_error(span, self.outcome());
+        }
+    }
+}
+
+/// The wait is a person switching to a browser and signing in, so its
+/// duration measures them, not `trg`.
+fn callback_wait_span(server_name: &str) -> Span {
+    tracing::info_span!(
+        "wait oauth_callback",
+        "otel.status_code" = Empty,
+        { MCP_SERVER_NAME } = server_name,
+        { OAUTH_CALLBACK_OUTCOME } = Empty,
+        { ERROR_TYPE } = Empty,
+    )
 }
 
 struct UnblockServer(Arc<Server>);
@@ -400,6 +486,42 @@ fn boxed_error_to_io(err: Box<dyn std::error::Error + Send + Sync>) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::testing::capture;
+
+    #[test]
+    fn the_callback_wait_records_how_it_ended() {
+        let ((), trace) = capture(|| {
+            CallbackWait::Timeout.record_on(&callback_wait_span("weather"));
+        });
+
+        let outcome = |key| {
+            trace
+                .attribute("wait oauth_callback", key)
+                .map(|value| value.to_string())
+        };
+        assert_eq!(outcome(OAUTH_CALLBACK_OUTCOME).as_deref(), Some("timeout"));
+        assert_eq!(outcome(ERROR_TYPE).as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn a_received_callback_is_not_an_error() {
+        let ((), trace) = capture(|| {
+            CallbackWait::Success {
+                code: "code".to_string(),
+                state: "state".to_string(),
+            }
+            .record_on(&callback_wait_span("weather"));
+        });
+
+        assert_eq!(
+            trace
+                .attribute("wait oauth_callback", OAUTH_CALLBACK_OUTCOME)
+                .map(|value| value.to_string())
+                .as_deref(),
+            Some("received")
+        );
+        assert!(trace.attribute("wait oauth_callback", ERROR_TYPE).is_none());
+    }
 
     /// The Keychain backend accepts any server name, so one carrying markup
     /// reaches this page. It has to arrive as text.

@@ -1,0 +1,32 @@
+whitespace_control:
+  trim_blocks: true
+  lstrip_blocks: true
+
+comment_formats:
+  rust:
+    format: markdown
+    prefix: "/// "
+    trim: true
+    remove_trailing_dots: true
+default_comment_format: rust
+
+templates:
+  - template: attributes.rs.j2
+    filter: >
+      semconv_grouped_attributes
+      | map(select(.root_namespace == "gen_ai" or .root_namespace == "mcp"))
+    application_mode: single
+    file_name: attributes.rs
+  - template: metrics.rs.j2
+    filter: >
+      semconv_grouped_metrics
+      | map(select(.root_namespace == "gen_ai" or .root_namespace == "mcp"))
+    application_mode: single
+    file_name: metrics.rs
+  - template: spans.rs.j2
+    filter: >
+      semconv_grouped_spans
+      | map(select(.root_namespace == "gen_ai" or .root_namespace == "mcp"))
+      | map(.spans |= map(.id |= sub("^span\\."; "")))
+    application_mode: single
+    file_name: span_kinds.rs

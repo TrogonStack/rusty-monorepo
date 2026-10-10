@@ -83,8 +83,11 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde::Deserialize;
 use tokio::process::Command;
+use tracing::Instrument;
 
-use super::{SecretMap, SecretPath, SecretsError};
+use super::telemetry::{CliSpan, TIMEOUT};
+use super::{BackendKind, SecretMap, SecretPath, SecretsError};
+use crate::telemetry::propagation;
 
 /// How long an `op` invocation gets before it is treated as hung.
 ///
@@ -93,6 +96,33 @@ use super::{SecretMap, SecretPath, SecretsError};
 /// block `get`/`current_account` — and, through the latter, `trg doctor` —
 /// forever.
 const OP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The `op` subcommands this backend drives, as a closed set so the one that
+/// lands on a span is always a fixed phrase and never an argument.
+#[derive(Debug, Clone, Copy)]
+enum OpCommand {
+    ItemGet,
+    AccountList,
+    AccountGet,
+}
+
+impl OpCommand {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ItemGet => "item get",
+            Self::AccountList => "account list",
+            Self::AccountGet => "account get",
+        }
+    }
+
+    fn words(self) -> [&'static str; 2] {
+        match self {
+            Self::ItemGet => ["item", "get"],
+            Self::AccountList => ["account", "list"],
+            Self::AccountGet => ["account", "get"],
+        }
+    }
+}
 
 /// Why a `ref = "op://..."` declaration could not be read as an address.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -722,17 +752,18 @@ impl OnePasswordBackend {
     /// a subprocess plus a round trip to the desktop app.
     pub async fn get_item(&self, item: &OnePasswordItem) -> Result<Option<OnePasswordItemFields>, SecretsError> {
         let out = self
-            .run(&[
-                "item",
-                "get",
-                item.title().as_str(),
-                "--vault",
-                item.vault().as_str(),
-                "--format",
-                "json",
-                "--account",
-                self.account.as_str(),
-            ])
+            .run(
+                OpCommand::ItemGet,
+                &[
+                    item.title().as_str(),
+                    "--vault",
+                    item.vault().as_str(),
+                    "--format",
+                    "json",
+                    "--account",
+                    self.account.as_str(),
+                ],
+            )
             .await?;
 
         if !out.status.success() {
@@ -766,7 +797,7 @@ impl OnePasswordBackend {
     /// different remedies, and conflating them sends people to `op signin`
     /// for a typo.
     pub async fn accounts(&self) -> Result<Vec<SignedInAccount>, SecretsError> {
-        let out = self.run(&["account", "list", "--format", "json"]).await?;
+        let out = self.run(OpCommand::AccountList, &["--format", "json"]).await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(SecretsError::Unavailable(format!(
@@ -786,7 +817,10 @@ impl OnePasswordBackend {
     /// `op whoami`.
     pub async fn current_account(&self) -> Result<CurrentAccount, SecretsError> {
         let out = self
-            .run(&["account", "get", "--format", "json", "--account", self.account.as_str()])
+            .run(
+                OpCommand::AccountGet,
+                &["--format", "json", "--account", self.account.as_str()],
+            )
             .await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -828,23 +862,50 @@ impl OnePasswordBackend {
         })
     }
 
-    async fn run(&self, args: &[&str]) -> Result<std::process::Output, SecretsError> {
-        let child = Command::new(&self.bin)
+    /// Runs `op <command> <args>` under a CLI client span that names the
+    /// subcommand and none of the arguments, which address the item.
+    async fn run(&self, command: OpCommand, args: &[&str]) -> Result<std::process::Output, SecretsError> {
+        let call = CliSpan::start(BackendKind::OnePassword, "op", command.as_str());
+        let invocation = || format!("{} {}", command.as_str(), args.join(" "));
+
+        let mut process = Command::new(&self.bin);
+        process
+            .args(command.words())
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| SecretsError::Transport(format!("op {}: {e}", args.join(" "))))?;
+            .kill_on_drop(true);
+        call.span().in_scope(|| propagation::inject_tokio_command(&mut process));
 
-        match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
-            Ok(result) => result.map_err(|e| SecretsError::Transport(format!("op {}: {e}", args.join(" ")))),
-            Err(_) => Err(SecretsError::Transport(format!(
-                "op {} timed out after {:?} — is the 1Password app unlocked?",
-                args.join(" "),
-                self.timeout
-            ))),
+        let child = process.spawn().map_err(|e| {
+            let error = SecretsError::Transport(format!("op {}: {e}", invocation()));
+            call.failed(error.error_type());
+            error
+        })?;
+        call.spawned(child.id());
+
+        let waited = tokio::time::timeout(self.timeout, child.wait_with_output())
+            .instrument(call.span().clone())
+            .await;
+        match waited {
+            Ok(Ok(output)) => {
+                call.exited(&output.status);
+                Ok(output)
+            }
+            Ok(Err(e)) => {
+                let error = SecretsError::Transport(format!("op {}: {e}", invocation()));
+                call.failed(error.error_type());
+                Err(error)
+            }
+            Err(_) => {
+                call.failed(TIMEOUT);
+                Err(SecretsError::Transport(format!(
+                    "op {} timed out after {:?} — is the 1Password app unlocked?",
+                    invocation(),
+                    self.timeout
+                )))
+            }
         }
     }
 }
@@ -1622,5 +1683,65 @@ mod tests {
             .await
             .expect_err("should fail");
         assert!(matches!(err, SecretsError::Transport(_)), "{err:?}");
+    }
+
+    #[test]
+    fn each_call_is_a_cli_span_that_the_child_continues() {
+        use crate::secrets::telemetry::testing::{assert_never_recorded, current_thread};
+        use opentelemetry::trace::SpanKind;
+
+        let stub = StubOp::scripted(&format!(
+            "printf '%s' \"${{TRACEPARENT:-}}\" > \"${{0%.body}}.traceparent\"\nprintf '%s' {}\n",
+            sh_quote(ITEM_JSON)
+        ));
+        let backend = stub.backend();
+        let (read, trace) =
+            crate::telemetry::testing::capture(|| current_thread(backend.get_item(&item("Ops", "deploy-keys"))));
+        assert!(read.expect("get").is_some());
+
+        let span = trace.span("op").expect("a span per call");
+        assert_eq!(span.span_kind, SpanKind::Client);
+        let attribute = |key: &str| trace.attribute("op", key).map(|v| v.to_string());
+        assert_eq!(attribute("process.executable.name").as_deref(), Some("op"));
+        assert_eq!(attribute("process.exit.code").as_deref(), Some("0"));
+        assert!(matches!(
+            trace.attribute("op", "process.pid"),
+            Some(opentelemetry::Value::I64(_))
+        ));
+        assert_eq!(attribute("trg.secrets.operation").as_deref(), Some("item get"));
+        assert_eq!(attribute("trg.secrets.backend.kind").as_deref(), Some("onepassword"));
+
+        let traceparent = std::fs::read_to_string(stub.dir.path().join("op.traceparent")).expect("traceparent");
+        assert_eq!(
+            traceparent,
+            format!("00-{}-{}-01", span.span_context.trace_id(), span.span_context.span_id()),
+            "the child continues the call's span"
+        );
+        assert_never_recorded(&trace, &["sk-ant-fake-value", "deploy-keys", "Ops", ACCOUNT]);
+    }
+
+    #[test]
+    fn a_call_that_outlives_its_budget_is_typed_as_a_timeout() {
+        use crate::secrets::telemetry::testing::current_thread;
+        use opentelemetry::trace::Status;
+
+        let stub = StubOp::hanging();
+        let backend = stub.backend().with_timeout(Duration::from_millis(50));
+        let (current, trace) = crate::telemetry::testing::capture(|| current_thread(backend.current_account()));
+        assert!(current.is_err());
+
+        let span = trace.span("op").expect("a span per call");
+        assert!(matches!(span.status, Status::Error { .. }));
+        assert_eq!(
+            trace.attribute("op", "error.type").map(|v| v.to_string()).as_deref(),
+            Some("timeout")
+        );
+        assert_eq!(
+            trace
+                .attribute("op", "trg.secrets.operation")
+                .map(|v| v.to_string())
+                .as_deref(),
+            Some("account get")
+        );
     }
 }

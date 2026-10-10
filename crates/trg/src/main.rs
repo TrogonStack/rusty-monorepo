@@ -1,8 +1,8 @@
-use clap::Parser;
+use tracing::Instrument;
 
 use trg::cli::Cli;
 use trg::commands::ai::AiCommands;
-use trg::commands::exec::ExecCommands;
+use trg::commands::exec::{ExecCommands, PreparedLaunch};
 use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
@@ -84,46 +84,67 @@ async fn wire_exec(name: &str) -> Result<config::LoadedExec, Box<WireError>> {
     pending.finish(&fetched).map_err(|e| Box::new(WireError::from(e)))
 }
 
+/// How a subcommand hands control back to `main`: most exit with a code, but
+/// `trg exec run` replaces the process, which can only happen once the root
+/// span has ended and been exported.
+enum Outcome {
+    Exit(i32),
+    Exec(PreparedLaunch),
+}
+
 #[tokio::main]
 async fn main() {
-    trg::telemetry::init();
+    let (cli, command_identity) = Cli::parse_with_command_identity();
+    let telemetry = trg::telemetry::init(command_identity);
+    let root_span = telemetry.root_span();
 
-    let cli = Cli::parse();
     let fs = trg::fs::RealFS;
 
-    let exit_code = match cli.command {
-        Commands::Ai { command } => match command {
-            AiCommands::Skills { command } => command.handle(&fs),
-        },
-        Commands::Mcp { command } => match wire_mcp(&command).await {
-            Ok(ctx) => command.handle(&ctx).await,
-            Err(e) => report_startup_failure(&command, &e).await,
-        },
-        Commands::Secret { command } => match wire_secrets() {
-            Ok(registry) => command.handle(&registry).await,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-        },
-        Commands::Doctor(args) => match wire_secrets() {
-            Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
-            Err(e) => {
-                eprintln!("{e}");
-                1
-            }
-        },
-        Commands::Exec { command } => match command {
-            ExecCommands::Run(args) => match wire_exec(&args.name).await {
-                Ok(loaded) => trg::commands::exec::run(loaded, &args),
+    let outcome = async {
+        match cli.command {
+            Commands::Ai { command } => match command {
+                AiCommands::Skills { command } => Outcome::Exit(command.handle(&fs)),
+            },
+            Commands::Mcp { command } => Outcome::Exit(match wire_mcp(&command).await {
+                Ok(ctx) => command.handle(&ctx).await,
+                Err(e) => report_startup_failure(&command, &e).await,
+            }),
+            Commands::Secret { command } => Outcome::Exit(match wire_secrets() {
+                Ok(registry) => command.handle(&registry).await,
                 Err(e) => {
                     eprintln!("{e}");
                     1
                 }
+            }),
+            Commands::Doctor(args) => Outcome::Exit(match wire_secrets() {
+                Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }),
+            Commands::Exec { command } => match command {
+                ExecCommands::Run(args) => match wire_exec(&args.name).await {
+                    Ok(loaded) => Outcome::Exec(trg::commands::exec::run(loaded, &args)),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        Outcome::Exit(1)
+                    }
+                },
+                ExecCommands::List(args) => Outcome::Exit(trg::commands::exec::list(&args)),
             },
-            ExecCommands::List(args) => trg::commands::exec::list(&args),
-        },
-    };
+        }
+    }
+    .instrument(root_span)
+    .await;
 
+    trg::agentskills::runner::group::yield_to_termination();
+    let exit_code = match outcome {
+        Outcome::Exit(code) => {
+            telemetry.shutdown(code);
+            code
+        }
+        Outcome::Exec(launch) => launch.exec(telemetry),
+    };
     std::process::exit(exit_code);
 }

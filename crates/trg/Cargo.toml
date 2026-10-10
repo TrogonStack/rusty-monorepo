@@ -42,6 +42,19 @@ regex = { workspace = true }
 jsonschema = { version = "0.49", optional = true }
 schemars = { workspace = true }
 libc = { workspace = true }
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = [
+    "http-proto",
+    "reqwest-blocking-client",
+    "trace",
+    "metrics",
+    "logs",
+    "internal-logs",
+] }
+opentelemetry-appender-tracing = "0.33"
+opentelemetry-semantic-conventions = { version = "0.33", features = ["semconv_experimental"] }
+tracing-opentelemetry = "0.34"
 
 [[bin]]
 name = "generate-schemas"
@@ -51,3 +64,4 @@ path = "src/bin/generate_schemas.rs"
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 jsonschema = "0.49"
+opentelemetry_sdk = { version = "0.33", features = ["testing", "trace", "metrics", "logs"] }
