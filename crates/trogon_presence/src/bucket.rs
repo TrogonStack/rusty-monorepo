@@ -558,17 +558,10 @@ async fn open_probe_stream(
     options: &ProvisionOptions,
 ) -> Result<stream::Stream, ProbeError> {
     let config = probe_stream_config(bucket, options);
-    match context.create_stream(config.clone()).await {
-        Ok(stream) => return Ok(stream),
-        Err(source) if is_name_taken(&source) => {}
+    match create_or_reuse_probe_stream(context, &config).await {
+        Ok(Some(stream)) => return Ok(stream),
+        Ok(None) => {}
         Err(source) => return Err(ProbeError::Create(source)),
-    }
-    if let Ok(mut existing) = context.get_stream(&config.name).await {
-        if let Ok(info) = existing.info().await {
-            if probe_stream_usable(&info.config, &config) {
-                return Ok(existing);
-            }
-        }
     }
     match context.delete_stream(&config.name).await {
         Ok(_) => {}
@@ -580,7 +573,29 @@ async fn open_probe_stream(
             })
         }
     }
-    context.create_stream(config).await.map_err(ProbeError::Create)
+    match create_or_reuse_probe_stream(context, &config).await {
+        Ok(Some(stream)) => Ok(stream),
+        Ok(None) => context.create_stream(config).await.map_err(ProbeError::Create),
+        Err(source) => Err(ProbeError::Create(source)),
+    }
+}
+
+async fn create_or_reuse_probe_stream(
+    context: &jetstream::Context,
+    config: &stream::Config,
+) -> Result<Option<stream::Stream>, CreateStreamError> {
+    match context.create_stream(config.clone()).await {
+        Ok(stream) => return Ok(Some(stream)),
+        Err(source) if is_name_taken(&source) => {}
+        Err(source) => return Err(source),
+    }
+    let Ok(mut existing) = context.get_stream(&config.name).await else {
+        return Ok(None);
+    };
+    match existing.info().await {
+        Ok(info) if probe_stream_usable(&info.config, config) => Ok(Some(existing)),
+        _ => Ok(None),
+    }
 }
 
 fn probe_stream_usable(existing: &stream::Config, wanted: &stream::Config) -> bool {
