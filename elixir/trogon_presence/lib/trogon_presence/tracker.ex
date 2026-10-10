@@ -60,6 +60,20 @@ defmodule TrogonPresence.Tracker do
   retry. A re-track changes the entry's `phx_ref`, so a caller still holding
   the `phx_ref` returned by its original `track/4` or `update/4` call will
   find that reference stale after a lease loss.
+
+  ## Disconnects
+
+  A NATS disconnect never takes this process down, because a crash here
+  would drop every presence tracked on the node and turn one network blip
+  into a leave for each of them. While the connection is gone, `track/4`
+  and `update/4` return `{:error, {:transport, reason}}` (see
+  `TrogonPresence.Writer`) and leave existing entries as they were; a
+  heartbeat tick logs its failure and the next tick retries. `untrack/3`
+  keeps `Phoenix.Presence`'s `:ok` contract and drops the entry locally;
+  a release the service never saw expires with its own lease. Once the
+  connection is back, heartbeats land again, and any entry the service
+  reclaimed in the meantime comes back through the `"gone"`/`"conflict"`
+  re-track above.
   """
 
   use GenServer

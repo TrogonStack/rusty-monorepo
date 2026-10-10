@@ -1,6 +1,7 @@
 defmodule TrogonPresence.ReconnectResnapshotTest do
   use TrogonPresence.Test.PresenceCase, async: false
   import Phoenix.ChannelTest
+  import ExUnit.CaptureLog
 
   @moduletag :capture_log
 
@@ -12,7 +13,7 @@ defmodule TrogonPresence.ReconnectResnapshotTest do
   alias TrogonPresence.{ConnectionId, HolderId, Key, Meta, Topic, Writer}
   alias TrogonPresence.Test.{Presence, TcpProxy, UserSocket}
 
-  setup %{nats: nats} do
+  setup %{nats: nats} = ctx do
     proxy = start_supervised!({TcpProxy, nats_port(nats)})
     name = :"reconnect_gnat_#{System.unique_integer([:positive])}"
 
@@ -41,7 +42,10 @@ defmodule TrogonPresence.ReconnectResnapshotTest do
     )
 
     start_supervised!(
-      {Presence, conn: name, resnapshot_ms: @resnapshot_ms, heartbeat_ms: @resnapshot_ms}
+      {Presence,
+       conn: name,
+       resnapshot_ms: @resnapshot_ms,
+       heartbeat_ms: Map.get(ctx, :heartbeat_ms, @resnapshot_ms)}
     )
 
     %{proxy: proxy, shim_conn: name}
@@ -87,6 +91,52 @@ defmodule TrogonPresence.ReconnectResnapshotTest do
     assert Enum.flat_map(diffs, &Map.keys(&1.joins)) == ["carol"]
     assert Enum.flat_map(diffs, &Map.keys(&1.leaves)) == ["bob"]
     assert keys(topic) == ["carol", "client"]
+  end
+
+  @tag heartbeat_ms: 100
+  test "writes and heartbeats while the shim is cut off fail softly and leave every tracked presence in place",
+       ctx do
+    suffix = System.unique_integer([:positive, :monotonic])
+    topic = "presence:cut-writes-#{suffix}"
+    online = %{"status" => "online"}
+
+    {:ok, _reply, _socket} =
+      UserSocket
+      |> socket("socket_id", %{})
+      |> subscribe_and_join(topic, %{"user_id" => "client"})
+
+    assert_push("presence_state", _initial_state, 5_000)
+    assert {:ok, _ref} = Presence.track(self(), topic, "alice", online)
+    await_keys!(topic, ["alice", "client"])
+    drain_pushes()
+
+    tracker = Process.whereis(Presence)
+    cut_pid = GenServer.whereis(ctx.shim_conn)
+    :ok = TcpProxy.cut(ctx.proxy)
+    await_connection_down!(cut_pid)
+
+    assert {:error, {:transport, _reason}} = Presence.track(self(), topic, "erin", online)
+
+    assert {:error, {:transport, _reason}} =
+             Presence.update(self(), topic, "alice", %{"status" => "away"})
+
+    {_result, cut_log} = with_log(fn -> refute_push("presence_diff", _payload, 500) end)
+    assert cut_log =~ "heartbeat request failed"
+    assert Process.whereis(Presence) == tracker
+
+    :ok = TcpProxy.restore(ctx.proxy)
+    await_connection!(ctx.shim_conn)
+
+    assert {:ok, _ref} = Presence.track(self(), topic, "erin", online)
+    assert_push("presence_diff", first, @convergence_ms)
+
+    {diffs, restored_log} = with_log(fn -> [first | collect_diffs(@quiet_ms)] end)
+
+    assert Enum.flat_map(diffs, &Map.keys(&1.joins)) == ["erin"]
+    assert Enum.flat_map(diffs, &Map.keys(&1.leaves)) == []
+    assert keys(topic) == ["alice", "client", "erin"]
+    refute restored_log =~ "heartbeat request failed"
+    assert Process.whereis(Presence) == tracker
   end
 
   defp track!(conn, connection, topic, raw_key) do
