@@ -546,8 +546,8 @@ impl AtomicBatch {
                 Some(gate) => gate.admit().await,
                 None => None,
             };
-            let retry_by = *deadline.get_or_insert_with(|| Instant::now() + budget.total);
-            let outcome = self.attempt(client, route, budget, pacer).await;
+            let finish_by = *deadline.get_or_insert_with(|| Instant::now() + budget.total);
+            let outcome = self.attempt(client, route, budget, finish_by, pacer).await;
             drop(permit);
             let rejection = match outcome {
                 Ok(BatchOutcome::Rejected(rejection)) if rejection.is_inflight_pressure() => rejection,
@@ -555,7 +555,7 @@ impl AtomicBatch {
             };
             retries += 1;
             let delay = pressure_backoff(retries - 1);
-            if retries >= PRESSURE_MAX_ATTEMPTS || Instant::now() + delay > retry_by {
+            if retries >= PRESSURE_MAX_ATTEMPTS || Instant::now() + delay >= finish_by {
                 return Ok(BatchOutcome::Rejected(rejection));
             }
             let Ok(fresh) = BatchId::generate() else {
@@ -572,10 +572,13 @@ impl AtomicBatch {
         client: &async_nats::Client,
         route: &JetStreamRoute,
         budget: BatchBudget,
+        finish_by: Instant,
         pacer: &P,
     ) -> Result<BatchOutcome, BatchPublishError> {
-        let started = Instant::now();
-        let finish_by = started + budget.total;
+        let remaining = finish_by.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(BatchOutcome::Unknown);
+        }
         let last = BatchPosition(self.records.len() as u16);
         let mut messages = self.outbound(route).into_iter();
         let Some(first) = messages.next() else {
@@ -590,7 +593,7 @@ impl AtomicBatch {
                 Request::new()
                     .headers(first.headers)
                     .payload(first.payload)
-                    .timeout(Some(budget.total)),
+                    .timeout(Some(remaining)),
             )
             .await
         {
@@ -628,12 +631,7 @@ impl AtomicBatch {
         Ok(BatchOutcome::Unknown)
     }
 
-    /// `position` is the commit message's own position in the batch. When it is
-    /// [`BatchPosition::FIRST`], this is the only message the batch sends, so a `NoResponders`
-    /// failure means the write never reached a stream and is classified the same way the
-    /// multi-record admission check classifies that failure: [`BatchPublishError::NoStream`],
-    /// not the ambiguous [`BatchOutcome::Unknown`]. A later commit position may follow records
-    /// that already reached the stream, so that ambiguity still applies there.
+    /// A `NoResponders` on the first position proves nothing reached a stream; later positions stay ambiguous.
     async fn commit(
         &self,
         client: &async_nats::Client,
