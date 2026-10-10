@@ -200,6 +200,36 @@ async fn an_incompatible_probe_stream_is_replaced() -> TestResult {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_compatible_probe_stream_with_other_limits_is_reused() -> TestResult {
+    let server = server_or_skip!();
+    let client = server.client().await;
+    let config = PresenceConfig::default();
+    let bucket = config.bucket().clone();
+    let context = jetstream::new(client.clone());
+    let original = context
+        .create_stream(stream::Config {
+            name: bucket.probe_stream_name(),
+            subjects: vec![format!("{}.>", bucket.probe_subject_root())],
+            allow_atomic_publish: true,
+            ..Default::default()
+        })
+        .await?
+        .cached_info()
+        .created;
+    Presence::provision(client.clone(), config.clone(), ProvisionOptions::default())
+        .await?
+        .close();
+    let reused = context.get_stream(bucket.probe_stream_name()).await?;
+    assert_eq!(
+        reused.cached_info().created,
+        original,
+        "a probe stream another provisioner may be using was replaced"
+    );
+    assert_eq!(probe_records(&client, &config).await?, 0, "probe records left behind");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_provisions_of_one_bucket_all_succeed() -> TestResult {
     const PROVISIONERS: usize = 8;
     let server = server_or_skip!();

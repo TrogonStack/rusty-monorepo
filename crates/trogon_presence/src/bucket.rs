@@ -563,6 +563,13 @@ async fn open_probe_stream(
         Err(source) if is_name_taken(&source) => {}
         Err(source) => return Err(ProbeError::Create(source)),
     }
+    if let Ok(mut existing) = context.get_stream(&config.name).await {
+        if let Ok(info) = existing.info().await {
+            if probe_stream_usable(&info.config, &config) {
+                return Ok(existing);
+            }
+        }
+    }
     match context.delete_stream(&config.name).await {
         Ok(_) => {}
         Err(source) if is_stream_missing(&source) => {}
@@ -574,6 +581,10 @@ async fn open_probe_stream(
         }
     }
     context.create_stream(config).await.map_err(ProbeError::Create)
+}
+
+fn probe_stream_usable(existing: &stream::Config, wanted: &stream::Config) -> bool {
+    existing.allow_atomic_publish && existing.subjects == wanted.subjects
 }
 
 pub(crate) fn is_name_taken(error: &CreateStreamError) -> bool {
