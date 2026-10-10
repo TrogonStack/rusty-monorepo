@@ -17,8 +17,18 @@ use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest}
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
 use super::outputs::FINAL_MD;
 use super::report::{GraderChoice, GradingStrategy, JudgeSettings, ReportDocument, RunRecord};
+use super::span_reference::SpanReference;
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
+use crate::telemetry::semconv::generated::attributes::GEN_AI_REQUEST_MODEL;
+use crate::telemetry::semconv::trg::{
+    EVAL_CASE_ID, EVAL_CASE_SPLIT, EVAL_GRADER_KIND, EVAL_GRADER_NAME, EVAL_ITERATION, EVAL_RUN_ID, EVAL_SCENARIO,
+};
+use crate::telemetry::ContentCapture;
+use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
+use tracing::field::Empty;
+
+pub(crate) mod telemetry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -441,6 +451,28 @@ fn suite_needs_a_judge(options: &GradeOptions, suite: &EvalSuite) -> bool {
 }
 
 pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport> {
+    let span = tracing::info_span!("grade", "otel.status_code" = Empty, { ERROR_TYPE } = Empty);
+    let graded = span.in_scope(|| grade_bundle(report_dir, options));
+    telemetry::record_result(&span, &graded);
+    graded
+}
+
+fn open_session<'a>(options: &'a GradeOptions, suite: &EvalSuite) -> Result<GradeSession<'a>> {
+    let span = tracing::info_span!(
+        "open judge session",
+        "otel.status_code" = Empty,
+        { ERROR_TYPE } = Empty,
+        { GEN_AI_REQUEST_MODEL } = Empty,
+    );
+    let session = span.in_scope(|| GradeSession::open(options, suite));
+    telemetry::record_result(&span, &session);
+    if let Some(judge) = session.as_ref().ok().and_then(|session| session.judge.as_ref()) {
+        span.record(GEN_AI_REQUEST_MODEL, judge.model.as_str());
+    }
+    session
+}
+
+fn grade_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport> {
     let report_path = report_dir.join("report.json");
     let report_content = std::fs::read_to_string(&report_path).map_err(|e| {
         EvalError::Validation(
@@ -467,7 +499,7 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
 
     let case_index: HashMap<String, &EvalCase> = suite.evals.iter().map(|c| (c.id.to_string(), c)).collect();
 
-    let session = GradeSession::open(&options, &suite)?;
+    let session = open_session(&options, &suite)?;
     let grading_strategy = build_grading_strategy(&options, session.judge.as_ref().map(|judge| &judge.model));
     if document.dimensions.grading_strategies.is_empty() {
         document.dimensions.grading_strategies.push(grading_strategy.clone());
@@ -505,55 +537,183 @@ pub fn grade_report_bundle(report_dir: &Path, options: GradeOptions) -> Result<G
             continue;
         }
 
-        let ctx = run_context(report_dir, run, &skill_path);
-        let mut assertion_results = Vec::with_capacity(case.graders.len() + run.mock_violations.len());
-
-        let declarative = DeclarativeContext::load(&ctx)?;
-        for grader in &case.graders {
-            assertion_results.push(grade_declaratively(grader, case, &declarative, &ctx, &session)?);
-        }
-
-        // A read-only fixture that was modified during the run is a failure of the run
-        // itself, not a property left for an assertion or grader to notice, so it is added
-        // here rather than left to whichever declared checks the case happens to have.
-        for path in &run.read_only_fixture_violations {
-            assertion_results.push(read_only_fixture_violation_result(path));
-        }
-
-        for violation in &run.mock_violations {
-            assertion_results.push(mock_violation_result(violation));
-        }
-
-        restore_when_nothing_would_be_scored(&mut assertion_results);
-
-        report.assertions_graded += assertion_results.len();
-        report
-            .ungraded_assertions
-            .extend(ungraded_assertion_texts(&assertion_results));
-        let counts = GradingCounts::tally(&assertion_results);
-        report.passed += counts.passed;
-        report.failed += counts.failed;
-        report.unsupported += counts.unsupported;
-        report.excluded += counts.excluded;
-        report.ungraded += counts.ungraded;
-        run_mut.case_score = case_score(&assertion_results);
-
-        let grading = build_grading_file(assertion_results)?;
-        validate_grading_document(&grading, options.strict)?;
-
-        let grading_path = ctx.run_dir.join("grading.json");
-        std::fs::write(&grading_path, serde_json::to_string_pretty(&grading)?)?;
-
-        store_grader_artifacts(run_mut, report_dir, &ctx, &options, &grading)?;
-
-        report.run_statuses.record(&run.status);
-        report.runs_graded += 1;
+        let span = grade_run_span(run);
+        run_mut.grade_trace = SpanReference::of(&span);
+        let graded = span.in_scope(|| {
+            grade_run(
+                RunToGrade {
+                    report_dir,
+                    run,
+                    case,
+                    skill_path: &skill_path,
+                    session: &session,
+                },
+                run_mut,
+                &mut report,
+            )
+        });
+        telemetry::record_result(&span, &graded);
+        graded?;
     }
 
     update_report_after_grading(&mut document, &runs, report_dir, &grading_strategy)?;
     std::fs::write(report_dir.join("report.json"), serde_json::to_string_pretty(&document)?)?;
 
     Ok(report)
+}
+
+/// One started run and everything grading it reads.
+struct RunToGrade<'a> {
+    report_dir: &'a Path,
+    run: &'a RunRecord,
+    case: &'a EvalCase,
+    skill_path: &'a Path,
+    session: &'a GradeSession<'a>,
+}
+
+/// `grade {run id}`, linked to the span the run executed under when the report
+/// recorded one, since the run finished in an earlier trace or an earlier part
+/// of this one.
+fn grade_run_span(run: &RunRecord) -> tracing::Span {
+    let span = tracing::info_span!(
+        "grade run",
+        "otel.name" = format!("grade {}", run.id),
+        "otel.status_code" = Empty,
+        { ERROR_TYPE } = Empty,
+        { EVAL_RUN_ID } = run.id.as_str(),
+        { EVAL_CASE_ID } = run.eval_case_id.as_str(),
+        { EVAL_CASE_SPLIT } = run.split.as_str(),
+        { EVAL_SCENARIO } = run.scenario_id.as_str(),
+        { EVAL_ITERATION } = i64::from(run.iteration),
+    );
+    telemetry::link_to(&span, run.span_reference());
+    span
+}
+
+/// The declared type a result is evaluated under, for the results grading adds
+/// on its own rather than from a declared grader.
+const READ_ONLY_FIXTURE_EVALUATION: &str = "read_only_fixture";
+const MOCK_EXPECTATION_EVALUATION: &str = "mock_expectation";
+
+fn grade_run(target: RunToGrade<'_>, run_mut: &mut RunRecord, report: &mut GradeReport) -> Result<()> {
+    let RunToGrade {
+        report_dir,
+        run,
+        case,
+        skill_path,
+        session,
+    } = target;
+    let options = session.options;
+    let ctx = run_context(report_dir, run, skill_path);
+    let mut assertion_results = Vec::with_capacity(case.graders.len() + run.mock_violations.len());
+    let mut grader_kinds: Vec<&'static str> = Vec::with_capacity(assertion_results.capacity());
+
+    let declarative = DeclarativeContext::load(&ctx)?;
+    for grader in &case.graders {
+        assertion_results.push(grade_with_span(grader, case, &declarative, &ctx, session)?);
+        grader_kinds.push(grader.grader.kind());
+    }
+
+    // A read-only fixture that was modified during the run is a failure of the run
+    // itself, not a property left for an assertion or grader to notice, so it is added
+    // here rather than left to whichever declared checks the case happens to have.
+    for path in &run.read_only_fixture_violations {
+        assertion_results.push(read_only_fixture_violation_result(path));
+        grader_kinds.push(READ_ONLY_FIXTURE_EVALUATION);
+    }
+
+    for violation in &run.mock_violations {
+        assertion_results.push(mock_violation_result(violation));
+        grader_kinds.push(MOCK_EXPECTATION_EVALUATION);
+    }
+
+    restore_when_nothing_would_be_scored(&mut assertion_results);
+
+    report.assertions_graded += assertion_results.len();
+    report
+        .ungraded_assertions
+        .extend(ungraded_assertion_texts(&assertion_results));
+    let counts = GradingCounts::tally(&assertion_results);
+    report.passed += counts.passed;
+    report.failed += counts.failed;
+    report.unsupported += counts.unsupported;
+    report.excluded += counts.excluded;
+    report.ungraded += counts.ungraded;
+    run_mut.case_score = case_score(&assertion_results);
+
+    emit_evaluations(run, &assertion_results, &grader_kinds, run_mut.case_score);
+
+    let span = tracing::info_span!(
+        "write grading results",
+        "otel.status_code" = Empty,
+        { ERROR_TYPE } = Empty
+    );
+    let written = span.in_scope(|| {
+        let grading = build_grading_file(assertion_results)?;
+        validate_grading_document(&grading, options.strict)?;
+
+        let grading_path = ctx.run_dir.join("grading.json");
+        std::fs::write(&grading_path, serde_json::to_string_pretty(&grading)?)?;
+
+        store_grader_artifacts(run_mut, report_dir, &ctx, options, &grading)
+    });
+    telemetry::record_result(&span, &written);
+    written?;
+
+    report.run_statuses.record(&run.status);
+    report.runs_graded += 1;
+    Ok(())
+}
+
+fn grade_with_span(
+    declared: &CaseGrader,
+    eval_case: &EvalCase,
+    declarative: &DeclarativeContext,
+    ctx: &RunContext,
+    session: &GradeSession,
+) -> Result<AssertionGradeResult> {
+    let kind = declared.grader.kind();
+    let name = declared.name.as_ref().map_or(kind, |name| name.as_str());
+    let span = tracing::info_span!(
+        "grader",
+        "otel.name" = format!("grader {kind}"),
+        "otel.status_code" = Empty,
+        { ERROR_TYPE } = Empty,
+        { EVAL_GRADER_NAME } = name,
+        { EVAL_GRADER_KIND } = kind,
+    );
+    let graded = span.in_scope(|| grade_declaratively(declared, eval_case, declarative, ctx, session));
+    telemetry::record_result(&span, &graded);
+    graded
+}
+
+/// One evaluation event and one counted assertion per result, plus the case's
+/// own score, each in the context of the span the run executed under.
+fn emit_evaluations(
+    run: &RunRecord,
+    results: &[AssertionGradeResult],
+    grader_kinds: &[&'static str],
+    score: Option<f64>,
+) {
+    let content = ContentCapture::from_env();
+    let parent = run.span_reference();
+    for (result, kind) in results.iter().zip(grader_kinds) {
+        let name = result.name.as_deref().unwrap_or(kind);
+        telemetry::Evaluation::of_assertion(result, name, kind, &run.eval_case_id, &run.id).emit(parent, content);
+        telemetry::count_assertion(result, kind);
+    }
+    if let Some(score) = score {
+        telemetry::Evaluation {
+            name: telemetry::CASE_SCORE_EVALUATION,
+            label: None,
+            score: Some(score),
+            explanation: None,
+            grader_kind: None,
+            case_id: &run.eval_case_id,
+            run_id: Some(&run.id),
+        }
+        .emit(parent, content);
+    }
 }
 
 fn run_context(report_dir: &Path, run: &RunRecord, skill_path: &Path) -> RunContext {
@@ -966,16 +1126,27 @@ fn grade_with_script(
             serde_json::Value::Object(hints.iter().map(|(key, value)| (key.clone(), value.clone())).collect());
     }
 
-    let mut child = Command::new(command)
+    let cli = telemetry::CliSpan::start(command);
+    let mut process = Command::new(command);
+    process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .current_dir(&ctx.workspace_dir)
-        .spawn()
-        .map_err(|e| EvalError::Validation(ValidationError::for_field("--grader-command", e.to_string()).into()))?;
+        .current_dir(&ctx.workspace_dir);
+    cli.inject(&mut process);
+    let mut child = process.spawn().map_err(|e| {
+        cli.spawn_failed();
+        EvalError::Validation(ValidationError::for_field("--grader-command", e.to_string()).into())
+    })?;
+    cli.spawned(child.id());
 
     let handover = feed_payload(&mut child, serde_json::to_string(&input)?.into_bytes());
-    let output = child.wait_with_output().map_err(EvalError::Io)?;
+    let output = child.wait_with_output().map_err(|e| {
+        cli.failed("wait_failed");
+        EvalError::Io(e)
+    })?;
+    cli.exited(&output.status);
+    drop(cli);
     payload_handed_over(handover)?;
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1050,7 +1221,7 @@ fn grade_with_llm(
     let mut opinions = Vec::with_capacity(votes.count() as usize);
     for _ in votes.ballots() {
         let reply = judge::judge(endpoint, &request, "--grader-model")?;
-        let parsed: LlmGraderResponse = judge::parse_json_reply(&reply, "--grader-model")?;
+        let parsed: LlmGraderResponse = judge::parse_json_reply(&reply.content, "--grader-model")?;
         opinions.push((parsed.passed, parsed));
     }
 
@@ -1212,7 +1383,7 @@ fn grade_against_baseline(
     let mut opinions = Vec::with_capacity(votes.count() as usize);
     for _ in votes.ballots() {
         let reply = judge::judge(endpoint, &request, "--grader-model")?;
-        let parsed: BaselineJudgeResponse = judge::parse_json_reply(&reply, "--grader-model")?;
+        let parsed: BaselineJudgeResponse = judge::parse_json_reply(&reply.content, "--grader-model")?;
         let winner = parse_winner(&parsed.better)?;
         opinions.push((pairing.at_least_as_good(winner), parsed));
     }
@@ -1864,8 +2035,11 @@ mod tests {
     };
     use crate::agentskills::runner::capabilities::HarnessControl;
     use crate::agentskills::runner::Runner;
+    use crate::agentskills::span_reference::SpanReference;
     use crate::agentskills::transcript::write_normalized_transcript;
     use crate::fs::testutil::MemFS;
+    use crate::telemetry::semconv::generated::attributes::{GEN_AI_EVALUATION_EXPLANATION, GEN_AI_EVALUATION_NAME};
+    use opentelemetry_semantic_conventions::attribute::{PROCESS_EXIT_CODE, PROCESS_PID};
     use std::fs;
     use tempfile::tempdir;
 
@@ -2914,6 +3088,7 @@ mod tests {
             skill_integrity: None,
             read_only_fixture_violations: Vec::new(),
             trace: None,
+            grade_trace: None,
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
@@ -4342,5 +4517,181 @@ echo '{"passed": true, "evidence": "script verified"}'
             .find(|result| result.evidence.contains("evals/files/input.csv"))
             .expect("the operator sees the fixture path, not just a count");
         assert!(!violation.passed);
+    }
+
+    fn run_reference() -> SpanReference {
+        serde_json::from_value(serde_json::json!({
+            "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+            "span_id": "00f067aa0ba902b7",
+        }))
+        .unwrap()
+    }
+
+    fn with_run_reference(report_dir: &Path, reference: SpanReference) -> String {
+        let path = report_dir.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        document["runs"][0]["trace"] = serde_json::to_value(reference).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+        document["runs"][0]["id"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn grading_a_run_links_to_the_run_span_and_reports_its_evaluations_in_that_trace() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _) = unobservable_report_dir(&temp);
+        let reference = run_reference();
+        let run_id = with_run_reference(&report_dir, reference);
+
+        let (report, trace, logs) = telemetry::testing::capture_with_logs(|| {
+            grade_report_bundle(
+                &report_dir,
+                GradeOptions {
+                    grader: GraderMode::None,
+                    ..GradeOptions::default()
+                },
+            )
+        });
+
+        report.unwrap();
+        let run_span_name = format!("grade {run_id}");
+        trace.assert_child_of(&run_span_name, "grade");
+        let run_span = trace.span(&run_span_name).unwrap();
+        assert!(
+            run_span
+                .links
+                .iter()
+                .any(|link| link.span_context.trace_id() == reference.trace_id()
+                    && link.span_context.span_id() == reference.span_id()),
+            "the grade span links back to the run span"
+        );
+        trace.assert_child_of("grader skill_used", &run_span_name);
+        trace.assert_child_of("grader contains", &run_span_name);
+        trace.assert_child_of("write grading results", &run_span_name);
+
+        let evaluations: Vec<_> = logs
+            .iter()
+            .filter(|record| record.event_name() == Some("gen_ai.evaluation.result"))
+            .collect();
+        assert!(evaluations.len() >= 3, "one per grader plus the case score");
+        for record in &evaluations {
+            assert_eq!(
+                record.trace_context().map(|context| context.trace_id),
+                Some(reference.trace_id()),
+                "an evaluation lands in the run's trace"
+            );
+        }
+        let names: Vec<String> = evaluations
+            .iter()
+            .filter_map(|record| {
+                record
+                    .attributes_iter()
+                    .find(|(key, _)| key.as_str() == GEN_AI_EVALUATION_NAME)
+                    .map(|(_, value)| format!("{value:?}"))
+            })
+            .collect();
+        assert!(
+            names.iter().any(|name| name.contains(telemetry::CASE_SCORE_EVALUATION)),
+            "{names:?}"
+        );
+        assert!(
+            evaluations.iter().all(|record| record
+                .attributes_iter()
+                .all(|(key, _)| key.as_str() != GEN_AI_EVALUATION_EXPLANATION)),
+            "the explanation quotes graded content, so it stays off by default"
+        );
+    }
+
+    #[test]
+    fn grading_a_run_records_its_grade_span_in_the_report_for_later_links() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _) = unobservable_report_dir(&temp);
+        let run_id = with_run_reference(&report_dir, run_reference());
+
+        let (report, trace) = crate::telemetry::testing::capture(|| {
+            grade_report_bundle(
+                &report_dir,
+                GradeOptions {
+                    grader: GraderMode::None,
+                    ..GradeOptions::default()
+                },
+            )
+        });
+
+        report.unwrap();
+        let grade_span = trace.span(&format!("grade {run_id}")).unwrap();
+        let document: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let run = document.runs.iter().find(|run| run.id == run_id).unwrap();
+        let recorded = run.grade_span_reference().expect("a traced grade is recorded");
+        assert_eq!(recorded.span_id(), grade_span.span_context.span_id());
+        assert_eq!(recorded.trace_id(), grade_span.span_context.trace_id());
+        assert_eq!(
+            run.span_reference(),
+            Some(&run_reference()),
+            "the run keeps the span it executed under"
+        );
+    }
+
+    #[test]
+    fn regrading_without_tracing_drops_a_grade_span_that_no_longer_describes_the_grade() {
+        let temp = tempdir().unwrap();
+        let (report_dir, _) = unobservable_report_dir(&temp);
+        let path = report_dir.join("report.json");
+        let mut document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        document["runs"][0]["grade_trace"] = serde_json::to_value(run_reference()).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let document: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(document["runs"][0].get("grade_trace").is_none());
+    }
+
+    #[test]
+    fn a_grader_script_runs_under_a_cli_span_it_receives_as_traceparent() {
+        let tmp = tempdir().unwrap();
+        let script = tmp.path().join("trace-grader.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\ncat >/dev/null\necho \"{\\\"passed\\\": true, \\\"evidence\\\": \\\"$TRACEPARENT\\\"}\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let options = GradeOptions {
+            grader: GraderMode::Script,
+            grader_command: Some(script.to_string_lossy().into_owned()),
+            ..GradeOptions::default()
+        };
+
+        let (result, trace) = crate::telemetry::testing::capture(|| {
+            grade_with_script("custom assertion", None, &baseline_case(), &ctx, &options)
+        });
+
+        let result = result.unwrap();
+        let process = trace.span("trace-grader.sh").expect("the script runs under a CLI span");
+        assert_eq!(process.span_kind, opentelemetry::trace::SpanKind::Client);
+        assert_eq!(
+            trace.attribute("trace-grader.sh", PROCESS_EXIT_CODE),
+            Some(opentelemetry::Value::I64(0))
+        );
+        assert!(matches!(
+            trace.attribute("trace-grader.sh", PROCESS_PID),
+            Some(opentelemetry::Value::I64(_))
+        ));
+        let context = &process.span_context;
+        assert_eq!(
+            result.evidence,
+            format!("00-{}-{}-01", context.trace_id(), context.span_id()),
+            "the script sees the CLI span as its parent"
+        );
     }
 }

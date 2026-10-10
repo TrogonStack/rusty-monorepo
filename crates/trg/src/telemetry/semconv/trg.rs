@@ -157,3 +157,14 @@ pub const EVAL_RUNS_METRIC: &str = "trg.eval.runs";
 
 /// Counter: USD the harness reported spending, per attempt.
 pub const EVAL_COST_METRIC: &str = "trg.eval.cost";
+
+/// The declared type of a grader (`contains`, `llm`, `baseline`, ...), beside
+/// `trg.eval.grader.name` on a grader span and on its evaluation event.
+pub const EVAL_GRADER_KIND: &str = "trg.eval.grader.kind";
+
+/// The two scenarios a `compare` pair puts side by side, as `{a}:{b}`.
+pub const EVAL_COMPARISON_PAIR: &str = "trg.eval.comparison.pair";
+
+/// Counter: graded assertions, split by `gen_ai.evaluation.score.label` and
+/// `trg.eval.grader.kind`.
+pub const EVAL_ASSERTIONS_METRIC: &str = "trg.eval.assertions";

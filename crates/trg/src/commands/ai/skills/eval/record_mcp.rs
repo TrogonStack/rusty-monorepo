@@ -6,14 +6,22 @@ use clap::Args;
 use serde::Serialize;
 use serde_json::Value;
 
+use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
+use tracing::field::Empty;
+
 use crate::agentskills::exit_code::ExitCode;
+use crate::agentskills::grading::telemetry::record_error;
 use crate::agentskills::mcp_recording::{write_recorded_mock, RealMcpServerSession};
 use crate::agentskills::mocks::{ServerName, ToolName};
 use crate::agentskills::real_mcp_server::{admit_real_server, RealServerCommand, RealServerTrust};
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
+use crate::telemetry::semconv::generated::attributes::GEN_AI_TOOL_NAME;
 
 use super::print_json;
+
+/// `error.type` when the trust gate refuses to start the real server.
+const REFUSED: &str = "refused";
 
 /// One `--call TOOL=JSON` flag: the tool to call, and the call's input as a JSON object.
 #[derive(Debug, Clone)]
@@ -171,10 +179,13 @@ impl RecordMcpArgs {
 
         let command = RealServerCommand::new(self.command.clone(), self.args.clone());
         let trust = RealServerTrust::granted(self.allow_real_mcp_server);
-        if let Err(e) = admit_real_server(&command, trust) {
+        let admit = tracing::info_span!("admit real server", "otel.status_code" = Empty, { ERROR_TYPE } = Empty);
+        if let Err(e) = admit.in_scope(|| admit_real_server(&command, trust)) {
+            record_error(&admit, REFUSED);
             eprintln!("{e}");
             return ExitCode::GateFailed;
         }
+        drop(admit);
 
         let timeout = Duration::from_secs(self.timeout_secs);
         let mut session = match RealMcpServerSession::spawn(&command) {
@@ -200,9 +211,18 @@ impl RecordMcpArgs {
                     return ExitCode::InfrastructureFailure;
                 }
             };
-            let path = match write_recorded_mock(&self.mocks_dir, &server, &call.tool, &call.input, &answer) {
+            let write = tracing::info_span!(
+                "write mock",
+                "otel.status_code" = Empty,
+                { GEN_AI_TOOL_NAME } = call.tool.as_str(),
+                { ERROR_TYPE } = Empty,
+            );
+            let written =
+                write.in_scope(|| write_recorded_mock(&self.mocks_dir, &server, &call.tool, &call.input, &answer));
+            let path = match written {
                 Ok(path) => path,
                 Err(e) => {
+                    record_error(&write, &e.error_type());
                     eprintln!("record-mcp: {e}");
                     return ExitCode::InfrastructureFailure;
                 }
