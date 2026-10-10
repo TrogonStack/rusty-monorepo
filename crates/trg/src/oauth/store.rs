@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use rmcp::transport::auth::{AuthError, CredentialStore, StoredCredentials};
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::oauth::telemetry::CredentialAccess;
 use crate::secrets::{Backend, SecretKey, SecretMap, SecretPath, SecretsError};
 use crate::shell::quote_for_shell;
 
@@ -164,6 +165,12 @@ impl OAuthCredentialStore {
     /// operator with a half-done logout and no answer. Erring toward telling
     /// them something is there is the safe direction.
     pub async fn fallback_is_reachable(&self) -> Result<Option<SecretPath>, AuthError> {
+        CredentialAccess::CheckShared
+            .traced(&self.server, self.shared_is_reachable())
+            .await
+    }
+
+    async fn shared_is_reachable(&self) -> Result<Option<SecretPath>, AuthError> {
         let Some(fallback) = self.fallback.clone() else {
             return Ok(None);
         };
@@ -185,6 +192,22 @@ impl OAuthCredentialStore {
 #[async_trait]
 impl CredentialStore for OAuthCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
+        CredentialAccess::Load.traced(&self.server, self.read()).await
+    }
+
+    async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
+        CredentialAccess::Save
+            .traced(&self.server, self.write(credentials))
+            .await
+    }
+
+    async fn clear(&self) -> Result<(), AuthError> {
+        CredentialAccess::Clear.traced(&self.server, self.erase()).await
+    }
+}
+
+impl OAuthCredentialStore {
+    async fn read(&self) -> Result<Option<StoredCredentials>, AuthError> {
         // `read_from` is deliberately not reset on the way in. Resetting up
         // front would clear it for reads that then fail, and a read that
         // failed says nothing about where the credential rmcp is still
@@ -237,7 +260,7 @@ impl CredentialStore for OAuthCredentialStore {
     /// rotation, it is one machine invalidating a credential, and a
     /// fallback-origin credential is not this machine's to invalidate. A
     /// save with no tokens always targets `self.path`, never the fallback.
-    async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
+    async fn write(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
         let json = serde_json::to_string(&credentials)
             .map_err(|e| AuthError::InternalError(format!("encode credentials: {e}")))?;
         let target = if credentials.token_response.is_some() {
@@ -277,7 +300,7 @@ impl CredentialStore for OAuthCredentialStore {
     /// reading the fallback at all; a `tracing::warn!` names what is still
     /// out there and how to actually remove it, since this store has no way
     /// to remove it itself.
-    async fn clear(&self) -> Result<(), AuthError> {
+    async fn erase(&self) -> Result<(), AuthError> {
         let existing = match self.backend.get(&self.path).await {
             Ok(existing) => existing,
             // `logout` is the documented recovery for an unreadable payload, so

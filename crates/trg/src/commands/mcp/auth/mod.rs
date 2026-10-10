@@ -7,7 +7,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::commands::mcp::McpContext;
-use crate::oauth::{ensure_credentials_for, store::OAuthCredentialStore, EnsureError, EnsureOutcome};
+use crate::oauth::{
+    ensure_credentials_for, store::OAuthCredentialStore, telemetry::OAuthHttp, EnsureError, EnsureOutcome,
+};
 use crate::output::{print_json, OutputFormat};
 use crate::secrets::SecretPath;
 use crate::term;
@@ -207,7 +209,8 @@ async fn login(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError>
     // credential still sitting at the shared path must not count as already
     // being authorized, or the flow never runs and `cred_path` never gets
     // written.
-    let outcome = ensure_credentials_for(ctx.endpoint()?, server, &ctx.backend, &ctx.cred_path, None).await?;
+    let http = OAuthHttp::traced().map_err(EnsureError::from)?;
+    let outcome = ensure_credentials_for(ctx.endpoint()?, server, &ctx.backend, &ctx.cred_path, None, &http).await?;
 
     if format.is_json() {
         let document = json!({
