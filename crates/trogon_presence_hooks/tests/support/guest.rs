@@ -37,6 +37,9 @@ fn build(example: &str, artifact: &str) -> Option<PathBuf> {
         .arg(guest.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&target_dir)
+        // Coverage instrumentation flags have no profiler runtime on wasm32-wasip2.
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .status();
     match status {
         Ok(status) if status.success() => Some(target_dir.join(TARGET).join("release").join(artifact)),
