@@ -233,7 +233,6 @@ fn pair_span(eval_case_id: &str, pair: &ScenarioPair) -> tracing::Span {
     let label = format!("{}:{}", pair.a.as_str(), pair.b.as_str());
     tracing::info_span!(
         "compare pair",
-        "otel.name" = format!("compare {label}"),
         "otel.status_code" = Empty,
         { ERROR_TYPE } = Empty,
         { EVAL_CASE_ID } = eval_case_id,
@@ -284,7 +283,6 @@ fn compare_report(report_dir: &Path, options: CompareOptions) -> Result<Vec<Comp
     for eval_case in &report.dimensions.eval_cases {
         let case_span = tracing::info_span!(
             "compare case",
-            "otel.name" = format!("compare case {}", eval_case.id),
             "otel.status_code" = Empty,
             { ERROR_TYPE } = Empty,
             { EVAL_CASE_ID } = eval_case.id.as_str(),
@@ -1075,7 +1073,7 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
         case_id: &str,
     ) -> &'a opentelemetry_sdk::trace::SpanData {
         let case = trace
-            .span(&format!("compare case {case_id}"))
+            .span_where("compare case", EVAL_CASE_ID, case_id)
             .unwrap_or_else(|| panic!("no span for {case_id}"));
         let pairs = trace.children_of(case);
         assert_eq!(pairs.len(), 1, "one span per pair under {case_id}");
@@ -1090,12 +1088,15 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
             crate::telemetry::testing::capture(|| run_comparisons(&traced.report_dir, script_judge_options()));
 
         assert_eq!(records.unwrap().len(), 2);
-        trace.assert_child_of("compare case case-a", "compare");
-        trace.assert_child_of("compare case case-b", "compare");
+        let compare = trace.span("compare").unwrap();
+        for case_id in ["case-a", "case-b"] {
+            let case = trace.span_where("compare case", EVAL_CASE_ID, case_id).unwrap();
+            assert_eq!(case.parent_span_id, compare.span_context.span_id(), "{case_id}");
+        }
         trace.assert_child_of("write report", "compare");
 
         let pair = pair_span_of(&trace, "case-a");
-        assert_eq!(pair.name, "compare with_skill:without_skill");
+        assert_eq!(pair.name, "compare pair");
         let attribute = |key: &str| {
             pair.attributes
                 .iter()
@@ -1173,20 +1174,25 @@ print(json.dumps({"winner": "A", "evidence": "A is clearer"}))
 
         assert!(records.is_err());
         let validation = Some(opentelemetry::Value::from("validation"));
-        for span in ["load outputs", "compare case case-a", "compare"] {
-            assert_eq!(trace.attribute(span, ERROR_TYPE), validation, "{span}");
+        let failed = [
+            trace.span("load outputs").unwrap(),
+            trace.span_where("compare case", EVAL_CASE_ID, "case-a").unwrap(),
+            trace.span("compare").unwrap(),
+        ];
+        for span in failed {
+            let error_type = span
+                .attributes
+                .iter()
+                .find(|kv| kv.key.as_str() == ERROR_TYPE)
+                .map(|kv| kv.value.clone());
+            assert_eq!(error_type, validation, "{}", span.name);
             assert!(
-                matches!(
-                    trace.span(span).unwrap().status,
-                    opentelemetry::trace::Status::Error { .. }
-                ),
-                "{span}"
+                matches!(span.status, opentelemetry::trace::Status::Error { .. }),
+                "{}",
+                span.name
             );
         }
-        assert_eq!(
-            trace.attribute("compare with_skill:without_skill", ERROR_TYPE),
-            validation
-        );
+        assert_eq!(trace.attribute("compare pair", ERROR_TYPE), validation);
         assert!(
             trace.span("write report").is_none(),
             "nothing is written after a failed pair"

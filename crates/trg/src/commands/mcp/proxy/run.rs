@@ -21,7 +21,9 @@ use rmcp::{
 use secrecy::ExposeSecret;
 use tracing::{debug, error, info, warn, Instrument, Span};
 
-use super::telemetry::{Connection, Endpoint, ExitReason, ObservedHttpClient, RequestSpan, Session, SessionEnd};
+use super::telemetry::{
+    operation_duration, Connection, Endpoint, ExitReason, ObservedHttpClient, RequestSpan, Session, SessionEnd,
+};
 use crate::{
     commands::mcp::McpContext,
     config::ResolvedMcpServer,
@@ -239,14 +241,19 @@ pub async fn refuse_over_stdio(reason: &dyn Display) {
 /// whatever span is current.
 fn refusal(request: &JsonRpcRequest<ClientRequest>, reason: &str) -> TxJsonRpcMessage<RoleServer> {
     let error = ErrorData::new(ErrorCode::INTERNAL_ERROR, reason.to_string(), None);
+    let connection = Connection::default();
     RequestSpan::open(
         &request.request,
         &request.id,
         &Span::current(),
-        &Connection::default(),
+        &connection,
         ContentCapture::from_env(),
     )
-    .refuse(&error);
+    .refuse(
+        &error,
+        &connection,
+        &operation_duration(&opentelemetry::global::meter("trg")),
+    );
     JsonRpcMessage::error(error, Some(request.id.clone()))
 }
 

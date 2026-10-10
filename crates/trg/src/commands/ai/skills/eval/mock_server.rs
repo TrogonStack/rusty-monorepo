@@ -17,9 +17,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use clap::Args;
-use opentelemetry_semantic_conventions::attribute::{ERROR_TYPE, JSONRPC_REQUEST_ID, RPC_RESPONSE_STATUS_CODE};
+use opentelemetry::metrics::{Histogram, Meter};
+use opentelemetry::KeyValue;
+use opentelemetry_semantic_conventions::attribute::{
+    ERROR_TYPE, JSONRPC_REQUEST_ID, NETWORK_TRANSPORT, RPC_RESPONSE_STATUS_CODE,
+};
 use serde_json::{json, Value};
 use tracing::field::Empty;
 
@@ -29,7 +34,18 @@ use crate::agentskills::mocks::{
 use crate::telemetry::semconv::generated::attributes::{
     gen_ai_operation_name, mcp_method_name, GEN_AI_OPERATION_NAME, GEN_AI_TOOL_NAME, MCP_METHOD_NAME,
 };
+use crate::telemetry::semconv::generated::metrics::MCP_SERVER_OPERATION_DURATION;
 use crate::telemetry::semconv::trg::{EVAL_MOCK_MATCH, EVAL_MOCK_SERVER};
+
+/// JSON-RPC over this process's stdin and stdout.
+const PIPE: &str = "pipe";
+
+/// `error.type` for a `tools/call` answered with `isError: true`.
+const TOOL_ERROR: &str = "tool_error";
+
+const DURATION_BUCKETS: [f64; 14] = [
+    0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
 
 /// `trg ai skills eval mock-server` flags. Not meant to be typed by hand: a run's
 /// generated `--mcp-config` is the only caller.
@@ -68,7 +84,8 @@ impl MockServerArgs {
 
         let stdin = io::stdin();
         let stdout = io::stdout();
-        match run_stdio_loop(stdin.lock(), stdout.lock(), &server, &tools, &self.calls) {
+        let durations = OperationDuration::on(&opentelemetry::global::meter("trg"));
+        match run_stdio_loop(stdin.lock(), stdout.lock(), &server, &tools, &self.calls, &durations) {
             Ok(()) => ExitCode::Success,
             Err(e) => {
                 eprintln!("mock-server: {e}");
@@ -112,6 +129,7 @@ fn run_stdio_loop(
     server: &ServerName,
     tools: &BTreeMap<ToolName, MockDeclaration>,
     calls_log_path: &PathBuf,
+    durations: &OperationDuration,
 ) -> io::Result<()> {
     for line in reader.lines() {
         let line = line?;
@@ -123,7 +141,7 @@ fn run_stdio_loop(
             Ok(value) => value,
             Err(_) => continue,
         };
-        if let Some(response) = handle_request(&request, server, tools, calls_log_path)? {
+        if let Some(response) = handle_request(&request, server, tools, calls_log_path, durations)? {
             let mut serialized = serde_json::to_string(&response)?;
             serialized.push('\n');
             writer.write_all(serialized.as_bytes())?;
@@ -144,12 +162,15 @@ fn handle_request(
     server: &ServerName,
     tools: &BTreeMap<ToolName, MockDeclaration>,
     calls_log_path: &PathBuf,
+    durations: &OperationDuration,
 ) -> io::Result<Option<Value>> {
     let Some(id) = request.get("id").cloned() else {
         return Ok(None);
     };
+    let received = Instant::now();
     let method = request.get("method").and_then(Value::as_str).unwrap_or_default();
-    let span = request_span(request, method, &id, server);
+    let tool = called_tool(request, method);
+    let span = request_span(method, tool, &id, server);
     let mut matched = None;
 
     let response = span
@@ -229,12 +250,64 @@ fn handle_request(
             })
         })
         .inspect_err(|error| {
+            let failure = Failure {
+                error_type: format!("{:?}", error.kind()),
+                status_code: None,
+            };
             span.record("otel.status_code", "ERROR");
-            span.record(ERROR_TYPE, format!("{:?}", error.kind()).as_str());
+            span.record(ERROR_TYPE, failure.error_type.as_str());
+            durations.record(received, method, tool, Some(&failure));
         })?;
 
-    record_response(&span, &response, matched);
+    let failure = record_response(&span, method, &response, matched);
+    durations.record(received, method, tool, failure.as_ref());
     Ok(Some(response))
+}
+
+/// `mcp.server.operation.duration`, recorded once for every request this server answers.
+struct OperationDuration(Histogram<f64>);
+
+impl OperationDuration {
+    fn on(meter: &Meter) -> Self {
+        Self(
+            meter
+                .f64_histogram(MCP_SERVER_OPERATION_DURATION)
+                .with_unit("s")
+                .with_description(
+                    "MCP request or notification duration as observed on the receiver from the time it was \
+                     received until the result or ack is sent.",
+                )
+                .with_boundaries(DURATION_BUCKETS.to_vec())
+                .build(),
+        )
+    }
+
+    fn record(&self, received: Instant, method: &str, tool: Option<&str>, failure: Option<&Failure>) {
+        let mut attributes = vec![
+            KeyValue::new(MCP_METHOD_NAME, method.to_string()),
+            KeyValue::new(NETWORK_TRANSPORT, PIPE),
+        ];
+        if let Some(tool) = tool {
+            attributes.push(KeyValue::new(
+                GEN_AI_OPERATION_NAME,
+                gen_ai_operation_name::EXECUTE_TOOL,
+            ));
+            attributes.push(KeyValue::new(GEN_AI_TOOL_NAME, tool.to_string()));
+        }
+        if let Some(failure) = failure {
+            if let Some(code) = &failure.status_code {
+                attributes.push(KeyValue::new(RPC_RESPONSE_STATUS_CODE, code.clone()));
+            }
+            attributes.push(KeyValue::new(ERROR_TYPE, failure.error_type.clone()));
+        }
+        self.0.record(received.elapsed().as_secs_f64(), &attributes);
+    }
+}
+
+/// Why a request did not succeed, as its span and its duration both report it.
+struct Failure {
+    error_type: String,
+    status_code: Option<String>,
 }
 
 /// How a mocked `tools/call` met its declaration, so a trace tells a call the agent got
@@ -266,11 +339,14 @@ impl MockMatch {
     }
 }
 
-/// The MCP SERVER span for one request, named `{mcp.method.name} {tool}` for a tool call.
-fn request_span(request: &Value, method: &str, id: &Value, server: &ServerName) -> tracing::Span {
-    let tool = (method == mcp_method_name::TOOLS_CALL)
+fn called_tool<'a>(request: &'a Value, method: &str) -> Option<&'a str> {
+    (method == mcp_method_name::TOOLS_CALL)
         .then(|| request.pointer("/params/name").and_then(Value::as_str))
-        .flatten();
+        .flatten()
+}
+
+/// The MCP SERVER span for one request, named `{mcp.method.name} {tool}` for a tool call.
+fn request_span(method: &str, tool: Option<&str>, id: &Value, server: &ServerName) -> tracing::Span {
     let name = match tool {
         Some(tool) => format!("{method} {tool}"),
         None => method.to_string(),
@@ -295,16 +371,35 @@ fn request_span(request: &Value, method: &str, id: &Value, server: &ServerName) 
     )
 }
 
-fn record_response(span: &tracing::Span, response: &Value, matched: Option<MockMatch>) {
+fn record_response(
+    span: &tracing::Span,
+    method: &str,
+    response: &Value,
+    matched: Option<MockMatch>,
+) -> Option<Failure> {
     if let Some(matched) = matched {
         span.record(EVAL_MOCK_MATCH, matched.as_str());
     }
-    if let Some(code) = response.pointer("/error/code").and_then(Value::as_i64) {
+    let failure = if let Some(code) = response.pointer("/error/code").and_then(Value::as_i64) {
         let code = code.to_string();
-        span.record("otel.status_code", "ERROR");
         span.record(RPC_RESPONSE_STATUS_CODE, code.as_str());
-        span.record(ERROR_TYPE, code.as_str());
-    }
+        Failure {
+            error_type: code.clone(),
+            status_code: Some(code),
+        }
+    } else if method == mcp_method_name::TOOLS_CALL
+        && response.pointer("/result/isError").and_then(Value::as_bool) == Some(true)
+    {
+        Failure {
+            error_type: TOOL_ERROR.to_string(),
+            status_code: None,
+        }
+    } else {
+        return None;
+    };
+    span.record("otel.status_code", "ERROR");
+    span.record(ERROR_TYPE, failure.error_type.as_str());
+    Some(failure)
 }
 
 fn append_call_log(path: &PathBuf, entry: &MockCallLogEntry) -> io::Result<()> {
@@ -326,6 +421,11 @@ fn error(id: Value, code: i64, message: String) -> Value {
 mod tests {
     use super::*;
     use crate::agentskills::mocks::MockType;
+    use crate::telemetry::testing::capture_metrics;
+
+    fn untracked() -> OperationDuration {
+        OperationDuration::on(&opentelemetry::global::meter("trg"))
+    }
 
     fn declaration(body: &str) -> MockDeclaration {
         MockDeclaration {
@@ -370,7 +470,9 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}});
         let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls, &untracked())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response["result"]["protocolVersion"], "2025-03-26");
     }
@@ -383,7 +485,9 @@ mod tests {
         let request = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
         let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls, &untracked())
+            .unwrap()
+            .unwrap();
 
         let names: Vec<&str> = response["result"]["tools"]
             .as_array()
@@ -405,7 +509,9 @@ mod tests {
         });
         let calls_path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls_path).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls_path, &untracked())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response["result"]["content"][0]["text"], "issue created");
         assert_eq!(response["result"]["isError"], false);
@@ -448,7 +554,9 @@ mod tests {
         });
         let calls_path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls_path).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls_path, &untracked())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             response["result"]["content"][0]["text"], "issue created",
@@ -481,7 +589,9 @@ mod tests {
         });
         let calls_path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls_path).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls_path, &untracked())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response["error"]["code"], MOCK_SUBSTITUTION_FAILED);
 
@@ -505,7 +615,9 @@ mod tests {
         });
         let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls, &untracked())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response["error"]["code"], INVALID_PARAMS);
     }
@@ -517,7 +629,9 @@ mod tests {
         let request = json!({"jsonrpc": "2.0", "id": 5, "method": "resources/list"});
         let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls, &untracked())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response["error"]["code"], METHOD_NOT_FOUND);
     }
@@ -529,7 +643,7 @@ mod tests {
         let request = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls).unwrap();
+        let response = handle_request(&request, &server, &tools, &calls, &untracked()).unwrap();
 
         assert!(response.is_none());
     }
@@ -545,7 +659,9 @@ mod tests {
         });
         let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let response = handle_request(&request, &server, &tools, &calls).unwrap().unwrap();
+        let response = handle_request(&request, &server, &tools, &calls, &untracked())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response["error"]["code"], MOCK_SUBSTITUTION_FAILED);
     }
@@ -559,7 +675,7 @@ mod tests {
         let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
         let mut output = Vec::new();
 
-        run_stdio_loop(input.as_slice(), &mut output, &server, &tools, &calls).unwrap();
+        run_stdio_loop(input.as_slice(), &mut output, &server, &tools, &calls, &untracked()).unwrap();
 
         let response: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(response["result"]["tools"][0]["name"], "create_issue");
@@ -576,8 +692,9 @@ mod tests {
         });
         let calls_path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let (_, trace) =
-            crate::telemetry::testing::capture(|| handle_request(&request, &server, &tools, &calls_path).unwrap());
+        let (_, trace) = crate::telemetry::testing::capture(|| {
+            handle_request(&request, &server, &tools, &calls_path, &untracked()).unwrap()
+        });
 
         let span = trace.span("tools/call create_issue").expect("server span exported");
         assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Server);
@@ -606,8 +723,9 @@ mod tests {
         });
         let calls_path = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
-        let (_, trace) =
-            crate::telemetry::testing::capture(|| handle_request(&request, &server, &tools, &calls_path).unwrap());
+        let (_, trace) = crate::telemetry::testing::capture(|| {
+            handle_request(&request, &server, &tools, &calls_path, &untracked()).unwrap()
+        });
 
         let name = "tools/call delete_repo";
         let span = trace.span(name).expect("server span exported");
@@ -617,5 +735,86 @@ mod tests {
             trace.attribute(name, RPC_RESPONSE_STATUS_CODE).unwrap().as_str(),
             INVALID_PARAMS.to_string()
         );
+    }
+
+    #[test]
+    fn every_answered_request_records_its_server_duration_with_why_it_failed() {
+        let server = ServerName::from("github");
+        let mut tools = BTreeMap::new();
+        tools.insert(ToolName::from("create_issue"), declaration("issue created"));
+        let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+        let requests = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                   "params": {"name": "create_issue", "arguments": {}}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                   "params": {"name": "delete_repo", "arguments": {}}}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        ];
+
+        let ((), points) = capture_metrics(|meter| {
+            let durations = OperationDuration::on(meter);
+            for request in &requests {
+                handle_request(request, &server, &tools, &calls, &durations).unwrap();
+            }
+        });
+
+        let points: Vec<_> = points
+            .iter()
+            .filter(|point| point.name == MCP_SERVER_OPERATION_DURATION)
+            .collect();
+        assert_eq!(points.len(), 2, "one series per outcome, none for the notification");
+        let answered = points
+            .iter()
+            .find(|point| point.attribute(GEN_AI_TOOL_NAME).as_deref() == Some("create_issue"))
+            .expect("the answered call has a duration");
+        assert_eq!(answered.count, 1);
+        assert_eq!(answered.attribute(MCP_METHOD_NAME).as_deref(), Some("tools/call"));
+        assert_eq!(answered.attribute(NETWORK_TRANSPORT).as_deref(), Some(PIPE));
+        assert_eq!(answered.attribute(ERROR_TYPE), None);
+
+        let refused = points
+            .iter()
+            .find(|point| point.attribute(GEN_AI_TOOL_NAME).as_deref() == Some("delete_repo"))
+            .expect("the refused call has a duration");
+        let code = INVALID_PARAMS.to_string();
+        assert_eq!(refused.attribute(ERROR_TYPE).as_deref(), Some(code.as_str()));
+        assert_eq!(
+            refused.attribute(RPC_RESPONSE_STATUS_CODE).as_deref(),
+            Some(code.as_str())
+        );
+    }
+
+    #[test]
+    fn a_tool_answer_flagged_as_an_error_is_a_tool_error() {
+        let server = ServerName::from("github");
+        let mut tools = BTreeMap::new();
+        tools.insert(
+            ToolName::from("create_issue"),
+            MockDeclaration {
+                error: Some("rate limited".to_string()),
+                ..declaration("")
+            },
+        );
+        let request = json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                             "params": {"name": "create_issue", "arguments": {}}});
+        let calls = tempfile::NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
+
+        let ((response, trace), points) = capture_metrics(|meter| {
+            let durations = OperationDuration::on(meter);
+            crate::telemetry::testing::capture(|| {
+                handle_request(&request, &server, &tools, &calls, &durations)
+                    .unwrap()
+                    .unwrap()
+            })
+        });
+
+        assert_eq!(response["result"]["isError"], true);
+        let name = "tools/call create_issue";
+        assert_eq!(trace.attribute(name, ERROR_TYPE).unwrap().as_str(), TOOL_ERROR);
+        let point = points
+            .iter()
+            .find(|point| point.name == MCP_SERVER_OPERATION_DURATION)
+            .expect("the call has a duration");
+        assert_eq!(point.attribute(ERROR_TYPE).as_deref(), Some(TOOL_ERROR));
     }
 }

@@ -1316,7 +1316,7 @@ impl RunExecution<'_> {
             );
             let result = attempt.in_scope(|| {
                 discard_mock_calls_from_earlier_attempts(&run_dir, &run.id);
-                trace_mock_servers(&mock_set, &run_dir);
+                trace_mock_servers(&mock_set, &run_dir, self.telemetry_forwarding);
                 let result = invoke_runner(self.runner, &request);
                 if let Ok(outcome) = &result {
                     self.cost_ledger.record(outcome.cost.as_ref());
@@ -1693,11 +1693,11 @@ fn materialize_mock_set_for_run(
 /// Rewrite the run's mcp config so the mock servers this attempt starts continue its
 /// trace. The config already written stays in place when this fails, since a mock server
 /// that starts a trace of its own still answers every call.
-fn trace_mock_servers(mock_set: &MockSet, run_dir: &Path) {
+fn trace_mock_servers(mock_set: &MockSet, run_dir: &Path, forwarding: TelemetryForwarding) {
     if mock_set.is_empty() {
         return;
     }
-    let server_env = MockServerEnv::from_current_trace();
+    let server_env = MockServerEnv::from_current_trace(forwarding);
     if !server_env.is_empty() {
         let _ = materialize_mock_set_for_run(mock_set, run_dir, &server_env);
     }

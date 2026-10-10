@@ -8,8 +8,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// A span's W3C trace and span id, serialized as lowercase hex.
 ///
-/// Only ever written when tracing was active for the invocation that produced the report,
-/// so its absence means "nothing to link to" rather than a broken reference.
+/// Only ever written when the invocation that produced the report exported the span, so
+/// its absence means "nothing to link to" rather than a broken reference, and a link built
+/// from it always names a span a backend received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SpanReference {
     #[serde(serialize_with = "hex_trace_id", deserialize_with = "parse_trace_id")]
@@ -21,11 +22,12 @@ pub struct SpanReference {
 }
 
 impl SpanReference {
-    /// The span's OTel identity, or `None` when no trace exporter gave it one.
+    /// The span's OTel identity, or `None` when no trace exporter gave it one or the
+    /// sampler dropped it, since a link to an unexported span leads nowhere.
     pub fn of(span: &tracing::Span) -> Option<Self> {
         let context = span.context();
         let span_context = context.span().span_context().clone();
-        span_context.is_valid().then(|| Self {
+        (span_context.is_valid() && span_context.is_sampled()).then(|| Self {
             trace_id: span_context.trace_id(),
             span_id: span_context.span_id(),
         })
@@ -99,6 +101,35 @@ mod tests {
         let back: SpanReference = serde_json::from_value(json).unwrap();
         assert_eq!(back, reference);
         assert!(back.span_context().is_remote());
+    }
+
+    #[test]
+    fn a_span_the_sampler_dropped_has_nothing_to_reference() {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+        use tracing_subscriber::prelude::*;
+
+        crate::telemetry::testing::consult_every_dispatcher();
+        let provider = SdkTracerProvider::builder().with_sampler(Sampler::AlwaysOff).build();
+        let subscriber =
+            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(provider.tracer("trg")));
+
+        let (valid, reference) = tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("run");
+            let valid = span.context().span().span_context().is_valid();
+            (valid, SpanReference::of(&span))
+        });
+
+        assert!(valid, "the dropped span still has an identity of its own");
+        assert_eq!(reference, None);
+    }
+
+    #[test]
+    fn a_sampled_span_is_referenced_and_linked_to_as_sampled() {
+        let (reference, _) = crate::telemetry::testing::capture(|| {
+            SpanReference::of(&tracing::info_span!("run")).expect("a sampled span is referenced")
+        });
+        assert!(reference.span_context().is_sampled());
     }
 
     #[test]

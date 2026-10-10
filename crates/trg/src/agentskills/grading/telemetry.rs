@@ -20,7 +20,7 @@ use crate::telemetry::semconv::generated::attributes::{
     GEN_AI_EVALUATION_EXPLANATION, GEN_AI_EVALUATION_NAME, GEN_AI_EVALUATION_SCORE_LABEL, GEN_AI_EVALUATION_SCORE_VALUE,
 };
 use crate::telemetry::semconv::trg::{EVAL_ASSERTIONS_METRIC, EVAL_CASE_ID, EVAL_GRADER_KIND, EVAL_RUN_ID};
-use crate::telemetry::ContentCapture;
+use crate::telemetry::{ContentCapture, LOGS_ONLY_TARGET};
 
 const NONZERO_EXIT: &str = "nonzero_exit";
 const SIGNALED: &str = "signaled";
@@ -210,7 +210,9 @@ impl<'a> Evaluation<'a> {
     /// Emits the event through the logs bridge in the context of `parent` when
     /// the report recorded one, so it lands in the run's trace even though that
     /// run span ended in an earlier pass, and in the current span's otherwise.
-    /// The explanation quotes what was graded, so it is content.
+    /// The explanation quotes what was graded, so it is content, and the event goes
+    /// to the logs signal alone: as a span event it would put that content on a trace
+    /// whatever the capture mode allows there.
     pub(crate) fn emit(&self, parent: Option<&SpanReference>, content: ContentCapture) {
         let explanation = self.explanation.filter(|_| content.includes_event());
         let _context = parent.map(|reference| {
@@ -220,6 +222,7 @@ impl<'a> Evaluation<'a> {
         });
         tracing::event!(
             name: "gen_ai.evaluation.result",
+            target: LOGS_ONLY_TARGET,
             tracing::Level::INFO,
             { GEN_AI_EVALUATION_NAME } = self.name,
             { GEN_AI_EVALUATION_SCORE_VALUE } = self.score,
@@ -258,7 +261,8 @@ pub(crate) mod testing {
     use crate::telemetry::testing::CapturedTrace;
 
     /// Like [`crate::telemetry::testing::capture`], also keeping the log records the tracing bridge
-    /// turned events into.
+    /// turned events into. Both layers carry the filters `trg` exports through, so what
+    /// reaches each signal here is what reaches it in a real process.
     pub(crate) fn capture_with_logs<T>(work: impl FnOnce() -> T) -> (T, CapturedTrace, Vec<SdkLogRecord>) {
         crate::telemetry::testing::consult_every_dispatcher();
         let spans = InMemorySpanExporter::default();
@@ -266,8 +270,12 @@ pub(crate) mod testing {
         let logs = InMemoryLogExporter::default();
         let logger_provider = SdkLoggerProvider::builder().with_simple_exporter(logs.clone()).build();
         let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("trg")))
-            .with(OpenTelemetryTracingBridge::new(&logger_provider));
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(tracer_provider.tracer("trg"))
+                    .with_filter(crate::telemetry::trace_filter()),
+            )
+            .with(OpenTelemetryTracingBridge::new(&logger_provider).with_filter(crate::telemetry::log_filter()));
         let output = tracing::subscriber::with_default(subscriber, work);
         let _ = tracer_provider.force_flush();
         let _ = logger_provider.force_flush();
@@ -283,5 +291,59 @@ pub(crate) mod testing {
             .map(|log| log.record)
             .collect();
         (output, trace, records)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::capture_with_logs;
+    use super::*;
+
+    fn evaluation() -> Evaluation<'static> {
+        Evaluation {
+            name: "contains",
+            label: Some("fail"),
+            score: Some(0.0),
+            explanation: Some("the answer quoted the customer's address"),
+            grader_kind: Some("contains"),
+            case_id: "case",
+            run_id: Some("run"),
+        }
+    }
+
+    #[test]
+    fn an_event_only_evaluation_carries_its_explanation_on_the_log_and_nothing_onto_the_span() {
+        let ((), trace, logs) = capture_with_logs(|| {
+            tracing::info_span!("grade").in_scope(|| evaluation().emit(None, ContentCapture::EventOnly));
+        });
+
+        let grade = trace.span("grade").expect("grade span exported");
+        assert!(
+            grade.events.is_empty(),
+            "an evaluation never becomes a span event: {:?}",
+            grade.events
+        );
+        assert!(grade
+            .attributes
+            .iter()
+            .all(|kv| kv.key.as_str() != GEN_AI_EVALUATION_EXPLANATION));
+
+        let record = logs
+            .iter()
+            .find(|record| record.event_name() == Some("gen_ai.evaluation.result"))
+            .expect("the evaluation reaches the logs signal");
+        let explanation = record
+            .attributes_iter()
+            .find(|(key, _)| key.as_str() == GEN_AI_EVALUATION_EXPLANATION)
+            .map(|(_, value)| format!("{value:?}"));
+        assert!(
+            explanation.is_some_and(|value| value.contains("the customer's address")),
+            "the log record keeps the explanation event capture allows"
+        );
+        assert_eq!(
+            record.trace_context().map(|context| context.span_id),
+            Some(grade.span_context.span_id()),
+            "the log record still correlates with the span it was emitted under"
+        );
     }
 }

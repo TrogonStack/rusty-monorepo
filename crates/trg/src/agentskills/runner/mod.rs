@@ -59,11 +59,24 @@ pub enum Runner {
 
 impl Runner {
     pub fn invoke(self, request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
-        let mut outcome = match self {
+        let result = match self {
             Self::CursorAgent => cursor_agent::run(request),
             Self::ClaudeCode => claude_code::run(request),
             Self::Codex => codex::run(request),
-        }?;
+        };
+        // Run unconditionally, regardless of which backend ran or whether it succeeded,
+        // failed, or timed out: the harness has exited either way, and the `mcp-launch`
+        // copy it was handed is a run-directory file this crate controls, so this is the
+        // one place that can scrub it before the result is handed back.
+        let scrub_result = request.mcp_config.as_ref().map(|mcp_config| {
+            telemetry::in_step("scrub mcp launch config", || {
+                mcp_config.scrub().map_err(RunnerError::from)
+            })
+        });
+        let mut outcome = result?;
+        if let Some(scrub_result) = scrub_result {
+            scrub_result?;
+        }
         // Checked here, once, regardless of which backend ran: permissions are only a
         // courtesy (an agent can delete a read-only file and recreate it in its place),
         // so content is re-verified against the source after every invocation.

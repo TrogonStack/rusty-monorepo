@@ -3,9 +3,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use opentelemetry::metrics::{Meter, MeterProvider as _};
 use opentelemetry::trace::{SpanId, TracerProvider as _};
-use opentelemetry::Value;
+use opentelemetry::{KeyValue, Value};
 use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData, SpanExporter};
 use tracing_subscriber::prelude::*;
 
@@ -41,6 +44,53 @@ pub(crate) fn capture<T>(work: impl FnOnce() -> T) -> (T, CapturedTrace) {
     (output, CapturedTrace { spans })
 }
 
+/// One histogram series a [`capture_metrics`] run exported.
+#[derive(Debug, Clone)]
+pub(crate) struct HistogramPoint {
+    pub name: String,
+    pub attributes: Vec<KeyValue>,
+    pub count: u64,
+}
+
+impl HistogramPoint {
+    pub fn attribute(&self, key: &str) -> Option<String> {
+        self.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    }
+}
+
+/// Runs `work` against a meter exporting to memory, returning every `f64`
+/// histogram series it recorded.
+pub(crate) fn capture_metrics<T>(work: impl FnOnce(&Meter) -> T) -> (T, Vec<HistogramPoint>) {
+    let exporter = InMemoryMetricExporter::default();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(PeriodicReader::builder(exporter.clone()).build())
+        .build();
+    let output = work(&provider.meter("trg"));
+    provider.force_flush().expect("in-memory metrics flush");
+    let points = exporter
+        .get_finished_metrics()
+        .expect("in-memory exporter is never shut down here")
+        .iter()
+        .flat_map(|resource| resource.scope_metrics())
+        .flat_map(|scope| scope.metrics())
+        .flat_map(|metric| match metric.data() {
+            AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                .data_points()
+                .map(|point| HistogramPoint {
+                    name: metric.name().to_string(),
+                    attributes: point.attributes().cloned().collect(),
+                    count: point.count(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    (output, points)
+}
+
 /// An exporter whose spans survive the provider shutting down, unlike
 /// [`InMemorySpanExporter`], for asserting on what a shutdown path exported.
 #[derive(Clone, Debug, Default)]
@@ -66,6 +116,25 @@ impl CapturedTrace {
 
     pub fn spans_named(&self, name: &str) -> Vec<&SpanData> {
         self.spans.iter().filter(|span| span.name == name).collect()
+    }
+
+    /// The span named `name` whose string attribute `key` is `value`, for the spans
+    /// that share one low-cardinality name and tell instances apart by attribute.
+    pub fn span_where(&self, name: &str, key: &str, value: &str) -> Option<&SpanData> {
+        self.spans.iter().find(|span| {
+            span.name == name
+                && span
+                    .attributes
+                    .iter()
+                    .any(|kv| kv.key.as_str() == key && kv.value.as_str() == value)
+        })
+    }
+
+    pub fn children_named<'a>(&'a self, parent: &SpanData, name: &str) -> Vec<&'a SpanData> {
+        self.children_of(parent)
+            .into_iter()
+            .filter(|span| span.name == name)
+            .collect()
     }
 
     pub fn attribute(&self, span: &str, key: &str) -> Option<Value> {

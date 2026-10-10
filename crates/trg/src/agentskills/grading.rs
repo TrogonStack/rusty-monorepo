@@ -571,13 +571,12 @@ struct RunToGrade<'a> {
     session: &'a GradeSession<'a>,
 }
 
-/// `grade {run id}`, linked to the span the run executed under when the report
+/// `grade run`, linked to the span the run executed under when the report
 /// recorded one, since the run finished in an earlier trace or an earlier part
 /// of this one.
 fn grade_run_span(run: &RunRecord) -> tracing::Span {
     let span = tracing::info_span!(
         "grade run",
-        "otel.name" = format!("grade {}", run.id),
         "otel.status_code" = Empty,
         { ERROR_TYPE } = Empty,
         { EVAL_RUN_ID } = run.id.as_str(),
@@ -4553,9 +4552,13 @@ echo '{"passed": true, "evidence": "script verified"}'
         });
 
         report.unwrap();
-        let run_span_name = format!("grade {run_id}");
-        trace.assert_child_of(&run_span_name, "grade");
-        let run_span = trace.span(&run_span_name).unwrap();
+        let run_span = trace
+            .span_where("grade run", EVAL_RUN_ID, &run_id)
+            .expect("the run's grade span, told apart by its run id");
+        assert_eq!(
+            run_span.parent_span_id,
+            trace.span("grade").unwrap().span_context.span_id()
+        );
         assert!(
             run_span
                 .links
@@ -4564,9 +4567,9 @@ echo '{"passed": true, "evidence": "script verified"}'
                     && link.span_context.span_id() == reference.span_id()),
             "the grade span links back to the run span"
         );
-        trace.assert_child_of("grader skill_used", &run_span_name);
-        trace.assert_child_of("grader contains", &run_span_name);
-        trace.assert_child_of("write grading results", &run_span_name);
+        for child in ["grader skill_used", "grader contains", "write grading results"] {
+            assert_eq!(trace.children_named(run_span, child).len(), 1, "{child}");
+        }
 
         let evaluations: Vec<_> = logs
             .iter()
@@ -4618,7 +4621,7 @@ echo '{"passed": true, "evidence": "script verified"}'
         });
 
         report.unwrap();
-        let grade_span = trace.span(&format!("grade {run_id}")).unwrap();
+        let grade_span = trace.span_where("grade run", EVAL_RUN_ID, &run_id).unwrap();
         let document: ReportDocument =
             serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
         let run = document.runs.iter().find(|run| run.id == run_id).unwrap();

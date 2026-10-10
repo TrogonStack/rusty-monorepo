@@ -30,8 +30,9 @@ pub use env::{EnvLookup, ProcessEnv};
 pub use identity::CommandIdentity;
 
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, Once, OnceLock};
 use std::time::Duration;
 
 use opentelemetry::trace::{Status, TraceContextExt as _, TracerProvider as _};
@@ -66,6 +67,10 @@ const DEFAULT_FILE_FILTER: &str = "info,trg=debug,rmcp=debug";
 /// them reaching the OTel log bridge would be exported by the very pipeline
 /// that produced it, and an export failure would then feed itself.
 const EXPORT_PIPELINE_TARGETS: [&str; 7] = ["opentelemetry", "reqwest", "hyper", "h2", "tower", "rustls", "tonic"];
+
+/// Events emitted under this target reach the logs signal and never become span
+/// events, for log-based events whose attributes may carry content a trace must not.
+pub(crate) const LOGS_ONLY_TARGET: &str = "trg::logs_only";
 
 /// The providers [`init`] built, reachable from the termination path so a
 /// signal can flush them before re-raising.
@@ -227,18 +232,48 @@ impl OtelSignal {
             .map(|(var, _)| var)
     }
 
+    fn exporter_requested(self, env: &impl EnvLookup) -> ExporterRequest {
+        let Some(value) = env.get(self.exporter_var()) else {
+            return ExporterRequest::Otlp;
+        };
+        let entries: Vec<String> = value
+            .split(',')
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        if entries.iter().all(|entry| entry == "otlp") {
+            ExporterRequest::Otlp
+        } else if entries.iter().all(|entry| entry == "none") {
+            ExporterRequest::None
+        } else {
+            ExporterRequest::Unsupported(value.trim().to_string())
+        }
+    }
+
+    fn endpoint_configured(self, env: &impl EnvLookup) -> bool {
+        env.get(self.endpoint_var()).is_some() || env.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_some()
+    }
+
+    #[cfg(test)]
     fn enabled(self, env: &impl EnvLookup) -> bool {
-        let endpoint_configured =
-            env.get(self.endpoint_var()).is_some() || env.get("OTEL_EXPORTER_OTLP_ENDPOINT").is_some();
-        let exporter_none = env
-            .get(self.exporter_var())
-            .is_some_and(|v| v.eq_ignore_ascii_case("none"));
-        endpoint_configured && !exporter_none
+        self.endpoint_configured(env) && self.exporter_requested(env) == ExporterRequest::Otlp
     }
 }
 
+/// What `OTEL_{SIGNAL}_EXPORTER` asks for. Unset or empty means the spec's
+/// default, `otlp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExporterRequest {
+    Otlp,
+    None,
+    /// Any exporter but OTLP, such as `console`, which would write to the
+    /// stdout trg owns for its own output.
+    Unsupported(String),
+}
+
 /// An OTLP signal that was asked for but will not be exported, reported to
-/// the file log once the subscriber exists to carry it.
+/// the file log once the subscriber exists to carry it, and on stderr when a
+/// setting is to blame.
 enum ExportProblem {
     BuildFailed {
         signal: OtelSignal,
@@ -247,12 +282,36 @@ enum ExportProblem {
     /// Only the `http-proto` transport is compiled in. The signal is skipped
     /// rather than sent over HTTP anyway: an endpoint configured for gRPC
     /// (port 4317, typically) would not accept it.
-    GrpcRequested { signal: OtelSignal, variable: &'static str },
+    GrpcRequested {
+        signal: OtelSignal,
+        variable: &'static str,
+    },
+    UnsupportedExporter {
+        signal: OtelSignal,
+        value: String,
+    },
 }
 
 impl ExportProblem {
+    /// The setting behind a problem the person running trg can fix, or
+    /// `None` when the setting was fine and the exporter failed anyway.
+    fn misconfigured_setting(&self) -> Option<(OtelSignal, String)> {
+        match self {
+            Self::BuildFailed { .. } => None,
+            Self::GrpcRequested { signal, variable } => Some((*signal, format!("{variable}=grpc"))),
+            Self::UnsupportedExporter { signal, value } => {
+                Some((*signal, format!("{}={value}", signal.exporter_var())))
+            }
+        }
+    }
+
     fn report(&self) {
         match self {
+            Self::UnsupportedExporter { signal, value } => tracing::warn!(
+                signal = signal.as_str(),
+                "trg exports OTLP only; {}={value} is not supported, so this signal will not be exported",
+                signal.exporter_var()
+            ),
             Self::BuildFailed { signal, error } => tracing::warn!(
                 signal = signal.as_str(),
                 error = %error,
@@ -265,6 +324,40 @@ impl ExportProblem {
         }
     }
 }
+
+/// One line naming every signal a setting kept from exporting, or `None`
+/// when nothing was misconfigured.
+fn misconfiguration_warning(problems: &[ExportProblem]) -> Option<String> {
+    let mut signals = Vec::new();
+    let mut settings = Vec::new();
+    for (signal, setting) in problems.iter().filter_map(ExportProblem::misconfigured_setting) {
+        if !signals.contains(&signal.as_str()) {
+            signals.push(signal.as_str());
+        }
+        if !settings.contains(&setting) {
+            settings.push(setting);
+        }
+    }
+    (!signals.is_empty()).then(|| {
+        format!(
+            "trg: not exporting {} telemetry: {} unsupported; trg exports OTLP over http/protobuf only",
+            signals.join(", "),
+            settings.join(", ")
+        )
+    })
+}
+
+/// Tells the person running trg, on stderr since the file log is somewhere
+/// they may never look, at most once however often `once` is consulted.
+fn warn_once(once: &Once, problems: &[ExportProblem], out: &mut impl Write) {
+    if let Some(warning) = misconfiguration_warning(problems) {
+        once.call_once(|| {
+            let _ = writeln!(out, "{warning}");
+        });
+    }
+}
+
+static MISCONFIGURATION_WARNED: Once = Once::new();
 
 /// Owns every OTel provider this process created and the root span every
 /// subcommand runs inside.
@@ -457,6 +550,7 @@ fn init_from(command: CommandIdentity, env: &impl EnvLookup) -> Telemetry {
     for problem in &problems {
         problem.report();
     }
+    warn_once(&MISCONFIGURATION_WARNED, &problems, &mut std::io::stderr());
 
     if let Some(provider) = &providers.tracer {
         opentelemetry::global::set_tracer_provider(provider.clone());
@@ -490,7 +584,15 @@ fn enabled_provider<P>(
     problems: &mut Vec<ExportProblem>,
     build: impl FnOnce() -> Result<P, ExporterBuildError>,
 ) -> Option<P> {
-    if !signal.enabled(env) {
+    match signal.exporter_requested(env) {
+        ExporterRequest::Otlp => {}
+        ExporterRequest::None => return None,
+        ExporterRequest::Unsupported(value) => {
+            problems.push(ExportProblem::UnsupportedExporter { signal, value });
+            return None;
+        }
+    }
+    if !signal.endpoint_configured(env) {
         return None;
     }
     if let Some(variable) = signal.grpc_requested_by(env) {
@@ -508,11 +610,13 @@ fn file_filter(env: &impl EnvLookup) -> EnvFilter {
         .unwrap_or_else(|| EnvFilter::new(DEFAULT_FILE_FILTER))
 }
 
-fn trace_filter() -> Targets {
-    Targets::new().with_target("trg", LevelFilter::INFO)
+pub(crate) fn trace_filter() -> Targets {
+    Targets::new()
+        .with_target("trg", LevelFilter::INFO)
+        .with_target(LOGS_ONLY_TARGET, LevelFilter::OFF)
 }
 
-fn log_filter() -> Targets {
+pub(crate) fn log_filter() -> Targets {
     EXPORT_PIPELINE_TARGETS.into_iter().fold(
         Targets::new()
             .with_default(LevelFilter::WARN)
@@ -806,6 +910,97 @@ mod tests {
                 variable: "OTEL_EXPORTER_OTLP_PROTOCOL"
             }]
         ));
+    }
+
+    #[test]
+    fn an_exporter_other_than_otlp_disables_the_signal_and_says_why() {
+        let env = fixed(&[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"),
+            ("OTEL_TRACES_EXPORTER", "console"),
+            ("OTEL_LOGS_EXPORTER", "otlp,console"),
+            ("OTEL_METRICS_EXPORTER", " OTLP "),
+        ]);
+
+        assert!(!OtelSignal::Traces.enabled(&env));
+        assert!(!OtelSignal::Logs.enabled(&env));
+        assert!(OtelSignal::Metrics.enabled(&env));
+
+        let mut problems = Vec::new();
+        let built = enabled_provider(OtelSignal::Traces, &env, &mut problems, || -> Result<(), _> {
+            panic!("an unsupported exporter must not be built")
+        });
+        assert!(built.is_none());
+        assert!(matches!(
+            problems.as_slice(),
+            [ExportProblem::UnsupportedExporter { signal: OtelSignal::Traces, value }] if value == "console"
+        ));
+    }
+
+    #[test]
+    fn an_unsupported_exporter_is_reported_even_without_an_endpoint() {
+        let env = fixed(&[("OTEL_TRACES_EXPORTER", "console")]);
+        let mut problems = Vec::new();
+        let built = enabled_provider(OtelSignal::Traces, &env, &mut problems, || -> Result<(), _> {
+            panic!("an unsupported exporter must not be built")
+        });
+        assert!(built.is_none());
+        assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_or_none_exporter_reports_nothing() {
+        let env = fixed(&[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"),
+            ("OTEL_TRACES_EXPORTER", ""),
+            ("OTEL_LOGS_EXPORTER", "none"),
+        ]);
+        assert!(OtelSignal::Traces.enabled(&env));
+        assert!(!OtelSignal::Logs.enabled(&env));
+        let mut problems = Vec::new();
+        enabled_provider(OtelSignal::Logs, &env, &mut problems, || -> Result<(), _> {
+            panic!("a disabled signal must not be built")
+        });
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn misconfigured_signals_share_one_warning_written_once() {
+        let env = fixed(&[
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317"),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+            ("OTEL_LOGS_EXPORTER", "console"),
+        ]);
+        let mut problems = Vec::new();
+        for signal in [OtelSignal::Traces, OtelSignal::Metrics, OtelSignal::Logs] {
+            enabled_provider(signal, &env, &mut problems, || -> Result<(), _> {
+                panic!("no signal here can be exported")
+            });
+        }
+
+        let once = Once::new();
+        let mut stderr = Vec::new();
+        warn_once(&once, &problems, &mut stderr);
+        warn_once(&once, &problems, &mut stderr);
+
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "trg: not exporting traces, metrics, logs telemetry: OTEL_EXPORTER_OTLP_PROTOCOL=grpc, \
+             OTEL_LOGS_EXPORTER=console unsupported; trg exports OTLP over http/protobuf only\n"
+        );
+    }
+
+    #[test]
+    fn a_well_configured_process_writes_no_warning() {
+        let mut problems = Vec::new();
+        enabled_provider(
+            OtelSignal::Traces,
+            &fixed(EXPORTING),
+            &mut problems,
+            || -> Result<(), ExporterBuildError> { Ok(()) },
+        );
+        let mut stderr = Vec::new();
+        warn_once(&Once::new(), &problems, &mut stderr);
+        assert!(stderr.is_empty());
     }
 
     #[test]

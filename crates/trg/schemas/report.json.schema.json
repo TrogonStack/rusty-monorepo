@@ -1513,7 +1513,7 @@
       "type": "object"
     },
     "SpanReference": {
-      "description": "A span's W3C trace and span id, serialized as lowercase hex.\n\nOnly ever written when tracing was active for the invocation that produced the report,\nso its absence means \"nothing to link to\" rather than a broken reference.",
+      "description": "A span's W3C trace and span id, serialized as lowercase hex.\n\nOnly ever written when the invocation that produced the report exported the span, so\nits absence means \"nothing to link to\" rather than a broken reference, and a link built\nfrom it always names a span a backend received.",
       "properties": {
         "span_id": {
           "pattern": "^[0-9a-f]{16}$",
