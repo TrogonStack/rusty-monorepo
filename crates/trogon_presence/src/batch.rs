@@ -582,7 +582,7 @@ impl AtomicBatch {
             return Err(BatchPublishError::Empty);
         };
         if last == BatchPosition::FIRST {
-            return Ok(self.commit(client, first, finish_by).await);
+            return self.commit(client, first, finish_by, BatchPosition::FIRST).await;
         }
         let admitted = match client
             .send_request(
@@ -615,7 +615,7 @@ impl AtomicBatch {
                 return Ok(BatchOutcome::Unknown);
             }
             if position == last {
-                return Ok(self.commit(client, message, finish_by).await);
+                return self.commit(client, message, finish_by, position).await;
             }
             if client
                 .publish_with_headers(message.subject, message.headers, message.payload)
@@ -628,11 +628,24 @@ impl AtomicBatch {
         Ok(BatchOutcome::Unknown)
     }
 
-    async fn commit(&self, client: &async_nats::Client, message: Outbound, finish_by: Instant) -> BatchOutcome {
+    /// `position` is the commit message's own position in the batch. When it is
+    /// [`BatchPosition::FIRST`], this is the only message the batch sends, so a `NoResponders`
+    /// failure means the write never reached a stream and is classified the same way the
+    /// multi-record admission check classifies that failure: [`BatchPublishError::NoStream`],
+    /// not the ambiguous [`BatchOutcome::Unknown`]. A later commit position may follow records
+    /// that already reached the stream, so that ambiguity still applies there.
+    async fn commit(
+        &self,
+        client: &async_nats::Client,
+        message: Outbound,
+        finish_by: Instant,
+        position: BatchPosition,
+    ) -> Result<BatchOutcome, BatchPublishError> {
         let remaining = finish_by.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return BatchOutcome::Unknown;
+            return Ok(BatchOutcome::Unknown);
         }
+        let subject = message.subject.clone();
         let reply = client
             .send_request(
                 message.subject,
@@ -642,23 +655,29 @@ impl AtomicBatch {
                     .timeout(Some(remaining)),
             )
             .await;
-        let Ok(reply) = reply else {
-            return BatchOutcome::Unknown;
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(err) if position == BatchPosition::FIRST && err.kind() == RequestErrorKind::NoResponders => {
+                return Err(BatchPublishError::NoStream(subject));
+            }
+            Err(_) => return Ok(BatchOutcome::Unknown),
         };
         let Ok(body) = serde_json::from_slice::<AckBody>(&reply.payload) else {
-            return BatchOutcome::Unknown;
+            return Ok(BatchOutcome::Unknown);
         };
         if let Some(error) = body.error {
-            return BatchOutcome::Rejected(error.into());
+            return Ok(BatchOutcome::Rejected(error.into()));
         }
         let expected_batch = self.id.to_string();
         let count_matches = body.count == Some(self.records.len() as u64);
         match (body.seq, body.batch) {
-            (Some(seq), Some(batch)) if batch == expected_batch && count_matches => BatchOutcome::Committed(BatchAck {
-                final_sequence: EntryRevision::from(seq),
-                last: BatchPosition(self.records.len() as u16),
-            }),
-            _ => BatchOutcome::Unknown,
+            (Some(seq), Some(batch)) if batch == expected_batch && count_matches => {
+                Ok(BatchOutcome::Committed(BatchAck {
+                    final_sequence: EntryRevision::from(seq),
+                    last: BatchPosition(self.records.len() as u16),
+                }))
+            }
+            _ => Ok(BatchOutcome::Unknown),
         }
     }
 }

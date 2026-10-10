@@ -8,8 +8,8 @@ use async_nats::{jetstream, Subject};
 use bytes::Bytes;
 use common::NatsServer;
 use trogon_presence::{
-    AtomicBatch, BatchBudget, BatchOutcome, BatchPacer, BatchPosition, BatchRecord, EntryRevision, Expected, GuardTtl,
-    Presence, PresenceConfig, ProvisionOptions,
+    AtomicBatch, BatchBudget, BatchOutcome, BatchPacer, BatchPosition, BatchPublishError, BatchRecord, EntryRevision,
+    Expected, GuardTtl, Presence, PresenceConfig, ProvisionOptions,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -182,6 +182,24 @@ impl BatchPacer for StallBefore {
             tokio::time::sleep(STALL).await;
         }
     }
+}
+
+#[tokio::test]
+async fn a_single_record_batch_with_no_stream_is_a_no_stream_error() -> TestResult {
+    let server = server_or_skip!();
+    let client = server.client().await;
+    let subject = Subject::from("no.such.stream.key");
+    let mut batch = AtomicBatch::new()?;
+    batch.push(BatchRecord::put(
+        subject.clone(),
+        Bytes::from_static(b"entry"),
+        Expected::Empty,
+    ))?;
+    match batch.publish(&client).await {
+        Err(BatchPublishError::NoStream(got)) => assert_eq!(got, subject),
+        other => return Err(format!("expected a NoStream error, got {other:?}").into()),
+    }
+    Ok(())
 }
 
 #[tokio::test]
