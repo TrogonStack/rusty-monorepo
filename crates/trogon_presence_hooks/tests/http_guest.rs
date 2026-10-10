@@ -217,7 +217,7 @@ async fn a_host_outside_the_allowlist_is_refused_before_connecting() -> TestResu
 
     for authority in [outsider.authority("127.0.0.1"), "api.example.com".to_owned()] {
         let reason = guest_failure(probe(&runtime, &authority, "ana").await?)?;
-        assert_eq!(reason, "request=ErrorCode::HttpRequestDenied", "{authority}");
+        assert_eq!(reason, "response=ErrorCode::HttpRequestDenied", "{authority}");
     }
     tokio::time::sleep(PROMPT).await;
     assert_eq!(
@@ -279,7 +279,7 @@ async fn a_streamed_body_over_the_limit_is_refused() -> TestResult {
 
     let reason = guest_failure(probe(&runtime, &server.authority("127.0.0.1"), "ana").await?)?;
 
-    assert_eq!(reason, "body=ErrorCode::HttpResponseBodySize(None)");
+    assert_eq!(reason, "body=\"HTTP response body size exceeds limit\"");
     Ok(())
 }
 

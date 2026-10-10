@@ -21,8 +21,10 @@ impl Target {
     fn of(topic: &str, key: &str) -> Self {
         let authority = if topic.contains(':') {
             topic.to_owned()
-        } else {
+        } else if topic.bytes().all(|b| b.is_ascii_digit()) {
             format!("127.0.0.1:{topic}")
+        } else {
+            topic.to_owned()
         };
         Self {
             authority,

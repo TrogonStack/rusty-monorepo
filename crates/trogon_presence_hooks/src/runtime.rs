@@ -16,8 +16,7 @@ use wasmtime::{
     StoreLimitsBuilder,
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
-use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
-use wasmtime_wasi_http::WasiHttpCtx;
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpCtxView, WasiHttpView};
 
 use crate::config::{HookConfig, HookPolicy};
 use crate::http::{HttpsTransport, OutboundPolicy, TlsSetupError};

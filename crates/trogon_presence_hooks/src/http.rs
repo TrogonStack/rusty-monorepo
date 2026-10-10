@@ -1,8 +1,12 @@
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full, Limited};
+use hyper::body::{Body, Bytes, Frame, SizeHint};
 use hyper::header::{HeaderValue, CONTENT_LENGTH, HOST};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, RootCertStore};
@@ -11,10 +15,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout_at, Instant};
 use tokio_rustls::TlsConnector;
 use wasmtime_wasi_http::io::TokioIo;
-use wasmtime_wasi_http::p2::bindings::http::types::ErrorCode;
-use wasmtime_wasi_http::p2::body::HyperOutgoingBody;
-use wasmtime_wasi_http::p2::types::{HostFutureIncomingResponse, IncomingResponse, OutgoingRequestConfig};
-use wasmtime_wasi_http::p2::{hyper_request_error, hyper_response_error, HttpResult, WasiHttpHooks};
+use wasmtime_wasi_http::{Error, RequestOptions, WasiBody, WasiHttpHooks};
 
 use crate::config::{AllowedHost, HttpsPort, TrustAnchors};
 
@@ -22,6 +23,7 @@ pub(crate) const BODY_MAX_BYTES: usize = 64 * 1024;
 const OUTGOING_BODY_CHUNKS: usize = 4;
 const OUTGOING_BODY_CHUNK_BYTES: usize = BODY_MAX_BYTES / OUTGOING_BODY_CHUNKS;
 const OUTSTANDING_REQUESTS: usize = 2;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AddressClass {
@@ -96,13 +98,9 @@ impl OutboundPolicy {
         })
     }
 
-    fn target(
-        &self,
-        request: &hyper::Request<HyperOutgoingBody>,
-        config: &OutgoingRequestConfig,
-    ) -> Option<AllowedHost> {
+    fn target(&self, request: &http::Request<WasiBody>) -> Option<AllowedHost> {
         let uri = request.uri();
-        if !config.use_tls || uri.scheme() != Some(&http::uri::Scheme::HTTPS) {
+        if uri.scheme() != Some(&http::uri::Scheme::HTTPS) {
             return None;
         }
         let host = uri.host()?;
@@ -133,37 +131,44 @@ impl HttpsTransport {
     }
 }
 
+type SendOutcome = Result<
+    (
+        http::Response<WasiBody>,
+        Box<dyn Future<Output = Result<(), Error>> + Send>,
+    ),
+    Error,
+>;
+
 impl WasiHttpHooks for HttpsTransport {
     fn send_request(
         &mut self,
-        request: hyper::Request<HyperOutgoingBody>,
-        config: OutgoingRequestConfig,
-    ) -> HttpResult<HostFutureIncomingResponse> {
-        let Some(target) = self.policy.target(&request, &config) else {
+        request: http::Request<WasiBody>,
+        options: Option<RequestOptions>,
+        _fut: Box<dyn Future<Output = Result<(), Error>> + Send>,
+    ) -> Box<dyn Future<Output = SendOutcome> + Send> {
+        let Some(target) = self.policy.target(&request) else {
             tracing::warn!(uri = %request.uri(), "hook outbound request denied by the HTTPS allowlist");
-            return Err(ErrorCode::HttpRequestDenied.into());
+            return Box::new(async move { Err(Error::HttpRequestDenied) });
         };
         let Ok(permit) = self.outstanding.clone().try_acquire_owned() else {
             tracing::warn!(target = %target, "hook outbound request denied, too many outstanding requests");
-            return Err(ErrorCode::HttpRequestDenied.into());
+            return Box::new(async move { Err(Error::HttpRequestDenied) });
         };
         let tls = self.policy.tls.clone();
         let expires = self.expires;
-        let handle =
-            wasmtime_wasi::runtime::spawn(async move { Ok(send(target, tls, request, config, expires, permit).await) });
-        Ok(HostFutureIncomingResponse::pending(handle))
+        Box::new(async move { send(target, tls, request, options, expires, permit).await })
     }
 
-    fn outgoing_body_buffer_chunks(&mut self) -> usize {
+    fn p2_outgoing_body_buffer_chunks(&mut self) -> usize {
         OUTGOING_BODY_CHUNKS
     }
 
-    fn outgoing_body_chunk_size(&mut self) -> usize {
+    fn p2_outgoing_body_chunk_size(&mut self) -> usize {
         OUTGOING_BODY_CHUNK_BYTES
     }
 }
 
-async fn resolve(target: &AllowedHost) -> Result<SocketAddr, ErrorCode> {
+async fn resolve(target: &AllowedHost) -> Result<SocketAddr, Error> {
     let port = target.port().get();
     if let Some(ip) = target.ip() {
         return Ok(SocketAddr::new(ip, port));
@@ -178,85 +183,90 @@ async fn resolve(target: &AllowedHost) -> Result<SocketAddr, ErrorCode> {
     addresses
         .into_iter()
         .find(|address| AddressClass::of(address.ip()) == AddressClass::Public)
-        .ok_or(ErrorCode::DestinationIpProhibited)
+        .ok_or(Error::DestinationIpProhibited)
 }
 
-fn dns_failure() -> ErrorCode {
-    ErrorCode::DnsError(wasmtime_wasi_http::p2::bindings::http::types::DnsErrorPayload {
+fn dns_failure() -> Error {
+    Error::DnsError {
         rcode: Some("address not available".to_owned()),
         info_code: Some(0),
-    })
+    }
 }
 
 async fn send(
     target: AllowedHost,
     tls: Arc<ClientConfig>,
-    request: hyper::Request<HyperOutgoingBody>,
-    config: OutgoingRequestConfig,
+    request: http::Request<WasiBody>,
+    options: Option<RequestOptions>,
     expires: Instant,
     permit: OwnedSemaphorePermit,
-) -> Result<IncomingResponse, ErrorCode> {
-    match timeout_at(expires, exchange(target, tls, request, config, expires, permit)).await {
+) -> SendOutcome {
+    match timeout_at(expires, exchange(target, tls, request, options, expires, permit)).await {
         Ok(result) => result,
-        Err(_) => Err(ErrorCode::ConnectionTimeout),
+        Err(_) => Err(Error::ConnectionTimeout),
     }
 }
 
 async fn exchange(
     target: AllowedHost,
     tls: Arc<ClientConfig>,
-    request: hyper::Request<HyperOutgoingBody>,
-    config: OutgoingRequestConfig,
+    request: http::Request<WasiBody>,
+    options: Option<RequestOptions>,
     expires: Instant,
     permit: OwnedSemaphorePermit,
-) -> Result<IncomingResponse, ErrorCode> {
+) -> SendOutcome {
     let (mut parts, body) = request.into_parts();
     let body = Limited::new(body, BODY_MAX_BYTES)
         .collect()
         .await
-        .map_err(|_| ErrorCode::HttpRequestBodySize(None))?
+        .map_err(|_| Error::HttpRequestBodySize(None))?
         .to_bytes();
+
+    let connect_timeout = options.and_then(|o| o.connect_timeout).unwrap_or(DEFAULT_TIMEOUT);
+    let first_byte_timeout = options.and_then(|o| o.first_byte_timeout).unwrap_or(DEFAULT_TIMEOUT);
+    let between_bytes_timeout = options.and_then(|o| o.between_bytes_timeout).unwrap_or(DEFAULT_TIMEOUT);
+
     let address = resolve(&target).await?;
-    let connect_by = expires.min(Instant::now() + config.connect_timeout);
+    let connect_by = expires.min(Instant::now() + connect_timeout);
     let tcp = timeout_at(connect_by, TcpStream::connect(address))
         .await
-        .map_err(|_| ErrorCode::ConnectionTimeout)?
-        .map_err(|_| ErrorCode::ConnectionRefused)?;
+        .map_err(|_| Error::ConnectionTimeout)?
+        .map_err(Error::Connect)?;
     let server_name = match target.ip() {
         Some(ip) => ServerName::IpAddress(ip.into()),
-        None => ServerName::try_from(target.host().to_owned()).map_err(|_| ErrorCode::HttpRequestUriInvalid)?,
+        None => ServerName::try_from(target.host().to_owned()).map_err(|_| Error::HttpRequestUriInvalid)?,
     };
     let stream = timeout_at(connect_by, TlsConnector::from(tls).connect(server_name, tcp))
         .await
-        .map_err(|_| ErrorCode::ConnectionTimeout)?
+        .map_err(|_| Error::ConnectionTimeout)?
         .map_err(|err| {
             tracing::warn!(%err, target = %target, "hook outbound TLS handshake failed");
-            ErrorCode::TlsProtocolError
+            Error::Tls(err)
         })?;
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
         .await
-        .map_err(hyper_request_error)?;
+        .map_err(Error::from)?;
     let worker = wasmtime_wasi::runtime::spawn(async move {
         let _permit = permit;
         if let Err(err) = connection.await {
             tracing::debug!(%err, "hook outbound connection closed with an error");
         }
     });
-    let authority = HeaderValue::from_str(&target.to_string()).map_err(|_| ErrorCode::HttpRequestUriInvalid)?;
+    let authority = HeaderValue::from_str(&target.to_string()).map_err(|_| Error::HttpRequestUriInvalid)?;
     parts.headers.insert(HOST, authority);
     parts.uri = parts
         .uri
         .path_and_query()
         .map_or_else(|| http::Uri::from_static("/"), |path| http::Uri::from(path.clone()));
     let outgoing = hyper::Request::from_parts(parts, Full::new(body));
-    let first_byte_by = expires.min(Instant::now() + config.first_byte_timeout);
+    let first_byte_by = expires.min(Instant::now() + first_byte_timeout);
     let response = timeout_at(first_byte_by, sender.send_request(outgoing))
         .await
-        .map_err(|_| ErrorCode::ConnectionReadTimeout)?
-        .map_err(hyper_request_error)?;
+        .map_err(|_| Error::ConnectionReadTimeout)?
+        .map_err(Error::from)?;
     if response.status().is_redirection() {
         tracing::warn!(status = %response.status(), target = %target, "hook outbound redirect refused");
-        return Err(ErrorCode::HttpRequestDenied);
+        return Err(Error::HttpRequestDenied);
     }
     let declared = response
         .headers()
@@ -264,32 +274,79 @@ async fn exchange(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
     if let Some(length) = declared.filter(|length| *length > BODY_MAX_BYTES as u64) {
-        return Err(ErrorCode::HttpResponseBodySize(Some(length)));
+        return Err(Error::HttpResponseBodySize(Some(length)));
     }
-    let between_bytes_timeout = config.between_bytes_timeout.min(
+    let between_bytes_timeout = between_bytes_timeout.min(
         expires
             .saturating_duration_since(Instant::now())
             .max(Duration::from_millis(1)),
     );
-    let resp = response.map(|body| {
-        Limited::new(body.map_err(hyper_response_error), BODY_MAX_BYTES)
-            .map_err(|err| match err.downcast::<ErrorCode>() {
-                Ok(code) => *code,
-                Err(_) => ErrorCode::HttpResponseBodySize(None),
-            })
-            .boxed_unsync()
+    let resp = response.map(|body| bounded_body(body, between_bytes_timeout));
+    let io: Box<dyn Future<Output = Result<(), Error>> + Send> = Box::new(async move {
+        worker.await;
+        Ok(())
     });
-    Ok(IncomingResponse {
-        resp,
-        worker: Some(worker),
-        between_bytes_timeout,
-    })
+    Ok((resp, io))
+}
+
+fn bounded_body(body: hyper::body::Incoming, between_bytes_timeout: Duration) -> WasiBody {
+    let limited =
+        Limited::new(body.map_err(Error::from), BODY_MAX_BYTES).map_err(|err| match err.downcast::<Error>() {
+            Ok(err) => *err,
+            Err(_) => Error::HttpResponseBodySize(None),
+        });
+    TimedBody::new(limited, between_bytes_timeout).boxed_unsync()
+}
+
+/// Wraps a response body so that a stall of more than `timeout` between
+/// frames surfaces as a read timeout instead of hanging forever.
+struct TimedBody<B> {
+    inner: B,
+    timeout: tokio::time::Interval,
+}
+
+impl<B> TimedBody<B> {
+    fn new(inner: B, between_bytes_timeout: Duration) -> Self {
+        let mut timeout = tokio::time::interval(between_bytes_timeout);
+        timeout.reset();
+        Self { inner, timeout }
+    }
+}
+
+impl<B> Body for TimedBody<B>
+where
+    B: Body<Data = Bytes, Error = Error> + Unpin,
+{
+    type Data = Bytes;
+    type Error = Error;
+
+    fn poll_frame(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, Error>>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                this.timeout.reset();
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(other) => Poll::Ready(other),
+            Poll::Pending => match this.timeout.poll_tick(cx) {
+                Poll::Ready(_) => Poll::Ready(Some(Err(Error::ConnectionReadTimeout))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use http_body_util::Empty;
-    use hyper::body::Bytes;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use rustls::ServerConfig;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -353,37 +410,45 @@ mod tests {
         }
     }
 
-    fn request(uri: &str, body: HyperOutgoingBody) -> hyper::Request<HyperOutgoingBody> {
-        hyper::Request::builder().uri(uri).body(body).expect("request")
+    fn request(uri: &str, body: WasiBody) -> http::Request<WasiBody> {
+        http::Request::builder().uri(uri).body(body).expect("request")
     }
 
-    fn empty() -> HyperOutgoingBody {
+    fn empty() -> WasiBody {
         Empty::<Bytes>::new().map_err(|never| match never {}).boxed_unsync()
     }
 
-    fn tls() -> OutgoingRequestConfig {
-        OutgoingRequestConfig {
-            use_tls: true,
-            connect_timeout: Duration::from_secs(5),
-            first_byte_timeout: Duration::from_secs(5),
-            between_bytes_timeout: Duration::from_secs(5),
-        }
+    fn tls() -> Option<RequestOptions> {
+        Some(RequestOptions {
+            connect_timeout: Some(Duration::from_secs(5)),
+            first_byte_timeout: Some(Duration::from_secs(5)),
+            between_bytes_timeout: Some(Duration::from_secs(5)),
+        })
+    }
+
+    fn no_op() -> Box<dyn Future<Output = Result<(), Error>> + Send> {
+        Box::new(async { Ok(()) })
     }
 
     async fn send_through(
         transport: &mut HttpsTransport,
-        request: hyper::Request<HyperOutgoingBody>,
-        config: OutgoingRequestConfig,
-    ) -> Result<IncomingResponse, ErrorCode> {
-        match transport.send_request(request, config) {
-            Ok(HostFutureIncomingResponse::Pending(handle)) => handle.await.expect("transport task"),
-            Ok(_) => panic!("the transport must hand back a pending response"),
-            Err(err) => Err(err.downcast().expect("an error code")),
-        }
+        request: http::Request<WasiBody>,
+        options: Option<RequestOptions>,
+    ) -> Result<http::Response<WasiBody>, Error> {
+        let fut = transport.send_request(request, options, no_op());
+        let (response, io) = Pin::from(fut).await?;
+        // The returned `io` future drives the connection past the point the
+        // response headers arrive; a real embedder keeps it alive for as
+        // long as the response body resource lives, so tests must too or a
+        // streamed body gets cut off as soon as this function returns.
+        tokio::spawn(async move {
+            let _ = Pin::from(io).await;
+        });
+        Ok(response)
     }
 
-    fn denied(result: Result<IncomingResponse, ErrorCode>) -> bool {
-        matches!(result, Err(ErrorCode::HttpRequestDenied))
+    fn denied(result: Result<http::Response<WasiBody>, Error>) -> bool {
+        matches!(result, Err(Error::HttpRequestDenied))
     }
 
     #[tokio::test]
@@ -392,8 +457,8 @@ mod tests {
         let response = send_through(&mut server.transport(), request(&server.uri(), empty()), tls())
             .await
             .expect("response");
-        assert_eq!(response.resp.status(), 200);
-        let body = response.resp.into_body().collect().await.expect("body").to_bytes();
+        assert_eq!(response.status(), 200);
+        let body = response.into_body().collect().await.expect("body").to_bytes();
         assert_eq!(&body[..], b"ok");
     }
 
@@ -413,7 +478,7 @@ mod tests {
         let server =
             LocalServer::start(format!("HTTP/1.1 200 OK\r\ncontent-length: {declared}\r\n\r\n").into_bytes()).await;
         let result = send_through(&mut server.transport(), request(&server.uri(), empty()), tls()).await;
-        assert!(matches!(result, Err(ErrorCode::HttpResponseBodySize(Some(length))) if length == declared));
+        assert!(matches!(result, Err(Error::HttpResponseBodySize(Some(length))) if length == declared));
     }
 
     #[tokio::test]
@@ -430,31 +495,27 @@ mod tests {
         let response = send_through(&mut server.transport(), request(&server.uri(), empty()), tls())
             .await
             .expect("headers arrive");
-        let read = response.resp.into_body().collect().await;
-        assert!(matches!(read, Err(ErrorCode::HttpResponseBodySize(None))));
+        let read = response.into_body().collect().await;
+        assert!(matches!(read, Err(Error::HttpResponseBodySize(None))));
     }
 
     #[tokio::test]
     async fn refuses_an_oversized_request_body() {
         let server = LocalServer::start(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_vec()).await;
-        let body = Full::new(Bytes::from(vec![b'x'; BODY_MAX_BYTES + 1]))
+        let body: WasiBody = Full::new(Bytes::from(vec![b'x'; BODY_MAX_BYTES + 1]))
             .map_err(|never| match never {})
             .boxed_unsync();
         let result = send_through(&mut server.transport(), request(&server.uri(), body), tls()).await;
-        assert!(matches!(result, Err(ErrorCode::HttpRequestBodySize(None))));
+        assert!(matches!(result, Err(Error::HttpRequestBodySize(None))));
     }
 
     #[tokio::test]
     async fn denies_targets_outside_the_allowlist() {
         let server = LocalServer::start(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_vec()).await;
         let mut transport = server.transport();
-        let plain = OutgoingRequestConfig {
-            use_tls: false,
-            ..tls()
-        };
         let http_uri = format!("http://127.0.0.1:{}/status", server.port);
         assert!(denied(
-            send_through(&mut transport, request(&http_uri, empty()), plain).await
+            send_through(&mut transport, request(&http_uri, empty()), tls()).await
         ));
         let other_port = format!("https://127.0.0.1:{}/status", server.port.wrapping_add(1).max(1));
         assert!(denied(
@@ -473,7 +534,7 @@ mod tests {
         let policy = OutboundPolicy::new(&[allowed], &TrustAnchors::WebPkiRoots).expect("outbound policy");
         let mut transport = HttpsTransport::new(Arc::new(policy), Instant::now() + Duration::from_secs(5));
         let result = send_through(&mut transport, request(&server.uri(), empty()), tls()).await;
-        assert!(matches!(result, Err(ErrorCode::TlsProtocolError)));
+        assert!(matches!(result, Err(Error::Tls(_))));
     }
 
     #[tokio::test]
@@ -490,17 +551,10 @@ mod tests {
         let policy = OutboundPolicy::new(&[allowed], &TrustAnchors::WebPkiRoots).expect("outbound policy");
         let mut transport = HttpsTransport::new(Arc::new(policy), Instant::now() + Duration::from_secs(5));
         let uri = format!("https://127.0.0.1:{port}/status");
-        let first = transport
-            .send_request(request(&uri, empty()), tls())
-            .expect("first admitted");
-        let second = transport
-            .send_request(request(&uri, empty()), tls())
-            .expect("second admitted");
-        let third = transport.send_request(request(&uri, empty()), tls());
-        assert!(matches!(
-            third.map_err(|err| err.downcast().expect("an error code")),
-            Err(ErrorCode::HttpRequestDenied)
-        ));
+        let first = transport.send_request(request(&uri, empty()), tls(), no_op());
+        let second = transport.send_request(request(&uri, empty()), tls(), no_op());
+        let third = Pin::from(transport.send_request(request(&uri, empty()), tls(), no_op())).await;
+        assert!(matches!(third, Err(Error::HttpRequestDenied)));
         drop((first, second));
         held.abort();
     }
