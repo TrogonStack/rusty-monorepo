@@ -18,6 +18,26 @@ defmodule TrogonPresence.Reader.BufferedFrame do
   @type t :: %__MODULE__{cursor: ViewCursor.t(), prev: DiffSequence.t(), diff: Diff.t() | nil}
 end
 
+defmodule TrogonPresence.Reader.Link do
+  @moduledoc false
+
+  @enforce_keys [:pid, :monitor, :diff, :parts, :replies, :epoch]
+  defstruct [:pid, :monitor, :diff, :parts, :replies, :epoch]
+
+  @type sid :: non_neg_integer() | String.t()
+  @type t :: %__MODULE__{
+          pid: pid(),
+          monitor: reference(),
+          diff: sid(),
+          parts: sid(),
+          replies: sid(),
+          epoch: sid()
+        }
+
+  @spec sids(t()) :: [sid()]
+  def sids(%__MODULE__{} = link), do: [link.diff, link.parts, link.replies, link.epoch]
+end
+
 defmodule TrogonPresence.Reader.Pending do
   @moduledoc false
 
@@ -78,18 +98,26 @@ defmodule TrogonPresence.Reader do
   currently installed state directly off the process, standing in for the
   Rust reader's `watch::Receiver<Presences>`.
 
-  Does not poll for a NATS reconnection the way the Rust reader's 250ms
-  `RECONNECT_POLL` tick does: the vendored `gnat` client exposes no
-  reconnect-count statistic to poll. A reconnect is instead caught by the
-  existing periodic resnapshot timer, or sooner by the first diff or epoch
-  hint the reconnected subscription receives landing outside the installed
-  cursor.
+  ## Reconnects
+
+  The Rust reader resnapshots when its client's reconnect count changes.
+  `gnat` keeps no such count and never reconnects in place: a `Gnat`
+  process dies with its socket, taking every subscription with it, and
+  `Gnat.ConnectionSupervisor` starts a fresh process under the same
+  registered name. So this process monitors the connection process it
+  subscribed on. When that process goes down and `:conn` is a registered
+  name, it keeps serving the installed (now possibly stale) state, polls the
+  name every 50ms until a new connection is registered, subscribes again
+  on it, and requests a fresh snapshot straight away instead of waiting for
+  the periodic timer. Frames still in the mailbox from the old connection
+  are ignored. When `:conn` is a bare pid there is nothing to reconnect to,
+  so this process stops with `{:shutdown, {:connection_down, reason}}`.
   """
 
   use GenServer
   require Logger
 
-  alias TrogonPresence.Reader.{BufferedFrame, Installed, Pending}
+  alias TrogonPresence.Reader.{BufferedFrame, Installed, Link, Pending}
   alias TrogonPresence.Snapshot.{Assembly, Frame, Identity, Limits, Manifest}
 
   alias TrogonPresence.{
@@ -113,6 +141,7 @@ defmodule TrogonPresence.Reader do
 
   @inbox_prefix "_INBOX_U"
   @default_resnapshot_ms :timer.seconds(30)
+  @reconnect_poll_ms 50
 
   @header_code "presence-code"
   @header_kind "presence-kind"
@@ -135,10 +164,6 @@ defmodule TrogonPresence.Reader do
     :resnapshot_ms,
     :request_subject,
     :inbox_prefix,
-    :diff_sid,
-    :parts_sid,
-    :replies_sid,
-    :epoch_sid,
     :subscribers
   ]
   defstruct [
@@ -151,10 +176,7 @@ defmodule TrogonPresence.Reader do
     :resnapshot_ms,
     :request_subject,
     :inbox_prefix,
-    :diff_sid,
-    :parts_sid,
-    :replies_sid,
-    :epoch_sid,
+    link: nil,
     installed: nil,
     pending: nil,
     retry_timer: nil,
@@ -188,34 +210,25 @@ defmodule TrogonPresence.Reader do
 
     view = LocalViewId.generate()
     inbox_prefix = "#{@inbox_prefix}.#{Key.token(key)}.#{connection}.#{view}"
-    shard = ViewShard.of(topic, shards)
 
-    with {:ok, diff_sid} <- Gnat.sub(conn, self(), Subjects.diff(topic)),
-         {:ok, parts_sid} <-
-           Gnat.sub(conn, self(), Subjects.snapshot_reply_filter(key, connection)),
-         {:ok, replies_sid} <- Gnat.sub(conn, self(), "#{inbox_prefix}.*"),
-         {:ok, epoch_sid} <- Gnat.sub(conn, self(), Subjects.epoch(shards, shard)) do
-      state = %__MODULE__{
-        conn: conn,
-        shards: shards,
-        key: key,
-        connection: connection,
-        topic: topic,
-        limits: limits,
-        resnapshot_ms: resnapshot_ms,
-        request_subject: Subjects.snapshot_request(shards, key, connection, topic),
-        inbox_prefix: inbox_prefix,
-        diff_sid: diff_sid,
-        parts_sid: parts_sid,
-        replies_sid: replies_sid,
-        epoch_sid: epoch_sid,
-        backoff: RetryBackoff.default(),
-        subscribers: subscribers
-      }
+    state = %__MODULE__{
+      conn: conn,
+      shards: shards,
+      key: key,
+      connection: connection,
+      topic: topic,
+      limits: limits,
+      resnapshot_ms: resnapshot_ms,
+      request_subject: Subjects.snapshot_request(shards, key, connection, topic),
+      inbox_prefix: inbox_prefix,
+      backoff: RetryBackoff.default(),
+      subscribers: subscribers
+    }
 
-      {:ok, request(state)}
-    else
-      {:error, reason} -> {:stop, reason}
+    case attach(state) do
+      {:ok, state} -> {:ok, request(state)}
+      {:error, reason} when is_pid(conn) -> {:stop, reason}
+      {:error, _reason} -> {:ok, schedule_reconnect(state)}
     end
   end
 
@@ -230,20 +243,23 @@ defmodule TrogonPresence.Reader do
   end
 
   @impl GenServer
-  def handle_info({:msg, %{sid: sid} = message}, %{diff_sid: sid} = state) do
-    {:noreply, on_diff(state, message)}
+  def handle_info({:msg, %{gnat: pid, sid: sid} = message}, %{link: %Link{pid: pid}} = state) do
+    {:noreply, on_message(state, state.link, sid, message)}
   end
 
-  def handle_info({:msg, %{sid: sid} = message}, %{parts_sid: sid} = state) do
-    {:noreply, on_part(state, message)}
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{link: %Link{monitor: ref}} = state) do
+    if is_pid(state.conn) do
+      {:stop, {:shutdown, {:connection_down, reason}}, %{state | link: nil}}
+    else
+      {:noreply, state |> detach() |> schedule_reconnect()}
+    end
   end
 
-  def handle_info({:msg, %{sid: sid} = message}, %{replies_sid: sid} = state) do
-    {:noreply, on_reply(state, message)}
-  end
-
-  def handle_info({:msg, %{sid: sid} = message}, %{epoch_sid: sid} = state) do
-    {:noreply, on_epoch(state, message)}
+  def handle_info(:reconnect, %{link: nil} = state) do
+    case attach(state) do
+      {:ok, state} -> {:noreply, request(state)}
+      {:error, _reason} -> {:noreply, schedule_reconnect(state)}
+    end
   end
 
   def handle_info(:retry, %{retry_timer: nil} = state), do: {:noreply, state}
@@ -266,20 +282,101 @@ defmodule TrogonPresence.Reader do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl GenServer
-  def terminate(_reason, state) do
-    safe_unsub(state.conn, state.diff_sid)
-    safe_unsub(state.conn, state.parts_sid)
-    safe_unsub(state.conn, state.replies_sid)
-    safe_unsub(state.conn, state.epoch_sid)
-    :ok
+  def terminate(_reason, %{link: %Link{} = link}) do
+    Enum.each(Link.sids(link), &safe_unsub(link.pid, &1))
   end
 
-  defp safe_unsub(conn, sid) do
-    Gnat.unsub(conn, sid)
+  def terminate(_reason, _state), do: :ok
+
+  defp on_message(state, %Link{diff: sid}, sid, message), do: on_diff(state, message)
+  defp on_message(state, %Link{parts: sid}, sid, message), do: on_part(state, message)
+  defp on_message(state, %Link{replies: sid}, sid, message), do: on_reply(state, message)
+  defp on_message(state, %Link{epoch: sid}, sid, message), do: on_epoch(state, message)
+  defp on_message(state, %Link{}, _sid, _message), do: state
+
+  defp attach(state) do
+    case GenServer.whereis(state.conn) do
+      pid when is_pid(pid) -> attach_to(state, pid)
+      _other -> {:error, :noproc}
+    end
+  end
+
+  defp attach_to(state, pid) do
+    monitor = Process.monitor(pid)
+
+    subjects = [
+      Subjects.diff(state.topic),
+      Subjects.snapshot_reply_filter(state.key, state.connection),
+      "#{state.inbox_prefix}.*",
+      Subjects.epoch(state.shards, ViewShard.of(state.topic, state.shards))
+    ]
+
+    case subscribe_all(pid, subjects) do
+      {:ok, [diff, parts, replies, epoch]} ->
+        link = %Link{
+          pid: pid,
+          monitor: monitor,
+          diff: diff,
+          parts: parts,
+          replies: replies,
+          epoch: epoch
+        }
+
+        {:ok, %{state | link: link}}
+
+      {:error, reason} ->
+        Process.demonitor(monitor, [:flush])
+        {:error, reason}
+    end
+  end
+
+  defp subscribe_all(pid, subjects) do
+    Enum.reduce_while(subjects, {:ok, []}, fn subject, {:ok, sids} ->
+      case safe_sub(pid, subject) do
+        {:ok, sid} ->
+          {:cont, {:ok, [sid | sids]}}
+
+        {:error, reason} ->
+          Enum.each(sids, &safe_unsub(pid, &1))
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, sids} -> {:ok, Enum.reverse(sids)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp safe_sub(pid, subject) do
+    Gnat.sub(pid, self(), subject)
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp safe_unsub(pid, sid) do
+    Gnat.unsub(pid, sid)
   catch
     :exit, _reason -> :ok
   end
 
+  defp safe_pub(pid, subject, body, opts) do
+    Gnat.pub(pid, subject, body, opts)
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  defp detach(state) do
+    cancel_pending_timer(state.pending)
+    cancel_retry_timer(state)
+    %{state | link: nil, pending: nil, retry_timer: nil, backoff: RetryBackoff.default()}
+  end
+
+  defp schedule_reconnect(state) do
+    Process.send_after(self(), :reconnect, @reconnect_poll_ms)
+    state
+  end
+
+  defp request(%{link: nil} = state), do: state
   defp request(%{pending: pending} = state) when not is_nil(pending), do: state
 
   defp request(state) do
@@ -294,7 +391,7 @@ defmodule TrogonPresence.Reader do
   defp send_request(state, request_id, body) do
     reply_to = "#{state.inbox_prefix}.#{request_id}"
 
-    case Gnat.pub(state.conn, state.request_subject, body, reply_to: reply_to) do
+    case safe_pub(state.link.pid, state.request_subject, body, reply_to: reply_to) do
       :ok ->
         deadline_timer =
           Process.send_after(self(), {:snapshot_deadline, request_id}, state.limits.deadline_ms)
@@ -331,6 +428,11 @@ defmodule TrogonPresence.Reader do
   defp cancel_pending_timer(nil), do: :ok
 
   defp cancel_pending_timer(%Pending{deadline_timer: timer}),
+    do: ignore_timer_result(Process.cancel_timer(timer))
+
+  defp cancel_retry_timer(%{retry_timer: nil}), do: :ok
+
+  defp cancel_retry_timer(%{retry_timer: timer}),
     do: ignore_timer_result(Process.cancel_timer(timer))
 
   defp cancel_resnapshot_timer(%{resnapshot_timer: nil}), do: :ok

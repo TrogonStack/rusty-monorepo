@@ -45,15 +45,13 @@ defmodule TrogonPresence.PidExitTest do
       end)
 
     assert_receive :tracked, 5_000
-    assert_push("presence_diff", %{joins: joins}, 5_000)
-    assert Map.has_key?(joins, other_key)
+    assert_push("presence_diff", %{joins: %{^other_key => _joined}}, 5_000)
 
     ref = Process.monitor(holder_pid)
     send(holder_pid, :stop)
     assert_receive {:DOWN, ^ref, :process, ^holder_pid, _reason}, 5_000
 
-    assert_push("presence_diff", %{joins: %{}, leaves: leaves}, 5_000)
-    assert Map.has_key?(leaves, other_key)
+    assert_push("presence_diff", %{joins: %{}, leaves: %{^other_key => _left}}, 5_000)
 
     refute Map.has_key?(Presence.list(topic), other_key)
   end

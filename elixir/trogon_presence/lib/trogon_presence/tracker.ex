@@ -15,7 +15,10 @@ defmodule TrogonPresence.Tracker do
     * re-heartbeats every locally tracked entry on a fixed interval, grouped
       by `TrogonPresence.Key` the way `Writer.heartbeat/4` expects;
     * rebroadcasts every reader diff as a `"presence_diff"` via
-      `Phoenix.PubSub`, shaped by `TrogonPresence.Broadcast`.
+      `Phoenix.PubSub`, shaped by `TrogonPresence.Broadcast`, and does the
+      same for whatever a reader's later snapshot changed against the
+      replica it replaces (a resnapshot after a reconnect or a gap), so a
+      channel client still sees every net change exactly once.
 
   ## Backends
 
@@ -68,6 +71,7 @@ defmodule TrogonPresence.Tracker do
 
   alias TrogonPresence.{
     Broadcast,
+    Diff,
     HolderId,
     Key,
     Meta,
@@ -429,7 +433,7 @@ defmodule TrogonPresence.Tracker do
   @impl GenServer
   def handle_info({:trogon_presence_reader, reader_pid, {:snapshot, _cursor, presences}}, state) do
     case Map.fetch(state.reader_pids, reader_pid) do
-      {:ok, topic_raw} -> {:noreply, put_presences(state, topic_raw, presences)}
+      {:ok, topic_raw} -> {:noreply, reinstall(state, topic_raw, presences)}
       :error -> {:noreply, state}
     end
   end
@@ -688,6 +692,19 @@ defmodule TrogonPresence.Tracker do
 
       :error ->
         state
+    end
+  end
+
+  defp reinstall(state, topic_raw, presences) do
+    case Map.fetch(state.presences, topic_raw) do
+      {:ok, previous} ->
+        diff = Diff.between(previous, presences)
+        state = put_presences(state, topic_raw, presences)
+        unless Diff.empty?(diff), do: broadcast_diff(state, topic_raw, diff)
+        state
+
+      :error ->
+        put_presences(state, topic_raw, presences)
     end
   end
 

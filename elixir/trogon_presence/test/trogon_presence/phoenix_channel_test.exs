@@ -36,13 +36,11 @@ defmodule TrogonPresence.PhoenixChannelTest do
     assert {:ok, _ref} =
              Presence.track(self(), topic, other_key, %{"status" => "away"})
 
-    assert_push("presence_diff", %{joins: joins, leaves: leaves}, 5_000)
-    assert Map.has_key?(joins, other_key)
+    assert_push("presence_diff", %{joins: %{^other_key => _joined}, leaves: leaves}, 5_000)
     assert leaves == %{}
 
     :ok = Presence.untrack(self(), topic, other_key)
 
-    assert_push("presence_diff", %{joins: %{}, leaves: left}, 5_000)
-    assert Map.has_key?(left, other_key)
+    assert_push("presence_diff", %{joins: %{}, leaves: %{^other_key => _left}}, 5_000)
   end
 end
