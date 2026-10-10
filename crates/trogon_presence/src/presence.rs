@@ -128,7 +128,7 @@ impl Presence {
     ) -> Result<Self, ProvisionError> {
         let context = config.context(client.clone());
         let bucket = config.bucket().clone();
-        probe_atomic_batch(&context, &bucket, &options).await?;
+        probe_atomic_batch(&context, config.route(), &bucket, &options).await?;
         match context.get_stream(bucket.stream_name()).await {
             Ok(stream) => verify_provisioned(stream.cached_info(), &config, &options)?,
             Err(source) if is_stream_missing(&source) => create(&context, &config, &options).await?,

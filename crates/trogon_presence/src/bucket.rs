@@ -12,13 +12,16 @@ use base64::Engine;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 
-use crate::batch::{AtomicBatch, BatchError, BatchOutcome, BatchPublishError, BatchRecord, Expected};
+use crate::batch::{
+    AtomicBatch, BatchBudget, BatchError, BatchOutcome, BatchPublishError, BatchRecord, Expected, Unpaced,
+};
 use crate::config::{BucketName, PresenceConfig, ProvisionOptions};
 use crate::constants::{
     BATCH_MAX_MESSAGES, BUCKET_MAX_AGE_SECS, BUCKET_MAX_BYTES, BUCKET_MAX_MESSAGE_BYTES, BUCKET_SCHEMA_V1,
     FINGERPRINT_METADATA_KEY, GENERATION_METADATA_KEY, SCHEMA_METADATA_KEY, SHARD_COUNT_METADATA_KEY,
     TOKEN_WIDTH_METADATA_KEY, WRITER_MODE_METADATA_KEY,
 };
+use crate::domain::JetStreamRoute;
 use crate::entropy::EntropyError;
 use crate::position::{BatchId, StreamGeneration};
 use crate::shard::ShardCount;
@@ -514,6 +517,7 @@ pub enum ProbeError {
 
 pub(crate) async fn probe_atomic_batch(
     context: &jetstream::Context,
+    route: &JetStreamRoute,
     bucket: &BucketName,
     options: &ProvisionOptions,
 ) -> Result<(), ProbeError> {
@@ -537,7 +541,7 @@ pub(crate) async fn probe_atomic_batch(
         })
         .await
         .map_err(ProbeError::Create)?;
-    let outcome = run_probe(context, &format!("{subject_root}.{id}")).await;
+    let outcome = run_probe(context, route, &format!("{subject_root}.{id}")).await;
     let cleanup = context
         .delete_stream(&stream)
         .await
@@ -553,13 +557,16 @@ fn is_stream_missing(error: &DeleteStreamError) -> bool {
     )
 }
 
-async fn run_probe(context: &jetstream::Context, subject_root: &str) -> Result<(), ProbeError> {
+async fn run_probe(context: &jetstream::Context, route: &JetStreamRoute, subject_root: &str) -> Result<(), ProbeError> {
     let mut batch = AtomicBatch::new()?;
     for index in 0..BATCH_MAX_MESSAGES {
         let subject = Subject::from(format!("{subject_root}.{index}"));
         batch.push(BatchRecord::put(subject, Bytes::new(), Expected::Empty))?;
     }
-    match batch.publish(&context.client()).await? {
+    match batch
+        .publish_routed(&context.client(), route, BatchBudget::default(), &Unpaced)
+        .await?
+    {
         BatchOutcome::Committed(ack) if usize::from(ack.last().get()) == BATCH_MAX_MESSAGES => Ok(()),
         BatchOutcome::Committed(ack) => Err(ProbeError::Partial {
             expected: BATCH_MAX_MESSAGES,

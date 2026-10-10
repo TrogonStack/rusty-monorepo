@@ -7,10 +7,10 @@ use async_nats::jetstream::stream::StorageType;
 use crate::batch::InflightBatchLimit;
 use crate::bucket::WriterMode;
 use crate::constants::{
-    BATCH_PROBE_STREAM_PREFIX, BATCH_PROBE_SUBJECT_PREFIX, DEFAULT_BUCKET, DEFAULT_GUARD_TTL_SECS,
-    DEFAULT_HEARTBEAT_INTERVAL_SECS, DEFAULT_LEASE_TTL_SECS, DEFAULT_MARKER_TTL_SECS, KV_STREAM_PREFIX,
-    KV_SUBJECT_PREFIX, LEASE_TTL_TO_HEARTBEAT_DENOMINATOR, LEASE_TTL_TO_HEARTBEAT_NUMERATOR,
-    MARKER_TTL_TO_LEASE_TTL_FACTOR, RECEIPT_TTL, REPLICAS_MAX, TOKEN_SEPARATOR,
+    BATCH_PROBE_STREAM_PREFIX, DEFAULT_BUCKET, DEFAULT_GUARD_TTL_SECS, DEFAULT_HEARTBEAT_INTERVAL_SECS,
+    DEFAULT_LEASE_TTL_SECS, DEFAULT_MARKER_TTL_SECS, KV_STREAM_PREFIX, KV_SUBJECT_PREFIX,
+    LEASE_TTL_TO_HEARTBEAT_DENOMINATOR, LEASE_TTL_TO_HEARTBEAT_NUMERATOR, MARKER_TTL_TO_LEASE_TTL_FACTOR, RECEIPT_TTL,
+    REPLICAS_MAX, TOKEN_SEPARATOR,
 };
 use crate::domain::{JetStreamDomain, JetStreamRoute};
 use crate::kv_key::KvKey;
@@ -46,7 +46,7 @@ impl BucketName {
     }
 
     pub fn probe_subject_root(&self) -> String {
-        format!("{BATCH_PROBE_SUBJECT_PREFIX}{TOKEN_SEPARATOR}{}", self.0)
+        format!("{KV_SUBJECT_PREFIX}{TOKEN_SEPARATOR}{}", self.probe_stream_name())
     }
 }
 
@@ -452,7 +452,7 @@ mod tests {
     fn probe_names_derive_from_the_bucket() -> Result<(), BucketNameError> {
         let bucket = BucketName::try_from("PRESENCE_V1".to_owned())?;
         assert_eq!(bucket.probe_stream_name(), "PRESENCE_PROBE_PRESENCE_V1");
-        assert_eq!(bucket.probe_subject_root(), "$PRESENCE_PROBE.PRESENCE_V1");
+        assert_eq!(bucket.probe_subject_root(), "$KV.PRESENCE_PROBE_PRESENCE_V1");
         Ok(())
     }
 

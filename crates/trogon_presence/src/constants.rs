@@ -55,7 +55,6 @@ pub const BATCH_MAX_BYTES: usize = 1024 * 1024;
 pub const BATCH_SEND_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 pub const BATCH_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 pub const BATCH_PROBE_STREAM_PREFIX: &str = "PRESENCE_PROBE_";
-pub const BATCH_PROBE_SUBJECT_PREFIX: &str = "$PRESENCE_PROBE";
 pub const NATS_HEADER_PREAMBLE: &str = "NATS/1.0\r\n";
 pub const NATS_HEADER_LINE_OVERHEAD: usize = ": \r\n".len();
 pub const NATS_HEADER_TERMINATOR: &str = "\r\n";

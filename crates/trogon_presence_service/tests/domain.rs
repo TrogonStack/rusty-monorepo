@@ -531,6 +531,36 @@ async fn kv_subjects_cross_domains_only_through_the_api_prefix() -> TestResult {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "hub and leaf domain fixture, run through `mise run presence:domain`"]
+async fn a_leaf_client_provisions_the_hub_bucket_past_a_leaf_probe_stream() -> TestResult {
+    let pair = pair_or_skip!();
+    let config = presence_config()?;
+    let bucket = config.bucket().clone();
+    let leaf_client = pair.client(Side::Leaf).await?;
+    let leaf = DomainPair::context(&leaf_client, Side::Leaf);
+    let leaf_probe = leaf
+        .create_stream(stream::Config {
+            name: bucket.probe_stream_name(),
+            subjects: vec![format!("{}.>", bucket.probe_subject_root())],
+            ..Default::default()
+        })
+        .await?;
+    Path::ThroughLeaf
+        .route(config)
+        .map(|routed| Presence::provision(leaf_client, routed, ProvisionOptions::default()))?
+        .await?
+        .close();
+    let hub = jetstream::new(pair.client(Side::Hub).await?);
+    hub.get_stream(bucket.stream_name()).await?;
+    let stray = leaf_probe.clone().info().await?.state.messages;
+    assert_eq!(
+        stray, 0,
+        "the hub probe wrote {stray} records into the leaf probe stream"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "hub and leaf domain fixture, run through `mise run presence:domain`"]
 async fn a_leaf_client_without_a_domain_cannot_open_the_hub_bucket() -> TestResult {
     let pair = pair_or_skip!();
     let config = presence_config()?;
