@@ -43,6 +43,10 @@ pub const EVAL_COST_USD: &str = "trg.eval.cost.usd";
 /// harness startup overhead is visible.
 pub const EVAL_HARNESS_DURATION_MS: &str = "trg.eval.harness.duration_ms";
 
+/// Harness-reported time spent waiting on the model API, in milliseconds,
+/// for harnesses that report it apart from their total.
+pub const EVAL_HARNESS_API_DURATION_MS: &str = "trg.eval.harness.api_duration_ms";
+
 /// The grader's name, on a `grade` span's children.
 pub const EVAL_GRADER_NAME: &str = "trg.eval.grader.name";
 
@@ -85,3 +89,71 @@ pub const EXEC_ENV_VAR_COUNT: &str = "trg.exec.env.var.count";
 
 /// Whether every check a `trg doctor` backend diagnosis ran passed.
 pub const DOCTOR_HEALTHY: &str = "trg.doctor.healthy";
+
+/// The content hash of the skill revision an eval suite ran against.
+pub const EVAL_SKILL_REVISION: &str = "trg.eval.skill.revision";
+
+/// The scenarios an eval suite covers, comma-separated in suite order.
+pub const EVAL_SCENARIOS: &str = "trg.eval.scenarios";
+
+/// How an eval suite is graded once its runs finish (`none`, `auto`).
+pub const EVAL_GRADING_STRATEGY: &str = "trg.eval.grading.strategy";
+
+/// How many runs an eval suite executes at once (`-j`).
+pub const EVAL_CONCURRENCY: &str = "trg.eval.concurrency";
+
+/// How many runs an eval suite scheduled.
+pub const EVAL_RUN_COUNT: &str = "trg.eval.run.count";
+
+/// The opaque model configuration label a run was recorded under.
+pub const EVAL_MODEL_CONFIG: &str = "trg.eval.model_config";
+
+/// The model a run resolved to, once the case's choice and the operator's are combined.
+pub const EVAL_RUNNER_MODEL: &str = "trg.eval.runner.model";
+
+/// The harness kind a run executes on (`claude`, `codex`, `cursor-agent`).
+pub const EVAL_RUNNER_KIND: &str = "trg.eval.runner.kind";
+
+/// The harness version the availability probe reported.
+pub const EVAL_RUNNER_VERSION: &str = "trg.eval.runner.version";
+
+/// A run's final status (`completed`, `failed`, `timeout`, `skipped`).
+pub const EVAL_RUN_STATUS: &str = "trg.eval.run.status";
+
+/// What one attempt ended as (`completed`, `failed`, `timeout`, `runner_error`).
+pub const EVAL_ATTEMPT_OUTCOME: &str = "trg.eval.attempt.outcome";
+
+/// Whether an attempt failed in a way a retry may recover from.
+pub const EVAL_ATTEMPT_TRANSIENT: &str = "trg.eval.attempt.transient";
+
+/// How many files a cache hit restored into the run reusing it.
+pub const EVAL_CACHE_RESTORED_FILES: &str = "trg.eval.cache.restored.files";
+
+/// How many bytes a cache hit restored into the run reusing it.
+pub const EVAL_CACHE_RESTORED_BYTES: &str = "trg.eval.cache.restored.bytes";
+
+/// Whether the skill directory changed while it was handed to runs.
+pub const EVAL_SKILL_TAMPERED: &str = "trg.eval.skill.tampered";
+
+/// The mocked MCP server a `mock-server` process answers as.
+pub const EVAL_MOCK_SERVER: &str = "trg.eval.mock.server";
+
+/// How a mocked `tools/call` matched its declaration (`matched`, `violated`,
+/// `unresolved`, `unknown_tool`).
+pub const EVAL_MOCK_MATCH: &str = "trg.eval.mock.match";
+
+/// What the operator answered when asked to trust a foreign skill (`yes`, `no`,
+/// `unanswered`).
+pub const EVAL_TRUST_ANSWER: &str = "trg.eval.trust.answer";
+
+/// Counter: eval cache lookups, split by `trg.eval.cache.hit`.
+pub const EVAL_CACHE_LOOKUPS_METRIC: &str = "trg.eval.cache.lookups";
+
+/// Counter: runner attempts, split by outcome and transience.
+pub const EVAL_ATTEMPTS_METRIC: &str = "trg.eval.attempts";
+
+/// Counter: finished runs, split by `trg.eval.run.status`.
+pub const EVAL_RUNS_METRIC: &str = "trg.eval.runs";
+
+/// Counter: USD the harness reported spending, per attempt.
+pub const EVAL_COST_METRIC: &str = "trg.eval.cost";

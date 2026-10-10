@@ -3,7 +3,7 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use super::fake::{invoke_with_retries, run_bash};
-use super::{EvalRunRequest, RunStatus, FAILURE_KIND_RUNNER};
+use super::{EvalRunRequest, RunStatus, TelemetryForwarding, FAILURE_KIND_RUNNER};
 use crate::agentskills::evals::{EvalCase, EvalDirName};
 use crate::agentskills::report::ScenarioKind;
 use crate::agentskills::transcript::{
@@ -46,6 +46,7 @@ fn bash_request<'a>(
         scaffold_permission: crate::agentskills::workspace_scaffold::ScaffoldPermission::Withheld,
         tool_grant: None,
         mcp_config: None,
+        telemetry_forwarding: TelemetryForwarding::Off,
     }
 }
 

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::trg_config_dir;
+use crate::telemetry::semconv::trg::EVAL_TRUST_ANSWER;
 
 const TRUST_FILE: &str = "trusted-skills.json";
 
@@ -202,18 +203,28 @@ fn ask_at_terminal(skill_dir: &Path) -> Option<bool> {
         return None;
     }
 
-    eprint!(
-        "Skill directory '{}' is outside this working tree. Running it lets its author decide \
-         what an agent does as you. Trust it from now on? [y/N] ",
-        skill_dir.display()
-    );
-    let _ = io::stderr().flush();
+    let span = tracing::info_span!("await trust answer", { EVAL_TRUST_ANSWER } = tracing::field::Empty);
+    let answer = span.in_scope(|| {
+        eprint!(
+            "Skill directory '{}' is outside this working tree. Running it lets its author decide \
+             what an agent does as you. Trust it from now on? [y/N] ",
+            skill_dir.display()
+        );
+        let _ = io::stderr().flush();
 
-    let mut reply = String::new();
-    if io::stdin().read_line(&mut reply).is_err() {
-        return None;
-    }
-    Some(matches!(reply.trim(), "y" | "Y" | "yes" | "Yes"))
+        let mut reply = String::new();
+        io::stdin()
+            .read_line(&mut reply)
+            .ok()
+            .map(|_| matches!(reply.trim(), "y" | "Y" | "yes" | "Yes"))
+    });
+    let recorded = match answer {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unanswered",
+    };
+    span.record(EVAL_TRUST_ANSWER, recorded);
+    answer
 }
 
 fn canonical(path: &Path) -> PathBuf {

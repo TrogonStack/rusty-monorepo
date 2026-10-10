@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::evals::RelativeSkillPath;
+use super::runner::telemetry::{CliProcessSpan, FailureType};
+use crate::telemetry::propagation::inject_std_command;
 
 /// A script a case runs in its own workspace before any agent starts.
 ///
@@ -58,10 +60,28 @@ impl WorkspaceScaffold {
         // The child changes into the workspace before it execs, so a skill directory given
         // as a relative path would be looked for inside the workspace and not found.
         let script = std::fs::canonicalize(self.resolve_in(skill_path)).map_err(|source| self.unreadable(source))?;
-        let output = Command::new(&script)
-            .current_dir(workspace_dir)
-            .output()
-            .map_err(|source| self.unreadable(source))?;
+        let executable = script
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.0.as_str().to_string());
+        let process = CliProcessSpan::start(&executable);
+        let output = process.span().in_scope(|| {
+            let mut command = Command::new(&script);
+            command
+                .current_dir(workspace_dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            inject_std_command(&mut command);
+            let child = command.spawn()?;
+            process.spawned(child.id());
+            child.wait_with_output()
+        });
+        let output = output.map_err(|source| {
+            process.failed(FailureType::SpawnFailed);
+            self.unreadable(source)
+        })?;
+        process.exited(output.status.code());
 
         if output.status.success() {
             return Ok(());

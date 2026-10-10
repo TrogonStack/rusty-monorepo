@@ -25,8 +25,9 @@ use super::model_name::{ModelName, ModelSource};
 use super::outputs::OUTPUTS_DIR;
 use super::permission_outcome::PermissionOutcome;
 use super::runner::capabilities::HarnessControl;
-use super::runner::{Runner, FAILURE_KIND_UNSUPPORTED};
+use super::runner::{Runner, TelemetryForwarding, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
+use super::span_reference::SpanReference;
 use super::tool_grant::ToolGrant;
 use super::validation::ValidationError;
 
@@ -235,6 +236,8 @@ pub struct BuildReportOptions {
     pub cases: CaseSelection,
     /// Directory, relative to the skill root, the suite is resolved from.
     pub eval_dir: EvalDirName,
+    /// Whether each run's harness exports its own telemetry.
+    pub telemetry_forwarding: TelemetryForwarding,
 }
 
 impl Default for BuildReportOptions {
@@ -255,6 +258,7 @@ impl Default for BuildReportOptions {
             allowed_tools: None,
             cases: CaseSelection::default(),
             eval_dir: EvalDirName::default(),
+            telemetry_forwarding: TelemetryForwarding::Off,
         }
     }
 }
@@ -330,8 +334,21 @@ pub struct ReportSection {
     pub permission: PermissionOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<ToolGrant>,
+    /// Whether each run's harness was handed what it needs to export its own telemetry,
+    /// which lets a run reach a collector its environment policy alone would not.
+    #[serde(default, skip_serializing_if = "forwarding_is_off")]
+    pub telemetry_forwarding: TelemetryForwarding,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci: Option<CiSection>,
+    /// The suite span of the pass that produced this report. Absent when tracing was off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<SpanReference>,
+}
+
+impl ReportSection {
+    pub fn span_reference(&self) -> Option<&SpanReference> {
+        self.trace.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -585,10 +602,18 @@ pub struct RunRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0.0, max = 1.0))]
     pub case_score: Option<f64>,
+    /// The span this run executed under, so a later `grade` or `compare` can link to it.
+    /// Absent when tracing was off for the pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<SpanReference>,
 }
 
 fn default_runner_invocations() -> u32 {
     1
+}
+
+fn forwarding_is_off(forwarding: &TelemetryForwarding) -> bool {
+    matches!(forwarding, TelemetryForwarding::Off)
 }
 
 fn environment_before_it_was_recorded() -> EnvironmentPolicy {
@@ -695,6 +720,10 @@ impl RunNotStarted {
 }
 
 impl RunRecord {
+    pub fn span_reference(&self) -> Option<&SpanReference> {
+        self.trace.as_ref()
+    }
+
     /// The one way a run is recorded as never having reached the harness.
     pub fn not_started(&mut self, reason: RunNotStarted) {
         self.status = RUN_STATUS_SKIPPED.to_string();
@@ -1089,7 +1118,9 @@ pub fn build_report_bundle(
             environment: options.environment,
             permission: options.permission,
             allowed_tools: options.allowed_tools.clone(),
+            telemetry_forwarding: options.telemetry_forwarding,
             ci: build_ci_section(),
+            trace: None,
         },
         suite: SuiteSection {
             skill_name: skill_name.to_string(),
@@ -1397,6 +1428,7 @@ fn build_runs(
                     warnings: Vec::new(),
                     mock_violations: Vec::new(),
                     case_score: None,
+                    trace: None,
                 });
                 run_number += 1;
             }
@@ -1631,7 +1663,9 @@ mod tests {
                 environment: EnvironmentPolicy::default(),
                 permission: PermissionOutcome::default(),
                 allowed_tools: None,
+                telemetry_forwarding: TelemetryForwarding::Off,
                 ci: None,
+                trace: None,
             },
             suite: SuiteSection {
                 skill_name: "demo-skill".to_string(),
@@ -2242,7 +2276,9 @@ mod tests {
                     environment: EnvironmentPolicy::default(),
                     permission: PermissionOutcome::default(),
                     allowed_tools: None,
+                    telemetry_forwarding: TelemetryForwarding::Off,
                     ci: None,
+                    trace: None,
                 },
                 suite: SuiteSection {
                     skill_name: "demo-skill".to_string(),

@@ -810,7 +810,9 @@ mod tests {
                 environment: Default::default(),
                 permission: Default::default(),
                 allowed_tools: None,
+                telemetry_forwarding: crate::agentskills::runner::TelemetryForwarding::Off,
                 ci: None::<CiSection>,
+                trace: None,
             },
             suite: SuiteSection {
                 skill_name: "demo-skill".to_string(),
@@ -863,6 +865,7 @@ mod tests {
                 warnings: Vec::new(),
                 mock_violations: Vec::new(),
                 case_score: None,
+                trace: None,
             }],
             assertion_results: Vec::new(),
             summaries: SummariesSection {
@@ -1002,6 +1005,7 @@ mod tests {
             warnings: Vec::new(),
             mock_violations: Vec::new(),
             case_score: None,
+            trace: None,
         }
     }
 
