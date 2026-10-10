@@ -2,7 +2,6 @@ mod common;
 
 use async_nats::jetstream::{self, stream};
 use common::NatsServer;
-use futures_util::TryStreamExt;
 use trogon_presence::{
     BucketField, Incompatible, OpenError, Presence, PresenceConfig, ProvisionError, ProvisionOptions, UnreadyReason,
 };
@@ -144,26 +143,38 @@ async fn recreating_the_stream_changes_the_fingerprint_and_reports_unready() -> 
     Ok(())
 }
 
+async fn probe_records(
+    client: &async_nats::Client,
+    config: &PresenceConfig,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let mut probe = jetstream::new(client.clone())
+        .get_stream(config.bucket().probe_stream_name())
+        .await?;
+    Ok(probe.info().await?.state.messages)
+}
+
 #[tokio::test]
-async fn the_scratch_probe_stream_is_gone_after_provisioning() -> TestResult {
+async fn the_probe_reuses_its_stream_and_leaves_no_records_behind() -> TestResult {
     let server = server_or_skip!();
     let client = server.client().await;
     let config = PresenceConfig::default();
     let probe = config.bucket().probe_stream_name();
     assert_eq!(probe, format!("{PROBE_STREAM_PREFIX}{}", config.bucket().as_str()));
-    Presence::provision(client.clone(), config, ProvisionOptions::default())
-        .await?
-        .close();
-    let names: Vec<String> = jetstream::new(client).stream_names().try_collect().await?;
-    assert!(
-        names.iter().all(|name| !name.starts_with(PROBE_STREAM_PREFIX)),
-        "probe streams left behind: {names:?}"
-    );
+    let context = jetstream::new(client.clone());
+    let mut created = Vec::new();
+    for _ in 0..2 {
+        Presence::provision(client.clone(), config.clone(), ProvisionOptions::default())
+            .await?
+            .close();
+        assert_eq!(probe_records(&client, &config).await?, 0, "probe records left behind");
+        created.push(context.get_stream(&probe).await?.cached_info().created);
+    }
+    assert_eq!(created[0], created[1], "a compatible probe stream was recreated");
     Ok(())
 }
 
 #[tokio::test]
-async fn a_leftover_probe_stream_is_replaced_and_removed() -> TestResult {
+async fn an_incompatible_probe_stream_is_replaced() -> TestResult {
     let server = server_or_skip!();
     let client = server.client().await;
     let config = PresenceConfig::default();
@@ -176,13 +187,47 @@ async fn a_leftover_probe_stream_is_replaced_and_removed() -> TestResult {
             ..Default::default()
         })
         .await?;
-    Presence::provision(client, config, ProvisionOptions::default())
+    Presence::provision(client.clone(), config.clone(), ProvisionOptions::default())
         .await?
         .close();
-    let names: Vec<String> = context.stream_names().try_collect().await?;
+    let replaced = context.get_stream(bucket.probe_stream_name()).await?;
     assert!(
-        !names.contains(&bucket.probe_stream_name()),
-        "leftover probe stream survived: {names:?}"
+        replaced.cached_info().config.allow_atomic_publish,
+        "the incompatible probe stream survived"
+    );
+    assert_eq!(probe_records(&client, &config).await?, 0, "probe records left behind");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_provisions_of_one_bucket_all_succeed() -> TestResult {
+    const PROVISIONERS: usize = 8;
+    let server = server_or_skip!();
+    let mut clients = Vec::with_capacity(PROVISIONERS);
+    for _ in 0..PROVISIONERS {
+        clients.push(server.client().await);
+    }
+    let outcomes = futures_util::future::join_all(
+        clients
+            .into_iter()
+            .map(|client| Presence::provision(client, PresenceConfig::default(), ProvisionOptions::default())),
+    )
+    .await;
+    let failures: Vec<String> = outcomes
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            Ok(presence) => {
+                presence.close();
+                None
+            }
+            Err(err) => Some(err.to_string()),
+        })
+        .collect();
+    assert!(failures.is_empty(), "concurrent provisions failed: {failures:?}");
+    assert_eq!(
+        probe_records(&server.client().await, &PresenceConfig::default()).await?,
+        0,
+        "probe records left behind"
     );
     Ok(())
 }

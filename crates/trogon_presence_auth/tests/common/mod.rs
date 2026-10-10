@@ -230,7 +230,7 @@ fn tenant_account(users: &TenantUsers) -> Value {
         vec!["$JS.API.INFO".to_owned()],
         provisioner_stream_grants(&presence),
         provisioner_stream_grants(&lease),
-        ["CREATE", "INFO", "DELETE"]
+        ["CREATE", "INFO", "DELETE", "PURGE"]
             .iter()
             .map(|op| format!("$JS.API.STREAM.{op}.{probe}"))
             .collect(),

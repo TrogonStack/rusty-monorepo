@@ -3,8 +3,10 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use async_nats::jetstream::context::{CreateStreamError, DeleteStreamError, DeleteStreamErrorKind};
-use async_nats::jetstream::stream::{self, DiscardPolicy, RetentionPolicy};
+use async_nats::jetstream::context::{
+    CreateStreamError, CreateStreamErrorKind, DeleteStreamError, DeleteStreamErrorKind,
+};
+use async_nats::jetstream::stream::{self, DiscardPolicy, PurgeError, RetentionPolicy};
 use async_nats::jetstream::ErrorCode;
 use async_nats::{jetstream, Subject};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -17,9 +19,9 @@ use crate::batch::{
 };
 use crate::config::{BucketName, PresenceConfig, ProvisionOptions};
 use crate::constants::{
-    BATCH_MAX_MESSAGES, BUCKET_MAX_AGE_SECS, BUCKET_MAX_BYTES, BUCKET_MAX_MESSAGE_BYTES, BUCKET_SCHEMA_V1,
-    FINGERPRINT_METADATA_KEY, GENERATION_METADATA_KEY, SCHEMA_METADATA_KEY, SHARD_COUNT_METADATA_KEY,
-    TOKEN_WIDTH_METADATA_KEY, WRITER_MODE_METADATA_KEY,
+    BATCH_MAX_MESSAGES, BATCH_PROBE_MAX_AGE, BUCKET_MAX_AGE_SECS, BUCKET_MAX_BYTES, BUCKET_MAX_MESSAGE_BYTES,
+    BUCKET_SCHEMA_V1, FINGERPRINT_METADATA_KEY, GENERATION_METADATA_KEY, SCHEMA_METADATA_KEY, SHARD_COUNT_METADATA_KEY,
+    TOKEN_SEPARATOR, TOKEN_WIDTH_METADATA_KEY, WRITER_MODE_METADATA_KEY,
 };
 use crate::domain::JetStreamRoute;
 use crate::entropy::EntropyError;
@@ -509,10 +511,10 @@ pub enum ProbeError {
     Unknown,
     #[error("the probe batch committed {found} of {expected} records")]
     Partial { expected: usize, found: u16 },
-    #[error("could not remove the leftover probe stream {stream}: {source}")]
+    #[error("could not replace the incompatible probe stream {stream}: {source}")]
     Leftover { stream: String, source: DeleteStreamError },
-    #[error("could not delete the probe stream {stream}: {source}")]
-    Cleanup { stream: String, source: DeleteStreamError },
+    #[error("could not purge the probe records from {stream}: {source}")]
+    Cleanup { stream: String, source: PurgeError },
 }
 
 pub(crate) async fn probe_atomic_batch(
@@ -522,32 +524,63 @@ pub(crate) async fn probe_atomic_batch(
     options: &ProvisionOptions,
 ) -> Result<(), ProbeError> {
     let id = BatchId::generate()?;
-    let stream = bucket.probe_stream_name();
-    let subject_root = bucket.probe_subject_root();
-    match context.delete_stream(&stream).await {
-        Ok(_) => {}
-        Err(source) if is_stream_missing(&source) => {}
-        Err(source) => return Err(ProbeError::Leftover { stream, source }),
-    }
-    context
-        .create_stream(stream::Config {
-            name: stream.clone(),
-            subjects: vec![format!("{subject_root}.>")],
-            max_messages_per_subject: 1,
-            storage: options.storage,
-            num_replicas: usize::from(options.replicas.get()),
-            allow_atomic_publish: true,
-            ..Default::default()
-        })
-        .await
-        .map_err(ProbeError::Create)?;
-    let outcome = run_probe(context, route, &format!("{subject_root}.{id}")).await;
-    let cleanup = context
-        .delete_stream(&stream)
+    let probe = open_probe_stream(context, bucket, options).await?;
+    let subject_root = format!("{}{TOKEN_SEPARATOR}{id}", bucket.probe_subject_root());
+    let outcome = run_probe(context, route, &subject_root).await;
+    let cleanup = probe
+        .purge()
+        .filter(format!("{subject_root}{TOKEN_SEPARATOR}>"))
         .await
         .map(drop)
-        .map_err(|source| ProbeError::Cleanup { stream, source });
+        .map_err(|source| ProbeError::Cleanup {
+            stream: bucket.probe_stream_name(),
+            source,
+        });
     outcome.and(cleanup)
+}
+
+fn probe_stream_config(bucket: &BucketName, options: &ProvisionOptions) -> stream::Config {
+    stream::Config {
+        name: bucket.probe_stream_name(),
+        subjects: vec![format!("{}{TOKEN_SEPARATOR}>", bucket.probe_subject_root())],
+        max_messages_per_subject: 1,
+        max_age: BATCH_PROBE_MAX_AGE,
+        storage: options.storage,
+        num_replicas: usize::from(options.replicas.get()),
+        allow_atomic_publish: true,
+        ..Default::default()
+    }
+}
+
+async fn open_probe_stream(
+    context: &jetstream::Context,
+    bucket: &BucketName,
+    options: &ProvisionOptions,
+) -> Result<stream::Stream, ProbeError> {
+    let config = probe_stream_config(bucket, options);
+    match context.create_stream(config.clone()).await {
+        Ok(stream) => return Ok(stream),
+        Err(source) if is_name_taken(&source) => {}
+        Err(source) => return Err(ProbeError::Create(source)),
+    }
+    match context.delete_stream(&config.name).await {
+        Ok(_) => {}
+        Err(source) if is_stream_missing(&source) => {}
+        Err(source) => {
+            return Err(ProbeError::Leftover {
+                stream: config.name,
+                source,
+            })
+        }
+    }
+    context.create_stream(config).await.map_err(ProbeError::Create)
+}
+
+pub(crate) fn is_name_taken(error: &CreateStreamError) -> bool {
+    matches!(
+        error.kind(),
+        CreateStreamErrorKind::JetStream(ref err) if err.error_code() == ErrorCode::STREAM_NAME_EXIST
+    )
 }
 
 fn is_stream_missing(error: &DeleteStreamError) -> bool {

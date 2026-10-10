@@ -1,14 +1,14 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
-use async_nats::jetstream::context::{CreateStreamError, CreateStreamErrorKind, GetStreamError, GetStreamErrorKind};
+use async_nats::jetstream::context::{CreateStreamError, GetStreamError, GetStreamErrorKind};
 use async_nats::jetstream::stream;
 use async_nats::jetstream::{self, ErrorCode};
 use tokio::sync::broadcast;
 
 use crate::batch::InflightBatches;
 use crate::bucket::{
-    check_placement, check_settings, data_stream_config, probe_atomic_batch, BucketField, BucketMetadata, BucketReport,
-    ProbeError, StreamFingerprint, StreamIdentity, WriterMode,
+    check_placement, check_settings, data_stream_config, is_name_taken, probe_atomic_batch, BucketField,
+    BucketMetadata, BucketReport, ProbeError, StreamFingerprint, StreamIdentity, WriterMode,
 };
 use crate::config::{BucketName, PresenceConfig, ProvisionOptions};
 use crate::constants::FINGERPRINT_METADATA_KEY;
@@ -130,7 +130,7 @@ impl Presence {
         let bucket = config.bucket().clone();
         probe_atomic_batch(&context, config.route(), &bucket, &options).await?;
         match context.get_stream(bucket.stream_name()).await {
-            Ok(stream) => verify_provisioned(stream.cached_info(), &config, &options)?,
+            Ok(stream) => adopt(&context, stream.cached_info(), &config, &options).await?,
             Err(source) if is_stream_missing(&source) => create(&context, &config, &options).await?,
             Err(source) => return Err(ProvisionError::Lookup { bucket, source }),
         }
@@ -360,12 +360,21 @@ fn verify_compatible(found: &stream::Config, config: &PresenceConfig) -> Result<
         bucket: config.bucket().clone(),
         field,
     };
-    check_settings(found, config).map_err(incompatible)?;
-    let metadata = BucketMetadata::from_map(&found.metadata).map_err(incompatible)?;
-    metadata.check_against(config).map_err(incompatible)?;
+    let metadata = verify_metadata(found, config)?;
     if StreamFingerprint::recorded(&found.metadata).is_none() {
         return Err(incompatible(BucketField::Fingerprint));
     }
+    Ok(metadata)
+}
+
+fn verify_metadata(found: &stream::Config, config: &PresenceConfig) -> Result<BucketMetadata, Incompatible> {
+    let incompatible = |field| Incompatible {
+        bucket: config.bucket().clone(),
+        field,
+    };
+    check_settings(found, config).map_err(incompatible)?;
+    let metadata = BucketMetadata::from_map(&found.metadata).map_err(incompatible)?;
+    metadata.check_against(config).map_err(incompatible)?;
     Ok(metadata)
 }
 
@@ -383,6 +392,23 @@ fn verify_provisioned(
     verify_compatible(&info.config, config).map(drop)
 }
 
+async fn adopt(
+    context: &jetstream::Context,
+    info: &stream::Info,
+    config: &PresenceConfig,
+    options: &ProvisionOptions,
+) -> Result<(), ProvisionError> {
+    if StreamFingerprint::recorded(&info.config.metadata).is_some() {
+        return Ok(verify_provisioned(info, config, options)?);
+    }
+    check_placement(&info.config, options).map_err(|field| Incompatible {
+        bucket: config.bucket().clone(),
+        field,
+    })?;
+    verify_metadata(&info.config, config)?;
+    stamp(context, info, config.bucket().clone()).await
+}
+
 async fn create(
     context: &jetstream::Context,
     config: &PresenceConfig,
@@ -397,13 +423,16 @@ async fn create(
         Ok(stream) => stream,
         Err(source) if is_name_taken(&source) => {
             return match context.get_stream(bucket.stream_name()).await {
-                Ok(stream) => Ok(verify_provisioned(stream.cached_info(), config, options)?),
+                Ok(stream) => adopt(context, stream.cached_info(), config, options).await,
                 Err(source) => Err(ProvisionError::Lookup { bucket, source }),
             };
         }
         Err(source) => return Err(ProvisionError::Create { bucket, source }),
     };
-    let info = created.cached_info();
+    stamp(context, created.cached_info(), bucket).await
+}
+
+async fn stamp(context: &jetstream::Context, info: &stream::Info, bucket: BucketName) -> Result<(), ProvisionError> {
     let fingerprint = StreamFingerprint::of(&[StreamIdentity::of(info)]);
     let mut stamped = info.config.clone();
     stamped
@@ -417,11 +446,4 @@ async fn create(
         .await
         .map(drop)
         .map_err(|source| ProvisionError::Fingerprint { bucket, source })
-}
-
-fn is_name_taken(error: &CreateStreamError) -> bool {
-    matches!(
-        error.kind(),
-        CreateStreamErrorKind::JetStream(ref err) if err.error_code() == ErrorCode::STREAM_NAME_EXIST
-    )
 }
