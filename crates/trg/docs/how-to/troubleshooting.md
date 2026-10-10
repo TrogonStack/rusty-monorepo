@@ -253,6 +253,7 @@ automatically; manual edits must respect the constraint.
 | `assertions: 0/N passed` | Check `runs not completed` in the same output before blaming the skill |
 | Duplicate scenario error | Remove duplicate `--scenario` flags |
 | CI missing context in report | Set `GITHUB_ACTIONS=true` (automatic on GitHub Actions) |
+| No trace reaches the collector | Check stderr for a `trg: not exporting` line and `trg.log` for exporter errors. See [Export telemetry over OTLP](export-telemetry-over-otlp.md#check-that-it-worked) |
 
 For artifact schemas and flag reference, see
 [ai-skills-eval reference](../reference/ai-skills-eval.md).

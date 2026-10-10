@@ -9,6 +9,7 @@
 - [Config file reference](docs/reference/config.md)
 - [AI skills eval](docs/reference/ai-skills-eval.md)
 - [Output format](docs/reference/output-format.md)
+- [Telemetry](docs/reference/telemetry.md)
 
 ### How-to
 
@@ -28,6 +29,10 @@
 - [Write mechanical grader scripts](docs/how-to/write-mechanical-grader-scripts.md)
 - [Validate graders against human labels](docs/how-to/validate-graders-against-human-labels.md)
 - [Check model scaling](docs/how-to/check-model-scaling.md)
+- [Export telemetry over OTLP](docs/how-to/export-telemetry-over-otlp.md)
+- [Capture GenAI message content](docs/how-to/capture-genai-message-content.md)
+- [Forward telemetry into eval harnesses](docs/how-to/forward-telemetry-to-eval-harnesses.md)
+- [Replay a report bundle into a telemetry backend](docs/how-to/replay-a-report-bundle.md)
 - [Troubleshooting](docs/how-to/troubleshooting.md)
 
 ### Explanation
@@ -35,3 +40,4 @@
 - [Secrets backends](docs/explanation/secrets-backends.md)
 - [Eval lifecycle](docs/explanation/eval-lifecycle.md)
 - [Divergences from agentskills.io](docs/explanation/divergences-from-agentskills-io.md)
+- [Telemetry design](docs/explanation/telemetry-design.md)
