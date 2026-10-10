@@ -101,6 +101,36 @@ fn a_pass_with_no_runner_still_writes_a_bundle_verify_can_read() {
         .success();
 }
 
+/// A replay with no trace exporter configured has nowhere to send anything, so it says
+/// so and succeeds rather than reporting a broken tool over telemetry that was never
+/// asked for.
+#[test]
+fn exporting_a_bundle_with_no_trace_exporter_sends_nothing_and_says_so() {
+    let temp = tempfile::tempdir().unwrap();
+    let skill_dir = write_skill(temp.path(), "pipeline-skill");
+    scaffold_suite(&skill_dir);
+    let report_dir = scaffold_bundle(&skill_dir, &temp.path().join("artifacts"));
+
+    let mut export = trg();
+    for var in [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    ] {
+        export.env_remove(var);
+    }
+    let output = export
+        .args(["ai", "skills", "eval", "export"])
+        .arg(&report_dir)
+        .args(["--output-format", "json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    let document: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["outcome"], "tracing_off", "{document}");
+}
+
 /// Whether a bundle conforms to the schemas is a fact about the writer that produced it, not
 /// about how the suite scored. Read after the verdict, the check was reachable only on a
 /// bundle whose every assertion passed, which no pass without a live runner can produce, so
@@ -213,6 +243,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
         vec!["compare"],
         vec!["next-iteration"],
         vec!["html-report"],
+        vec!["export"],
         vec!["feedback", "init"],
         vec!["feedback", "list"],
         vec!["feedback", "validate"],

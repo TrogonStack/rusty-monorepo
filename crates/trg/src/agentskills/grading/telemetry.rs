@@ -19,7 +19,9 @@ use crate::telemetry::propagation::inject_std_command;
 use crate::telemetry::semconv::generated::attributes::{
     GEN_AI_EVALUATION_EXPLANATION, GEN_AI_EVALUATION_NAME, GEN_AI_EVALUATION_SCORE_LABEL, GEN_AI_EVALUATION_SCORE_VALUE,
 };
-use crate::telemetry::semconv::trg::{EVAL_ASSERTIONS_METRIC, EVAL_CASE_ID, EVAL_GRADER_KIND, EVAL_RUN_ID};
+use crate::telemetry::semconv::trg::{
+    EVAL_ASSERTIONS_METRIC, EVAL_CASE_ID, EVAL_GRADER_KIND, EVAL_REPLAYED, EVAL_RUN_ID,
+};
 use crate::telemetry::{ContentCapture, LOGS_ONLY_TARGET};
 
 const NONZERO_EXIT: &str = "nonzero_exit";
@@ -167,6 +169,22 @@ impl EvaluationLabel {
     }
 }
 
+/// Whether telemetry describes work as it happened or was rebuilt from a report
+/// bundle afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Provenance {
+    Live,
+    Replayed,
+}
+
+impl Provenance {
+    /// The `trg.eval.replayed` value, present only on a replay so live telemetry
+    /// stays exactly as it was.
+    pub(crate) fn replayed(self) -> Option<bool> {
+        (self == Self::Replayed).then_some(true)
+    }
+}
+
 /// One `gen_ai.evaluation.result` event.
 pub(crate) struct Evaluation<'a> {
     pub name: &'a str,
@@ -176,6 +194,7 @@ pub(crate) struct Evaluation<'a> {
     pub grader_kind: Option<&'a str>,
     pub case_id: &'a str,
     pub run_id: Option<&'a str>,
+    pub provenance: Provenance,
 }
 
 impl<'a> Evaluation<'a> {
@@ -204,6 +223,7 @@ impl<'a> Evaluation<'a> {
             grader_kind: Some(grader_kind),
             case_id,
             run_id: Some(run_id),
+            provenance: Provenance::Live,
         }
     }
 
@@ -230,7 +250,8 @@ impl<'a> Evaluation<'a> {
             { GEN_AI_EVALUATION_EXPLANATION } = explanation,
             { EVAL_GRADER_KIND } = self.grader_kind,
             { EVAL_CASE_ID } = self.case_id,
-            { EVAL_RUN_ID } = self.run_id
+            { EVAL_RUN_ID } = self.run_id,
+            { EVAL_REPLAYED } = self.provenance.replayed()
         );
     }
 }
@@ -308,6 +329,7 @@ mod tests {
             grader_kind: Some("contains"),
             case_id: "case",
             run_id: Some("run"),
+            provenance: Provenance::Live,
         }
     }
 

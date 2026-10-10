@@ -22,6 +22,7 @@ trg ai skills eval <SUBCOMMAND>
 | `compare` | Blindly compare scenario outputs within a report directory |
 | `next-iteration` | Build an improvement bundle from a prior iteration |
 | `html-report` | Render a local-only, self-contained HTML report over a report bundle |
+| `export` | Replay a finished report bundle as OpenTelemetry traces and evaluation events |
 | `scaling` | Check whether a stronger configuration scored higher across ordered report bundles |
 
 ---
@@ -876,6 +877,172 @@ trg ai skills eval html-report <REPORT_DIR> [OPTIONS]
 $ trg ai skills eval html-report ./artifacts/my-skill/20260526T120000Z-abc
 ./artifacts/my-skill/20260526T120000Z-abc
 html report: ./artifacts/my-skill/20260526T120000Z-abc/report.html
+```
+
+---
+
+## `eval export`
+
+Replay a finished report bundle as the OpenTelemetry trace a live `eval run`
+would have exported, for a pass that ran with tracing off or whose trace the
+backend no longer holds. `report.json` is read and never modified.
+
+```text
+trg ai skills eval export <REPORT_DIR> [OPTIONS]
+```
+
+Nothing is sent unless a trace exporter is configured through the standard
+`OTEL_*` variables (`OTEL_EXPORTER_OTLP_ENDPOINT` or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`). Without one the command says nothing
+was exported and exits `0`.
+
+### Positional argument
+
+| Argument | Description |
+| -------- | ----------- |
+| `REPORT_DIR` | Path to a report bundle directory containing `report.json` |
+
+### Flags
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--include-traced` | bool | `false` | Also replay runs and grades whose `trace` or `grade_trace` field shows they were already traced live, linking each replayed span to its live span |
+| `--output-format` | enum | `text` | `text` prints the replayed trace id and how many runs were replayed or skipped; `json` prints a machine-readable document |
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0` | The bundle was replayed, or there was nothing to replay or nowhere to send it |
+| `3` | The bundle could not be read, or `report.generated_at` is not an RFC 3339 timestamp |
+
+### What a replay contains
+
+A replay uses the span names and attributes a live pass records, so a query
+written against live traces also matches a replayed one:
+
+- `invoke_workflow {skill}` as a new root span, with `gen_ai.workflow.name`,
+  `trg.eval.skill.revision`, `trg.eval.iteration`, `trg.eval.scenarios`,
+  `trg.eval.grading.strategy` (the strategy the report was last graded
+  under), and `trg.eval.report.id`. It links to the `export` command's own
+  span and, when the report recorded one, to the live suite span.
+- `execute runs`, holding one `run` span per replayed run with the run's
+  case, split, scenario, model, runner, status, and cache attributes. A
+  failed run carries `error.type` from its `failure_kind`.
+- `attempt` and `invoke_agent {runner}` under a run the harness answered,
+  with token usage, `trg.eval.cost.usd`, and `process.exit.code`. A cache
+  hit gets neither. A run whose harness never answered gets an `attempt`
+  marked `runner_error` and no `invoke_agent`.
+- `grade`, holding a `grade run` span (identified by `trg.eval.run.id`) for
+  each run with recorded assertion results, linked to the replayed run span,
+  and a `grader {kind}` span per result.
+- One `gen_ai.evaluation.result` log event per recorded assertion result,
+  plus a `case_score` event, emitted in the replayed run span's context. As
+  in a live `grade`, they are sent as logs only, never as span events. The
+  evidence is message content and is only included under the same content
+  capture settings a live `grade` honors.
+
+Every replayed span and event carries `trg.eval.replayed = true`, so a
+backend can tell a replay from a live pass.
+
+### Where replayed spans sit in time
+
+A report records when the bundle was stamped (`report.generated_at`, written
+before any run executes) and how long each run's harness invocation took
+(`runs[].metrics.duration_ms`), but no per-run start time. A replay places
+spans by those facts alone:
+
+- Every `run`, its `attempt`, and its `invoke_agent` start at
+  `report.generated_at` and end `duration_ms` later. Runs of a serial pass
+  appear to overlap; their order is not recorded.
+- A run with no recorded duration is a zero-length span at
+  `report.generated_at`.
+- `execute runs` and `invoke_workflow` end when the longest run ends.
+- Grading time is not recorded, so `grade` and its children are zero-length
+  spans at the end of `execute runs`.
+- Evaluation events are stamped when the export runs, since the logs bridge
+  cannot backdate a record; their span context still places them in the
+  replayed run.
+
+### Runs already traced live
+
+A run whose `trace` field is set was exported when it ran. Replaying it again
+would show its usage and cost twice in any backend that still has the live
+trace, so such runs are skipped by default and listed under `skipped_runs`.
+`--include-traced` replays them anyway, each linked to the live span it
+duplicates.
+
+Grading is decided per run from its `grade_trace` field alone, whether or
+not the run itself was traced live:
+
+- A run whose `grade_trace` is set was graded under a live trace that
+  already sent its evaluation events, so its `grade run` span and events are
+  skipped and the run is listed under `skipped_grades`. `--include-traced`
+  replays them too, with the `grade run` span linked to the live grade span.
+- A run traced live but graded with tracing off keeps its live run span, and
+  only its `grade run` span and evaluation events are replayed, as a child of
+  that live run span inside the live trace. The run is listed under
+  `live_run_grades` with where its `grade run` span landed. Its grade spans
+  sit at the run's recorded end, measured from `report.generated_at`.
+
+When every run and every grade is skipped, nothing is exported. When only
+grades of live runs are left, no replayed `invoke_workflow` is created and
+`suite` is `null`.
+
+### What a replay leaves out
+
+- Metrics. An OTLP data point is stamped when it is exported, so replayed
+  counters and histograms would attribute historical runs and cost to the
+  moment of the export.
+- Steps a report does not record: setup and teardown steps, `-j` lanes,
+  retried attempts before the final one, harness turns and tool calls, the
+  process id, and the response model.
+- The declared grader type. A live grader span is named for the grader a
+  case declared (`grader contains`); the report only keeps how each result
+  was decided, so a replayed grader span and its event's
+  `trg.eval.grader.kind` use that instead (`grader mechanical`,
+  `grader llm`).
+
+Span ids are new on every export, so exporting the same bundle twice produces
+two traces.
+
+### JSON output
+
+```json
+{
+  "report_dir": "./artifacts/my-skill/20260526T120000Z-abc",
+  "outcome": "exported",
+  "suite": {
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "00f067aa0ba902b7"
+  },
+  "runs": [
+    {
+      "run_id": "run-001",
+      "span": {
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "span_id": "b7ad6b7169203331"
+      }
+    }
+  ],
+  "skipped_runs": [],
+  "live_run_grades": [],
+  "skipped_grades": []
+}
+```
+
+`outcome` is `exported`, `nothing_to_replay`, or `tracing_off`. The span
+references name where each replayed run, or each grade replayed into a live
+run, landed, so a later step can join on them the way it joins on a live
+run's `trace` field.
+
+### Example
+
+```shell
+$ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+    trg ai skills eval export ./artifacts/my-skill/20260526T120000Z-abc
+replayed trace: 4bf92f3577b34da6a3ce929d0e0e4736
+runs replayed: 2
 ```
 
 ---

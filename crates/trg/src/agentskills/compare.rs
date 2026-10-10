@@ -10,7 +10,7 @@ use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
 use tracing::field::Empty;
 
 use super::evals::EvalError;
-use super::grading::telemetry::{self, phase, CliSpan, Evaluation};
+use super::grading::telemetry::{self, phase, CliSpan, Evaluation, Provenance};
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::report::ScenarioKind;
 use super::span_reference::SpanReference;
@@ -421,6 +421,7 @@ fn emit_verdict(record: &ComparisonRecord, pair: &ScenarioPair, parent: Option<&
         grader_kind: Some(kind),
         case_id: &record.eval_case_id,
         run_id: None,
+        provenance: Provenance::Live,
     }
     .emit(parent, ContentCapture::from_env());
 }
