@@ -25,12 +25,38 @@ use crate::telemetry::semconv::generated::attributes::{
 };
 use crate::telemetry::ContentCapture;
 
-/// A harness's stdout as captured, with when it started and when each line arrived.
+/// A harness's stdout as captured, with when it started, when each line arrived, and
+/// how it stopped.
 #[derive(Debug, Clone, Copy)]
 pub struct HarnessStream<'a> {
     pub stdout: &'a [u8],
     pub timeline: &'a StdoutTimeline,
     pub started_at: SystemTime,
+    pub ended: StreamEnd,
+}
+
+/// How a harness's stdout stopped, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    /// The harness exited on its own.
+    Exited(SystemTime),
+    /// The run's time limit killed the harness.
+    TimedOut(SystemTime),
+}
+
+impl StreamEnd {
+    fn at(self) -> SystemTime {
+        match self {
+            Self::Exited(at) | Self::TimedOut(at) => at,
+        }
+    }
+
+    fn unfinished(self) -> StepFailure {
+        match self {
+            Self::Exited(_) => StepFailure::Unfinished,
+            Self::TimedOut(_) => StepFailure::TimedOut,
+        }
+    }
 }
 
 impl<'a> HarnessStream<'a> {
@@ -85,8 +111,10 @@ pub enum StepFailure {
     ToolError,
     /// The turn the harness reported as failed.
     TurnFailed,
-    /// The stream ended, usually at a timeout, before the step reported finishing.
+    /// The harness exited before the step reported finishing.
     Unfinished,
+    /// The run's time limit killed the harness before the step reported finishing.
+    TimedOut,
 }
 
 impl StepFailure {
@@ -95,6 +123,7 @@ impl StepFailure {
             Self::ToolError => "tool_error",
             Self::TurnFailed => "turn_failed",
             Self::Unfinished => "unfinished",
+            Self::TimedOut => "timeout",
         }
     }
 }
@@ -102,7 +131,10 @@ impl StepFailure {
 #[derive(Debug, Clone, PartialEq)]
 pub enum StepKind {
     Chat {
-        model: Option<String>,
+        /// The model `trg` asked the harness for, absent when the harness chose.
+        request_model: Option<String>,
+        /// The model the harness's stream says answered.
+        response_model: Option<String>,
         response_id: Option<String>,
         usage: TurnUsage,
     },
@@ -126,8 +158,14 @@ pub struct HarnessStep {
 impl HarnessStep {
     pub fn name(&self) -> String {
         match &self.kind {
-            StepKind::Chat { model: Some(model), .. } => format!("{} {model}", gen_ai_operation_name::CHAT),
-            StepKind::Chat { model: None, .. } => gen_ai_operation_name::CHAT.to_string(),
+            StepKind::Chat {
+                request_model,
+                response_model,
+                ..
+            } => match request_model.as_ref().or(response_model.as_ref()) {
+                Some(model) => format!("{} {model}", gen_ai_operation_name::CHAT),
+                None => gen_ai_operation_name::CHAT.to_string(),
+            },
             StepKind::Tool { name, .. } => format!("{} {name}", gen_ai_operation_name::EXECUTE_TOOL),
         }
     }
@@ -192,13 +230,13 @@ pub fn reconstruct(
     content: ContentCapture,
 ) -> Reconstruction {
     let content = ToolContent(content.includes_span());
-    let mut builder = StepBuilder::new(stream.started_at);
+    let mut builder = StepBuilder::new(stream.started_at, request_model);
     match runner {
         Runner::ClaudeCode => claude_code(&mut builder, stream, content),
-        Runner::Codex => codex(&mut builder, stream, request_model, content),
+        Runner::Codex => codex(&mut builder, stream, content),
         Runner::CursorAgent => cursor_agent(&mut builder, stream, content),
     }
-    builder.finish()
+    builder.finish(stream.ended)
 }
 
 struct OpenTool {
@@ -210,7 +248,7 @@ struct OpenTool {
 
 struct OpenTurn {
     key: Option<String>,
-    model: Option<String>,
+    response_model: Option<String>,
     response_id: Option<String>,
     usage: TurnUsage,
     start: SystemTime,
@@ -223,16 +261,18 @@ struct StepBuilder {
     turn: Option<OpenTurn>,
     summary: HarnessSummary,
     last_at: SystemTime,
+    request_model: Option<String>,
 }
 
 impl StepBuilder {
-    fn new(started_at: SystemTime) -> Self {
+    fn new(started_at: SystemTime, request_model: Option<&str>) -> Self {
         Self {
             steps: Vec::new(),
             tools: BTreeMap::new(),
             turn: None,
             summary: HarnessSummary::default(),
             last_at: started_at,
+            request_model: request_model.map(str::to_string),
         }
     }
 
@@ -244,7 +284,7 @@ impl StepBuilder {
         self.close_turn(None);
         self.turn = Some(OpenTurn {
             key,
-            model: None,
+            response_model: None,
             response_id: None,
             usage: TurnUsage::default(),
             start,
@@ -254,12 +294,13 @@ impl StepBuilder {
 
     fn close_turn(&mut self, failure: Option<StepFailure>) {
         if let Some(turn) = self.turn.take() {
-            if turn.model.is_some() {
-                self.summary.response_model.clone_from(&turn.model);
+            if turn.response_model.is_some() {
+                self.summary.response_model.clone_from(&turn.response_model);
             }
             self.steps.push(HarnessStep {
                 kind: StepKind::Chat {
-                    model: turn.model,
+                    request_model: self.request_model.clone(),
+                    response_model: turn.response_model,
                     response_id: turn.response_id,
                     usage: turn.usage,
                 },
@@ -308,12 +349,12 @@ impl StepBuilder {
         });
     }
 
-    fn finish(mut self) -> Reconstruction {
-        let end = self.last_at;
+    fn finish(mut self, ended: StreamEnd) -> Reconstruction {
+        let end = ended.at();
         if let Some(turn) = &mut self.turn {
-            turn.end = turn.end.max(turn.start);
+            turn.end = end.max(turn.start);
         }
-        self.close_turn(None);
+        self.close_turn(Some(ended.unfinished()));
         for (_, tool) in std::mem::take(&mut self.tools) {
             self.steps.push(HarnessStep {
                 kind: StepKind::Tool {
@@ -324,7 +365,7 @@ impl StepBuilder {
                 },
                 start: tool.start,
                 end: end.max(tool.start),
-                failure: Some(StepFailure::Unfinished),
+                failure: Some(ended.unfinished()),
             });
         }
         self.steps.sort_by_key(|step| step.start);
@@ -383,7 +424,7 @@ fn claude_code(builder: &mut StepBuilder, stream: HarnessStream, content: ToolCo
                 if let Some(turn) = &mut builder.turn {
                     turn.end = at;
                     if let Some(message) = message {
-                        turn.model = string_at(message, "model").or(turn.model.take());
+                        turn.response_model = string_at(message, "model").or(turn.response_model.take());
                         turn.response_id = id.or(turn.response_id.take());
                         if message.get("usage").is_some() {
                             turn.usage = TurnUsage::read(message.get("usage"), CLAUDE_USAGE);
@@ -477,28 +518,26 @@ fn codex_failure(item: &Value) -> Option<StepFailure> {
     (status_failed || nonzero_exit).then_some(StepFailure::ToolError)
 }
 
-/// Codex names no model on its stream, so its turns carry the one the run asked for.
-fn codex(builder: &mut StepBuilder, stream: HarnessStream, request_model: Option<&str>, content: ToolContent) {
+/// A codex turn is one or more model calls with tool calls between them, and codex
+/// reports only the tool calls. Every stretch of the turn with no tool running is taken
+/// as a model call: the one that chose the next tool, or the one that ended the turn.
+/// Codex names no model on its stream, so its model calls carry only the one the run
+/// asked for.
+fn codex(builder: &mut StepBuilder, stream: HarnessStream, content: ToolContent) {
+    let mut turn: Option<CodexTurn> = None;
     for (event, at) in stream.events() {
         match event_type(&event) {
-            Some("turn.started") => {
-                builder.open_turn(None, at);
-                if let Some(turn) = &mut builder.turn {
-                    turn.model = request_model.map(str::to_string);
-                }
-            }
+            Some("turn.started") => turn = Some(CodexTurn::start(builder, at)),
             Some("turn.completed") => {
-                if let Some(turn) = &mut builder.turn {
-                    turn.end = at;
-                    turn.usage = TurnUsage::read(event.get("usage"), CODEX_USAGE);
+                let usage = TurnUsage::read(event.get("usage"), CODEX_USAGE);
+                if let Some(turn) = turn.take() {
+                    turn.end(builder, at, None, |last| *last = usage);
                 }
-                builder.close_turn(None);
             }
             Some("turn.failed") => {
-                if let Some(turn) = &mut builder.turn {
-                    turn.end = at;
+                if let Some(turn) = turn.take() {
+                    turn.end(builder, at, Some(StepFailure::TurnFailed), |_| {});
                 }
-                builder.close_turn(Some(StepFailure::TurnFailed));
             }
             Some(kind @ ("item.started" | "item.completed")) => {
                 let Some(item) = event.get("item") else {
@@ -509,15 +548,19 @@ fn codex(builder: &mut StepBuilder, stream: HarnessStream, request_model: Option
                     builder.arrived(at);
                     continue;
                 };
-                if kind == "item.started" {
-                    builder.open_tool(call_id, name, content.render(codex_arguments(item)), at);
+                let arguments = content.render(codex_arguments(item));
+                if let Some(open) = builder.tools.get_mut(&call_id) {
+                    open.arguments = open.arguments.take().or(arguments);
                 } else {
-                    let arguments = content.render(codex_arguments(item));
-                    if let Some(open) = builder.tools.get_mut(&call_id) {
-                        open.arguments = open.arguments.take().or(arguments);
-                    } else {
-                        builder.open_tool(call_id.clone(), name.clone(), arguments, at);
+                    if builder.tools.is_empty() {
+                        if let Some(chat) = &mut builder.turn {
+                            chat.end = at;
+                        }
+                        builder.close_turn(None);
                     }
+                    builder.open_tool(call_id.clone(), name.clone(), arguments, at);
+                }
+                if kind == "item.completed" {
                     builder.close_tool(
                         &call_id,
                         || name,
@@ -525,14 +568,55 @@ fn codex(builder: &mut StepBuilder, stream: HarnessStream, request_model: Option
                         codex_failure(item),
                         at,
                     );
+                    if builder.tools.is_empty() && turn.is_some() {
+                        builder.open_turn(None, at);
+                    }
                 }
             }
             _ => {}
         }
-        if let Some(turn) = &mut builder.turn {
-            turn.end = turn.end.max(at);
+        if let Some(chat) = &mut builder.turn {
+            chat.end = chat.end.max(at);
         }
         builder.arrived(at);
+    }
+}
+
+/// Where a codex turn's model calls begin among the rebuilt steps.
+struct CodexTurn {
+    first_step: usize,
+}
+
+impl CodexTurn {
+    fn start(builder: &mut StepBuilder, at: SystemTime) -> Self {
+        builder.close_turn(None);
+        let first_step = builder.steps.len();
+        builder.open_turn(None, at);
+        Self { first_step }
+    }
+
+    /// Ends the turn at `at`, handing its last model call to `last_chat`, the only call
+    /// the turn's usage and failure can be pinned on.
+    fn end(
+        self,
+        builder: &mut StepBuilder,
+        at: SystemTime,
+        failure: Option<StepFailure>,
+        last_chat: impl FnOnce(&mut TurnUsage),
+    ) {
+        if let Some(chat) = &mut builder.turn {
+            chat.end = at;
+            last_chat(&mut chat.usage);
+            builder.close_turn(failure);
+            return;
+        }
+        let closed = builder.steps.get_mut(self.first_step..).unwrap_or_default();
+        if let Some(step) = closed.iter_mut().rev().find(|step| !step.is_tool()) {
+            if let StepKind::Chat { usage, .. } = &mut step.kind {
+                last_chat(usage);
+            }
+            step.failure = step.failure.or(failure);
+        }
     }
 }
 
@@ -569,7 +653,7 @@ fn cursor_agent(builder: &mut StepBuilder, stream: HarnessStream, content: ToolC
                 }
                 if let Some(turn) = &mut builder.turn {
                     turn.end = at;
-                    turn.model.clone_from(&model);
+                    turn.response_model.clone_from(&model);
                 }
             }
             Some("tool_call") => {
@@ -611,13 +695,16 @@ pub fn emit<T: Tracer>(tracer: &T, parent: &Context, provider: &'static str, ste
         let mut attributes = vec![KeyValue::new(GEN_AI_PROVIDER_NAME, provider)];
         let kind = match &step.kind {
             StepKind::Chat {
-                model,
+                request_model,
+                response_model,
                 response_id,
                 usage,
             } => {
                 attributes.push(KeyValue::new(GEN_AI_OPERATION_NAME, gen_ai_operation_name::CHAT));
-                if let Some(model) = model {
+                if let Some(model) = request_model {
                     attributes.push(KeyValue::new(GEN_AI_REQUEST_MODEL, model.clone()));
+                }
+                if let Some(model) = response_model {
                     attributes.push(KeyValue::new(GEN_AI_RESPONSE_MODEL, model.clone()));
                 }
                 if let Some(id) = response_id {
@@ -679,14 +766,29 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + seconds)
     }
 
+    fn line_count(stdout: &[u8]) -> u64 {
+        stdout.split_inclusive(|byte| *byte == b'\n').count() as u64
+    }
+
     /// A stream whose lines arrive one second apart, the first at second 1.
     fn stamped(stdout: &[u8]) -> (StdoutTimeline, SystemTime) {
-        let lines = stdout.split_inclusive(|byte| *byte == b'\n').count();
-        let times: Vec<SystemTime> = (1..=lines as u64).map(at).collect();
+        let times: Vec<SystemTime> = (1..=line_count(stdout)).map(at).collect();
         (StdoutTimeline::stamped(stdout, &times), at(0))
     }
 
+    /// Rebuilds a stream whose harness exited as its last line arrived.
     fn rebuild(runner: Runner, stdout: &[u8], model: Option<&str>, content: ContentCapture) -> Reconstruction {
+        let ended = StreamEnd::Exited(at(line_count(stdout)));
+        rebuild_ending(runner, stdout, model, content, ended)
+    }
+
+    fn rebuild_ending(
+        runner: Runner,
+        stdout: &[u8],
+        model: Option<&str>,
+        content: ContentCapture,
+        ended: StreamEnd,
+    ) -> Reconstruction {
         let (timeline, started_at) = stamped(stdout);
         reconstruct(
             runner,
@@ -694,10 +796,22 @@ mod tests {
                 stdout,
                 timeline: &timeline,
                 started_at,
+                ended,
             },
             model,
             content,
         )
+    }
+
+    fn chat_usages(reconstruction: &Reconstruction) -> Vec<TurnUsage> {
+        reconstruction
+            .steps
+            .iter()
+            .filter_map(|step| match step.kind {
+                StepKind::Chat { usage, .. } => Some(usage),
+                StepKind::Tool { .. } => None,
+            })
+            .collect()
     }
 
     fn tool<'a>(reconstruction: &'a Reconstruction, name: &str) -> &'a HarnessStep {
@@ -749,7 +863,8 @@ mod tests {
         assert_eq!(
             turns[0].kind,
             StepKind::Chat {
-                model: Some("claude-sonnet-4-5".to_string()),
+                request_model: None,
+                response_model: Some("claude-sonnet-4-5".to_string()),
                 response_id: Some("msg_1".to_string()),
                 usage: TurnUsage {
                     input: Some(10),
@@ -794,15 +909,52 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_tool_cut_off_by_the_end_of_the_stream_is_unfinished() {
-        let stdout = br#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}
+    const CUT_OFF: &[u8] = br#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}]}}
 {"type":"system","subtype":"status"}
 "#;
-        let rebuilt = rebuild(Runner::ClaudeCode, stdout, None, ContentCapture::NoContent);
+
+    #[test]
+    fn a_tool_cut_off_by_the_harness_exiting_ends_when_it_exited_and_is_unfinished() {
+        let ended = StreamEnd::Exited(at(5));
+        let rebuilt = rebuild_ending(Runner::ClaudeCode, CUT_OFF, None, ContentCapture::NoContent, ended);
         let bash = tool(&rebuilt, "Bash");
-        assert_eq!((bash.start, bash.end), (at(1), at(2)));
+        assert_eq!((bash.start, bash.end), (at(1), at(5)));
         assert_eq!(bash.failure, Some(StepFailure::Unfinished));
+    }
+
+    #[test]
+    fn a_tool_cut_off_by_the_time_limit_ends_when_the_harness_was_killed_and_is_a_timeout() {
+        let ended = StreamEnd::TimedOut(at(30));
+        let rebuilt = rebuild_ending(Runner::ClaudeCode, CUT_OFF, None, ContentCapture::NoContent, ended);
+        let bash = tool(&rebuilt, "Bash");
+        assert_eq!((bash.start, bash.end), (at(1), at(30)));
+        assert_eq!(bash.failure, Some(StepFailure::TimedOut));
+
+        let (spans, _) = exported(&rebuilt.steps);
+        let span = spans.iter().find(|span| span.name == "execute_tool Bash").unwrap();
+        assert_eq!(span.end_time, at(30));
+        let error_type = span
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == ERROR_TYPE)
+            .map(|kv| kv.value.clone());
+        assert_eq!(error_type, Some(opentelemetry::Value::from("timeout")));
+    }
+
+    #[test]
+    fn claude_code_chat_usage_is_each_messages_last_snapshot_and_never_reconciled_with_the_result_total() {
+        let stdout = br#"{"type":"assistant","message":{"id":"msg_1","model":"claude-sonnet-4-5","content":[{"type":"text","text":"a"}],"usage":{"input_tokens":10,"output_tokens":1}}}
+{"type":"assistant","message":{"id":"msg_1","model":"claude-sonnet-4-5","content":[{"type":"text","text":"b"}],"usage":{"input_tokens":10,"output_tokens":6}}}
+{"type":"assistant","message":{"id":"msg_2","model":"claude-sonnet-4-5","content":[{"type":"text","text":"c"}],"usage":{"input_tokens":20,"output_tokens":4}}}
+{"type":"result","is_error":false,"duration_ms":10,"usage":{"input_tokens":500,"output_tokens":90}}
+"#;
+        let rebuilt = rebuild(Runner::ClaudeCode, stdout, None, ContentCapture::NoContent);
+        let reported = |input, output| TurnUsage {
+            input: Some(input),
+            output: Some(output),
+            ..TurnUsage::default()
+        };
+        assert_eq!(chat_usages(&rebuilt), vec![reported(10, 6), reported(20, 4)]);
     }
 
     const CODEX: &[u8] = br#"{"type":"thread.started","thread_id":"abc"}
@@ -834,19 +986,101 @@ mod tests {
     }
 
     #[test]
-    fn codex_turns_carry_the_requested_model_and_turn_usage() {
+    fn codex_model_calls_fill_the_gaps_between_tools_without_overlapping_them() {
         let rebuilt = rebuild(Runner::Codex, CODEX, Some("gpt-5"), ContentCapture::NoContent);
-        let turns = chats(&rebuilt);
-        assert_eq!(turns.len(), 1);
-        assert_eq!((turns[0].start, turns[0].end), (at(2), at(9)));
-        assert_eq!(turns[0].name(), "chat gpt-5");
-        assert!(matches!(
-            &turns[0].kind,
-            StepKind::Chat { usage, .. } if *usage == TurnUsage { input: Some(200), output: Some(40), cache_read: Some(150), cache_write: None }
-        ));
+        let spans: Vec<(SystemTime, SystemTime, bool)> = rebuilt
+            .steps
+            .iter()
+            .map(|step| (step.start, step.end, step.is_tool()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                (at(2), at(4), false),
+                (at(4), at(5), true),
+                (at(5), at(6), false),
+                (at(6), at(7), true),
+                (at(7), at(8), false),
+                (at(8), at(8), true),
+                (at(8), at(9), false),
+            ]
+        );
+        assert_eq!(rebuilt.inference_calls(), 4);
+        assert!(chats(&rebuilt).iter().all(|chat| chat.name() == "chat gpt-5"));
 
         let unnamed = rebuild(Runner::Codex, CODEX, None, ContentCapture::NoContent);
         assert_eq!(chats(&unnamed)[0].name(), "chat");
+    }
+
+    #[test]
+    fn codex_turn_usage_lands_once_on_the_turns_last_model_call() {
+        let rebuilt = rebuild(Runner::Codex, CODEX, Some("gpt-5"), ContentCapture::NoContent);
+        let turn = TurnUsage {
+            input: Some(200),
+            output: Some(40),
+            cache_read: Some(150),
+            cache_write: None,
+        };
+        let unattributed = TurnUsage::default();
+        assert_eq!(
+            chat_usages(&rebuilt),
+            vec![unattributed, unattributed, unattributed, turn]
+        );
+    }
+
+    #[test]
+    fn a_codex_turn_without_tools_is_a_single_model_call() {
+        let stdout = br#"{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Done."}}
+{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":4}}
+"#;
+        let rebuilt = rebuild(Runner::Codex, stdout, Some("gpt-5"), ContentCapture::NoContent);
+        let turns = chats(&rebuilt);
+        assert_eq!(turns.len(), 1);
+        assert_eq!((turns[0].start, turns[0].end), (at(1), at(3)));
+    }
+
+    const CODEX_CUT_OFF_AFTER_TOOL: &[u8] = br#"{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"system","subtype":"status"}
+"#;
+
+    #[test]
+    fn a_codex_chat_cut_off_by_the_time_limit_ends_when_the_harness_was_killed_and_is_a_timeout() {
+        let ended = StreamEnd::TimedOut(at(30));
+        let rebuilt = rebuild_ending(
+            Runner::Codex,
+            CODEX_CUT_OFF_AFTER_TOOL,
+            Some("gpt-5"),
+            ContentCapture::NoContent,
+            ended,
+        );
+        let last_chat = chats(&rebuilt).into_iter().last().unwrap();
+        assert_eq!(last_chat.end, at(30));
+        assert_eq!(last_chat.failure, Some(StepFailure::TimedOut));
+
+        let (spans, _) = exported(&rebuilt.steps);
+        let span = spans.iter().rfind(|span| span.name == "chat gpt-5").unwrap();
+        assert_eq!(span.end_time, at(30));
+        let error_type = span
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == ERROR_TYPE)
+            .map(|kv| kv.value.clone());
+        assert_eq!(error_type, Some(opentelemetry::Value::from("timeout")));
+    }
+
+    #[test]
+    fn a_failed_codex_turn_marks_only_its_last_model_call() {
+        let stdout = br#"{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"ls","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"turn.failed"}
+"#;
+        let rebuilt = rebuild(Runner::Codex, stdout, None, ContentCapture::NoContent);
+        let failures: Vec<Option<StepFailure>> = chats(&rebuilt).iter().map(|chat| chat.failure).collect();
+        assert_eq!(failures, vec![None, Some(StepFailure::TurnFailed)]);
     }
 
     const CURSOR: &[u8] = br#"{"type":"system","subtype":"init","model":"gpt-5","cwd":"/w"}
@@ -943,10 +1177,72 @@ mod tests {
         let chat = spans.iter().find(|span| span.name == "chat claude-sonnet-4-5").unwrap();
         assert_eq!(chat.span_kind, SpanKind::Client);
         assert_eq!(
-            attribute(chat, GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS).as_deref(),
-            Some("100")
+            value(chat, GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS),
+            Some(opentelemetry::Value::I64(100))
         );
         assert_eq!(attribute(chat, GEN_AI_PROVIDER_NAME).as_deref(), Some("anthropic"));
+    }
+
+    fn value(span: &SpanData, key: &str) -> Option<opentelemetry::Value> {
+        span.attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.clone())
+    }
+
+    fn chat_models(
+        runner: Runner,
+        stdout: &[u8],
+        requested: Option<&str>,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
+        let rebuilt = rebuild(runner, stdout, requested, ContentCapture::NoContent);
+        let (spans, _) = exported(&rebuilt.steps);
+        let text = |span: &SpanData, key: &str| value(span, key).map(|value| value.to_string());
+        spans
+            .iter()
+            .filter(|span| value(span, GEN_AI_OPERATION_NAME) == Some(opentelemetry::Value::from("chat")))
+            .map(|span| {
+                (
+                    span.name.to_string(),
+                    text(span, GEN_AI_REQUEST_MODEL),
+                    text(span, GEN_AI_RESPONSE_MODEL),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_chat_span_names_a_request_model_only_when_trg_requested_one() {
+        let unrequested = chat_models(Runner::ClaudeCode, CLAUDE, None);
+        assert!(!unrequested.is_empty());
+        for (name, request, response) in unrequested {
+            assert_eq!(name, "chat claude-sonnet-4-5");
+            assert_eq!(request, None);
+            assert_eq!(response.as_deref(), Some("claude-sonnet-4-5"));
+        }
+
+        for (name, request, response) in chat_models(Runner::ClaudeCode, CLAUDE, Some("sonnet")) {
+            assert_eq!(name, "chat sonnet");
+            assert_eq!(request.as_deref(), Some("sonnet"));
+            assert_eq!(response.as_deref(), Some("claude-sonnet-4-5"));
+        }
+
+        for (name, request, response) in chat_models(Runner::CursorAgent, CURSOR, None) {
+            assert_eq!(name, "chat gpt-5");
+            assert_eq!(request, None);
+            assert_eq!(response.as_deref(), Some("gpt-5"));
+        }
+    }
+
+    #[test]
+    fn a_codex_chat_span_carries_the_requested_model_and_no_response_model_its_stream_never_named() {
+        for (name, request, response) in chat_models(Runner::Codex, CODEX, Some("gpt-5")) {
+            assert_eq!(name, "chat gpt-5");
+            assert_eq!(request.as_deref(), Some("gpt-5"));
+            assert_eq!(response, None);
+        }
+        let rebuilt = rebuild(Runner::Codex, CODEX, Some("gpt-5"), ContentCapture::NoContent);
+        assert_eq!(rebuilt.summary.response_model, None);
     }
 
     #[test]

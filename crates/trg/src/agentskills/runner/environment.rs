@@ -321,6 +321,7 @@ pub struct RunEnvironment {
     config_home: Option<RecordedConfigHome>,
     /// Held apart because, unlike `vars`, they reach the harness under `Inherited` too.
     telemetry_vars: BTreeMap<String, String>,
+    forwards_traces: bool,
     codex_otel: Option<CodexOtelConfig>,
 }
 
@@ -346,6 +347,7 @@ impl RunEnvironment {
         content: ContentCapture,
     ) {
         self.telemetry_vars = forwarding.harness_vars(runner, self.policy, host, content);
+        self.forwards_traces = forwarding.forwards_traces(runner, host);
         self.codex_otel = (matches!(forwarding, TelemetryForwarding::On)
             && runner.telemetry_passthrough() == HarnessPassthrough::CodexConfig)
             .then(|| CodexOtelConfig::render(host, content))
@@ -358,10 +360,10 @@ impl RunEnvironment {
         self.codex_otel.as_ref()
     }
 
-    /// Whether a harness configured through its environment was switched on to export
-    /// spans of its own, which makes rebuilding them from its stdout a duplicate.
+    /// Whether a harness configured through its environment was handed somewhere to
+    /// export spans of its own, which makes rebuilding them from its stdout a duplicate.
     pub fn harness_exports_traces(&self) -> bool {
-        !self.telemetry_vars.is_empty()
+        self.forwards_traces
     }
 
     pub(crate) fn prepare_from(
@@ -388,6 +390,7 @@ impl RunEnvironment {
                 case_vars,
                 config_home,
                 telemetry_vars: BTreeMap::new(),
+                forwards_traces: false,
                 codex_otel: None,
             });
         }
@@ -428,6 +431,7 @@ impl RunEnvironment {
             case_vars,
             config_home,
             telemetry_vars: BTreeMap::new(),
+            forwards_traces: false,
             codex_otel: None,
         })
     }
@@ -1074,6 +1078,34 @@ mod tests {
             let recorded = env.recorded_vars();
             assert!(!recorded.contains_key("OTEL_EXPORTER_OTLP_HEADERS"), "{policy:?}");
             assert!(recorded.contains_key("CLAUDE_CODE_ENABLE_TELEMETRY"), "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn claude_code_exports_its_own_traces_only_when_forwarded_a_traces_endpoint() {
+        for policy in [EnvironmentPolicy::Inherited, EnvironmentPolicy::Isolated] {
+            assert!(
+                forwarded(Runner::ClaudeCode, policy, TelemetryForwarding::On).harness_exports_traces(),
+                "{policy:?}"
+            );
+            assert!(
+                !forwarded(Runner::ClaudeCode, policy, TelemetryForwarding::Off).harness_exports_traces(),
+                "{policy:?}"
+            );
+
+            let temp = tempdir().unwrap();
+            let host = host();
+            let mut env =
+                RunEnvironment::prepare_from(Runner::ClaudeCode, &temp.path().join("run"), policy, None, &host)
+                    .unwrap();
+            env.forward_telemetry(
+                Runner::ClaudeCode,
+                TelemetryForwarding::On,
+                &host,
+                ContentCapture::NoContent,
+            );
+            assert!(applied(&env).contains_key("CLAUDE_CODE_ENABLE_TELEMETRY"), "{policy:?}");
+            assert!(!env.harness_exports_traces(), "{policy:?}");
         }
     }
 
