@@ -20,6 +20,9 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Node packages under js/ are installed locally, never published.
+js/**/node_modules/
+
 # Agent and operator working notes.
 # Kept out of the repository rather than relying on a machine-local global ignore,
 # so the rule travels with a clone instead of with one workstation.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/trg"]
+members = ["crates/trg", "crates/trogon_presence", "crates/trogon_presence_auth", "crates/trogon_presence_e2e", "crates/trogon_presence_hooks", "crates/trogon_presence_load", "crates/trogon_presence_service"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -19,3 +19,12 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 regex = "1.11"
 schemars = "1.2"
 libc = "0.2"
+base64 = "0.22"
+getrandom = "0.3"
+proptest = "1.7"
+criterion = "0.7"
+async-nats = { version = "=0.50.0", features = ["server_2_12"] }
+bytes = "1"
+sha2 = "0.10"
+tracing = "0.1"
+futures-util = "0.3"

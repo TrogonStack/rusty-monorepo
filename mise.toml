@@ -1,9 +1,11 @@
 [tools]
-rust = { version = "stable", components = ["rustfmt", "clippy"] }
+rust = { version = "stable", components = ["rustfmt", "clippy", "llvm-tools-preview"] }
 "cargo:cargo-audit" = { version = "0.22.2", locked = true }
 "cargo:cargo-tarpaulin" = { version = "0.37.2", locked = true }
 "cargo:cargo-dylint" = { version = "6.0.1", locked = true }
 "cargo:dylint-link" = { version = "6.0.1", locked = true }
+nats-server = ["2.14.7", "2.12.15"]
+node = "22"
 
 [tasks."schemas:generate"]
 description = "Generate JSON schemas from Rust structs (crates/trg/schemas/)"
@@ -68,4 +70,131 @@ depends = ["lints:build"]
 run = '''
 lib="$(ls crates/trogon_dylint_lints/target/release/libtrogon_dylint_lints@* | head -1)"
 cargo dylint --lib-path "$lib" --workspace --no-deps -- --all-features
+'''
+
+[tasks."nats:up"]
+description = "Run a local single-node nats-server with JetStream"
+run = 'nats-server -js -sd "${NATS_STORE_DIR:-${TMPDIR:-/tmp}/nats-data}" -p 4222'
+
+[tasks."hooks:build-example"]
+description = "Build the example presence hook component for wasm32-wasip2"
+run = '''
+rustup target add wasm32-wasip2
+cargo build --release --target wasm32-wasip2 \
+  --manifest-path crates/trogon_presence_hooks/examples/guest/Cargo.toml \
+  --target-dir target/trogon_presence_hook_example
+echo "target/trogon_presence_hook_example/wasm32-wasip2/release/trogon_presence_hook_example.wasm"
+'''
+
+[tasks."presence:conformance:record"]
+description = "Record phoenix.js conformance golden files from a live nats-server and presence service"
+run = [
+  "cargo test -p trogon_presence_service --test conformance -- --ignored --test-threads 1",
+  "cargo test -p trogon_presence_e2e --test e2e -- --ignored --test-threads 1",
+]
+
+[tasks."presence:conformance:replay"]
+description = "Replay the golden files through the vendored phoenix.js Presence.syncState and syncDiff"
+dir = "crates/trogon_presence_service/conformance"
+run = "node replay.mjs golden"
+
+[tasks."presence:matrix"]
+description = "Run the presence tests once per supported nats-server version"
+run = '''
+set -eu
+for version in 2.12.15 2.14.7; do
+  binary="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "presence tests against nats-server ${version}"
+  TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence -p trogon_presence_service
+done
+mise run presence:e2e
+mise run presence:cluster
+mise run presence:domain
+'''
+
+[tasks."presence:shim:deps"]
+description = "Fetch the Elixir presence shim dependencies when mix.lock changes"
+dir = "elixir/trogon_presence"
+sources = ["mix.exs", "mix.lock"]
+outputs = ["deps/.mix-lock-stamp"]
+run = "mise exec -- mix deps.get && touch deps/.mix-lock-stamp"
+
+[tasks."presence:shim"]
+description = "Run the Elixir presence shim tests once per supported nats-server version"
+depends = ["presence:shim:deps"]
+run = '''
+set -eu
+cargo build -p trogon_presence_service --bin trogon-presence
+bin="$(pwd)/target/debug/trogon-presence"
+for version in 2.12.15 2.14.7; do
+  server="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "presence shim tests against nats-server ${version}"
+  (cd elixir/trogon_presence && TROGON_PRESENCE_NATS_SERVER="$server" TROGON_PRESENCE_BIN="$bin" mise exec -- mix test)
+done
+'''
+
+[tasks."presence:cluster"]
+description = "Run the three-node cluster fault tests once per supported nats-server version"
+run = '''
+set -eu
+for version in 2.12.15 2.14.7; do
+  binary="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "cluster fault tests against nats-server ${version}"
+  TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence_service --test cluster -- --ignored --nocapture --test-threads 1
+  TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence_auth --test cluster -- --ignored --nocapture --test-threads 1
+done
+'''
+
+[tasks."presence:domain"]
+description = "Run the hub and leaf JetStream domain tests once per supported nats-server version"
+run = '''
+set -eu
+for version in 2.12.15 2.14.7; do
+  binary="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "domain tests against nats-server ${version}"
+  TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence_service --test domain -- --ignored --nocapture --test-threads 1
+done
+'''
+
+[tasks."presence:e2e"]
+description = "Run the authenticated websocket presence tests once per supported nats-server version"
+run = '''
+set -eu
+for version in 2.12.15 2.14.7; do
+  binary="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "authenticated presence tests against nats-server ${version}"
+  TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence_auth -p trogon_presence_e2e
+done
+'''
+
+[tasks."presence:glue:deps"]
+description = "Install the js/trogon-presence dependencies when package-lock.json changes"
+dir = "js/trogon-presence"
+sources = ["package.json", "package-lock.json"]
+outputs = ["node_modules/.package-lock.json"]
+run = "mise exec -- npm ci"
+
+[tasks."presence:glue"]
+description = "Run the browser glue test against the js/trogon-presence package once per supported nats-server version"
+depends = ["presence:glue:deps"]
+run = '''
+set -eu
+for version in 2.12.15 2.14.7; do
+  binary="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "browser glue test against nats-server ${version}"
+  TROGON_PRESENCE_NATS_SERVER="$binary" cargo test -p trogon_presence_e2e --test browser_glue
+done
+'''
+
+[tasks."presence:load"]
+description = "Measure auth callout admission and service load once per supported nats-server version; prints tables, writes JSON to TROGON_PRESENCE_LOAD_OUT"
+run = '''
+set -eu
+out="${TROGON_PRESENCE_LOAD_OUT:-target/presence-load}"
+mkdir -p "$out"
+for version in 2.12.15 2.14.7; do
+  binary="$(mise exec "nats-server@${version}" -- which nats-server)"
+  echo "presence load measurement against nats-server ${version}"
+  TROGON_PRESENCE_NATS_SERVER="$binary" TROGON_PRESENCE_LOAD_OUT="$out" cargo test --release -p trogon_presence_load --test load -- --ignored --nocapture --test-threads 1
+done
 '''

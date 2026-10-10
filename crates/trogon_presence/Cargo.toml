@@ -1,0 +1,32 @@
+[package]
+name = "trogon_presence"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+async-nats = { workspace = true }
+futures-util = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+sha2 = { workspace = true }
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tracing = { workspace = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+
+[[bench]]
+name = "codec"
+harness = false

@@ -1,0 +1,14 @@
+{
+  "name": "@trogonstack/presence-browser",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "main": "./index.js",
+  "exports": "./index.js",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@nats-io/nats-core": "3.4.0"
+  }
+}
