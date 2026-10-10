@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "stable", components = ["rustfmt", "clippy"] }
+rust = { version = "stable", components = ["rustfmt", "clippy", "llvm-tools-preview"] }
 "cargo:cargo-audit" = { version = "0.22.2", locked = true }
 "cargo:cargo-tarpaulin" = { version = "0.37.2", locked = true }
 "cargo:cargo-dylint" = { version = "6.0.1", locked = true }
