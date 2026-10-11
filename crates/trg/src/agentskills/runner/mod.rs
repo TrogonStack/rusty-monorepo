@@ -19,6 +19,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -27,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::budget::{HarnessPricing, RunCost};
+use super::budget::{HarnessPricing, RunCap, RunCaps, RunCost};
 use super::case_directories::EVAL_CASE_PROMPT_FILE_NAME;
 use super::companion_skills::{resolve_companions, CompanionFailure, StagedCompanion};
 use super::errors::SkillError;
@@ -41,10 +42,13 @@ use super::tool_grant::ToolGrant;
 use super::transcript::{
     write_normalized_transcript, StagedSkill, StagedSkillName, TranscriptFormat, WorkspaceBoundary,
 };
+use super::transcript_metrics::{ToolCallCount, TranscriptMetrics, TurnCount};
 use super::workspace_scaffold::{scaffold_workspace, ScaffoldFailure, ScaffoldPermission};
+use capabilities::HarnessControl;
 use environment::{RecordedEnvironment, RunEnvironment};
 pub use forwarding::TelemetryForwarding;
-use stream::{read_stamped, StdoutTimeline};
+use harness_spans::LiveReconstruction;
+use stream::{read_stamped, read_stamped_watching, StdoutTimeline};
 use telemetry::{in_step, CliProcessSpan, FailureType};
 use usage::HarnessTokenUsage;
 
@@ -175,6 +179,8 @@ pub struct EvalRunRequest<'a> {
     pub mcp_config: Option<MaterializedMcpConfig>,
     /// Whether the harness is handed what it needs to export its own telemetry.
     pub telemetry_forwarding: TelemetryForwarding,
+    /// How many tool calls and turns the run may take before it is stopped.
+    pub caps: RunCaps,
 }
 
 impl EvalRunRequest<'_> {
@@ -189,6 +195,8 @@ pub enum RunStatus {
     Completed,
     Failed,
     Timeout,
+    /// Stopped for going past one of the run's caps on tool calls or turns.
+    BudgetExhausted,
 }
 
 impl RunStatus {
@@ -197,9 +205,13 @@ impl RunStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Timeout => "timeout",
+            Self::BudgetExhausted => RUN_STATUS_BUDGET_EXHAUSTED,
         }
     }
 }
+
+/// The status recorded on a run stopped for going past one of its caps.
+pub const RUN_STATUS_BUDGET_EXHAUSTED: &str = "budget_exhausted";
 
 pub const FAILURE_KIND_RUNNER: &str = "runner";
 
@@ -240,7 +252,9 @@ pub struct CapturedProcess {
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
-    /// When the harness was seen exiting, or was killed at its time limit.
+    /// The cap the harness went past, when one of the run's caps is what stopped it.
+    pub cap_reached: Option<RunCap>,
+    /// When the harness was seen exiting, or was killed at its time limit or a cap.
     pub ended_at: SystemTime,
     pub duration_ms: u64,
 }
@@ -264,6 +278,42 @@ pub enum RunnerError {
 }
 
 pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> Result<CapturedProcess, RunnerError> {
+    capture_capped(command, timeout, None)
+}
+
+/// The caps a harness is killed for going past, read off its stdout as it runs. A cap the
+/// harness enforces itself is left to the harness, so the run ends the way it chose to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapWatch {
+    runner: Runner,
+    caps: RunCaps,
+}
+
+impl CapWatch {
+    pub fn of(runner: Runner, caps: RunCaps) -> Option<Self> {
+        Self::unassisted(
+            runner,
+            RunCaps {
+                turns: caps
+                    .turns
+                    .filter(|_| runner.support(HarnessControl::TurnCap).flag().is_none()),
+                ..caps
+            },
+        )
+    }
+
+    /// Watches every cap, for a process that speaks `runner`'s stream but was handed none
+    /// of the flags `runner` would enforce a cap through.
+    pub fn unassisted(runner: Runner, caps: RunCaps) -> Option<Self> {
+        (!caps.is_unbounded()).then_some(Self { runner, caps })
+    }
+}
+
+pub fn capture_capped(
+    command: &mut Command,
+    timeout: Option<Duration>,
+    watch: Option<CapWatch>,
+) -> Result<CapturedProcess, RunnerError> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -280,7 +330,26 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let stdout_handle = thread::spawn(move || read_stamped(stdout_pipe));
+    let crossed: Arc<OnceLock<RunCap>> = Arc::default();
+    let watching = Arc::clone(&crossed);
+    let stdout_handle = thread::spawn(move || match watch {
+        None => read_stamped(stdout_pipe),
+        Some(watch) => {
+            let mut live = LiveReconstruction::counting(watch.runner, started_at);
+            read_stamped_watching(stdout_pipe, |line, at| {
+                if watching.get().is_some() {
+                    return;
+                }
+                live.observe_line(line, at);
+                if let Some(cap) = watch.caps.crossed(
+                    ToolCallCount::new(u64::try_from(live.tool_calls()).unwrap_or(u64::MAX)),
+                    TurnCount::new(u64::try_from(live.model_calls()).unwrap_or(u64::MAX)),
+                ) {
+                    let _ = watching.set(cap);
+                }
+            })
+        }
+    });
     let stderr_handle = thread::spawn(move || read_child_stream(stderr_pipe));
 
     let ended_at = loop {
@@ -299,30 +368,42 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
                     stderr,
                     exit_code: status.code(),
                     timed_out: false,
+                    cap_reached: crossed.get().copied(),
                     ended_at,
                     duration_ms: start.elapsed().as_millis() as u64,
                 });
             }
             None => {
-                if let Some(limit) = timeout {
-                    if start.elapsed() >= limit {
-                        tracing::info!(timeout_ms = limit.as_millis() as u64, "SIGTERM");
-                        let terminating = Instant::now();
-                        group.terminate();
-                        tracing::info!(grace_ms = terminating.elapsed().as_millis() as u64, "SIGKILL");
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break SystemTime::now();
-                    }
+                let stop = if let Some(cap) = crossed.get() {
+                    tracing::info!(failure_kind = cap.failure_kind(), "SIGTERM");
+                    Some(Stop::Cap(*cap))
+                } else if let Some(limit) = timeout.filter(|limit| start.elapsed() >= *limit) {
+                    tracing::info!(timeout_ms = limit.as_millis() as u64, "SIGTERM");
+                    Some(Stop::Timeout(limit))
+                } else {
+                    None
+                };
+                if let Some(stop) = stop {
+                    let terminating = Instant::now();
+                    group.terminate();
+                    tracing::info!(grace_ms = terminating.elapsed().as_millis() as u64, "SIGKILL");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break (SystemTime::now(), stop);
                 }
                 thread::sleep(Duration::from_millis(50));
             }
         }
     };
+    let (ended_at, stop) = ended_at;
 
     let (stdout, stdout_timeline) = stdout_handle.join().unwrap_or_default();
     let stdout_timeline = stdout_timeline.clamped_to(ended_at);
     let stderr = stderr_handle.join().unwrap_or_default();
+    let (timed_out, cap_reached, duration_ms) = match stop {
+        Stop::Timeout(limit) => (true, None, limit.as_millis() as u64),
+        Stop::Cap(cap) => (false, Some(cap), start.elapsed().as_millis() as u64),
+    };
     Ok(CapturedProcess {
         stdout,
         stdout_timeline,
@@ -330,12 +411,18 @@ pub fn capture_subprocess(command: &mut Command, timeout: Option<Duration>) -> R
         pid,
         stderr,
         exit_code: None,
-        timed_out: true,
+        timed_out,
+        cap_reached,
         ended_at,
-        duration_ms: timeout
-            .map(|limit| limit.as_millis() as u64)
-            .unwrap_or_else(|| start.elapsed().as_millis() as u64),
+        duration_ms,
     })
+}
+
+/// Why `trg` killed a harness that had not exited on its own.
+#[derive(Debug, Clone, Copy)]
+enum Stop {
+    Timeout(Duration),
+    Cap(RunCap),
 }
 
 fn read_child_stream<R: std::io::Read>(pipe: Option<R>) -> Vec<u8> {
@@ -368,6 +455,26 @@ pub fn runner_failure_outcome(
         tokens: HarnessTokenUsage::unreported(),
         cost: runner.pricing().price(None),
         final_text,
+        read_only_fixture_violations: Vec::new(),
+    }
+}
+
+/// A run stopped at one of its caps was still paid for up to that point, so it says what
+/// its harness can say about cost, for the same reason a failed one does.
+pub fn budget_exhausted_outcome(
+    runner: Runner,
+    cap: RunCap,
+    duration_ms: u64,
+    exit_code: Option<i32>,
+) -> EvalRunOutcome {
+    EvalRunOutcome {
+        status: RunStatus::BudgetExhausted,
+        failure_kind: Some(cap.failure_kind()),
+        duration_ms,
+        exit_code,
+        tokens: HarnessTokenUsage::unreported(),
+        cost: runner.pricing().price(None),
+        final_text: String::new(),
         read_only_fixture_violations: Vec::new(),
     }
 }
@@ -1023,6 +1130,13 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Turn and tool counts read from a run's persisted transcript; `None` when the run
+/// left no transcript to read.
+pub fn measure_transcript(runner: Runner, transcript_path: &Path) -> Option<TranscriptMetrics> {
+    let stdout = std::fs::read(transcript_path).ok()?;
+    Some(harness_spans::measure(runner, &stdout))
+}
+
 pub fn write_transcript(transcript_path: &Path, stdout: &RedactedTranscript) -> std::io::Result<()> {
     if let Some(parent) = transcript_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1315,6 +1429,7 @@ mod workspace_tests {
             tool_grant: None,
             mcp_config: None,
             telemetry_forwarding: TelemetryForwarding::Off,
+            caps: RunCaps::default(),
         }
     }
 

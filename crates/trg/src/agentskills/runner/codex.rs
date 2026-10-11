@@ -9,9 +9,9 @@ use super::environment::{ConfigHomeOrigin, RunEnvironment};
 use super::telemetry::{in_step, AgentInvocation, HarnessTraces};
 use super::usage::{HarnessTokenUsage, UsageFieldNames};
 use super::{
-    check_runner_version, completed_outcome, persist_runner_io, prepare_workspace, runner_failure_outcome,
-    timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file, EvalRunOutcome,
-    EvalRunRequest, Runner, RunnerError,
+    budget_exhausted_outcome, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
+    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
+    EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
 };
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::mocks::MaterializedMcpConfig;
@@ -256,8 +256,16 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     prepared.environment.apply(&mut command);
 
     let invocation = AgentInvocation::begin(Runner::Codex, request.runner_model);
-    let captured = invocation.capture(&mut command, timeout_duration(request.timeout_secs))?;
+    let captured = invocation.capture(&mut command, timeout_duration(request.timeout_secs), request.caps)?;
     let outcome = in_step("parse outcome", || {
+        if let Some(cap) = captured.cap_reached {
+            return Ok(budget_exhausted_outcome(
+                Runner::Codex,
+                cap,
+                captured.duration_ms,
+                captured.exit_code,
+            ));
+        }
         if captured.timed_out {
             let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
             return Ok(timeout_outcome(Runner::Codex, timeout_ms, captured.exit_code));

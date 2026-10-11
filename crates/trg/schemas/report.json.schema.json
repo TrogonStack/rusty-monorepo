@@ -672,6 +672,24 @@
       ],
       "type": "object"
     },
+    "Interval": {
+      "description": "The range a measurement is consistent with.",
+      "properties": {
+        "high": {
+          "format": "double",
+          "type": "number"
+        },
+        "low": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "low",
+        "high"
+      ],
+      "type": "object"
+    },
     "IterationSummary": {
       "properties": {
         "always_fail": {
@@ -1078,6 +1096,12 @@
       ],
       "type": "object"
     },
+    "ResultBytes": {
+      "description": "The size of one tool result as the harness handed it back to the model, in bytes.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "RunCacheInfo": {
       "properties": {
         "hit": {
@@ -1209,6 +1233,17 @@
             "integer",
             "null"
           ]
+        },
+        "transcript": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TranscriptMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Turn and per-tool counts read off the run's transcript; absent for a run that\nleft no transcript, and for every run recorded before these were measured."
         }
       },
       "type": "object"
@@ -1448,6 +1483,34 @@
           "minimum": 0,
           "type": "integer"
         },
+        "pass_at_k": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ScoredRate"
+            }
+          ],
+          "default": {
+            "interval": null,
+            "rate": null,
+            "successes": 0,
+            "trials": 0
+          },
+          "description": "Fraction of this scenario's cases where at least one attempt passed every scored\nassertion (\"pass@k\", best-of-N), pooled with a Wilson interval across the cases\nthis scenario graded. Easy to mistake for `pass_pow_k`: the two agree only when a\ncase was drawn once."
+        },
+        "pass_pow_k": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ScoredRate"
+            }
+          ],
+          "default": {
+            "interval": null,
+            "rate": null,
+            "successes": 0,
+            "trials": 0
+          },
+          "description": "Fraction of this scenario's cases where every attempt passed (\"pass^k\"), the\nmatched aggregate `pass_at_k` is often mistaken for."
+        },
         "passed_runs": {
           "format": "uint",
           "minimum": 0,
@@ -1473,6 +1536,46 @@
         "passed_runs",
         "skipped_runs",
         "failed_runs"
+      ],
+      "type": "object"
+    },
+    "ScoredRate": {
+      "description": "A rate over cases together with the Wilson interval around it, serializable for a\nreport rather than kept as a [`Proportion`]: a reader of the report has no way to\nrecompute the interval from `rate` alone, so it rides alongside rather than being\ndropped at the serialization boundary.\n\n`rate` and `interval` are derived from `successes`/`trials` rather than independent\nfields, so deserializing goes through [`Proportion::parse`] to keep a decoded value\nas internally consistent as one built by [`ScoredRate::from_counts`].",
+      "properties": {
+        "interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate": {
+          "description": "Absent when `trials` is zero: nothing was measured.",
+          "format": "double",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "successes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trials": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "successes",
+        "trials"
       ],
       "type": "object"
     },
@@ -1621,6 +1724,12 @@
       ],
       "type": "string"
     },
+    "ToolCallCount": {
+      "description": "How many tool calls a run, or one tool within it, made.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "ToolGrant": {
       "description": "A named, finite set of tools a run's harness may use.\n\nNever parsed as empty: naming zero tools is not how an operator or a case denies\nevery gated tool, since a grant with nothing in it reads in a report exactly like a\ngrant nobody declared. [`ToolGrant::narrowed_by`] is the one place an empty set is\nlegitimate, because it answers \"what do both sides admit\", not \"what was declared\".",
       "items": {
@@ -1631,6 +1740,89 @@
     },
     "ToolName": {
       "type": "string"
+    },
+    "ToolUsage": {
+      "description": "How a run used one tool.",
+      "properties": {
+        "calls": {
+          "$ref": "#/$defs/ToolCallCount"
+        },
+        "largest_result_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultBytes"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absent when no call to this tool reported a result."
+        },
+        "repeated_calls": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ToolCallCount"
+            }
+          ],
+          "description": "Calls with the same arguments as an earlier call to this tool in the same run."
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "calls",
+        "repeated_calls"
+      ],
+      "type": "object"
+    },
+    "TranscriptMetrics": {
+      "description": "Turn and tool counts read off one run's transcript.",
+      "properties": {
+        "peak_turn_input_tokens": {
+          "description": "The most input tokens any single turn sent, cache reads and writes included.\nAbsent for a harness that reports usage only for the whole run.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "repeated_tool_calls": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ToolCallCount"
+            }
+          ],
+          "description": "Calls with the same tool and arguments as an earlier call in the same run."
+        },
+        "tool_calls": {
+          "$ref": "#/$defs/ToolCallCount"
+        },
+        "tools": {
+          "description": "Ordered by tool name.",
+          "items": {
+            "$ref": "#/$defs/ToolUsage"
+          },
+          "type": "array"
+        },
+        "turns": {
+          "$ref": "#/$defs/TurnCount"
+        }
+      },
+      "required": [
+        "turns",
+        "tool_calls",
+        "repeated_tool_calls"
+      ],
+      "type": "object"
+    },
+    "TurnCount": {
+      "description": "How many model turns a run took, as its harness's stream reports them.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/report.json.schema.json",

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -6,6 +7,7 @@ use regex::Regex;
 use schemars::JsonSchema;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 use super::call_bounds::CallBounds;
 use super::evals::{EvalError, GlobPattern, NonEmptyString, RelativeSkillPath, Result};
@@ -44,6 +46,21 @@ impl RegexPattern {
         let mut builder = regex::RegexBuilder::new(&self.0);
         flags.apply(&mut builder);
         builder.build().expect("pattern was validated at construction")
+    }
+
+    /// Compiles the pattern folded the same way as the text it is matched
+    /// against, so a pattern naming a dash or a curly quote still finds one.
+    /// Folding can turn a full-width character into a regex metacharacter, so
+    /// the folded pattern is compiled afresh rather than assumed valid.
+    pub fn compile_normalized(
+        &self,
+        flags: &RegexFlags,
+        normalize: TextNormalization,
+    ) -> std::result::Result<Regex, regex::Error> {
+        let folded = normalize.for_pattern(&self.0);
+        let mut builder = regex::RegexBuilder::new(&folded);
+        flags.apply(&mut builder);
+        builder.build()
     }
 }
 
@@ -524,6 +541,364 @@ impl BaselineReference {
     }
 }
 
+/// Whether a text grader compares text as the run wrote it, or folded first.
+///
+/// Folding is the default because a model that writes `2.1.0-M1` with a
+/// non-breaking hyphen, or quotes a phrase in curly quotes, has still written
+/// what the case asked for, and a check that fails on the typography reports
+/// the font rather than the skill. Folding applies NFKC, then maps the hyphen
+/// and dash variants to `-` and the curly quotes to their ASCII forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[schemars(schema_with = "text_normalization_schema")]
+pub enum TextNormalization {
+    #[default]
+    Folded,
+    Exact,
+}
+
+fn text_normalization_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "boolean",
+        "default": true
+    })
+}
+
+const HYPHEN_VARIANTS: [char; 7] = [
+    '\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}',
+];
+const SINGLE_QUOTE_VARIANTS: [char; 4] = ['\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
+const DOUBLE_QUOTE_VARIANTS: [char; 4] = ['\u{201C}', '\u{201D}', '\u{201E}', '\u{201F}'];
+
+impl TextNormalization {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// For substring search, where a line break the model wrapped a phrase at is
+    /// no different from the space the case wrote, so whitespace runs collapse.
+    pub fn for_search<'a>(self, text: &'a str) -> Cow<'a, str> {
+        match self {
+            Self::Exact => Cow::Borrowed(text),
+            Self::Folded => {
+                let mut folded = String::with_capacity(text.len());
+                let mut in_whitespace = false;
+                for c in fold_characters(text) {
+                    if c.is_whitespace() {
+                        if !in_whitespace {
+                            folded.push(' ');
+                        }
+                        in_whitespace = true;
+                    } else {
+                        folded.push(c);
+                        in_whitespace = false;
+                    }
+                }
+                unchanged_or_owned(text, folded)
+            }
+        }
+    }
+
+    /// What a `contains` or `identifier` grader should compare with, given the
+    /// text it looks for. A needle that itself carries a character folding would
+    /// rewrite, such as an em dash, is asking about that character, so folding
+    /// both sides would turn "must not contain an em dash" into "must not
+    /// contain a hyphen". Such a needle is matched exactly.
+    pub fn for_needle(self, needle: &str) -> Self {
+        match self {
+            Self::Folded if !fold_characters(needle).eq(needle.chars()) => Self::Exact,
+            other => other,
+        }
+    }
+
+    /// For regex, where a pattern may anchor on line breaks, so whitespace is
+    /// left as written.
+    pub fn for_pattern<'a>(self, text: &'a str) -> Cow<'a, str> {
+        match self {
+            Self::Exact => Cow::Borrowed(text),
+            Self::Folded => unchanged_or_owned(text, fold_characters(text).collect()),
+        }
+    }
+}
+
+fn fold_characters(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.nfkc().map(|c| match c {
+        c if HYPHEN_VARIANTS.contains(&c) => '-',
+        c if SINGLE_QUOTE_VARIANTS.contains(&c) => '\'',
+        c if DOUBLE_QUOTE_VARIANTS.contains(&c) => '"',
+        c => c,
+    })
+}
+
+fn unchanged_or_owned(original: &str, folded: String) -> Cow<'_, str> {
+    if folded == original {
+        Cow::Borrowed(original)
+    } else {
+        Cow::Owned(folded)
+    }
+}
+
+/// The text a substring grader actually searched, together with what it is
+/// called in evidence whenever it is no longer the text as written, since a
+/// byte offset only means something against the text it was counted in.
+struct ComparedText<'a> {
+    text: Cow<'a, str>,
+    form: Option<&'static str>,
+}
+
+impl<'a> ComparedText<'a> {
+    fn of(original: &'a str, normalize: TextNormalization, case: MatchCase) -> Self {
+        let folded = normalize.for_search(original);
+        let was_folded = folded.as_ref() != original;
+        let (text, was_lowered) = match case {
+            MatchCase::Sensitive => (folded, false),
+            MatchCase::Insensitive => {
+                let lowered = folded.to_lowercase();
+                let was_lowered = lowered != folded.as_ref();
+                (Cow::Owned(lowered), was_lowered)
+            }
+        };
+        let form = match (was_folded, was_lowered) {
+            (false, false) => None,
+            (true, false) => Some("folded text"),
+            (false, true) => Some("lowercased text"),
+            (true, true) => Some("folded, lowercased text"),
+        };
+        Self { text, form }
+    }
+
+    fn offset(&self, offset: usize) -> String {
+        match self.form {
+            Some(form) => format!("byte {offset} of the {form}"),
+            None => format!("byte {offset}"),
+        }
+    }
+
+    fn searched(&self) -> String {
+        self.form
+            .map(|form| format!(" (searched the {form})"))
+            .unwrap_or_default()
+    }
+}
+
+impl Serialize for TextNormalization {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_bool(matches!(self, Self::Folded))
+    }
+}
+
+impl<'de> Deserialize<'de> for TextNormalization {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        Ok(match bool::deserialize(deserializer)? {
+            true => Self::Folded,
+            false => Self::Exact,
+        })
+    }
+}
+
+/// One token an `identifier` grader looks for as a whole name, so that
+/// `rubric` is not found inside `rubrics` or `getRubric`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(schema_with = "identifier_schema")]
+pub struct Identifier(String);
+
+fn identifier_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^\\S+$"
+    })
+}
+
+impl Identifier {
+    pub fn parse(value: impl Into<String>) -> std::result::Result<Self, String> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("identifier must not be empty".to_string());
+        }
+        if value.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "identifier '{value}' holds whitespace; an identifier is one token, so use contains for a phrase"
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Byte offsets of every whole-token occurrence in `text`. A side of the
+    /// identifier that ends in a name character only matches where the text does
+    /// not carry on with one, which is the same rule as a regex `\b`.
+    fn occurrences_in(needle: &str, text: &str) -> Vec<usize> {
+        let starts_with_name = needle.chars().next().is_some_and(is_name_char);
+        let ends_with_name = needle.chars().next_back().is_some_and(is_name_char);
+        text.match_indices(needle)
+            .filter(|(start, found)| {
+                let before = text[..*start].chars().next_back();
+                let after = text[start + found.len()..].chars().next();
+                !(starts_with_name && before.is_some_and(is_name_char))
+                    && !(ends_with_name && after.is_some_and(is_name_char))
+            })
+            .map(|(start, _)| start)
+            .collect()
+    }
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+impl fmt::Display for Identifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Identifier {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
+/// How many whole-token occurrences an `identifier` grader accepts, with the
+/// same rules `tool_used` holds its call counts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OccurrenceBounds(CallBounds);
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+struct DeclaredOccurrenceBounds {
+    #[serde(default = "at_least_one")]
+    #[schemars(range(min = 0))]
+    min: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    max: Option<usize>,
+}
+
+fn at_least_one() -> usize {
+    1
+}
+
+impl OccurrenceBounds {
+    pub fn parse(min: usize, max: Option<usize>) -> std::result::Result<Self, String> {
+        match max {
+            Some(max) if max < min => Err(format!(
+                "max {max} is below min {min}, so no number of occurrences satisfies it"
+            )),
+            None if min == 0 => {
+                Err("min 0 without max accepts every run; give max to say the identifier must not appear".to_string())
+            }
+            _ => CallBounds::parse(min, max).map(Self),
+        }
+    }
+
+    pub fn admits(&self, occurrences: usize) -> bool {
+        self.0.admits(occurrences)
+    }
+
+    pub fn is_at_least_once(&self) -> bool {
+        self.0 == CallBounds::at_least_once()
+    }
+}
+
+impl fmt::Display for OccurrenceBounds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl Serialize for OccurrenceBounds {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        DeclaredOccurrenceBounds {
+            min: self.0.min(),
+            max: self.0.max(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OccurrenceBounds {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let declared = DeclaredOccurrenceBounds::deserialize(deserializer)?;
+        Self::parse(declared.min, declared.max).map_err(de::Error::custom)
+    }
+}
+
+impl JsonSchema for OccurrenceBounds {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        DeclaredOccurrenceBounds::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        DeclaredOccurrenceBounds::json_schema(generator)
+    }
+}
+
+fn case_sensitive() -> MatchCase {
+    MatchCase::Sensitive
+}
+
+fn is_case_sensitive(case: &MatchCase) -> bool {
+    *case == MatchCase::Sensitive
+}
+
+/// The markup a model writes when it imitates a tool call in its reply instead
+/// of making one, matched case-insensitively.
+const TOOL_CALL_MARKUP: &[&str] = &[
+    "<tool>",
+    "<tool ",
+    "<tool_call",
+    "<tool_use",
+    "<tool_code",
+    "<tool_response",
+    "<tool_result",
+    "<function_call",
+    "<function=",
+    "<functioncall",
+    "<invoke",
+    "<|channel|>",
+    "<|tool_call",
+    "<|python_tag|>",
+    "[tool_calls]",
+    "```tool_call",
+    "```tool_code",
+    "```tool_use",
+    "```function_call",
+];
+
+/// Where a run's final text first carries tool-call markup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolCallMarkup {
+    marker: &'static str,
+    offset: usize,
+}
+
+impl ToolCallMarkup {
+    pub fn find_in(text: &str) -> Option<Self> {
+        let lowered = text.to_ascii_lowercase();
+        TOOL_CALL_MARKUP
+            .iter()
+            .filter_map(|marker| lowered.find(marker).map(|offset| Self { marker, offset }))
+            .min_by_key(|found| found.offset)
+    }
+}
+
+impl fmt::Display for ToolCallMarkup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "tool-call markup '{}' at byte {}",
+            self.marker.trim_end(),
+            self.offset
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Grader {
@@ -537,6 +912,8 @@ pub enum Grader {
         flags: RegexFlags,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         count: Option<MatchCount>,
+        #[serde(default, skip_serializing_if = "TextNormalization::is_default")]
+        normalize: TextNormalization,
     },
     Contains {
         text: NonEmptyString,
@@ -546,6 +923,21 @@ pub enum Grader {
         case: MatchCase,
         #[serde(default)]
         negate: bool,
+        #[serde(default, skip_serializing_if = "TextNormalization::is_default")]
+        normalize: TextNormalization,
+    },
+    /// Is a name present as a whole token, rather than as part of a longer one?
+    Identifier {
+        identifier: Identifier,
+        #[serde(default)]
+        target: GradeTarget,
+        #[serde(default = "case_sensitive", skip_serializing_if = "is_case_sensitive")]
+        #[schemars(extend("default" = "sensitive"))]
+        case: MatchCase,
+        #[serde(default, skip_serializing_if = "TextNormalization::is_default")]
+        normalize: TextNormalization,
+        #[serde(flatten)]
+        occurrences: OccurrenceBounds,
     },
     FileExists {
         path: GlobPattern,
@@ -568,6 +960,10 @@ pub enum Grader {
         #[schemars(extend("default" = false))]
         negate: bool,
     },
+    /// Fails when the final text carries tool-call markup and the run made no
+    /// real tool call at all. Any real call passes it; the markup is not matched
+    /// against the calls the run made.
+    NoFakeToolCalls,
     Llm {
         criterion: NonEmptyString,
         #[serde(default, skip_serializing_if = "is_default_target")]
@@ -601,10 +997,12 @@ impl Grader {
         match self {
             Self::Regex { .. } => "regex",
             Self::Contains { .. } => "contains",
+            Self::Identifier { .. } => "identifier",
             Self::FileExists { .. } => "file_exists",
             Self::ToolUsed { .. } => "tool_used",
             Self::ToolOrder { .. } => "tool_order",
             Self::SkillUsed { .. } => "skill_used",
+            Self::NoFakeToolCalls => "no_fake_tool_calls",
             Self::Llm { .. } => "llm",
             Self::ValidJson { .. } => "valid_json",
             Self::SchemaValidation { .. } => "schema_validation",
@@ -619,11 +1017,16 @@ impl Grader {
         match self {
             Self::Regex { target, .. }
             | Self::Contains { target, .. }
+            | Self::Identifier { target, .. }
             | Self::ValidJson { target }
             | Self::SchemaValidation { target, .. }
             | Self::Baseline { target, .. } => Some(target.clone()),
             Self::Llm { target, .. } => Some(target.resolve()),
-            Self::FileExists { .. } | Self::ToolUsed { .. } | Self::ToolOrder { .. } | Self::SkillUsed { .. } => None,
+            Self::FileExists { .. }
+            | Self::ToolUsed { .. }
+            | Self::ToolOrder { .. }
+            | Self::SkillUsed { .. }
+            | Self::NoFakeToolCalls => None,
         }
     }
 
@@ -637,11 +1040,13 @@ impl Grader {
                 negate,
                 flags,
                 count,
+                normalize,
             } => {
                 let verb = if *negate { "does not match" } else { "matches" };
+                let exact = exact_suffix(*normalize);
                 match count {
-                    Some(n) => format!("{target} {verb} regex /{pattern}/{flags} exactly {n} time(s)"),
-                    None => format!("{target} {verb} regex /{pattern}/{flags}"),
+                    Some(n) => format!("{target} {verb} regex /{pattern}/{flags} exactly {n} time(s){exact}"),
+                    None => format!("{target} {verb} regex /{pattern}/{flags}{exact}"),
                 }
             }
             Self::Contains {
@@ -649,13 +1054,31 @@ impl Grader {
                 target,
                 case,
                 negate,
+                normalize,
             } => {
                 let verb = if *negate { "does not contain" } else { "contains" };
                 let suffix = match case {
                     MatchCase::Sensitive => " (case sensitive)",
                     MatchCase::Insensitive => "",
                 };
-                format!("{target} {verb} '{text}'{suffix}")
+                format!("{target} {verb} '{text}'{suffix}{}", exact_suffix(*normalize))
+            }
+            Self::Identifier {
+                identifier,
+                target,
+                case,
+                normalize,
+                occurrences,
+            } => {
+                let counted = match occurrences.is_at_least_once() {
+                    true => format!("{target} names identifier '{identifier}'"),
+                    false => format!("{target} names identifier '{identifier}' {occurrences}"),
+                };
+                let suffix = match case {
+                    MatchCase::Sensitive => "",
+                    MatchCase::Insensitive => " (case insensitive)",
+                };
+                format!("{counted}{suffix}{}", exact_suffix(*normalize))
             }
             Self::FileExists { path, exists } => match exists {
                 true => format!("file '{path}' exists"),
@@ -688,6 +1111,9 @@ impl Grader {
                 true => "the skill was not engaged".to_string(),
                 false => "the skill was engaged".to_string(),
             },
+            Self::NoFakeToolCalls => {
+                "final text carries no tool-call markup unless the run made a real tool call".to_string()
+            }
             Self::Llm { criterion, target } => match target.resolve() {
                 GradeTarget::FinalText => criterion.to_string(),
                 other => format!("{other}: {criterion}"),
@@ -705,7 +1131,7 @@ impl Grader {
     pub fn needs_tool_visibility(&self) -> bool {
         matches!(
             self,
-            Self::ToolUsed { .. } | Self::ToolOrder { .. } | Self::SkillUsed { .. }
+            Self::ToolUsed { .. } | Self::ToolOrder { .. } | Self::SkillUsed { .. } | Self::NoFakeToolCalls
         )
     }
 
@@ -776,6 +1202,13 @@ pub struct CaseGrader {
     pub name: Option<GraderName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<GraderWeight>,
+}
+
+fn exact_suffix(normalize: TextNormalization) -> &'static str {
+    match normalize {
+        TextNormalization::Folded => "",
+        TextNormalization::Exact => " (unnormalized)",
+    }
 }
 
 fn is_not_negated(negate: &bool) -> bool {
@@ -1220,13 +1653,29 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
             negate,
             flags,
             count,
+            normalize,
         } => match input.target_content(target) {
             TargetContent::Missing(reason) => GraderOutcome::Failed { evidence: reason },
             TargetContent::Image { .. } => GraderOutcome::Failed {
                 evidence: format!("{target} is an image; a pattern can only match text"),
             },
             TargetContent::Text(text) => {
-                let regex = pattern.compile_with(flags);
+                let folded = normalize.for_pattern(&text);
+                let at = match folded.as_ref() == text.as_str() {
+                    true => "at byte",
+                    false => "at folded-text byte",
+                };
+                let text = folded;
+                let regex = match pattern.compile_normalized(flags, *normalize) {
+                    Ok(regex) => regex,
+                    Err(e) => {
+                        return GraderOutcome::AuthoringError {
+                            reason: format!(
+                                "pattern /{pattern}/ no longer compiles once folded ({e}); set normalize to false"
+                            ),
+                        }
+                    }
+                };
                 match count {
                     Some(expected) => {
                         let actual = regex.find_iter(&text).count();
@@ -1239,7 +1688,7 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
                         let found = regex.find(&text);
                         let evidence = match &found {
                             Some(m) => format!(
-                                "{target} matched /{pattern}/{flags} at byte {}: '{}'",
+                                "{target} matched /{pattern}/{flags} {at} {}: '{}'",
                                 m.start(),
                                 m.as_str()
                             ),
@@ -1255,22 +1704,78 @@ pub fn evaluate(grader: &Grader, input: &GradeInput) -> GraderOutcome {
             target,
             case,
             negate,
+            normalize,
         } => match input.target_content(target) {
             TargetContent::Missing(reason) => GraderOutcome::Failed { evidence: reason },
             TargetContent::Image { .. } => GraderOutcome::Failed {
                 evidence: format!("{target} is an image; it cannot be searched for text"),
             },
             TargetContent::Text(haystack) => {
-                let found = match case {
-                    MatchCase::Sensitive => haystack.find(text.as_str()),
-                    MatchCase::Insensitive => haystack.to_lowercase().find(&text.as_str().to_lowercase()),
-                };
+                let normalize = normalize.for_needle(text.as_str());
+                let searched = ComparedText::of(&haystack, normalize, *case);
+                let needle = ComparedText::of(text.as_str(), normalize, *case);
+                let found = searched.text.find(needle.text.as_ref());
                 let evidence = match found {
-                    Some(offset) => format!("{target} ({} bytes) contains '{text}' at byte {offset}", haystack.len()),
-                    None => format!("{target} ({} bytes) does not contain '{text}'", haystack.len()),
+                    Some(offset) => format!(
+                        "{target} ({} bytes) contains '{text}' at {}",
+                        haystack.len(),
+                        searched.offset(offset)
+                    ),
+                    None => format!(
+                        "{target} ({} bytes) does not contain '{text}'{}",
+                        haystack.len(),
+                        searched.searched()
+                    ),
                 };
                 GraderOutcome::from_bool(found.is_some() != *negate, evidence)
             }
+        },
+        Grader::Identifier {
+            identifier,
+            target,
+            case,
+            normalize,
+            occurrences,
+        } => match input.target_content(target) {
+            TargetContent::Missing(reason) => GraderOutcome::Failed { evidence: reason },
+            TargetContent::Image { .. } => GraderOutcome::Failed {
+                evidence: format!("{target} is an image; it cannot be searched for an identifier"),
+            },
+            TargetContent::Text(haystack) => {
+                let normalize = normalize.for_needle(identifier.as_str());
+                let searched = ComparedText::of(&haystack, normalize, *case);
+                let needle = ComparedText::of(identifier.as_str(), normalize, *case);
+                let found = Identifier::occurrences_in(&needle.text, &searched.text);
+                let first = match found.first() {
+                    Some(offset) => format!(", first at {}", searched.offset(*offset)),
+                    None => searched.searched(),
+                };
+                GraderOutcome::from_bool(
+                    occurrences.admits(found.len()),
+                    format!(
+                        "{target} names '{identifier}' as a whole token {} time(s){first}, expected {occurrences}",
+                        found.len()
+                    ),
+                )
+            }
+        },
+        Grader::NoFakeToolCalls => match ToolCallMarkup::find_in(input.final_text) {
+            None => GraderOutcome::Passed {
+                evidence: "final text carries no tool-call markup".to_string(),
+            },
+            Some(markup) => with_transcript(input, |transcript| {
+                let real = transcript.tool_calls().count();
+                match real {
+                    0 => GraderOutcome::Failed {
+                        evidence: format!(
+                            "final text carries {markup}, but the run made no real tool call, so the call was written out as text"
+                        ),
+                    },
+                    _ => GraderOutcome::Passed {
+                        evidence: format!("final text carries {markup}, and the run made {real} real tool call(s)"),
+                    },
+                }
+            }),
         },
         Grader::ToolUsed {
             tool,
@@ -1677,6 +2182,7 @@ mod tests {
             negate: false,
             flags: RegexFlags::default(),
             count: None,
+            normalize: TextNormalization::default(),
         };
         let outcome = evaluate(&grader, &fixture.input());
         assert!(matches!(outcome, GraderOutcome::Passed { .. }), "{outcome:?}");
@@ -1691,6 +2197,7 @@ mod tests {
             negate: false,
             flags: RegexFlags::parse("i").unwrap(),
             count: None,
+            normalize: TextNormalization::default(),
         };
         assert!(matches!(
             evaluate(&grader, &fixture.input()),
@@ -1707,6 +2214,7 @@ mod tests {
             negate: false,
             flags: RegexFlags::default(),
             count: None,
+            normalize: TextNormalization::default(),
         };
         assert!(matches!(
             evaluate(&grader, &fixture.input()),
@@ -1729,6 +2237,7 @@ mod tests {
             negate: false,
             flags: RegexFlags::default(),
             count: Some(MatchCount::parse(1).unwrap()),
+            normalize: TextNormalization::default(),
         };
         // "# Title\nRevenue grew 12% in Q3.\n" has more than one 'e'.
         assert!(matches!(
@@ -1746,6 +2255,7 @@ mod tests {
             negate: true,
             flags: RegexFlags::default(),
             count: None,
+            normalize: TextNormalization::default(),
         };
         assert!(matches!(
             evaluate(&grader, &fixture.input()),
@@ -1768,6 +2278,7 @@ mod tests {
             negate: true,
             flags: RegexFlags::default(),
             count: Some(MatchCount::parse(1).unwrap()),
+            normalize: TextNormalization::default(),
         };
         // "# Title\nRevenue grew 12% in Q3.\n" has more than one 'e', so negate
         // flips the "not exactly 1" mismatch into a pass.
@@ -1785,6 +2296,7 @@ mod tests {
             target: GradeTarget::File(path("report.md")),
             case: MatchCase::Sensitive,
             negate: true,
+            normalize: TextNormalization::default(),
         };
         match evaluate(&grader, &fixture.input()) {
             GraderOutcome::Passed { evidence } => assert!(evidence.contains("does not contain"), "{evidence}"),
@@ -1800,6 +2312,7 @@ mod tests {
             target: GradeTarget::File(path("absent.md")),
             case: MatchCase::Insensitive,
             negate: false,
+            normalize: TextNormalization::default(),
         };
         match evaluate(&grader, &fixture.input()) {
             GraderOutcome::Failed { evidence } => assert!(evidence.contains("cannot read"), "{evidence}"),
@@ -2081,6 +2594,7 @@ mod tests {
             target: GradeTarget::AnyOutput,
             case: MatchCase::Sensitive,
             negate: false,
+            normalize: TextNormalization::default(),
         };
         assert!(matches!(
             evaluate(&grader, &fixture.input()),
@@ -2435,6 +2949,7 @@ mod tests {
             negate: false,
             flags: RegexFlags::default(),
             count: None,
+            normalize: TextNormalization::default(),
         };
         assert!(matches!(evaluate(&grader, &input), GraderOutcome::Passed { .. }));
     }
@@ -2586,6 +3101,7 @@ mod tests {
             target: GradeTarget::CreatedFiles,
             case: MatchCase::Sensitive,
             negate: false,
+            normalize: TextNormalization::default(),
         };
         assert!(matches!(evaluate(&grader, &input), GraderOutcome::Passed { .. }));
 
@@ -2594,6 +3110,7 @@ mod tests {
             target: GradeTarget::CreatedFiles,
             case: MatchCase::Sensitive,
             negate: false,
+            normalize: TextNormalization::default(),
         };
         assert!(matches!(evaluate(&missing, &input), GraderOutcome::Failed { .. }));
     }
@@ -2626,6 +3143,7 @@ mod tests {
                     negate: false,
                     flags: RegexFlags::default(),
                     count: None,
+                    normalize: TextNormalization::default(),
                 },
                 "final text matches regex /foo/",
             ),
@@ -2635,6 +3153,7 @@ mod tests {
                     target: GradeTarget::File(path("out.md")),
                     case: MatchCase::Insensitive,
                     negate: true,
+                    normalize: TextNormalization::default(),
                 },
                 "file 'out.md' does not contain 'bar'",
             ),
@@ -2694,6 +3213,30 @@ mod tests {
                 },
                 "file 'out.json' validates against schema 'schema.json'",
             ),
+            (
+                Grader::Identifier {
+                    identifier: Identifier::parse("rubric").unwrap(),
+                    target: GradeTarget::FinalText,
+                    case: MatchCase::Sensitive,
+                    normalize: TextNormalization::default(),
+                    occurrences: OccurrenceBounds::default(),
+                },
+                "final text names identifier 'rubric'",
+            ),
+            (
+                Grader::Identifier {
+                    identifier: Identifier::parse("Fact.member").unwrap(),
+                    target: GradeTarget::FinalText,
+                    case: MatchCase::Insensitive,
+                    normalize: TextNormalization::Exact,
+                    occurrences: OccurrenceBounds::parse(0, Some(0)).unwrap(),
+                },
+                "final text names identifier 'Fact.member' never (case insensitive) (unnormalized)",
+            ),
+            (
+                Grader::NoFakeToolCalls,
+                "final text carries no tool-call markup unless the run made a real tool call",
+            ),
         ];
         for (grader, expected) in cases {
             assert_eq!(grader.describe(), expected, "{}", grader.kind());
@@ -2711,10 +3254,13 @@ mod tests {
             {"type": "skill_used"},
             {"type": "llm", "criterion": "reads naturally"},
             {"type": "valid_json"},
-            {"type": "schema_validation", "schema": "schema.json"}
+            {"type": "schema_validation", "schema": "schema.json"},
+            {"type": "identifier", "identifier": "rubric", "case": "insensitive", "max": 3},
+            {"type": "no_fake_tool_calls"},
+            {"type": "contains", "text": "2.1.0-M1", "normalize": false}
         ]);
         let graders: Vec<Grader> = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(graders.len(), 9);
+        assert_eq!(graders.len(), 12);
         assert_eq!(
             graders.iter().map(Grader::kind).collect::<Vec<_>>(),
             vec![
@@ -2726,7 +3272,10 @@ mod tests {
                 "skill_used",
                 "llm",
                 "valid_json",
-                "schema_validation"
+                "schema_validation",
+                "identifier",
+                "no_fake_tool_calls",
+                "contains"
             ]
         );
         let reparsed: Vec<Grader> = serde_json::from_value(serde_json::to_value(&graders).unwrap()).unwrap();
@@ -3212,6 +3761,7 @@ mod tests {
             target: GradeTarget::MockCalls,
             case: MatchCase::Sensitive,
             negate,
+            normalize: TextNormalization::default(),
         }
     }
 
@@ -3380,6 +3930,7 @@ mod tests {
                 negate: false,
                 flags: RegexFlags::default(),
                 count: None,
+                normalize: TextNormalization::default(),
             },
             mock_calls_grader("x", false),
             Grader::ValidJson {
@@ -3407,6 +3958,310 @@ mod tests {
                 "{} reads a target and must say so, or an unobservable one reaches it unchecked",
                 grader.kind()
             );
+        }
+    }
+
+    fn graded_text(grader: serde_json::Value, final_text: &str, stream: &[u8]) -> GraderOutcome {
+        let fixture = Fixture::of(stream);
+        let input = GradeInput {
+            final_text,
+            ..fixture.input()
+        };
+        evaluate(&serde_json::from_value(grader).expect("grader parses"), &input)
+    }
+
+    const NO_TOOL_STREAM: &[u8] = br#"{"type":"result","is_error":false,"result":"done"}
+"#;
+
+    #[test]
+    fn contains_matches_a_version_written_with_a_non_breaking_hyphen() {
+        let grader = serde_json::json!({"type": "contains", "text": "2.1.0-M1"});
+        match graded_text(grader, "Upgrade to 2.1.0\u{2011}M1 today.", CLAUDE_STREAM) {
+            GraderOutcome::Passed { evidence } => assert!(evidence.contains("of the folded"), "{evidence}"),
+            other => panic!("expected a pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn contains_folds_dashes_quotes_compatibility_forms_and_whitespace() {
+        for (needle, haystack) in [
+            ("a-b", "a\u{2013}b"),
+            ("a-b", "a\u{2212}b"),
+            ("a-b", "a\u{2014}b"),
+            ("it's \"done\"", "it\u{2019}s \u{201C}done\u{201D}"),
+            ("ABC 12", "\u{FF21}\u{FF22}\u{FF23}\u{00A0}\u{FF11}\u{FF12}"),
+            ("grew 12% in Q3", "grew   12%\n\tin Q3"),
+            ("file", "\u{FB01}le"),
+        ] {
+            let grader = serde_json::json!({"type": "contains", "text": needle, "case": "sensitive"});
+            assert!(
+                matches!(
+                    graded_text(grader, haystack, CLAUDE_STREAM),
+                    GraderOutcome::Passed { .. }
+                ),
+                "'{needle}' in '{haystack}'"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_collapses_whitespace_in_the_needle_as_well_as_the_text() {
+        let grader = serde_json::json!({"type": "contains", "text": "grew  12%\nin Q3"});
+        assert!(matches!(
+            graded_text(grader, "Revenue grew 12% in\tQ3.", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_needle_carrying_a_variant_character_is_matched_exactly() {
+        let grader = || serde_json::json!({"type": "contains", "text": "2.1.0\u{2011}M1"});
+        assert!(matches!(
+            graded_text(grader(), "Upgrade to 2.1.0\u{2011}M1 today.", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+        assert!(matches!(
+            graded_text(grader(), "Upgrade to 2.1.0-M1 today.", CLAUDE_STREAM),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn contains_compares_text_as_written_when_normalization_is_opted_out() {
+        let grader = serde_json::json!({"type": "contains", "text": "2.1.0-M1", "normalize": false});
+        assert!(matches!(
+            graded_text(grader, "Upgrade to 2.1.0\u{2011}M1 today.", CLAUDE_STREAM),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn regex_folds_characters_but_keeps_line_breaks() {
+        let folded = serde_json::json!({"type": "regex", "pattern": r"2\.1\.0-M1"});
+        assert!(matches!(
+            graded_text(folded, "2.1.0\u{2011}M1", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+        let anchored = serde_json::json!({"type": "regex", "pattern": "^second$", "flags": "m"});
+        assert!(matches!(
+            graded_text(anchored, "first\n\nsecond", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+        let exact = serde_json::json!({"type": "regex", "pattern": r"2\.1\.0-M1", "normalize": false});
+        assert!(matches!(
+            graded_text(exact, "2.1.0\u{2011}M1", CLAUDE_STREAM),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn normalization_is_omitted_from_the_manifest_unless_opted_out() {
+        let default: Grader = serde_json::from_value(serde_json::json!({"type": "contains", "text": "x"})).unwrap();
+        assert!(serde_json::to_value(&default).unwrap().get("normalize").is_none());
+        let exact: Grader =
+            serde_json::from_value(serde_json::json!({"type": "contains", "text": "x", "normalize": false})).unwrap();
+        assert_eq!(serde_json::to_value(&exact).unwrap()["normalize"], false);
+    }
+
+    #[test]
+    fn identifier_matches_only_the_whole_token() {
+        let grader = || serde_json::json!({"type": "identifier", "identifier": "rubric"});
+        assert!(matches!(
+            graded_text(grader(), "Each rubric scores one thing.", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+        for haystack in ["Two rubrics.", "call getRubric()", "my_rubric", "rubric2", "Rubric"] {
+            assert!(
+                matches!(
+                    graded_text(grader(), haystack, CLAUDE_STREAM),
+                    GraderOutcome::Failed { .. }
+                ),
+                "{haystack}"
+            );
+        }
+    }
+
+    #[test]
+    fn identifier_is_case_insensitive_only_when_asked() {
+        let grader = serde_json::json!({"type": "identifier", "identifier": "rubric", "case": "insensitive"});
+        assert!(matches!(
+            graded_text(grader.clone(), "The Rubric holds.", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+        assert!(matches!(
+            graded_text(grader, "call getRubric()", CLAUDE_STREAM),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn identifier_with_punctuation_matches_a_qualified_name() {
+        let grader = || serde_json::json!({"type": "identifier", "identifier": "Fact.member"});
+        assert!(matches!(
+            graded_text(grader(), "Use `Fact.member(x)` here.", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+        assert!(matches!(
+            graded_text(grader(), "Use Fact.members here.", CLAUDE_STREAM),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn identifier_counts_occurrences_against_its_bounds() {
+        let text = "rubric, rubrics, rubric.";
+        let exactly_two = serde_json::json!({"type": "identifier", "identifier": "rubric", "min": 2, "max": 2});
+        match graded_text(exactly_two, text, CLAUDE_STREAM) {
+            GraderOutcome::Passed { evidence } => assert!(evidence.contains("2 time(s)"), "{evidence}"),
+            other => panic!("expected a pass, got {other:?}"),
+        }
+        let absent = serde_json::json!({"type": "identifier", "identifier": "rubric", "min": 0, "max": 0});
+        assert!(matches!(
+            graded_text(absent, text, CLAUDE_STREAM),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn identifier_rejects_bounds_and_tokens_that_cannot_mean_anything() {
+        for (json, expected) in [
+            (
+                serde_json::json!({"type": "identifier", "identifier": "a", "min": 0}),
+                "min 0",
+            ),
+            (
+                serde_json::json!({"type": "identifier", "identifier": "a", "min": 3, "max": 1}),
+                "below min",
+            ),
+            (
+                serde_json::json!({"type": "identifier", "identifier": "two words"}),
+                "one token",
+            ),
+            (serde_json::json!({"type": "identifier", "identifier": ""}), "empty"),
+        ] {
+            let err = serde_json::from_value::<Grader>(json).unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    #[test]
+    fn identifier_folds_a_non_breaking_hyphen() {
+        let grader = serde_json::json!({"type": "identifier", "identifier": "2.1.0-M1"});
+        assert!(matches!(
+            graded_text(grader, "pin 2.1.0\u{2011}M1 now", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_call_markup_without_a_real_call_fails() {
+        for text in [
+            "<tool>web_search</tool> The results say Rust 2.0 shipped.",
+            "<tool_call>{\"name\": \"search\"}</tool_call>",
+            "<function_call>search()</function_call>",
+            "<invoke name=\"search\">",
+            "<|channel|>commentary to=functions.search",
+            "<|tool_call|>search",
+            "```tool_call\nsearch(\"x\")\n```",
+            "<TOOL_CALL>search</TOOL_CALL>",
+        ] {
+            match graded_text(serde_json::json!({"type": "no_fake_tool_calls"}), text, NO_TOOL_STREAM) {
+                GraderOutcome::Failed { evidence } => assert!(evidence.contains("no real tool call"), "{evidence}"),
+                other => panic!("'{text}' should fail, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tool_call_markup_passes_when_the_run_made_real_calls() {
+        match graded_text(
+            serde_json::json!({"type": "no_fake_tool_calls"}),
+            "<tool>Read</tool>",
+            CLAUDE_STREAM,
+        ) {
+            GraderOutcome::Passed { evidence } => assert!(evidence.contains("3 real tool call(s)"), "{evidence}"),
+            other => panic!("expected a pass, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_without_tool_call_markup_passes_even_without_a_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = GradeInput {
+            final_text: "A <tooltip> is not a tool call.",
+            run_dir: dir.path(),
+            workspace_dir: dir.path(),
+            outputs_dir: dir.path(),
+            raw_transcript: "",
+            transcript: None,
+            skill_dir: dir.path(),
+            created_files: &[],
+        };
+        assert!(matches!(
+            evaluate(&Grader::NoFakeToolCalls, &input),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn tool_call_markup_is_unsupported_where_real_calls_cannot_be_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = NormalizedTranscript::unavailable("mystery-runner");
+        let input = GradeInput {
+            final_text: "<tool>web_search</tool>",
+            run_dir: dir.path(),
+            workspace_dir: dir.path(),
+            outputs_dir: dir.path(),
+            raw_transcript: "",
+            transcript: Some(&transcript),
+            skill_dir: dir.path(),
+            created_files: &[],
+        };
+        assert!(matches!(
+            evaluate(&Grader::NoFakeToolCalls, &input),
+            GraderOutcome::Unsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn regex_folds_its_pattern_so_an_em_dash_pattern_matches_em_dash_text() {
+        let grader = serde_json::json!({"type": "regex", "pattern": "a\u{2014}b"});
+        assert!(matches!(
+            graded_text(grader, "a\u{2014}b", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_negated_contains_for_an_em_dash_passes_on_ascii_hyphens() {
+        let grader = serde_json::json!({"type": "contains", "text": "\u{2014}", "negate": true});
+        assert!(matches!(
+            graded_text(grader, "well-known, low-key", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_contains_with_a_smart_quote_matches_smart_quote_text_exactly() {
+        let grader = || serde_json::json!({"type": "contains", "text": "it\u{2019}s"});
+        assert!(matches!(
+            graded_text(grader(), "Yes, it\u{2019}s done.", CLAUDE_STREAM),
+            GraderOutcome::Passed { .. }
+        ));
+        assert!(matches!(
+            graded_text(grader(), "Yes, it's done.", CLAUDE_STREAM),
+            GraderOutcome::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn contains_evidence_names_the_text_its_offset_counts_into() {
+        let grader = serde_json::json!({"type": "contains", "text": "done"});
+        match graded_text(grader, "DONE", CLAUDE_STREAM) {
+            GraderOutcome::Passed { evidence } => {
+                assert!(evidence.contains("byte 0 of the lowercased text"), "{evidence}")
+            }
+            other => panic!("expected a pass, got {other:?}"),
         }
     }
 }

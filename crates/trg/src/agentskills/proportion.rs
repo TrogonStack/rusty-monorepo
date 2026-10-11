@@ -7,6 +7,7 @@
 //! not separated the arms looks like one.
 
 use schemars::JsonSchema;
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 /// The two-sided normal deviate for 95% coverage.
@@ -121,6 +122,92 @@ pub fn difference(left: Proportion, right: Proportion) -> Interval {
         .expect("a difference interval built from two finite intervals is finite and ordered")
 }
 
+/// Whether at least one attempt passed, and whether every attempt passed, among one
+/// case's own attempts. `None` when the case drew no graded attempt at all, so an
+/// ungraded case does not silently count as a loss under either reading.
+pub fn case_k_outcome(attempts_passed: impl IntoIterator<Item = bool>) -> Option<(bool, bool)> {
+    let mut any = false;
+    let mut all = true;
+    let mut drew_one = false;
+    for passed in attempts_passed {
+        drew_one = true;
+        any = any || passed;
+        all = all && passed;
+    }
+    drew_one.then_some((any, all))
+}
+
+/// How many cases, out of how many drew a graded attempt, had at least one attempt pass
+/// and how many had every attempt pass: the two counts [`case_k_outcome`] rolls up across
+/// a scenario's cases.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KCaseCounts {
+    pub any_pass: usize,
+    pub all_pass: usize,
+    pub trials: usize,
+}
+
+pub fn k_case_counts(outcomes: impl IntoIterator<Item = (bool, bool)>) -> KCaseCounts {
+    let mut counts = KCaseCounts::default();
+    for (any, all) in outcomes {
+        counts.trials += 1;
+        counts.any_pass += any as usize;
+        counts.all_pass += all as usize;
+    }
+    counts
+}
+
+/// A rate over cases together with the Wilson interval around it, serializable for a
+/// report rather than kept as a [`Proportion`]: a reader of the report has no way to
+/// recompute the interval from `rate` alone, so it rides alongside rather than being
+/// dropped at the serialization boundary.
+///
+/// `rate` and `interval` are derived from `successes`/`trials` rather than independent
+/// fields, so deserializing goes through [`Proportion::parse`] to keep a decoded value
+/// as internally consistent as one built by [`ScoredRate::from_counts`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, JsonSchema)]
+pub struct ScoredRate {
+    pub successes: usize,
+    pub trials: usize,
+    /// Absent when `trials` is zero: nothing was measured.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub rate: Option<f64>,
+    pub interval: Option<Interval>,
+}
+
+impl ScoredRate {
+    pub fn from_counts(successes: usize, trials: usize) -> Self {
+        let proportion = Proportion::parse(successes, trials).ok();
+        Self {
+            successes,
+            trials,
+            rate: proportion.map(Proportion::rate),
+            interval: proportion.map(Proportion::interval),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ScoredRate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            successes: usize,
+            trials: usize,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.successes == 0 && raw.trials == 0 {
+            return Ok(Self::default());
+        }
+        Proportion::parse(raw.successes, raw.trials)
+            .map(|_| Self::from_counts(raw.successes, raw.trials))
+            .map_err(de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +301,81 @@ mod tests {
     fn an_interval_that_runs_backwards_is_refused() {
         assert!(Interval::parse(0.4, 0.1).is_err());
         assert!(Interval::parse(f64::NAN, 0.1).is_err());
+    }
+
+    #[test]
+    fn a_case_with_no_graded_attempt_has_no_k_outcome() {
+        assert_eq!(case_k_outcome(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn one_pass_among_several_attempts_is_a_pass_at_k_but_not_a_pass_pow_k() {
+        assert_eq!(case_k_outcome([false, true, false]), Some((true, false)));
+    }
+
+    #[test]
+    fn every_attempt_passing_is_both_a_pass_at_k_and_a_pass_pow_k() {
+        assert_eq!(case_k_outcome([true, true]), Some((true, true)));
+    }
+
+    #[test]
+    fn every_attempt_failing_is_neither() {
+        assert_eq!(case_k_outcome([false, false]), Some((false, false)));
+    }
+
+    #[test]
+    fn k_case_counts_pools_outcomes_across_cases() {
+        let counts = k_case_counts([(true, false), (true, true), (false, false)]);
+
+        assert_eq!(counts.trials, 3);
+        assert_eq!(counts.any_pass, 2);
+        assert_eq!(counts.all_pass, 1);
+    }
+
+    #[test]
+    fn best_of_n_reads_higher_than_the_matched_aggregate_over_the_same_cases() {
+        let cases = [(true, false), (true, false), (true, true)];
+        let counts = k_case_counts(cases);
+
+        let pass_at_k = ScoredRate::from_counts(counts.any_pass, counts.trials);
+        let pass_pow_k = ScoredRate::from_counts(counts.all_pass, counts.trials);
+
+        assert_eq!(pass_at_k.rate, Some(1.0));
+        assert_eq!(pass_pow_k.rate, Some(1.0 / 3.0));
+        assert!(pass_pow_k.rate.unwrap() < pass_at_k.rate.unwrap());
+    }
+
+    #[test]
+    fn a_scored_rate_over_nothing_reports_no_rate_rather_than_dividing_by_zero() {
+        let rate = ScoredRate::from_counts(0, 0);
+
+        assert_eq!(rate.rate, None);
+        assert_eq!(rate.interval, None);
+        assert_eq!(rate.trials, 0);
+    }
+
+    #[test]
+    fn a_scored_rate_deserializes_through_proportion_parse_rather_than_trusting_its_own_rate() {
+        let decoded: ScoredRate =
+            serde_json::from_str(r#"{"successes":2,"trials":4,"rate":0.9,"interval":null}"#).expect("valid counts");
+
+        assert_eq!(decoded, ScoredRate::from_counts(2, 4));
+        assert_eq!(decoded.rate, Some(0.5));
+    }
+
+    #[test]
+    fn a_scored_rate_with_more_successes_than_trials_is_refused_on_decode() {
+        let result: Result<ScoredRate, _> =
+            serde_json::from_str(r#"{"successes":5,"trials":3,"rate":null,"interval":null}"#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_scored_rate_over_nothing_decodes_back_to_the_same_default() {
+        let decoded: ScoredRate =
+            serde_json::from_str(r#"{"successes":0,"trials":0,"rate":null,"interval":null}"#).expect("empty counts");
+
+        assert_eq!(decoded, ScoredRate::default());
     }
 }

@@ -27,7 +27,9 @@ use super::evals::Result;
 use super::grading::{AssertionGradeResult, GraderInfo, GraderKind, GradingFile, GradingSummary};
 use super::outputs::{FINAL_MD, OUTPUTS_DIR};
 use super::permission_outcome::PermissionOutcome;
+use super::proportion::{self, ScoredRate};
 use super::report::{EvalCaseDimension, ReportDocument, RunRecord, ScenarioKind, ScenarioSummary};
+use super::transcript_metrics::{tally_tools, ResultBytes, TranscriptMetrics};
 
 pub const HTML_REPORT_FILENAME: &str = "report.html";
 
@@ -141,6 +143,7 @@ pub fn render_report_html(document: &ReportDocument, report_dir: &Path) -> Strin
     out.push_str(&render_header(document));
     out.push_str(&render_provenance(document));
     out.push_str(&render_summary(document, totals));
+    out.push_str(&render_tool_usage(document));
     out.push_str(&render_cases(document, report_dir, &gradings));
     out.push_str("</body>\n</html>\n");
     out
@@ -278,11 +281,15 @@ fn render_summary(document: &ReportDocument, totals: ReportTotals) -> String {
 
     out.push_str(&render_totals_bar(totals));
 
-    out.push_str("<table>\n<thead><tr><th>scenario</th><th>runs</th><th>passed</th><th>skipped</th><th>failed</th></tr></thead>\n<tbody>\n");
+    out.push_str("<table>\n<thead><tr><th>scenario</th><th>runs</th><th>passed</th><th>skipped</th><th>failed</th><th>pass@k</th><th>pass^k</th></tr></thead>\n<tbody>\n");
     for scenario in &document.summaries.by_scenario {
         out.push_str(&render_scenario_summary_row(scenario));
     }
     out.push_str("</tbody>\n</table>\n");
+    out.push_str(
+        "<p class=\"muted\">pass@k: fraction of cases where at least one attempt passed (best-of-N). \
+         pass^k: fraction where every attempt passed, the matched aggregate pass@k is often mistaken for.</p>\n",
+    );
 
     if let Some(budget) = &document.budget {
         let spent = budget
@@ -307,13 +314,22 @@ fn render_summary(document: &ReportDocument, totals: ReportTotals) -> String {
 
 fn render_scenario_summary_row(scenario: &ScenarioSummary) -> String {
     format!(
-        "<tr><td>{scenario}</td><td>{total}</td><td>{passed}</td><td>{skipped}</td><td>{failed}</td></tr>\n",
+        "<tr><td>{scenario}</td><td>{total}</td><td>{passed}</td><td>{skipped}</td><td>{failed}</td><td>{pass_at_k}</td><td>{pass_pow_k}</td></tr>\n",
         scenario = esc(scenario.scenario_id.as_str()),
         total = scenario.total_runs,
         passed = scenario.passed_runs,
         skipped = scenario.skipped_runs,
         failed = scenario.failed_runs,
+        pass_at_k = render_scored_rate(&scenario.pass_at_k),
+        pass_pow_k = render_scored_rate(&scenario.pass_pow_k),
     )
+}
+
+fn render_scored_rate(rate: &ScoredRate) -> String {
+    match rate.rate {
+        Some(rate_value) => format!("{:.0}% ({}/{})", rate_value * 100.0, rate.successes, rate.trials),
+        None => "not scored".to_string(),
+    }
 }
 
 /// A small inline SVG bar splitting every scored and non-scoring assertion in the bundle.
@@ -474,6 +490,9 @@ fn render_case_group(
 
 fn render_arm_group(arm: &ArmGroup<'_>, report_dir: &Path, gradings: &HashMap<&str, Option<GradingFile>>) -> String {
     let mut out = format!("<div class=\"arm\">\n<h4>{}</h4>\n", esc(arm.scenario.as_str()));
+    if let Some(k_outcome_line) = render_case_k_outcome(arm) {
+        out.push_str(&k_outcome_line);
+    }
     for run in &arm.runs {
         let grading = gradings.get(run.id.as_str()).and_then(|found| found.as_ref());
         out.push_str(&render_run(run, report_dir, grading));
@@ -482,10 +501,90 @@ fn render_arm_group(arm: &ArmGroup<'_>, report_dir: &Path, gradings: &HashMap<&s
     out
 }
 
+/// Whether this case's own attempts in this arm had at least one pass and whether they
+/// all passed, drawn from each attempt's own `case_score` rather than any new scoring
+/// decision. `None` when no attempt in this arm was graded yet.
+fn render_case_k_outcome(arm: &ArmGroup<'_>) -> Option<String> {
+    let outcome = proportion::case_k_outcome(
+        arm.runs
+            .iter()
+            .filter_map(|run| run.case_score)
+            .map(|score| score >= 1.0),
+    )?;
+    let (any_pass, all_pass) = outcome;
+    Some(format!(
+        "<p class=\"muted\">pass@k: {} &middot; pass^k: {}</p>\n",
+        if any_pass { "yes" } else { "no" },
+        if all_pass { "yes" } else { "no" },
+    ))
+}
+
+fn render_tool_usage(document: &ReportDocument) -> String {
+    let mut by_scenario: Vec<(ScenarioKind, Vec<&TranscriptMetrics>)> = Vec::new();
+    for run in &document.runs {
+        let Some(transcript) = &run.metrics.transcript else {
+            continue;
+        };
+        match by_scenario
+            .iter_mut()
+            .find(|(scenario, _)| *scenario == run.scenario_id)
+        {
+            Some((_, runs)) => runs.push(transcript),
+            None => by_scenario.push((run.scenario_id, vec![transcript])),
+        }
+    }
+    if by_scenario.is_empty() {
+        return String::new();
+    }
+    by_scenario.sort_by_key(|(scenario, _)| *scenario);
+
+    let mut out = String::from("<section>\n<h2>Tool usage</h2>\n");
+    out.push_str("<table>\n<thead><tr><th>scenario</th><th>tool</th><th>runs</th><th>calls</th><th>repeated</th><th>largest result (bytes)</th></tr></thead>\n<tbody>\n");
+    for (scenario, runs) in by_scenario {
+        for tally in tally_tools(runs) {
+            out.push_str(&format!(
+                "<tr><td>{scenario}</td><td>{tool}</td><td>{runs}</td><td>{calls}</td><td>{repeated}</td><td>{largest}</td></tr>\n",
+                scenario = scenario.as_str(),
+                tool = esc(&tally.tool),
+                runs = tally.runs,
+                calls = tally.calls,
+                repeated = tally.repeated_calls,
+                largest = largest_result(tally.largest_result_bytes),
+            ));
+        }
+    }
+    out.push_str("</tbody>\n</table>\n</section>\n");
+    out
+}
+
+fn largest_result(bytes: Option<ResultBytes>) -> String {
+    bytes.map_or_else(|| "&ndash;".to_string(), |bytes| bytes.to_string())
+}
+
+fn render_run_tools(transcript: &TranscriptMetrics) -> String {
+    if transcript.tools.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "<table>\n<thead><tr><th>tool</th><th>calls</th><th>repeated</th><th>largest result (bytes)</th></tr></thead>\n<tbody>\n",
+    );
+    for usage in &transcript.tools {
+        out.push_str(&format!(
+            "<tr><td>{tool}</td><td>{calls}</td><td>{repeated}</td><td>{largest}</td></tr>\n",
+            tool = esc(&usage.tool),
+            calls = usage.calls,
+            repeated = usage.repeated_calls,
+            largest = largest_result(usage.largest_result_bytes),
+        ));
+    }
+    out.push_str("</tbody>\n</table>\n");
+    out
+}
+
 fn run_status_class(status: &str) -> &'static str {
     match status {
         "completed" => "status-ok",
-        "failed" | "timeout" => "status-bad",
+        "failed" | "timeout" | "budget_exhausted" => "status-bad",
         "skipped" => "status-skip",
         _ => "status-unknown",
     }
@@ -505,6 +604,9 @@ fn render_run(run: &RunRecord, report_dir: &Path, grading: Option<&GradingFile>)
     }
 
     out.push_str(&render_run_metrics(run));
+    if let Some(transcript) = &run.metrics.transcript {
+        out.push_str(&render_run_tools(transcript));
+    }
 
     if let Some(cache) = &run.cache {
         out.push_str(&format!(
@@ -572,6 +674,16 @@ fn render_run_metrics(run: &RunRecord) -> String {
     }
     if let Some(exit_code) = run.metrics.exit_code {
         parts.push(format!("exit {exit_code}"));
+    }
+    if let Some(transcript) = &run.metrics.transcript {
+        parts.push(format!("{} turns", transcript.turns));
+        parts.push(format!(
+            "{} tool calls ({} repeated)",
+            transcript.tool_calls, transcript.repeated_tool_calls
+        ));
+        if let Some(peak) = transcript.peak_turn_input_tokens {
+            parts.push(format!("peak turn input {peak} tokens"));
+        }
     }
     if parts.is_empty() {
         return String::new();
@@ -790,6 +902,7 @@ mod tests {
         CiSection, DimensionsSection, ProducerSection, ReportSection, RunMetrics, RunPaths, SuiteSection,
         SummariesSection,
     };
+    use crate::agentskills::transcript_metrics::{ObservedToolCall, TurnCount};
 
     const SCRIPT_PAYLOAD: &str = "<script>alert(1)</script>";
     const IMG_PAYLOAD: &str = "\"><img src=x onerror=alert(1)>";
@@ -974,6 +1087,102 @@ mod tests {
 
         assert!(!html.contains(SCRIPT_PAYLOAD));
         assert!(!html.contains(IMG_PAYLOAD));
+    }
+
+    #[test]
+    fn the_summary_table_shows_pass_at_k_separately_from_pass_pow_k() {
+        let mut document = minimal_document();
+        document.summaries.by_scenario = vec![ScenarioSummary {
+            scenario_id: ScenarioKind::WithSkill,
+            total_runs: 4,
+            passed_runs: 3,
+            skipped_runs: 0,
+            failed_runs: 1,
+            pass_at_k: ScoredRate::from_counts(2, 2),
+            pass_pow_k: ScoredRate::from_counts(1, 2),
+        }];
+
+        let html = render_summary(&document, ReportTotals::default());
+
+        assert!(html.contains("<th>pass@k</th><th>pass^k</th>"));
+        assert!(html.contains("<td>100% (2/2)</td><td>50% (1/2)</td></tr>"));
+    }
+
+    #[test]
+    fn a_scenario_with_no_graded_attempts_shows_not_scored_rather_than_a_rate() {
+        let row = render_scenario_summary_row(&ScenarioSummary {
+            scenario_id: ScenarioKind::WithSkill,
+            total_runs: 0,
+            passed_runs: 0,
+            skipped_runs: 0,
+            failed_runs: 0,
+            pass_at_k: ScoredRate::default(),
+            pass_pow_k: ScoredRate::default(),
+        });
+
+        assert!(row.contains("<td>not scored</td><td>not scored</td></tr>"));
+    }
+
+    #[test]
+    fn an_arm_where_every_attempt_passed_reports_yes_for_both_k_readings() {
+        let mut document = minimal_document();
+        document.runs[0].case_score = Some(1.0);
+
+        let html = render_report_html(&document, tempfile::tempdir().unwrap().path());
+
+        assert!(html.contains("pass@k: yes"));
+        assert!(html.contains("pass^k: yes"));
+    }
+
+    #[test]
+    fn an_arm_with_no_graded_attempt_renders_no_k_outcome_line() {
+        let mut run = minimal_run();
+        run.case_score = None;
+        let arm = ArmGroup {
+            scenario: ScenarioKind::WithSkill,
+            runs: vec![&run],
+        };
+
+        assert_eq!(render_case_k_outcome(&arm), None);
+    }
+
+    #[test]
+    fn tool_usage_is_tabled_per_scenario_and_per_run_with_tool_names_escaped() {
+        let mut document = minimal_document();
+        let mut run = minimal_run();
+        run.metrics.transcript = Some(TranscriptMetrics::measure(
+            TurnCount::new(2),
+            Some(76_000),
+            [
+                ObservedToolCall {
+                    tool: SCRIPT_PAYLOAD,
+                    arguments: Some("{}"),
+                    result: Some("12345"),
+                },
+                ObservedToolCall {
+                    tool: SCRIPT_PAYLOAD,
+                    arguments: Some("{}"),
+                    result: None,
+                },
+            ],
+        ));
+        document.runs = vec![run.clone()];
+
+        let section = render_tool_usage(&document);
+        let metrics = render_run_metrics(&run);
+
+        assert!(section.contains("<h2>Tool usage</h2>"));
+        assert!(section.contains(
+            "<td>with_skill</td><td>&lt;script&gt;alert(1)&lt;/script&gt;</td><td>1</td><td>2</td><td>1</td><td>5</td>"
+        ));
+        assert!(!section.contains(SCRIPT_PAYLOAD));
+        assert!(metrics.contains("2 tool calls (1 repeated)"));
+        assert!(metrics.contains("peak turn input 76000 tokens"));
+    }
+
+    #[test]
+    fn a_report_with_no_measured_runs_has_no_tool_usage_section() {
+        assert_eq!(render_tool_usage(&minimal_document()), "");
     }
 
     fn minimal_run() -> RunRecord {

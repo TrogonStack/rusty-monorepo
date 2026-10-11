@@ -6,10 +6,11 @@ use super::capabilities::HarnessControl;
 use super::telemetry::{in_step, AgentInvocation, HarnessTraces};
 use super::usage::{HarnessTokenUsage, UsageFieldNames};
 use super::{
-    check_runner_version, completed_outcome, persist_runner_io, prepare_workspace, runner_failure_outcome,
-    timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file, EvalRunOutcome,
-    EvalRunRequest, RunStatus, Runner, RunnerError,
+    budget_exhausted_outcome, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
+    runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
+    EvalRunOutcome, EvalRunRequest, RunStatus, Runner, RunnerError,
 };
+use crate::agentskills::budget::{MaxTurns, RunCap};
 use crate::agentskills::evals::EvalError;
 use crate::agentskills::mocks::MaterializedMcpConfig;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
@@ -57,6 +58,7 @@ pub(crate) fn build_args(
     tool_grant: Option<&ToolGrant>,
     mcp_config: Option<&Path>,
     append_system_prompt: Option<&SystemPromptAppendix>,
+    max_turns: Option<MaxTurns>,
 ) -> Vec<OsString> {
     let sandbox_flag = Runner::ClaudeCode
         .support(HarnessControl::SandboxLevels)
@@ -104,6 +106,14 @@ pub(crate) fn build_args(
         args.push(mcp_config.as_os_str().to_os_string());
         args.push(OsString::from(guard_flag));
     }
+    if let Some(max_turns) = max_turns {
+        let turn_cap_flag = Runner::ClaudeCode
+            .support(HarnessControl::TurnCap)
+            .flag()
+            .expect("the capability matrix declares claude-code takes its turn cap as a flag");
+        args.push(OsString::from(turn_cap_flag));
+        args.push(OsString::from(max_turns.to_string()));
+    }
     args
 }
 
@@ -117,6 +127,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         request.tool_grant.as_ref(),
         request.mcp_config.as_ref().map(MaterializedMcpConfig::json),
         request.eval.append_system_prompt.as_ref(),
+        request.caps.turns,
     );
 
     let mut command = Command::new(PROGRAM);
@@ -138,8 +149,16 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
     prepared.environment.apply(&mut command);
 
     let invocation = AgentInvocation::begin(Runner::ClaudeCode, request.runner_model);
-    let captured = invocation.capture(&mut command, timeout_duration(request.timeout_secs))?;
+    let captured = invocation.capture(&mut command, timeout_duration(request.timeout_secs), request.caps)?;
     let outcome = in_step("parse outcome", || {
+        if let Some(cap) = captured.cap_reached {
+            return Ok(budget_exhausted_outcome(
+                Runner::ClaudeCode,
+                cap,
+                captured.duration_ms,
+                captured.exit_code,
+            ));
+        }
         if captured.timed_out {
             let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
             return Ok(timeout_outcome(Runner::ClaudeCode, timeout_ms, captured.exit_code));
@@ -150,6 +169,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
             captured.duration_ms,
             exit_ok,
             captured.exit_code,
+            request.caps.turns,
         ))
     })?;
     invocation.finish(
@@ -187,7 +207,16 @@ fn write_timing(request: &EvalRunRequest, outcome: &EvalRunOutcome) -> Result<()
     .map_err(RunnerError::from)
 }
 
-fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i32>) -> EvalRunOutcome {
+/// The `result` subtype claude-code ends a run with when `--max-turns` stopped it.
+const MAX_TURNS_SUBTYPE: &str = "error_max_turns";
+
+fn parse_outcome(
+    stdout: &[u8],
+    wall_ms: u64,
+    exit_ok: bool,
+    exit_code: Option<i32>,
+    max_turns: Option<MaxTurns>,
+) -> EvalRunOutcome {
     let text = match std::str::from_utf8(stdout) {
         Ok(text) => text,
         Err(_) => {
@@ -221,15 +250,25 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_ok: bool, exit_code: Option<i
         .unwrap_or_default()
         .to_string();
     let duration_ms = result.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(wall_ms);
-
-    if is_error {
-        return runner_failure_outcome(Runner::ClaudeCode, duration_ms, exit_code, final_text);
-    }
-
     let tokens = HarnessTokenUsage::read(result.get("usage"), Runner::ClaudeCode, USAGE_FIELDS);
     let cost = Runner::ClaudeCode
         .pricing()
         .price(result.get("total_cost_usd").and_then(|v| v.as_f64()));
+
+    if let Some(max_turns) = max_turns {
+        if result.get("subtype").and_then(|v| v.as_str()) == Some(MAX_TURNS_SUBTYPE) {
+            return EvalRunOutcome {
+                tokens,
+                cost,
+                final_text,
+                ..budget_exhausted_outcome(Runner::ClaudeCode, RunCap::Turns(max_turns), duration_ms, exit_code)
+            };
+        }
+    }
+
+    if is_error {
+        return runner_failure_outcome(Runner::ClaudeCode, duration_ms, exit_code, final_text);
+    }
 
     completed_outcome(duration_ms, exit_code, tokens, cost, final_text)
 }
@@ -245,7 +284,7 @@ mod tests {
         let stdout = br#"{"type":"system","subtype":"init"}
 {"type":"result","is_error":false,"duration_ms":2000,"result":"final text","total_cost_usd":0.0123,"usage":{"input_tokens":80,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":0}}
 "#;
-        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        let outcome = parse_outcome(stdout, 9999, true, Some(0), None);
         assert!(matches!(outcome.status, RunStatus::Completed));
         assert_eq!(outcome.duration_ms, 2000);
         assert_eq!(outcome.tokens.input_tokens(), Some(80));
@@ -265,7 +304,7 @@ mod tests {
     fn a_result_with_no_cache_fields_reports_no_cache_activity() {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":2000,"result":"final text","usage":{"input_tokens":80,"output_tokens":20}}
 "#;
-        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        let outcome = parse_outcome(stdout, 9999, true, Some(0), None);
         assert_eq!(
             outcome.tokens.cached_tokens(),
             None,
@@ -277,7 +316,7 @@ mod tests {
     fn non_zero_exit_is_runner_failure() {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":10,"result":"ok"}
 "#;
-        let outcome = parse_outcome(stdout, 0, false, Some(1));
+        let outcome = parse_outcome(stdout, 0, false, Some(1), None);
         assert!(matches!(outcome.status, RunStatus::Failed));
         assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
     }
@@ -286,7 +325,7 @@ mod tests {
     fn a_usage_block_the_harness_filled_in_leaves_nothing_unreadable() {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":2000,"result":"final text","usage":{"input_tokens":80,"output_tokens":20}}
 "#;
-        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        let outcome = parse_outcome(stdout, 9999, true, Some(0), None);
         assert_eq!(outcome.tokens.input_tokens(), Some(80));
         assert_eq!(outcome.tokens.output_tokens(), Some(20));
         assert!(outcome.tokens.unreadable().is_empty());
@@ -296,7 +335,7 @@ mod tests {
     fn a_result_carrying_no_usage_block_at_all_reports_no_tokens_and_nothing_to_warn_about() {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":2000,"result":"final text"}
 "#;
-        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        let outcome = parse_outcome(stdout, 9999, true, Some(0), None);
         assert_eq!(outcome.tokens.total_tokens(), None);
         assert!(
             outcome.tokens.unreadable().is_empty(),
@@ -309,7 +348,7 @@ mod tests {
         let stdout =
             br#"{"type":"result","is_error":false,"duration_ms":2000,"result":"final text","usage":{"input_tokens":80}}
 "#;
-        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        let outcome = parse_outcome(stdout, 9999, true, Some(0), None);
         assert_eq!(outcome.tokens.input_tokens(), Some(80));
         assert_eq!(outcome.tokens.output_tokens(), None);
         assert!(outcome.tokens.unreadable().is_empty());
@@ -319,7 +358,7 @@ mod tests {
     fn a_usage_field_the_harness_garbled_is_reported_as_unreadable_rather_than_as_a_count_nobody_sent() {
         let stdout = br#"{"type":"result","is_error":false,"duration_ms":2000,"result":"final text","usage":{"input_tokens":"80","output_tokens":20}}
 "#;
-        let outcome = parse_outcome(stdout, 9999, true, Some(0));
+        let outcome = parse_outcome(stdout, 9999, true, Some(0), None);
         assert_eq!(outcome.tokens.input_tokens(), None);
         assert_eq!(outcome.tokens.output_tokens(), Some(20));
         let warnings: Vec<String> = outcome
@@ -342,7 +381,7 @@ mod tests {
 {"type":"assistant","message":{"id":"msg_2","content":[],"usage":{"input_tokens":20,"output_tokens":4}}}
 {"type":"result","is_error":false,"duration_ms":10,"usage":{"input_tokens":500,"output_tokens":90}}
 "#;
-        let outcome = parse_outcome(stdout, 0, true, Some(0));
+        let outcome = parse_outcome(stdout, 0, true, Some(0), None);
         assert_eq!(outcome.tokens.input_tokens(), Some(500));
         assert_eq!(outcome.tokens.output_tokens(), Some(90));
     }
@@ -351,7 +390,40 @@ mod tests {
     fn missing_result_event_is_runner_failure() {
         let stdout = br#"{"type":"system"}
 "#;
-        let outcome = parse_outcome(stdout, 0, true, Some(0));
+        let outcome = parse_outcome(stdout, 0, true, Some(0), None);
+        assert!(matches!(outcome.status, RunStatus::Failed));
+        assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
+    }
+
+    /// A tool name carrying a leaked model-internal channel marker is just a string to
+    /// this parser: it never inspects a tool's name, so nothing here needs to recognize
+    /// the marker. The run still fails on its own `is_error`, with the harness's own
+    /// explanation of why carried through as `final_text` rather than dropped.
+    #[test]
+    fn a_tool_name_carrying_a_leaked_channel_marker_still_fails_with_a_useful_reason() {
+        let stdout = br#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"<|channel|>commentary<|message|>Bash","input":{"command":"false"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"exit 1","is_error":true}]}}
+{"type":"result","is_error":true,"duration_ms":500,"result":"the model leaked an internal channel marker into a tool call"}
+"#;
+        let outcome = parse_outcome(stdout, 0, true, Some(0), None);
+        assert!(matches!(outcome.status, RunStatus::Failed));
+        assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
+        assert_eq!(
+            outcome.final_text,
+            "the model leaked an internal channel marker into a tool call"
+        );
+    }
+
+    /// A tool call's JSON arguments cut off mid-object, the way a harness that died
+    /// mid-write would leave them, parse as nothing: the line fails
+    /// `serde_json::from_str` and is skipped like any other unparseable line, rather than
+    /// panicking or being read as a tool call with no arguments. With no terminal
+    /// `result` event following it either, since the harness that cut this line off
+    /// never got to write one, the run still falls back to a runner failure.
+    #[test]
+    fn a_tool_call_truncated_mid_object_is_skipped_rather_than_panicking() {
+        let stdout = br#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la /very/long/path/that/got/cut/of"#;
+        let outcome = parse_outcome(stdout, 0, false, None, None);
         assert!(matches!(outcome.status, RunStatus::Failed));
         assert_eq!(outcome.failure_kind, Some(super::super::FAILURE_KIND_RUNNER));
     }
@@ -375,7 +447,7 @@ mod tests {
     #[test]
     fn the_permission_mode_flag_actually_follows_the_requested_grant() {
         let mode_value_for = |grant: PermissionGrant| {
-            let args = build_args("do the thing", None, grant, None, None, None);
+            let args = build_args("do the thing", None, grant, None, None, None, None);
             let position = args
                 .windows(2)
                 .position(|pair| pair[0] == "--permission-mode")
@@ -393,7 +465,15 @@ mod tests {
             .support(HarnessControl::SandboxLevels)
             .flag()
             .expect("claude-code declares a sandbox flag in the capability matrix");
-        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None, None, None);
+        let args = build_args(
+            "do the thing",
+            None,
+            PermissionGrant::Unrestricted,
+            None,
+            None,
+            None,
+            None,
+        );
         let position = args
             .windows(2)
             .position(|pair| pair[0] == expected_flag)
@@ -414,6 +494,7 @@ mod tests {
             None,
             None,
             Some(&appendix),
+            None,
         );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
 
@@ -429,7 +510,15 @@ mod tests {
     /// added nothing.
     #[test]
     fn a_case_that_declares_no_appendix_leaves_the_flag_off_entirely() {
-        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None, None, None);
+        let args = build_args(
+            "do the thing",
+            None,
+            PermissionGrant::Unrestricted,
+            None,
+            None,
+            None,
+            None,
+        );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
 
         assert!(!borrowed.contains(&"--append-system-prompt"), "{borrowed:?}");
@@ -443,6 +532,7 @@ mod tests {
             PermissionGrant::Unrestricted,
             None,
             Some(Path::new("/workspace/mcp-config.json")),
+            None,
             None,
         );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
@@ -459,7 +549,15 @@ mod tests {
 
     #[test]
     fn no_declared_mcp_config_carries_neither_flag() {
-        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None, None, None);
+        let args = build_args(
+            "do the thing",
+            None,
+            PermissionGrant::Unrestricted,
+            None,
+            None,
+            None,
+            None,
+        );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
         assert!(!borrowed.contains(&"--mcp-config"));
         assert!(!borrowed.contains(&"--strict-mcp-config"));
@@ -475,6 +573,7 @@ mod tests {
             Some(&grant),
             None,
             None,
+            None,
         );
         let position = args
             .windows(2)
@@ -485,7 +584,15 @@ mod tests {
 
     #[test]
     fn no_declared_tool_grant_carries_no_allowed_tools_flag() {
-        let args = build_args("do the thing", None, PermissionGrant::Unrestricted, None, None, None);
+        let args = build_args(
+            "do the thing",
+            None,
+            PermissionGrant::Unrestricted,
+            None,
+            None,
+            None,
+            None,
+        );
         let borrowed: Vec<&str> = args.iter().map(|a| a.to_str().expect("test args are utf8")).collect();
         assert!(!borrowed.contains(&"--allowedTools"));
     }
@@ -496,6 +603,7 @@ mod tests {
             "do the thing",
             Some("claude-opus-5"),
             PermissionGrant::Unrestricted,
+            None,
             None,
             None,
             None,
@@ -515,5 +623,49 @@ mod tests {
                 "claude-opus-5",
             ]
         );
+    }
+
+    #[test]
+    fn a_turn_cap_reaches_claude_as_max_turns() {
+        let args = build_args(
+            "do the thing",
+            None,
+            PermissionGrant::Unrestricted,
+            None,
+            None,
+            None,
+            Some("7".parse().unwrap()),
+        );
+        let position = args
+            .windows(2)
+            .position(|pair| pair[0] == "--max-turns")
+            .expect("the invocation carries --max-turns");
+        assert_eq!(args[position + 1], OsString::from("7"));
+        let uncapped = build_args(
+            "do the thing",
+            None,
+            PermissionGrant::Unrestricted,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!uncapped.contains(&OsString::from("--max-turns")));
+    }
+
+    #[test]
+    fn a_run_claude_stopped_at_its_turn_cap_is_budget_exhausted_and_keeps_what_it_spent() {
+        let stdout = br#"{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":3,"duration_ms":1500,"total_cost_usd":0.02,"usage":{"input_tokens":50,"output_tokens":5}}
+"#;
+        let outcome = parse_outcome(stdout, 9999, false, Some(1), Some("2".parse().unwrap()));
+
+        assert_eq!(outcome.status, RunStatus::BudgetExhausted);
+        assert_eq!(
+            outcome.failure_kind,
+            Some(crate::agentskills::budget::FAILURE_KIND_TURN_CAP)
+        );
+        assert_eq!(outcome.tokens.input_tokens(), Some(50));
+        assert_eq!(outcome.cost, Some(RunCost::Priced { usd: 0.02 }));
+        assert!(!outcome.is_transient_failure());
     }
 }

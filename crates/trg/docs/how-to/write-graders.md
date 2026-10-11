@@ -150,11 +150,28 @@ trg ai skills eval verify ./runs/run-001/workspace --mode strict
   rarely the point. Add `"input_match"` to name the command, as in
   `{"type": "tool_used", "tool": "Bash", "input_match": "npm (run )?test"}`, so
   the case says which command it meant.
+- `contains` folds Unicode before comparing, so `2.1.0-M1` written with a
+  non-breaking hyphen, curly quotes, or a phrase wrapped across lines still
+  match. Add `"normalize": false` only when the exact code points are the point
+  of the check.
+- When the case asks whether a run named one symbol, use `identifier` rather
+  than `contains`: `{"type": "identifier", "identifier": "rubric"}` does not
+  pass on `rubrics` or `getRubric`.
+- When the model under test may lack tools, add
+  `{"type": "no_fake_tool_calls"}`. It fails a run whose reply writes a tool
+  call out as markup, such as `<tool>web_search</tool>`, without the run having
+  made one, which is the run that goes on to invent the results.
 - To ask whether the skill gets reached for at all, add
   `"skill_disclosure": "unannounced"` to the case. Announced prompts name the
   skill, so the routing decision is made for the run rather than by it.
 - Keep `expected_output` as a human-readable reference; graders are what
-  actually get checked, not exact string matching against it.
+  actually get checked, not exact string matching against it. Write it as an
+  answer you have verified, not a description of one: every `llm` grader
+  hands it to the judge, together with `prompt`, as the ground truth it grades
+  the run's answer against.
+- Grade with a judge from a different model family than the runner. A judge
+  tends to favour output from its own family, so `grade` warns when the two
+  match.
 
 ## Generated artifacts
 

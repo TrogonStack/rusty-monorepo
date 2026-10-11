@@ -15,8 +15,12 @@ use super::graders::{
 };
 use super::judge::{self, JudgeEndpoint, JudgeModel, JudgeProvider, JudgeRequest};
 use super::judge_votes::{tally_opinions, JudgeVoteTally, JudgeVotes};
+use super::model_family::ModelFamily;
 use super::outputs::FINAL_MD;
-use super::report::{GraderChoice, GradingStrategy, JudgeSettings, ReportDocument, RunRecord};
+use super::report::{
+    recompute_scenario_summaries, GraderChoice, GradingStrategy, JudgeSettings, ReportDocument, RunRecord,
+};
+use super::runner::Runner;
 use super::span_reference::SpanReference;
 use super::transcript::{read_normalized_transcript, NormalizedTranscript};
 use super::validation::{ValidationError, ValidationErrors};
@@ -339,6 +343,53 @@ pub struct GradeReport {
     pub ungraded_assertions: Vec<String>,
     #[serde(default)]
     pub run_statuses: GradedRunStatuses,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judge_independence: Option<JudgeIndependenceWarning>,
+}
+
+/// Set when the judge comes from the same model family as a model that produced the runs it
+/// grades.
+///
+/// A judge tends to rate output from its own family more kindly, so a pass recorded this way
+/// is weaker evidence than one from an unrelated judge. It is a warning rather than a
+/// refusal, since a same-family judge is sometimes the only one available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct JudgeIndependenceWarning {
+    pub family: ModelFamily,
+    pub judge_model: String,
+    /// Each graded run's model in that family, or `<runner> default` for a run that left the
+    /// choice to a harness that only defaults to that family.
+    pub runner_models: Vec<String>,
+}
+
+impl JudgeIndependenceWarning {
+    fn assess(judge: &JudgeModel, runner: Option<Runner>, runs: &[RunRecord]) -> Option<Self> {
+        let family = ModelFamily::of(judge.as_str())?;
+        let runner_models: std::collections::BTreeSet<String> = runs
+            .iter()
+            .filter(|run| run.started())
+            .filter_map(|run| match &run.runner_model {
+                Some(model) => (ModelFamily::of(model.as_str()) == Some(family)).then(|| model.to_string()),
+                None => runner
+                    .filter(|runner| ModelFamily::of_harness_default(*runner) == Some(family))
+                    .map(|runner| format!("{} default", runner.display_name())),
+            })
+            .collect();
+        (!runner_models.is_empty()).then(|| Self {
+            family,
+            judge_model: judge.as_str().to_string(),
+            runner_models: runner_models.into_iter().collect(),
+        })
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "WARN: judge model '{}' is from the same model family ({}) as the runs it graded ({}); a judge tends to favour its own family, so prefer a --grader-model from another family",
+            self.judge_model,
+            self.family,
+            self.runner_models.join(", ")
+        )
+    }
 }
 
 /// The run statuses behind an assertion tally.
@@ -351,6 +402,10 @@ pub struct GradedRunStatuses {
     pub completed: usize,
     pub failed: usize,
     pub timed_out: usize,
+    /// Runs stopped for going past a cap on their tool calls or turns. Absent from
+    /// grading files written before runs could be capped.
+    #[serde(default)]
+    pub budget_exhausted: usize,
     pub skipped: usize,
     pub unrecognized: usize,
 }
@@ -361,19 +416,21 @@ impl GradedRunStatuses {
             "completed" => self.completed += 1,
             "failed" => self.failed += 1,
             "timeout" => self.timed_out += 1,
+            "budget_exhausted" => self.budget_exhausted += 1,
             "skipped" => self.skipped += 1,
             _ => self.unrecognized += 1,
         }
     }
 
     pub fn not_completed(self) -> usize {
-        self.failed + self.timed_out + self.skipped + self.unrecognized
+        self.failed + self.timed_out + self.budget_exhausted + self.skipped + self.unrecognized
     }
 
     pub fn describe_not_completed(self) -> Option<String> {
         let parts: Vec<String> = [
             (self.failed, "failed"),
             (self.timed_out, "timed out"),
+            (self.budget_exhausted, "stopped at a run cap"),
             (self.skipped, "skipped"),
             (self.unrecognized, "of an unrecognized status"),
         ]
@@ -528,6 +585,14 @@ fn grade_bundle(report_dir: &Path, options: GradeOptions) -> Result<GradeReport>
         excluded: 0,
         ungraded_assertions: Vec::new(),
         run_statuses: GradedRunStatuses::default(),
+        judge_independence: session.judge.as_ref().and_then(|judge| {
+            let runner = document
+                .report
+                .runner
+                .as_deref()
+                .and_then(|name| <Runner as clap::ValueEnum>::from_str(name, false).ok());
+            JudgeIndependenceWarning::assess(&judge.model, runner, &document.runs)
+        }),
     };
 
     let runs = document.runs.clone();
@@ -906,7 +971,14 @@ fn grade_declaratively(
         },
         GraderOutcome::Deferred { criterion, target } => {
             let mut result = match options.grader {
-                GraderMode::Llm | GraderMode::Auto => grade_with_llm(&criterion, &target, declarative, ctx, session)?,
+                GraderMode::Llm | GraderMode::Auto => grade_with_llm(
+                    &criterion,
+                    &target,
+                    &CaseBrief::of(eval_case),
+                    declarative,
+                    ctx,
+                    session,
+                )?,
                 GraderMode::Script => grade_with_script(&criterion, None, eval_case, ctx, options)?,
                 GraderMode::None => needs_llm_result(&criterion, "grader mode is none, so no judge was consulted"),
             };
@@ -1219,12 +1291,18 @@ struct ScriptGraderResponse {
 fn grade_with_llm(
     assertion: &str,
     target: &TargetDeclaration,
+    brief: &CaseBrief,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
     session: &GradeSession,
 ) -> Result<AssertionGradeResult> {
+    let target = target.resolve();
+    if let Some(evidence) = blank_answer(&target, declarative, ctx) {
+        return Ok(settled_without_a_judge(assertion, evidence));
+    }
+
     let endpoint = session.endpoint()?;
-    let payload = llm_grader_payload(assertion, &target.resolve(), declarative, ctx)?;
+    let payload = llm_grader_payload(assertion, &target, brief, declarative, ctx)?;
     let mut request = JudgeRequest::new(LLM_GRADER_SYSTEM_PROMPT, payload.text);
     if let Some(image) = payload.image {
         request = request.with_image(image);
@@ -1261,6 +1339,25 @@ fn grade_with_llm(
         votes: (!votes.is_single()).then_some(verdict.tally),
         weight: None,
     })
+}
+
+/// Why the run left the judge nothing to grade, when it did.
+///
+/// A judge shown an empty answer still returns a verdict, and a lenient one passes
+/// assertions that read as satisfied by saying nothing, so a blank answer is failed here
+/// without billing a judge for it. `created_files` and `mock_calls` are listings rather
+/// than answers: an empty one is an observation an assertion may be about, so it is still
+/// put to the judge, as is a target that is missing, which already says why.
+fn blank_answer(target: &GradeTarget, declarative: &DeclarativeContext, ctx: &RunContext) -> Option<String> {
+    if matches!(target, GradeTarget::CreatedFiles | GradeTarget::MockCalls) {
+        return None;
+    }
+    match declarative.input(ctx).target_content(target) {
+        TargetContent::Text(text) if text.trim().is_empty() => Some(format!(
+            "{target} is empty, so the run gave no answer for the judge to grade"
+        )),
+        TargetContent::Text(_) | TargetContent::Image { .. } | TargetContent::Missing(_) => None,
+    }
 }
 
 /// Which blind label the run's own output was given for one baseline comparison.
@@ -1359,9 +1456,9 @@ fn grade_against_baseline(
 ) -> Result<AssertionGradeResult> {
     let run_output = match declarative.input(ctx).target_content(target) {
         TargetContent::Text(text) => text,
-        TargetContent::Missing(reason) => return Ok(baseline_shortfall(assertion, reason)),
+        TargetContent::Missing(reason) => return Ok(settled_without_a_judge(assertion, reason)),
         TargetContent::Image { .. } => {
-            return Ok(baseline_shortfall(
+            return Ok(settled_without_a_judge(
                 assertion,
                 format!("{target} is an image, and a baseline reference is compared as text"),
             ))
@@ -1373,7 +1470,7 @@ fn grade_against_baseline(
     // as a missing target, so without this a run that produced nothing reaches the judge
     // and passes on a tie against a reference it never answered.
     if run_output.trim().is_empty() {
-        return Ok(baseline_shortfall(
+        return Ok(settled_without_a_judge(
             assertion,
             format!("{target} is empty, and nothing is not at least as good as a baseline"),
         ));
@@ -1436,7 +1533,7 @@ fn grade_against_baseline(
     })
 }
 
-fn baseline_shortfall(assertion: &str, evidence: impl Into<String>) -> AssertionGradeResult {
+fn settled_without_a_judge(assertion: &str, evidence: impl Into<String>) -> AssertionGradeResult {
     AssertionGradeResult {
         name: None,
         assertion: assertion.to_string(),
@@ -1457,8 +1554,12 @@ fn baseline_shortfall(assertion: &str, evidence: impl Into<String>) -> Assertion
 }
 
 const LLM_GRADER_SYSTEM_PROMPT: &str = "You are grading one assertion about the output of a single agent run. \
-     Decide only whether the assertion holds for the material you are given. \
-     Quote the material in `evidence`; do not restate the assertion as its own evidence. \
+     You are given the `prompt` the agent was asked, an `expected_output` the case author verified as a correct \
+     answer to it, and the run's own material. Decide only whether the assertion holds for the run's material. \
+     Read the material as an answer to `prompt`, and treat `expected_output` as ground truth wherever the two \
+     disagree on a fact. Leaving out something `expected_output` covers is acceptable unless the assertion itself \
+     requires it. Quote the run's material in `evidence`, never `prompt` or `expected_output`; do not restate the \
+     assertion as its own evidence. \
      Respond with JSON: {\"passed\": true|false, \"evidence\": \"...\", \"rationale\": \"...\"}.";
 
 /// Total bytes of content one judge request may carry, across every artifact
@@ -1477,9 +1578,15 @@ struct PayloadBudget {
 impl PayloadBudget {
     const TOTAL_BYTES: usize = 8_000;
 
-    fn new(slots: usize) -> Self {
+    /// What is left of the request once `brief` has claimed the bytes it always keeps,
+    /// for the run's own artifacts to share.
+    fn after(brief: &CaseBrief, slots: usize) -> Self {
+        Self::with_bytes(Self::TOTAL_BYTES - brief.reserved_bytes(), slots)
+    }
+
+    fn with_bytes(bytes: usize, slots: usize) -> Self {
         Self {
-            remaining_bytes: Self::TOTAL_BYTES,
+            remaining_bytes: bytes,
             remaining_slots: slots.max(1),
         }
     }
@@ -1500,6 +1607,54 @@ impl PayloadBudget {
         }
         self.remaining_bytes -= share;
         Placement::Truncated(truncate(text, share, direction))
+    }
+}
+
+/// What the case asked and the answer its author verified, handed to the judge alongside
+/// the run's material.
+///
+/// A judge shown only the run's output grades whether the output sounds right, not whether
+/// it answers the question correctly, and passes a confident wrong answer for it.
+struct CaseBrief<'a> {
+    prompt: &'a str,
+    expected_output: &'a str,
+}
+
+impl<'a> CaseBrief<'a> {
+    /// What each part of the brief keeps however much of the request the run's own
+    /// artifacts want. The run's answer is what is being graded, so it has first claim on
+    /// the rest, and the brief is what gets truncated when the request runs out.
+    const FLOOR_BYTES: usize = 1_000;
+
+    fn of(case: &'a EvalCase) -> Self {
+        Self {
+            prompt: case.prompt.as_str(),
+            expected_output: case.expected_output.as_str(),
+        }
+    }
+
+    fn reserved_bytes(&self) -> usize {
+        self.prompt.len().min(Self::FLOOR_BYTES) + self.expected_output.len().min(Self::FLOOR_BYTES)
+    }
+
+    /// Writes the brief into `payload` out of whatever `artifacts` left unspent.
+    ///
+    /// `expected_output` is placed before `prompt`, since a reference is what a judge
+    /// cannot grade correctness without, and a question is usually short enough to fit.
+    fn place_into(&self, payload: &mut serde_json::Value, artifacts: PayloadBudget) {
+        let remaining = artifacts.remaining_bytes + self.reserved_bytes();
+        let reference_cap = remaining - self.prompt.len().min(Self::FLOOR_BYTES);
+        let reference_spent = self.expected_output.len().min(reference_cap);
+        payload["expected_output"] = serde_json::Value::String(Self::clip(self.expected_output, reference_cap));
+        payload["prompt"] = serde_json::Value::String(Self::clip(self.prompt, remaining - reference_spent));
+    }
+
+    fn clip(text: &str, cap: usize) -> String {
+        if text.len() <= cap {
+            text.to_string()
+        } else {
+            truncate(text, cap, TruncateDirection::Head)
+        }
     }
 }
 
@@ -1620,21 +1775,22 @@ impl JudgePayload {
 fn llm_grader_payload(
     assertion: &str,
     target: &GradeTarget,
+    brief: &CaseBrief,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
 ) -> Result<JudgePayload> {
     match target {
         GradeTarget::FinalText => {
-            legacy_structured_payload(assertion, declarative, ctx, OutputScope::TopLevel).map(JudgePayload::text_only)
+            structured_payload(assertion, brief, declarative, ctx, OutputScope::TopLevel).map(JudgePayload::text_only)
         }
         GradeTarget::AnyOutput => {
-            legacy_structured_payload(assertion, declarative, ctx, OutputScope::Nested).map(JudgePayload::text_only)
+            structured_payload(assertion, brief, declarative, ctx, OutputScope::Nested).map(JudgePayload::text_only)
         }
         GradeTarget::Transcript
         | GradeTarget::File(_)
         | GradeTarget::CreatedFiles
         | GradeTarget::Files(_)
-        | GradeTarget::MockCalls => single_target_payload(assertion, target, declarative, ctx),
+        | GradeTarget::MockCalls => single_target_payload(assertion, target, brief, declarative, ctx),
     }
 }
 
@@ -1711,11 +1867,11 @@ fn relative_slash_path(root: &Path, path: &Path) -> String {
         .join("/")
 }
 
-/// The payload shape used before the judge could be aimed at anything but the
-/// final text plus the run's output files. Kept byte-for-byte for a suite that
-/// does not declare a `target`.
-fn legacy_structured_payload(
+/// The payload shape for a judge looking at the run's final text plus its output
+/// files, the shape a suite that does not declare a `target` gets.
+fn structured_payload(
     assertion: &str,
+    brief: &CaseBrief,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
     scope: OutputScope,
@@ -1723,7 +1879,7 @@ fn legacy_structured_payload(
     let mut output_files = collect_output_files(&ctx.outputs_dir, scope);
     output_files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut budget = PayloadBudget::new(1 + output_files.len());
+    let mut budget = PayloadBudget::after(brief, 1 + output_files.len());
     let mut omitted = 0usize;
 
     let final_text = match budget.place(&declarative.final_text, TruncateDirection::Head) {
@@ -1753,6 +1909,7 @@ fn legacy_structured_payload(
         payload["artifacts_omitted"] =
             serde_json::Value::String(format!("{omitted} artifact(s) omitted: judge payload budget exhausted"));
     }
+    brief.place_into(&mut payload, budget);
 
     Ok(serde_json::to_string(&payload)?)
 }
@@ -1763,6 +1920,7 @@ fn legacy_structured_payload(
 fn single_target_payload(
     assertion: &str,
     target: &GradeTarget,
+    brief: &CaseBrief,
     declarative: &DeclarativeContext,
     ctx: &RunContext,
 ) -> Result<JudgePayload> {
@@ -1777,9 +1935,10 @@ fn single_target_payload(
         "target": target.to_string(),
     });
     let mut image = None;
+    let mut budget = PayloadBudget::after(brief, 1);
 
     match content {
-        TargetContent::Text(text) => match PayloadBudget::new(1).place(&text, direction) {
+        TargetContent::Text(text) => match budget.place(&text, direction) {
             Placement::Whole(text) | Placement::Truncated(text) => {
                 payload["content"] = serde_json::Value::String(text);
             }
@@ -1796,6 +1955,7 @@ fn single_target_payload(
             payload["missing_reason"] = serde_json::Value::String(reason);
         }
     }
+    brief.place_into(&mut payload, budget);
 
     Ok(JudgePayload {
         text: serde_json::to_string(&payload)?,
@@ -2034,6 +2194,8 @@ fn update_report_after_grading(
                 })?);
         }
     }
+
+    recompute_scenario_summaries(document);
 
     Ok(())
 }
@@ -2426,6 +2588,55 @@ mod tests {
             Some(0.0),
             "a case that scored and failed everything is a zero, not a missing score"
         );
+    }
+
+    #[test]
+    fn grading_recomputes_pass_at_k_and_pass_pow_k_rather_than_leaving_them_at_zero_trials() {
+        let temp = tempdir().unwrap();
+        let report_dir = both_arms_report_dir(&temp, TRIGGERING_ONLY_SUITE);
+
+        let before: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        for summary in &before.summaries.by_scenario {
+            assert_eq!(
+                summary.pass_at_k.trials, 0,
+                "a run report written before grading has no case_score to draw a k rate from yet"
+            );
+        }
+
+        grade_report_bundle(
+            &report_dir,
+            GradeOptions {
+                grader: GraderMode::None,
+                ..GradeOptions::default()
+            },
+        )
+        .unwrap();
+
+        let after: ReportDocument =
+            serde_json::from_str(&fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
+        let with_skill = after
+            .summaries
+            .by_scenario
+            .iter()
+            .find(|summary| summary.scenario_id == ScenarioKind::WithSkill)
+            .unwrap();
+        let without_skill = after
+            .summaries
+            .by_scenario
+            .iter()
+            .find(|summary| summary.scenario_id == ScenarioKind::WithoutSkill)
+            .unwrap();
+
+        assert_eq!(
+            with_skill.pass_at_k.trials, 1,
+            "grading must recompute the k rates, not leave the pre-grading placeholder in the written report"
+        );
+        assert_eq!(with_skill.pass_at_k.rate, Some(1.0));
+        assert_eq!(with_skill.pass_pow_k.rate, Some(1.0));
+        assert_eq!(without_skill.pass_at_k.trials, 1);
+        assert_eq!(without_skill.pass_at_k.rate, Some(0.0));
+        assert_eq!(without_skill.pass_pow_k.rate, Some(0.0));
     }
 
     #[test]
@@ -3096,6 +3307,7 @@ mod tests {
                 output_tokens: None,
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,
@@ -3106,6 +3318,40 @@ mod tests {
             mock_violations: Vec::new(),
             case_score: None,
         }
+    }
+
+    fn run_under(model: Option<&str>) -> RunRecord {
+        let mut run = run_record_with_artifacts(vec![]);
+        run.runner_model = model.map(|name| crate::agentskills::model_name::ModelName::parse(name).unwrap());
+        run
+    }
+
+    #[test]
+    fn a_judge_from_the_family_that_ran_the_runs_is_warned_about_but_not_refused() {
+        let judge = JudgeModel::new("claude-opus-4-1").unwrap();
+        let runs = [run_under(Some("sonnet")), run_under(Some("gpt-5")), run_under(None)];
+
+        let warning = JudgeIndependenceWarning::assess(&judge, Some(Runner::ClaudeCode), &runs).unwrap();
+
+        assert_eq!(warning.family, ModelFamily::Claude);
+        assert_eq!(
+            warning.runner_models,
+            vec!["claude-code default".to_string(), "sonnet".to_string()]
+        );
+        assert!(warning.describe().starts_with("WARN: "), "{}", warning.describe());
+    }
+
+    #[test]
+    fn a_judge_from_another_family_than_every_run_raises_no_warning() {
+        let judge = JudgeModel::new("gpt-5").unwrap();
+        let runs = [run_under(Some("claude-sonnet-4-5")), run_under(None)];
+
+        assert!(JudgeIndependenceWarning::assess(&judge, Some(Runner::ClaudeCode), &runs).is_none());
+        assert!(
+            JudgeIndependenceWarning::assess(&JudgeModel::new("my-finetune").unwrap(), Some(Runner::Codex), &runs)
+                .is_none(),
+            "a judge whose family is unknown cannot be said to share one"
+        );
     }
 
     #[test]
@@ -3153,6 +3399,18 @@ mod tests {
         assert_eq!(created, vec!["report.md".to_string(), "sub/data.json".to_string()]);
     }
 
+    const BRIEF: CaseBrief<'static> = CaseBrief {
+        prompt: "the question",
+        expected_output: "the reference",
+    };
+
+    /// A brief that claims none of the request, for the tests that pin down how the run's
+    /// own artifacts share the whole budget.
+    const NO_BRIEF: CaseBrief<'static> = CaseBrief {
+        prompt: "",
+        expected_output: "",
+    };
+
     fn declarative_context(final_text: &str, raw_transcript: &str) -> DeclarativeContext {
         DeclarativeContext {
             final_text: final_text.to_string(),
@@ -3168,7 +3426,7 @@ mod tests {
         fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
         let declarative = declarative_context("the final answer", "irrelevant to this target");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3177,6 +3435,8 @@ mod tests {
             value,
             serde_json::json!({
                 "assertion": "the assertion",
+                "prompt": "the question",
+                "expected_output": "the reference",
                 "final_text": "the final answer",
                 "outputs": {"out.txt": "an output file"},
             })
@@ -3190,7 +3450,7 @@ mod tests {
         fs::write(ctx.outputs_dir.join("out.txt"), "an output file").unwrap();
         let declarative = declarative_context("the final answer", "irrelevant to this target");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3199,6 +3459,8 @@ mod tests {
             value,
             serde_json::json!({
                 "assertion": "the assertion",
+                "prompt": "the question",
+                "expected_output": "the reference",
                 "final_text": "the final answer",
                 "outputs": {"out.txt": "an output file"},
             })
@@ -3214,7 +3476,7 @@ mod tests {
         fs::write(ctx.outputs_dir.join("sub").join("nested.txt"), "buried").unwrap();
         let declarative = declarative_context("the final answer", "irrelevant to this target");
 
-        let any_output = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &declarative, &ctx)
+        let any_output = llm_grader_payload("the assertion", &GradeTarget::AnyOutput, &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let any_output: serde_json::Value = serde_json::from_str(&any_output).unwrap();
@@ -3224,7 +3486,7 @@ mod tests {
             "any_output must see everything the mechanical grader's collect_text would see"
         );
 
-        let final_text = llm_grader_payload("the assertion", &GradeTarget::FinalText, &declarative, &ctx)
+        let final_text = llm_grader_payload("the assertion", &GradeTarget::FinalText, &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let final_text: serde_json::Value = serde_json::from_str(&final_text).unwrap();
@@ -3241,7 +3503,7 @@ mod tests {
         let ctx = ctx_with_outputs(tmp.path());
         let declarative = declarative_context("the final answer", "the agent read the config then wrote it back");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3250,6 +3512,8 @@ mod tests {
             value,
             serde_json::json!({
                 "assertion": "the assertion",
+                "prompt": "the question",
+                "expected_output": "the reference",
                 "target": "transcript",
                 "content": "the agent read the config then wrote it back",
             })
@@ -3264,7 +3528,7 @@ mod tests {
 
         let path: RelativeSkillPath = serde_json::from_value(serde_json::json!("missing.json")).unwrap();
         let target = GradeTarget::File(path);
-        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &target, &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3288,7 +3552,7 @@ mod tests {
 
         let path: RelativeSkillPath = serde_json::from_value(serde_json::json!("screenshot.png")).unwrap();
         let target = GradeTarget::File(path);
-        let payload = llm_grader_payload("the assertion", &target, &declarative, &ctx).unwrap();
+        let payload = llm_grader_payload("the assertion", &target, &BRIEF, &declarative, &ctx).unwrap();
 
         assert!(
             payload.image.is_some(),
@@ -3308,7 +3572,7 @@ mod tests {
         ctx.created_files = vec!["report.md".to_string(), "sub/data.json".to_string()];
         let declarative = declarative_context("the final answer", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::CreatedFiles, &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::CreatedFiles, &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3317,6 +3581,8 @@ mod tests {
             value,
             serde_json::json!({
                 "assertion": "the assertion",
+                "prompt": "the question",
+                "expected_output": "the reference",
                 "target": "created files",
                 "content": "report.md\nsub/data.json",
             })
@@ -3334,7 +3600,7 @@ mod tests {
         fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
         let declarative = declarative_context("c", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3368,7 +3634,7 @@ mod tests {
         fs::write(ctx.outputs_dir.join("b.txt"), "b").unwrap();
         let declarative = declarative_context("c", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3384,7 +3650,7 @@ mod tests {
 
     #[test]
     fn payload_budget_answers_a_placement_it_was_never_told_to_expect() {
-        let mut budget = PayloadBudget::new(1);
+        let mut budget = PayloadBudget::after(&NO_BRIEF, 1);
 
         assert!(matches!(
             budget.place("first", TruncateDirection::Head),
@@ -3405,7 +3671,7 @@ mod tests {
         }
         let declarative = declarative_context("final", "");
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::default(), &NO_BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3537,7 +3803,7 @@ mod tests {
         let tail = "B".repeat(PayloadBudget::TOTAL_BYTES + 100);
         let declarative = declarative_context("final", &format!("{head}{tail}"));
 
-        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &declarative, &ctx)
+        let payload = llm_grader_payload("the assertion", &GradeTarget::Transcript, &BRIEF, &declarative, &ctx)
             .unwrap()
             .text;
         let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -3606,7 +3872,7 @@ mod tests {
             TargetDeclaration::Default,
             TargetDeclaration::Named(GradeTarget::Transcript),
         ] {
-            let result = grade_with_llm(mechanical_sounding, &target, &declarative, &ctx, &session);
+            let result = grade_with_llm(mechanical_sounding, &target, &BRIEF, &declarative, &ctx, &session);
             let err = result.expect_err(
                 "a declared llm grader must reach the judge regardless of target, even when its criterion reads like a mechanical pattern",
             );
@@ -4214,6 +4480,223 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
 
         assert!(!result.passed, "nothing is not at least as good as a baseline");
         assert!(result.grader.model.is_none(), "no judge was billed for an empty run");
+    }
+
+    struct LocalJudge(String);
+
+    impl judge::JudgeEnv for LocalJudge {
+        fn var(&self, key: &str) -> Option<String> {
+            match key {
+                judge::BASE_URL_ENV => Some(self.0.clone()),
+                judge::API_KEY_ENV => Some("test-key".to_string()),
+                _ => None,
+            }
+        }
+    }
+
+    fn local_endpoint(listener: &std::net::TcpListener) -> JudgeEndpoint {
+        JudgeEndpoint::resolve_from(
+            &LocalJudge(format!("http://{}/v1", listener.local_addr().unwrap())),
+            JudgeProvider::OpenAi,
+            &JudgeModel::new("judge-model").unwrap(),
+            "--grader-model",
+        )
+        .unwrap()
+    }
+
+    /// Answers one judge request with `verdict` and hands back the body it was sent.
+    fn serve_one_verdict(
+        listener: std::net::TcpListener,
+        verdict: serde_json::Value,
+    ) -> std::thread::JoinHandle<String> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().unwrap();
+                    }
+                }
+            }
+            let mut request = vec![0; length];
+            reader.read_exact(&mut request).unwrap();
+            let body = serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": verdict.to_string()}, "finish_reason": "stop"}],
+            })
+            .to_string();
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            String::from_utf8(request).unwrap()
+        })
+    }
+
+    /// A judge shown nothing still answers, and a lenient one passes an assertion that
+    /// reads as satisfied by saying nothing. The listener stands in for the judge, so a
+    /// request reaching it, rather than a missing endpoint, is what would fail this.
+    #[test]
+    fn an_empty_answer_fails_its_llm_assertion_without_a_judge_being_asked() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let options = GradeOptions {
+            grader: GraderMode::Llm,
+            grader_votes: "3".parse().unwrap(),
+            ..GradeOptions::default()
+        };
+        let session = GradeSession {
+            options: &options,
+            judge: Some(local_endpoint(&listener)),
+        };
+
+        for target in [
+            TargetDeclaration::Default,
+            TargetDeclaration::Named(GradeTarget::AnyOutput),
+        ] {
+            let result = grade_with_llm(
+                "the answer does not invent facts",
+                &target,
+                &BRIEF,
+                &declarative_context(" \n\t", ""),
+                &ctx,
+                &session,
+            )
+            .unwrap();
+
+            assert!(!result.passed, "an empty answer must not pass");
+            assert_eq!(result.grader.kind, GraderKind::Declarative);
+            assert!(result.grader.model.is_none(), "no judge answered this one");
+            assert!(result.evidence.contains("is empty"), "{}", result.evidence);
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "no request may reach the judge for an empty answer"
+        );
+    }
+
+    #[test]
+    fn the_judge_is_asked_with_the_question_and_the_verified_reference() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = local_endpoint(&listener);
+        let server = serve_one_verdict(
+            listener,
+            serde_json::json!({"passed": true, "evidence": "Paris", "rationale": "matches the reference"}),
+        );
+        let options = GradeOptions {
+            grader: GraderMode::Llm,
+            ..GradeOptions::default()
+        };
+        let session = GradeSession {
+            options: &options,
+            judge: Some(endpoint),
+        };
+        let case: EvalCase = serde_json::from_value(serde_json::json!({
+            "id": "capital",
+            "prompt": "What is the capital of France?",
+            "expected_output": "Paris",
+        }))
+        .unwrap();
+
+        let result = grade_with_llm(
+            "names the capital correctly",
+            &TargetDeclaration::Default,
+            &CaseBrief::of(&case),
+            &declarative_context("Paris", ""),
+            &ctx,
+            &session,
+        )
+        .unwrap();
+
+        assert!(result.passed);
+        let body: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+        assert!(body["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("ground truth"));
+        let sent: serde_json::Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(sent["prompt"], "What is the capital of France?");
+        assert_eq!(sent["expected_output"], "Paris");
+        assert_eq!(sent["final_text"], "Paris");
+    }
+
+    #[test]
+    fn the_run_answer_keeps_first_claim_on_the_payload_and_the_brief_is_cut_before_it() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let huge = "x".repeat(PayloadBudget::TOTAL_BYTES * 2);
+        let brief = CaseBrief {
+            prompt: &huge,
+            expected_output: &huge,
+        };
+        let answer = "a".repeat(PayloadBudget::TOTAL_BYTES);
+
+        let payload = llm_grader_payload(
+            "the assertion",
+            &GradeTarget::default(),
+            &brief,
+            &declarative_context(&answer, ""),
+            &ctx,
+        )
+        .unwrap()
+        .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        let kept = |field: &str| value[field].as_str().unwrap().chars().filter(|c| *c != '\n').count();
+        assert!(
+            value["final_text"].as_str().unwrap().len() > PayloadBudget::TOTAL_BYTES - 2 * CaseBrief::FLOOR_BYTES - 50,
+            "the answer keeps everything the brief does not reserve"
+        );
+        assert!(kept("expected_output") < CaseBrief::FLOOR_BYTES + 50);
+        assert!(kept("prompt") < CaseBrief::FLOOR_BYTES + 50);
+        assert!(value["expected_output"].as_str().unwrap().contains("[truncated after"));
+    }
+
+    #[test]
+    fn a_reference_takes_what_a_short_answer_leaves_before_the_question_does() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let reference = "r".repeat(PayloadBudget::TOTAL_BYTES - 100);
+        let question = "q".repeat(PayloadBudget::TOTAL_BYTES);
+        let brief = CaseBrief {
+            prompt: &question,
+            expected_output: &reference,
+        };
+
+        let payload = llm_grader_payload(
+            "the assertion",
+            &GradeTarget::default(),
+            &brief,
+            &declarative_context("short answer", ""),
+            &ctx,
+        )
+        .unwrap()
+        .text;
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["final_text"], "short answer");
+        let sent_reference = value["expected_output"].as_str().unwrap();
+        assert!(
+            sent_reference.len() >= PayloadBudget::TOTAL_BYTES - CaseBrief::FLOOR_BYTES - 20,
+            "the reference keeps all but the question's floor: {} bytes",
+            sent_reference.len()
+        );
+        assert!(value["prompt"].as_str().unwrap().contains("[truncated after"));
     }
 
     #[test]

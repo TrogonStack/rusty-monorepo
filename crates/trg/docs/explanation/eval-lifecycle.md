@@ -102,7 +102,7 @@ When `--runner` is provided, the CLI invokes the agent for each run:
 | Prepare workspace | Stage fixtures; stage skill to `.skill/`, `.old-skill/`, or `skills/<skill-name>/` for an unannounced case, via copy (default) or symlink (`--skill-staging`) |
 | Build prompt | Task + fixture paths + frontmatter summary + output constraints (`prompt` contract v1) |
 | Invoke runner | Spawn `cursor-agent`, `claude`, or `codex` with stream-json output |
-| Capture output | Write `transcript.jsonl`, `timing.json`; update run status and metrics |
+| Capture output | Write `transcript.jsonl`, `timing.json`; update run status and metrics, including the turn and per-tool counts read off the transcript |
 | Integrity check | Hash skill files before/after; record tampering in `skill_integrity` |
 
 Run terminal statuses:
@@ -112,6 +112,8 @@ Run terminal statuses:
 | `skipped` | No runner configured (scaffold only) |
 | `completed` | Runner exited successfully with a result event |
 | `failed` | Spawn error, missing result event, or non-zero exit |
+| `timeout` | Runner outlived its timeout and was stopped |
+| `budget_exhausted` | Runner went past `--max-tool-calls-per-run` or `--max-turns-per-run` and was stopped |
 
 After all runs, summaries are rebuilt and `report.json` is rewritten in place.
 

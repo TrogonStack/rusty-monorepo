@@ -160,6 +160,9 @@ pub(crate) fn grade_report_dir_with_report(
                         println!("    ... and {} more", report.ungraded_assertions.len() - CAP);
                     }
                 }
+                if let Some(warning) = &report.judge_independence {
+                    println!("{}", warning.describe());
+                }
             }
             let exit_code = ExitCode::from_gate(report.failed == 0 && report.ungraded == 0);
             (exit_code, Some(report))

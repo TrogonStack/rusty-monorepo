@@ -14,7 +14,8 @@ use tracing::field::Empty;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use super::harness_spans::{self, HarnessStream, Reconstruction, StreamEnd};
-use super::{capture_subprocess, CapturedProcess, EvalRunOutcome, RunStatus, Runner, RunnerError};
+use super::{capture_capped, CapWatch, CapturedProcess, EvalRunOutcome, RunStatus, Runner, RunnerError};
+use crate::agentskills::budget::RunCaps;
 use crate::agentskills::budget::RunCost;
 use crate::telemetry::propagation::inject_std_command;
 use crate::telemetry::semconv::generated::attributes::{
@@ -42,6 +43,8 @@ pub enum FailureType {
     Json,
     /// The harness exited cleanly but reported the run itself failed.
     HarnessError,
+    /// A cap on the run's tool calls or turns stopped the harness.
+    BudgetExhausted,
 }
 
 impl FailureType {
@@ -56,6 +59,7 @@ impl FailureType {
             Self::UnsupportedScenario => "unsupported_scenario",
             Self::Json => "json",
             Self::HarnessError => "harness_error",
+            Self::BudgetExhausted => "budget_exhausted",
         }
     }
 
@@ -215,10 +219,11 @@ impl AgentInvocation {
         &self,
         command: &mut std::process::Command,
         timeout: Option<std::time::Duration>,
+        caps: RunCaps,
     ) -> Result<CapturedProcess, RunnerError> {
         let result = self.span.in_scope(|| {
             inject_std_command(command);
-            capture_subprocess(command, timeout)
+            capture_capped(command, timeout, CapWatch::of(self.runner, caps))
         });
         if let Err(error) = &result {
             record_error(&self.span, error.failure_type());
@@ -242,7 +247,9 @@ impl AgentInvocation {
                 stdout: &captured.stdout,
                 timeline: &captured.stdout_timeline,
                 started_at: captured.started_at,
-                ended: if captured.timed_out {
+                ended: if captured.cap_reached.is_some() {
+                    StreamEnd::CapReached(captured.ended_at)
+                } else if captured.timed_out {
                     StreamEnd::TimedOut(captured.ended_at)
                 } else {
                     StreamEnd::Exited(captured.ended_at)
@@ -314,6 +321,7 @@ impl AgentInvocation {
         let failure = match outcome.status {
             RunStatus::Completed => None,
             RunStatus::Timeout => Some(FailureType::Timeout),
+            RunStatus::BudgetExhausted => Some(FailureType::BudgetExhausted),
             RunStatus::Failed => Some(FailureType::of_exit(captured.exit_code).unwrap_or(FailureType::HarnessError)),
         };
         if let Some(failure) = failure {
@@ -395,7 +403,7 @@ fn instruments() -> Instruments {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agentskills::runner::{completed_outcome, timeout_outcome, HarnessTokenUsage};
+    use crate::agentskills::runner::{capture_subprocess, completed_outcome, timeout_outcome, HarnessTokenUsage};
     use crate::telemetry::testing::capture;
     use std::process::Command;
     use std::time::Duration;
@@ -439,7 +447,9 @@ mod tests {
             .arg("-c")
             .arg("printf '%s' \"$TRACEPARENT\"")
             .env_remove("TRACEPARENT");
-        let captured = invocation.capture(&mut command, Some(Duration::from_secs(10))).unwrap();
+        let captured = invocation
+            .capture(&mut command, Some(Duration::from_secs(10)), RunCaps::default())
+            .unwrap();
         String::from_utf8(captured.stdout).unwrap()
     }
 
@@ -463,7 +473,9 @@ mod tests {
             command
                 .arg("-c")
                 .arg(r#"echo '{"type":"result","is_error":false,"duration_ms":40,"duration_api_ms":30}'"#);
-            let captured = invocation.capture(&mut command, Some(Duration::from_secs(10))).unwrap();
+            let captured = invocation
+                .capture(&mut command, Some(Duration::from_secs(10)), RunCaps::default())
+                .unwrap();
             let outcome = completed_outcome(
                 40,
                 captured.exit_code,
@@ -524,7 +536,9 @@ mod tests {
             let invocation = AgentInvocation::begin(Runner::Codex, None);
             let mut command = Command::new("bash");
             command.arg("-c").arg("trap '' TERM; sleep 30");
-            let captured = invocation.capture(&mut command, Some(Duration::from_secs(1))).unwrap();
+            let captured = invocation
+                .capture(&mut command, Some(Duration::from_secs(1)), RunCaps::default())
+                .unwrap();
             assert!(captured.timed_out);
             let outcome = timeout_outcome(Runner::Codex, 1000, captured.exit_code);
             invocation.finish(&captured, &outcome, None, HarnessTraces::Silent);

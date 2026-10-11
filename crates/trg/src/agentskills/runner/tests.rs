@@ -3,7 +3,8 @@ use std::path::Path;
 use tempfile::tempdir;
 
 use super::fake::{invoke_with_retries, run_bash};
-use super::{EvalRunRequest, RunStatus, TelemetryForwarding, FAILURE_KIND_RUNNER};
+use super::{capture_capped, CapWatch, EvalRunRequest, RunStatus, Runner, TelemetryForwarding, FAILURE_KIND_RUNNER};
+use crate::agentskills::budget::{RunCap, RunCaps, FAILURE_KIND_TOOL_CALL_CAP, FAILURE_KIND_TURN_CAP};
 use crate::agentskills::evals::{EvalCase, EvalDirName};
 use crate::agentskills::report::ScenarioKind;
 use crate::agentskills::transcript::{
@@ -47,6 +48,7 @@ fn bash_request<'a>(
         tool_grant: None,
         mcp_config: None,
         telemetry_forwarding: TelemetryForwarding::Off,
+        caps: RunCaps::default(),
     }
 }
 
@@ -311,4 +313,110 @@ fn an_isolated_run_gets_its_own_home() {
         "isolated run did not get its own HOME: {}",
         outcome.final_text
     );
+}
+
+const THREE_TOOL_CALLS_THEN_HANG: &str = r#"for id in 1 2 3; do
+  echo "{\"type\":\"assistant\",\"message\":{\"id\":\"msg_$id\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_$id\",\"name\":\"Grep\",\"input\":{\"q\":\"$id\"}}]}}"
+done
+sleep 30
+echo '{"type":"result","is_error":false,"result":"late"}'"#;
+
+#[test]
+fn a_run_past_its_tool_call_cap_is_stopped_as_budget_exhausted_and_not_retried() {
+    let temp = tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript = workspace.join("transcript.jsonl");
+    let stderr = workspace.join("stderr.log");
+    let mut request = bash_request(&case, &workspace, &transcript, &stderr, Some(60));
+    request.caps = RunCaps {
+        tool_calls: Some("2".parse().unwrap()),
+        turns: None,
+    };
+
+    let started = std::time::Instant::now();
+    let (outcome, invocations) = invoke_with_retries(&request, THREE_TOOL_CALLS_THEN_HANG, 2).unwrap();
+
+    assert!(matches!(outcome.status, RunStatus::BudgetExhausted));
+    assert_eq!(outcome.failure_kind, Some(FAILURE_KIND_TOOL_CALL_CAP));
+    assert_eq!(invocations, 1);
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}
+
+#[test]
+fn a_run_within_its_tool_call_cap_completes() {
+    let temp = tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript = workspace.join("transcript.jsonl");
+    let stderr = workspace.join("stderr.log");
+    let mut request = bash_request(&case, &workspace, &transcript, &stderr, None);
+    request.caps = RunCaps {
+        tool_calls: Some("3".parse().unwrap()),
+        turns: None,
+    };
+
+    let script = THREE_TOOL_CALLS_THEN_HANG.replace("sleep 30", "true");
+    let outcome = run_bash(&request, &script).unwrap();
+
+    assert!(matches!(outcome.status, RunStatus::Completed));
+}
+
+#[test]
+fn the_fake_runner_is_stopped_at_its_turn_cap_since_it_is_handed_no_turn_flag() {
+    let temp = tempdir().unwrap();
+    let workspace = temp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let case = make_case();
+    let transcript = workspace.join("transcript.jsonl");
+    let stderr = workspace.join("stderr.log");
+    let mut request = bash_request(&case, &workspace, &transcript, &stderr, Some(60));
+    request.caps = RunCaps {
+        tool_calls: None,
+        turns: Some("2".parse().unwrap()),
+    };
+    let script = r#"for id in 1 2 3; do
+  echo "{\"type\":\"assistant\",\"message\":{\"id\":\"msg_$id\",\"content\":[{\"type\":\"text\",\"text\":\"turn $id\"}]}}"
+done
+sleep 30
+echo '{"type":"result","is_error":false,"result":"late"}'"#;
+
+    let started = std::time::Instant::now();
+    let outcome = run_bash(&request, script).unwrap();
+
+    assert!(matches!(outcome.status, RunStatus::BudgetExhausted));
+    assert_eq!(outcome.failure_kind, Some(FAILURE_KIND_TURN_CAP));
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+}
+
+#[test]
+fn a_harness_without_a_turn_flag_is_stopped_once_it_starts_a_turn_past_its_cap() {
+    let caps = RunCaps {
+        tool_calls: None,
+        turns: Some("1".parse().unwrap()),
+    };
+    let script = r#"echo '{"type":"turn.started"}'
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+echo '{"type":"turn.started"}'
+sleep 30"#;
+    let mut command = std::process::Command::new("bash");
+    command.arg("-c").arg(script);
+
+    let captured = capture_capped(&mut command, None, CapWatch::of(Runner::Codex, caps)).unwrap();
+
+    assert!(matches!(captured.cap_reached, Some(RunCap::Turns(_))));
+}
+
+#[test]
+fn claude_enforces_its_own_turn_cap_so_no_watch_is_kept_for_it() {
+    let caps = RunCaps {
+        tool_calls: None,
+        turns: Some("1".parse().unwrap()),
+    };
+
+    assert!(CapWatch::of(Runner::ClaudeCode, caps).is_none());
+    assert!(CapWatch::of(Runner::Codex, caps).is_some());
+    assert!(CapWatch::of(Runner::Codex, RunCaps::default()).is_none());
 }

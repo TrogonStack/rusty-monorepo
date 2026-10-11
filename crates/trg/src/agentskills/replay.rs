@@ -362,7 +362,7 @@ where
     if let Some(grant) = &run.tool_grant {
         blueprint = blueprint.with(KeyValue::new(EVAL_TOOL_GRANT, grant.to_string()));
     }
-    if run.status == "failed" {
+    if matches!(run.status.as_str(), "failed" | "timeout" | "budget_exhausted") {
         blueprint = blueprint.failed(run.failure_kind.clone().unwrap_or_else(|| RUN_FAILED.to_string()));
     }
 
@@ -467,6 +467,7 @@ fn agent_invocation(run: &RunRecord, runner: Option<Runner>) -> Blueprint {
     }
     let failure = match run.status.as_str() {
         "timeout" => Some(FailureType::Timeout),
+        "budget_exhausted" => Some(FailureType::BudgetExhausted),
         "failed" => Some(FailureType::of_exit(metrics.exit_code).unwrap_or(FailureType::HarnessError)),
         _ => None,
     };

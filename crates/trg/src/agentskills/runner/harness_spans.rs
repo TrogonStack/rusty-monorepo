@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use super::stream::{StampedLine, StdoutTimeline};
 use super::Runner;
+use crate::agentskills::transcript_metrics::{ObservedToolCall, TranscriptMetrics, TurnCount};
 use crate::telemetry::semconv::generated::attributes::{
     gen_ai_operation_name, GEN_AI_OPERATION_NAME, GEN_AI_PROVIDER_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_RESPONSE_ID,
     GEN_AI_RESPONSE_MODEL, GEN_AI_TOOL_CALL_ARGUMENTS, GEN_AI_TOOL_CALL_ID, GEN_AI_TOOL_CALL_RESULT, GEN_AI_TOOL_NAME,
@@ -42,12 +43,14 @@ pub enum StreamEnd {
     Exited(SystemTime),
     /// The run's time limit killed the harness.
     TimedOut(SystemTime),
+    /// One of the run's caps on tool calls or turns killed the harness.
+    CapReached(SystemTime),
 }
 
 impl StreamEnd {
     fn at(self) -> SystemTime {
         match self {
-            Self::Exited(at) | Self::TimedOut(at) => at,
+            Self::Exited(at) | Self::TimedOut(at) | Self::CapReached(at) => at,
         }
     }
 
@@ -55,6 +58,7 @@ impl StreamEnd {
         match self {
             Self::Exited(_) => StepFailure::Unfinished,
             Self::TimedOut(_) => StepFailure::TimedOut,
+            Self::CapReached(_) => StepFailure::BudgetExhausted,
         }
     }
 }
@@ -62,14 +66,18 @@ impl StreamEnd {
 impl<'a> HarnessStream<'a> {
     fn events(&self) -> impl Iterator<Item = (Value, SystemTime)> + 'a {
         let stdout = self.stdout;
-        self.timeline.lines(stdout).filter_map(|StampedLine { text, at }| {
-            let text = std::str::from_utf8(text).ok()?.trim();
-            if text.is_empty() {
-                return None;
-            }
-            serde_json::from_str::<Value>(text).ok().map(|value| (value, at))
-        })
+        self.timeline
+            .lines(stdout)
+            .filter_map(|StampedLine { text, at }| parse_event(text).map(|value| (value, at)))
     }
+}
+
+fn parse_event(line: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(line).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<Value>(text).ok()
 }
 
 /// Token counts one model turn reported, each `None` when the harness left it out.
@@ -90,6 +98,14 @@ impl TurnUsage {
             cache_read: count(names[2]),
             cache_write: count(names[3]),
         }
+    }
+
+    /// Every input token the call sent, cached or not; `None` when none were reported.
+    fn sent(self) -> Option<u64> {
+        [self.input, self.cache_read, self.cache_write]
+            .into_iter()
+            .flatten()
+            .reduce(u64::saturating_add)
     }
 
     fn attributes(self) -> impl Iterator<Item = KeyValue> {
@@ -115,6 +131,9 @@ pub enum StepFailure {
     Unfinished,
     /// The run's time limit killed the harness before the step reported finishing.
     TimedOut,
+    /// A cap on the run's tool calls or turns killed the harness before the step
+    /// reported finishing.
+    BudgetExhausted,
 }
 
 impl StepFailure {
@@ -124,6 +143,7 @@ impl StepFailure {
             Self::TurnFailed => "turn_failed",
             Self::Unfinished => "unfinished",
             Self::TimedOut => "timeout",
+            Self::BudgetExhausted => "budget_exhausted",
         }
     }
 }
@@ -229,14 +249,116 @@ pub fn reconstruct(
     request_model: Option<&str>,
     content: ContentCapture,
 ) -> Reconstruction {
-    let content = ToolContent(content.includes_span());
-    let mut builder = StepBuilder::new(stream.started_at, request_model);
-    match runner {
-        Runner::ClaudeCode => claude_code(&mut builder, stream, content),
-        Runner::Codex => codex(&mut builder, stream, content),
-        Runner::CursorAgent => cursor_agent(&mut builder, stream, content),
+    rebuild(runner, stream, request_model, ToolContent(content.includes_span()))
+}
+
+/// Turn and tool counts for a run, read from its captured stdout. A turn's input
+/// counts only for a harness that reports usage per model call: codex reports one total
+/// per turn spanning every model call in it, and cursor-agent none at all.
+pub fn measure(runner: Runner, stdout: &[u8]) -> TranscriptMetrics {
+    let reconstruction = reconstruct_for_measuring(runner, stdout);
+    let peak_turn_input_tokens = match runner {
+        Runner::ClaudeCode => reconstruction
+            .steps
+            .iter()
+            .filter_map(|step| match &step.kind {
+                StepKind::Chat { usage, .. } => usage.sent(),
+                StepKind::Tool { .. } => None,
+            })
+            .max(),
+        Runner::Codex | Runner::CursorAgent => None,
+    };
+    let calls = reconstruction.steps.iter().filter_map(|step| match &step.kind {
+        StepKind::Tool {
+            name,
+            arguments,
+            result,
+            ..
+        } => Some(ObservedToolCall {
+            tool: name,
+            arguments: arguments.as_deref(),
+            result: result.as_deref(),
+        }),
+        StepKind::Chat { .. } => None,
+    });
+    let turns = TurnCount::new(u64::try_from(reconstruction.inference_calls()).unwrap_or(u64::MAX));
+    TranscriptMetrics::measure(turns, peak_turn_input_tokens, calls)
+}
+
+/// Every step with its arguments and results kept, for measuring a run rather than
+/// exporting it, so nothing it holds ever reaches a span.
+fn reconstruct_for_measuring(runner: Runner, stdout: &[u8]) -> Reconstruction {
+    let mut live = LiveReconstruction::begin(runner, SystemTime::UNIX_EPOCH, None, ToolContent(true));
+    for line in stdout.split(|byte| *byte == b'\n') {
+        live.observe_line(line, SystemTime::UNIX_EPOCH);
     }
-    builder.finish(stream.ended)
+    live.finish(StreamEnd::Exited(SystemTime::UNIX_EPOCH))
+}
+
+fn rebuild(runner: Runner, stream: HarnessStream, request_model: Option<&str>, content: ToolContent) -> Reconstruction {
+    let mut live = LiveReconstruction::begin(runner, stream.started_at, request_model, content);
+    for (event, at) in stream.events() {
+        live.observe(&event, at);
+    }
+    live.finish(stream.ended)
+}
+
+/// A reconstruction fed one line at a time, so a run can be watched while it executes
+/// and stopped at the step that crossed one of its caps.
+pub struct LiveReconstruction {
+    runner: Runner,
+    builder: StepBuilder,
+    content: ToolContent,
+    codex_turn: Option<CodexTurn>,
+    cursor_model: Option<String>,
+}
+
+impl LiveReconstruction {
+    fn begin(runner: Runner, started_at: SystemTime, request_model: Option<&str>, content: ToolContent) -> Self {
+        Self {
+            runner,
+            builder: StepBuilder::new(started_at, request_model),
+            content,
+            codex_turn: None,
+            cursor_model: None,
+        }
+    }
+
+    /// Counts steps without keeping what any of them carried.
+    pub fn counting(runner: Runner, started_at: SystemTime) -> Self {
+        Self::begin(runner, started_at, None, ToolContent(false))
+    }
+
+    pub fn observe_line(&mut self, line: &[u8], at: SystemTime) {
+        if let Some(event) = parse_event(line) {
+            self.observe(&event, at);
+        }
+    }
+
+    fn observe(&mut self, event: &Value, at: SystemTime) {
+        match self.runner {
+            Runner::ClaudeCode => claude_code(&mut self.builder, event, at, self.content),
+            Runner::Codex => codex(&mut self.builder, &mut self.codex_turn, event, at, self.content),
+            Runner::CursorAgent => cursor_agent(&mut self.builder, &mut self.cursor_model, event, at, self.content),
+        }
+    }
+
+    /// Tool calls seen so far, including any still running.
+    pub fn tool_calls(&self) -> usize {
+        self.builder.steps.iter().filter(|step| step.is_tool()).count() + self.builder.tools.len()
+    }
+
+    /// Model calls seen so far, including one still answering.
+    pub fn model_calls(&self) -> usize {
+        self.builder.steps.iter().filter(|step| !step.is_tool()).count() + usize::from(self.builder.turn.is_some())
+    }
+
+    fn finish(mut self, ended: StreamEnd) -> Reconstruction {
+        if self.runner == Runner::CursorAgent && self.builder.summary.response_model.is_none() {
+            self.builder.summary.response_model = self.cursor_model.take();
+        }
+        self.builder.finish(ended)
+    }
 }
 
 struct OpenTool {
@@ -407,72 +529,70 @@ const CLAUDE_USAGE: [&str; 4] = [
 
 /// A claude-code turn is every `assistant` event sharing one `message.id`; it starts
 /// when the event before it arrived, which is when the request that produced it went out.
-fn claude_code(builder: &mut StepBuilder, stream: HarnessStream, content: ToolContent) {
-    for (event, at) in stream.events() {
-        match event_type(&event) {
-            Some("assistant") => {
-                let message = event.get("message");
-                let id = message.and_then(|message| string_at(message, "id"));
-                let continues = builder
-                    .turn
-                    .as_ref()
-                    .is_some_and(|turn| turn.key.is_some() && turn.key == id);
-                if !continues {
-                    let start = builder.last_at;
-                    builder.open_turn(id.clone(), start);
-                }
-                if let Some(turn) = &mut builder.turn {
-                    turn.end = at;
-                    if let Some(message) = message {
-                        turn.response_model = string_at(message, "model").or(turn.response_model.take());
-                        turn.response_id = id.or(turn.response_id.take());
-                        if message.get("usage").is_some() {
-                            turn.usage = TurnUsage::read(message.get("usage"), CLAUDE_USAGE);
-                        }
+fn claude_code(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolContent) {
+    match event_type(event) {
+        Some("assistant") => {
+            let message = event.get("message");
+            let id = message.and_then(|message| string_at(message, "id"));
+            let continues = builder
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.key.is_some() && turn.key == id);
+            if !continues {
+                let start = builder.last_at;
+                builder.open_turn(id.clone(), start);
+            }
+            if let Some(turn) = &mut builder.turn {
+                turn.end = at;
+                if let Some(message) = message {
+                    turn.response_model = string_at(message, "model").or(turn.response_model.take());
+                    turn.response_id = id.or(turn.response_id.take());
+                    if message.get("usage").is_some() {
+                        turn.usage = TurnUsage::read(message.get("usage"), CLAUDE_USAGE);
                     }
                 }
-                for block in content_blocks(&event) {
-                    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-                        continue;
-                    }
-                    let Some(call_id) = string_at(block, "id") else {
-                        continue;
-                    };
-                    let name = string_at(block, "name").unwrap_or_else(|| "unknown".to_string());
-                    builder.open_tool(call_id, name, content.render(block.get("input")), at);
+            }
+            for block in content_blocks(event) {
+                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    continue;
                 }
+                let Some(call_id) = string_at(block, "id") else {
+                    continue;
+                };
+                let name = string_at(block, "name").unwrap_or_else(|| "unknown".to_string());
+                builder.open_tool(call_id, name, content.render(block.get("input")), at);
             }
-            Some("user") => {
-                builder.close_turn(None);
-                for block in content_blocks(&event) {
-                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                        continue;
-                    }
-                    let Some(call_id) = block.get("tool_use_id").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let failure = block
-                        .get("is_error")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                        .then_some(StepFailure::ToolError);
-                    builder.close_tool(
-                        call_id,
-                        || "unknown".to_string(),
-                        content.render(block.get("content")),
-                        failure,
-                        at,
-                    );
-                }
-            }
-            Some("result") => {
-                builder.close_turn(None);
-                builder.read_result(&event);
-            }
-            _ => builder.close_turn(None),
         }
-        builder.arrived(at);
+        Some("user") => {
+            builder.close_turn(None);
+            for block in content_blocks(event) {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                let Some(call_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let failure = block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    .then_some(StepFailure::ToolError);
+                builder.close_tool(
+                    call_id,
+                    || "unknown".to_string(),
+                    content.render(block.get("content")),
+                    failure,
+                    at,
+                );
+            }
+        }
+        Some("result") => {
+            builder.close_turn(None);
+            builder.read_result(event);
+        }
+        _ => builder.close_turn(None),
     }
+    builder.arrived(at);
 }
 
 const CODEX_USAGE: [&str; 4] = [
@@ -523,63 +643,60 @@ fn codex_failure(item: &Value) -> Option<StepFailure> {
 /// as a model call: the one that chose the next tool, or the one that ended the turn.
 /// Codex names no model on its stream, so its model calls carry only the one the run
 /// asked for.
-fn codex(builder: &mut StepBuilder, stream: HarnessStream, content: ToolContent) {
-    let mut turn: Option<CodexTurn> = None;
-    for (event, at) in stream.events() {
-        match event_type(&event) {
-            Some("turn.started") => turn = Some(CodexTurn::start(builder, at)),
-            Some("turn.completed") => {
-                let usage = TurnUsage::read(event.get("usage"), CODEX_USAGE);
-                if let Some(turn) = turn.take() {
-                    turn.end(builder, at, None, |last| *last = usage);
-                }
+fn codex(builder: &mut StepBuilder, turn: &mut Option<CodexTurn>, event: &Value, at: SystemTime, content: ToolContent) {
+    match event_type(event) {
+        Some("turn.started") => *turn = Some(CodexTurn::start(builder, at)),
+        Some("turn.completed") => {
+            let usage = TurnUsage::read(event.get("usage"), CODEX_USAGE);
+            if let Some(turn) = turn.take() {
+                turn.end(builder, at, None, |last| *last = usage);
             }
-            Some("turn.failed") => {
-                if let Some(turn) = turn.take() {
-                    turn.end(builder, at, Some(StepFailure::TurnFailed), |_| {});
-                }
-            }
-            Some(kind @ ("item.started" | "item.completed")) => {
-                let Some(item) = event.get("item") else {
-                    builder.arrived(at);
-                    continue;
-                };
-                let (Some(call_id), Some(name)) = (string_at(item, "id"), codex_tool_name(item)) else {
-                    builder.arrived(at);
-                    continue;
-                };
-                let arguments = content.render(codex_arguments(item));
-                if let Some(open) = builder.tools.get_mut(&call_id) {
-                    open.arguments = open.arguments.take().or(arguments);
-                } else {
-                    if builder.tools.is_empty() {
-                        if let Some(chat) = &mut builder.turn {
-                            chat.end = at;
-                        }
-                        builder.close_turn(None);
-                    }
-                    builder.open_tool(call_id.clone(), name.clone(), arguments, at);
-                }
-                if kind == "item.completed" {
-                    builder.close_tool(
-                        &call_id,
-                        || name,
-                        content.render(codex_result(item)),
-                        codex_failure(item),
-                        at,
-                    );
-                    if builder.tools.is_empty() && turn.is_some() {
-                        builder.open_turn(None, at);
-                    }
-                }
-            }
-            _ => {}
         }
-        if let Some(chat) = &mut builder.turn {
-            chat.end = chat.end.max(at);
+        Some("turn.failed") => {
+            if let Some(turn) = turn.take() {
+                turn.end(builder, at, Some(StepFailure::TurnFailed), |_| {});
+            }
         }
-        builder.arrived(at);
+        Some(kind @ ("item.started" | "item.completed")) => {
+            let Some(item) = event.get("item") else {
+                builder.arrived(at);
+                return;
+            };
+            let (Some(call_id), Some(name)) = (string_at(item, "id"), codex_tool_name(item)) else {
+                builder.arrived(at);
+                return;
+            };
+            let arguments = content.render(codex_arguments(item));
+            if let Some(open) = builder.tools.get_mut(&call_id) {
+                open.arguments = open.arguments.take().or(arguments);
+            } else {
+                if builder.tools.is_empty() {
+                    if let Some(chat) = &mut builder.turn {
+                        chat.end = at;
+                    }
+                    builder.close_turn(None);
+                }
+                builder.open_tool(call_id.clone(), name.clone(), arguments, at);
+            }
+            if kind == "item.completed" {
+                builder.close_tool(
+                    &call_id,
+                    || name,
+                    content.render(codex_result(item)),
+                    codex_failure(item),
+                    at,
+                );
+                if builder.tools.is_empty() && turn.is_some() {
+                    builder.open_turn(None, at);
+                }
+            }
+        }
+        _ => {}
     }
+    if let Some(chat) = &mut builder.turn {
+        chat.end = chat.end.max(at);
+    }
+    builder.arrived(at);
 }
 
 /// Where a codex turn's model calls begin among the rebuilt steps.
@@ -636,57 +753,57 @@ fn cursor_call_id(event: &Value) -> Option<String> {
 
 /// A cursor-agent turn is a run of consecutive `assistant` events. cursor-agent reports
 /// no usage per turn, only for the whole invocation.
-fn cursor_agent(builder: &mut StepBuilder, stream: HarnessStream, content: ToolContent) {
-    let mut model: Option<String> = None;
-    for (event, at) in stream.events() {
-        match event_type(&event) {
-            Some("system") => {
-                if let Some(init_model) = string_at(&event, "model") {
-                    model = Some(init_model);
-                }
-                builder.close_turn(None);
+fn cursor_agent(
+    builder: &mut StepBuilder,
+    model: &mut Option<String>,
+    event: &Value,
+    at: SystemTime,
+    content: ToolContent,
+) {
+    match event_type(event) {
+        Some("system") => {
+            if let Some(init_model) = string_at(event, "model") {
+                *model = Some(init_model);
             }
-            Some("assistant") => {
-                if builder.turn.is_none() {
-                    let start = builder.last_at;
-                    builder.open_turn(None, start);
-                }
-                if let Some(turn) = &mut builder.turn {
-                    turn.end = at;
-                    turn.response_model.clone_from(&model);
-                }
-            }
-            Some("tool_call") => {
-                builder.close_turn(None);
-                if let (Some(call_id), Some((name, call))) = (cursor_call_id(&event), cursor_tool(&event)) {
-                    match event.get("subtype").and_then(Value::as_str) {
-                        Some("started") => builder.open_tool(call_id, name, content.render(call.get("args")), at),
-                        Some("completed") => {
-                            let result = call.get("result");
-                            let failure = result
-                                .and_then(|result| result.get("error"))
-                                .map(|_| StepFailure::ToolError);
-                            if !builder.tools.contains_key(&call_id) {
-                                builder.open_tool(call_id.clone(), name.clone(), content.render(call.get("args")), at);
-                            }
-                            builder.close_tool(&call_id, || name, content.render(result), failure, at);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Some("result") => {
-                builder.close_turn(None);
-                builder.read_result(&event);
-            }
-            Some("thinking") => {}
-            _ => builder.close_turn(None),
+            builder.close_turn(None);
         }
-        builder.arrived(at);
+        Some("assistant") => {
+            if builder.turn.is_none() {
+                let start = builder.last_at;
+                builder.open_turn(None, start);
+            }
+            if let Some(turn) = &mut builder.turn {
+                turn.end = at;
+                turn.response_model.clone_from(model);
+            }
+        }
+        Some("tool_call") => {
+            builder.close_turn(None);
+            if let (Some(call_id), Some((name, call))) = (cursor_call_id(event), cursor_tool(event)) {
+                match event.get("subtype").and_then(Value::as_str) {
+                    Some("started") => builder.open_tool(call_id, name, content.render(call.get("args")), at),
+                    Some("completed") => {
+                        let result = call.get("result");
+                        let failure = result
+                            .and_then(|result| result.get("error"))
+                            .map(|_| StepFailure::ToolError);
+                        if !builder.tools.contains_key(&call_id) {
+                            builder.open_tool(call_id.clone(), name.clone(), content.render(call.get("args")), at);
+                        }
+                        builder.close_tool(&call_id, || name, content.render(result), failure, at);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Some("result") => {
+            builder.close_turn(None);
+            builder.read_result(event);
+        }
+        Some("thinking") => {}
+        _ => builder.close_turn(None),
     }
-    if builder.summary.response_model.is_none() {
-        builder.summary.response_model = model;
-    }
+    builder.arrived(at);
 }
 
 /// Emits `steps` as children of `parent`, each with the start and end it was rebuilt with.
@@ -940,6 +1057,49 @@ mod tests {
             .map(|kv| kv.value.clone());
         assert_eq!(error_type, Some(opentelemetry::Value::from("timeout")));
     }
+
+    const LEAKED_CHANNEL_MARKER: &[u8] = br#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"<|channel|>commentary<|message|>Bash","input":{"command":"false"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"exit 1","is_error":true}]}}
+{"type":"result","is_error":true,"duration_ms":500}
+"#;
+
+    /// This parser never inspects a tool's name beyond reading it as a string, so a name
+    /// carrying a leaked model-internal channel marker rebuilds exactly like any other
+    /// name: kept verbatim, nothing panics reading it.
+    #[test]
+    fn a_tool_name_carrying_a_leaked_channel_marker_rebuilds_without_panicking() {
+        let rebuilt = rebuild(
+            Runner::ClaudeCode,
+            LEAKED_CHANNEL_MARKER,
+            None,
+            ContentCapture::NoContent,
+        );
+
+        let leaked = tool(&rebuilt, "<|channel|>commentary<|message|>Bash");
+        assert_eq!(leaked.failure, Some(StepFailure::ToolError));
+    }
+
+    const TRUNCATED_TOOL_CALL: &[u8] = br#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"ls -la /very/long/path/that/got/cut/of
+{"type":"result","is_error":true,"duration_ms":500}
+"#;
+
+    /// A tool call's JSON arguments cut off mid-object never finishes the object on its
+    /// own line, so it fails `serde_json::from_str` and is skipped entirely rather than
+    /// opening a tool with no arguments or panicking on a line that is not valid JSON.
+    #[test]
+    fn a_tool_call_truncated_mid_object_is_dropped_rather_than_opening_a_tool() {
+        let rebuilt = rebuild(Runner::ClaudeCode, TRUNCATED_TOOL_CALL, None, ContentCapture::NoContent);
+
+        assert!(
+            rebuilt.steps.iter().all(|step| !step.is_tool()),
+            "a line that never finished its JSON object cannot have opened a tool"
+        );
+    }
+
+    // Case (c), the terminal event missing entirely, is already covered by
+    // `a_tool_cut_off_by_the_harness_exiting_ends_when_it_exited_and_is_unfinished` above:
+    // the stream simply stops, and the open tool ends at `StreamEnd::Exited` marked
+    // `StepFailure::Unfinished` rather than being left dangling or panicking.
 
     #[test]
     fn claude_code_chat_usage_is_each_messages_last_snapshot_and_never_reconciled_with_the_result_total() {
@@ -1248,5 +1408,55 @@ mod tests {
     #[test]
     fn an_unrecorded_parent_is_recognised() {
         assert!(!records(&Context::new()));
+    }
+
+    #[test]
+    fn claude_code_measures_turns_tools_results_and_the_heaviest_turn() {
+        let metrics = measure(Runner::ClaudeCode, CLAUDE);
+
+        assert_eq!(metrics.turns, TurnCount::new(3));
+        assert_eq!(metrics.tool_calls.get(), 2);
+        assert_eq!(metrics.peak_turn_input_tokens, Some(115));
+        let read = metrics.tools.iter().find(|tool| tool.tool == "Read").unwrap();
+        assert_eq!(read.largest_result_bytes.map(|bytes| bytes.get()), Some(10));
+    }
+
+    #[test]
+    fn a_tool_called_again_with_the_same_arguments_counts_as_repeated() {
+        let stdout = br#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"t1","name":"Grep","input":{"q":"x"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"[]"}]}}
+{"type":"assistant","message":{"id":"msg_2","content":[{"type":"tool_use","id":"t2","name":"Grep","input":{"q":"x"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"[]"}]}}
+"#;
+
+        let metrics = measure(Runner::ClaudeCode, stdout);
+
+        assert_eq!(metrics.repeated_tool_calls.get(), 1);
+    }
+
+    #[test]
+    fn codex_and_cursor_report_no_per_turn_input() {
+        assert_eq!(measure(Runner::Codex, CODEX).peak_turn_input_tokens, None);
+        assert_eq!(measure(Runner::Codex, CODEX).tool_calls.get(), 3);
+        assert_eq!(measure(Runner::CursorAgent, CURSOR).peak_turn_input_tokens, None);
+        assert_eq!(measure(Runner::CursorAgent, CURSOR).tool_calls.get(), 2);
+    }
+
+    #[test]
+    fn a_live_count_agrees_with_the_rebuilt_steps() {
+        for (runner, stdout) in [
+            (Runner::ClaudeCode, CLAUDE),
+            (Runner::Codex, CODEX),
+            (Runner::CursorAgent, CURSOR),
+        ] {
+            let rebuilt = rebuild(runner, stdout, None, ContentCapture::NoContent);
+            let mut live = LiveReconstruction::counting(runner, at(0));
+            for line in stdout.split(|byte| *byte == b'\n') {
+                live.observe_line(line, at(1));
+            }
+
+            assert_eq!(live.tool_calls(), rebuilt.tool_calls(), "{runner:?}");
+            assert_eq!(live.model_calls(), rebuilt.inference_calls(), "{runner:?}");
+        }
     }
 }

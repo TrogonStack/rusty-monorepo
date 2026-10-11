@@ -493,7 +493,7 @@ fn build_summary(report: &ReportDocument, report_dir: &Path) -> Result<BundleSum
     for run in report.runs.iter().filter(|run| run.split != EvalSplit::Test) {
         total_runs += 1;
         match run.status.as_str() {
-            "failed" => failed_runs += 1,
+            "failed" | "timeout" | "budget_exhausted" => failed_runs += 1,
             "skipped" => skipped_runs += 1,
             "completed" => completed_runs += 1,
             _ => {}
@@ -679,7 +679,7 @@ fn failed_run_ids(report_dir: &Path, report: &ReportDocument, groups: &[FailedAs
         .collect();
 
     for run in report.runs.iter().filter(|run| run.split != EvalSplit::Test) {
-        if run.status == "failed" {
+        if matches!(run.status.as_str(), "failed" | "timeout" | "budget_exhausted") {
             ids.insert(run.id.clone());
         }
         if run_has_failed_grading(report_dir, run) {
