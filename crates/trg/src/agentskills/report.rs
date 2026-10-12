@@ -734,6 +734,23 @@ impl RunRecord {
         self.grade_trace.as_ref()
     }
 
+    /// How this attempt counts toward its case's pass@k and pass^k, when it counts at all.
+    ///
+    /// A graded attempt counts by its own score. An attempt the harness failed, timed
+    /// out, or stopped at a cap never reached grading, yet it was a draw that did not
+    /// pass, so it counts as a failed attempt rather than vanishing from the rate, the
+    /// same reading the iteration summary gives it. A skipped or not yet graded attempt
+    /// counts as nothing.
+    pub fn k_attempt_outcome(&self) -> Option<bool> {
+        if let Some(score) = self.case_score {
+            return Some(score >= 1.0);
+        }
+        match self.status.as_str() {
+            "failed" | "timeout" | "budget_exhausted" => Some(false),
+            _ => None,
+        }
+    }
+
     /// The one way a run is recorded as never having reached the harness.
     pub fn not_started(&mut self, reason: RunNotStarted) {
         self.status = RUN_STATUS_SKIPPED.to_string();
@@ -1412,13 +1429,13 @@ pub fn recompute_scenario_summaries(document: &mut ReportDocument) {
             "failed" | "timeout" | "budget_exhausted" => entry.3 += 1,
             _ => {}
         }
-        if let Some(score) = run.case_score {
+        if let Some(passed) = run.k_attempt_outcome() {
             case_attempts
                 .entry(run.scenario_id)
                 .or_default()
                 .entry(run.eval_case_id.as_str())
                 .or_default()
-                .push(score >= 1.0);
+                .push(passed);
         }
     }
     for summary in document.summaries.by_scenario.iter_mut() {

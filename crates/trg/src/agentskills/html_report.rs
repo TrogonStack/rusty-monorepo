@@ -502,15 +502,10 @@ fn render_arm_group(arm: &ArmGroup<'_>, report_dir: &Path, gradings: &HashMap<&s
 }
 
 /// Whether this case's own attempts in this arm had at least one pass and whether they
-/// all passed, drawn from each attempt's own `case_score` rather than any new scoring
-/// decision. `None` when no attempt in this arm was graded yet.
+/// all passed, drawn from each attempt's own outcome rather than any new scoring
+/// decision. `None` when no attempt in this arm was graded or failed yet.
 fn render_case_k_outcome(arm: &ArmGroup<'_>) -> Option<String> {
-    let outcome = proportion::case_k_outcome(
-        arm.runs
-            .iter()
-            .filter_map(|run| run.case_score)
-            .map(|score| score >= 1.0),
-    )?;
+    let outcome = proportion::case_k_outcome(arm.runs.iter().filter_map(|run| run.k_attempt_outcome()))?;
     let (any_pass, all_pass) = outcome;
     Some(format!(
         "<p class=\"muted\">pass@k: {} &middot; pass^k: {}</p>\n",
@@ -1132,6 +1127,55 @@ mod tests {
 
         assert!(html.contains("pass@k: yes"));
         assert!(html.contains("pass^k: yes"));
+    }
+
+    /// A draw the harness stopped at a cap did not pass, so a case that passed once and
+    /// was then capped is not one where every attempt passed, in the HTML report as much
+    /// as in the iteration summary.
+    #[test]
+    fn a_capped_attempt_counts_against_pass_pow_k() {
+        let mut passed = minimal_run();
+        passed.case_score = Some(1.0);
+        let mut capped = minimal_run();
+        capped.case_score = None;
+        capped.status = "budget_exhausted".to_string();
+        let arm = ArmGroup {
+            scenario: ScenarioKind::WithSkill,
+            runs: vec![&passed, &capped],
+        };
+
+        let line = render_case_k_outcome(&arm).unwrap();
+
+        assert!(line.contains("pass@k: yes"), "{line}");
+        assert!(line.contains("pass^k: no"), "{line}");
+    }
+
+    /// The report's own scenario rates read a capped draw the same way the arm line does.
+    #[test]
+    fn recomputed_scenario_rates_count_a_capped_attempt_as_a_failed_draw() {
+        let mut document = minimal_document();
+        document.runs[0].case_score = Some(1.0);
+        let mut capped = minimal_run();
+        capped.eval_case_id = document.runs[0].eval_case_id.clone();
+        capped.case_score = None;
+        capped.status = "budget_exhausted".to_string();
+        document.runs.push(capped);
+        document.summaries.by_scenario.push(ScenarioSummary {
+            scenario_id: ScenarioKind::WithSkill,
+            total_runs: 0,
+            passed_runs: 0,
+            skipped_runs: 0,
+            failed_runs: 0,
+            pass_at_k: ScoredRate::default(),
+            pass_pow_k: ScoredRate::default(),
+        });
+
+        crate::agentskills::report::recompute_scenario_summaries(&mut document);
+
+        let summary = &document.summaries.by_scenario[0];
+        assert_eq!(summary.failed_runs, 1);
+        assert_eq!((summary.pass_at_k.successes, summary.pass_at_k.trials), (1, 1));
+        assert_eq!((summary.pass_pow_k.successes, summary.pass_pow_k.trials), (0, 1));
     }
 
     #[test]
