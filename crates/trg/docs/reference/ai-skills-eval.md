@@ -2118,7 +2118,7 @@ attempt; a case still ungraded counts toward neither.
 | `total_runs` | integer | Runs scaffolded for this scenario, across every case and attempt |
 | `passed_runs` | integer | Runs with `status: completed` |
 | `skipped_runs` | integer | Runs with `status: skipped` |
-| `failed_runs` | integer | Runs with `status: failed` |
+| `failed_runs` | integer | Runs with `status: failed`, `timeout`, or `budget_exhausted` |
 | `pass_at_k.successes` / `.trials` | integer | Cases with at least one passing attempt, out of cases that drew a graded attempt |
 | `pass_at_k.rate` | number or null | `successes / trials`, absent when `trials` is zero |
 | `pass_at_k.interval` | object or null | Wilson score interval around `rate`, absent alongside it |

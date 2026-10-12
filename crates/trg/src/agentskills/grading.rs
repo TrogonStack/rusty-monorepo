@@ -1348,8 +1348,19 @@ fn grade_with_llm(
 /// without billing a judge for it. `created_files` and `mock_calls` are listings rather
 /// than answers: an empty one is an observation an assertion may be about, so it is still
 /// put to the judge, as is a target that is missing, which already says why.
+///
+/// A `final_text` judge is also shown the files directly under `outputs/`, so a run that
+/// wrote its answer to a file and said nothing in its final message has still answered,
+/// and the judge gets to read it.
 fn blank_answer(target: &GradeTarget, declarative: &DeclarativeContext, ctx: &RunContext) -> Option<String> {
     if matches!(target, GradeTarget::CreatedFiles | GradeTarget::MockCalls) {
+        return None;
+    }
+    if matches!(target, GradeTarget::FinalText)
+        && collect_output_files(&ctx.outputs_dir, OutputScope::TopLevel)
+            .iter()
+            .any(|(_, text)| !text.trim().is_empty())
+    {
         return None;
     }
     match declarative.input(ctx).target_content(target) {
@@ -4585,6 +4596,31 @@ echo '{"passed": true, "evidence": "script verified workspace contents", "ration
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock,
             "no request may reach the judge for an empty answer"
+        );
+    }
+
+    /// A run that put its answer in a file and left the final message blank has still
+    /// answered, and the default judge is shown that file.
+    #[test]
+    fn an_empty_final_text_with_an_output_file_is_still_put_to_the_judge() {
+        let tmp = tempdir().unwrap();
+        let ctx = ctx_with_outputs(tmp.path());
+        let blank = declarative_context(" \n", "");
+
+        fs::write(ctx.outputs_dir.join("notes.txt"), "   \n").unwrap();
+        assert!(
+            blank_answer(&GradeTarget::FinalText, &blank, &ctx).is_some(),
+            "a blank output file is no more an answer than blank final text"
+        );
+
+        fs::write(ctx.outputs_dir.join("answer.md"), "The answer is in this file.").unwrap();
+        assert!(
+            blank_answer(&GradeTarget::FinalText, &blank, &ctx).is_none(),
+            "an output file with content is an answer the judge must read"
+        );
+        assert!(
+            blank_answer(&GradeTarget::AnyOutput, &blank, &ctx).is_none(),
+            "any_output already reads the file as part of the answer"
         );
     }
 

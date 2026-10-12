@@ -1240,6 +1240,7 @@ impl RunExecution<'_> {
             skill_staging: self.skill_staging,
             scaffold_hash,
             companion_hash,
+            caps: self.caps,
         };
         let reuse_input = ReuseKeyInput::of(&key_input);
         let cache_key = CacheKey::from_input(&key_input);

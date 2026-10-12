@@ -290,7 +290,8 @@ fn parse_cap(value: &str, what: &str) -> Result<NonZeroU32, String> {
 }
 
 /// The most tool calls one run may make before it is stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MaxToolCalls(NonZeroU32);
 
 impl MaxToolCalls {
@@ -314,7 +315,8 @@ impl fmt::Display for MaxToolCalls {
 }
 
 /// The most model turns one run may take before it is stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct MaxTurns(NonZeroU32);
 
 impl MaxTurns {
@@ -342,14 +344,16 @@ impl fmt::Display for MaxTurns {
 /// The pass-level [`CostCeiling`] only refuses runs it has not started yet, so a single
 /// run that loops on a tool or floods its context spends without limit until the clock
 /// ends it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunCaps {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<MaxToolCalls>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<MaxTurns>,
 }
 
 impl RunCaps {
-    pub fn is_unbounded(self) -> bool {
+    pub fn is_unbounded(&self) -> bool {
         self.tool_calls.is_none() && self.turns.is_none()
     }
 
