@@ -38,6 +38,9 @@
               "default": false,
               "type": "boolean"
             },
+            "normalize": {
+              "$ref": "#/$defs/TextNormalization"
+            },
             "pattern": {
               "$ref": "#/$defs/RegexPattern"
             },
@@ -74,6 +77,9 @@
               "default": false,
               "type": "boolean"
             },
+            "normalize": {
+              "$ref": "#/$defs/TextNormalization"
+            },
             "target": {
               "allOf": [
                 {
@@ -93,6 +99,56 @@
           "required": [
             "type",
             "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Is a name present as a whole token, rather than as part of a longer one?",
+          "properties": {
+            "case": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/MatchCase"
+                }
+              ],
+              "default": "sensitive"
+            },
+            "identifier": {
+              "$ref": "#/$defs/Identifier"
+            },
+            "max": {
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "min": {
+              "default": 1,
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "normalize": {
+              "$ref": "#/$defs/TextNormalization"
+            },
+            "target": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/GradeTarget"
+                }
+              ],
+              "default": "final_text"
+            },
+            "type": {
+              "const": "identifier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "identifier"
           ],
           "type": "object"
         },
@@ -205,6 +261,19 @@
             },
             "type": {
               "const": "skill_used",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Fails when the final text carries tool-call markup and the run made no\nreal tool call at all. Any real call passes it; the markup is not matched\nagainst the calls the run made.",
+          "properties": {
+            "type": {
+              "const": "no_fake_tool_calls",
               "type": "string"
             }
           },
@@ -686,6 +755,12 @@
       "exclusiveMinimum": 0.0,
       "type": "number"
     },
+    "Identifier": {
+      "description": "One token an `identifier` grader looks for as a whole name, so that\n`rubric` is not found inside `rubrics` or `getRubric`.",
+      "minLength": 1,
+      "pattern": "^\\S+$",
+      "type": "string"
+    },
     "MatchCase": {
       "enum": [
         "insensitive",
@@ -741,6 +816,11 @@
       "minLength": 1,
       "pattern": "\\S",
       "type": "string"
+    },
+    "TextNormalization": {
+      "default": true,
+      "description": "Whether a text grader compares text as the run wrote it, or folded first.\n\nFolding is the default because a model that writes `2.1.0-M1` with a\nnon-breaking hyphen, or quotes a phrase in curly quotes, has still written\nwhat the case asked for, and a check that fails on the typography reports\nthe font rather than the skill. Folding applies NFKC, then maps the hyphen\nand dash variants to `-` and the curly quotes to their ASCII forms.",
+      "type": "boolean"
     },
     "ToolGrant": {
       "description": "A named, finite set of tools a run's harness may use.\n\nNever parsed as empty: naming zero tools is not how an operator or a case denies\nevery gated tool, since a grant with nothing in it reads in a report exactly like a\ngrant nobody declared. [`ToolGrant::narrowed_by`] is the one place an empty set is\nlegitimate, because it answers \"what do both sides admit\", not \"what was declared\".",

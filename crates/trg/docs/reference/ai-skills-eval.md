@@ -54,6 +54,8 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `--attempts` | integer | *(unset, 3 draws)* | Draw each (case × scenario) cell this many times. Overrides any count a case pinned. See [How many times a cell is drawn](#how-many-times-a-cell-is-drawn) |
 | `--concurrency`, `-j` | integer | `1` | Execute this many runs at once, `1` to `8`. See [Running more than one run at a time](#running-more-than-one-run-at-a-time) |
 | `--max-cost-usd` | USD | *(unset)* | Refuse to start further runs once the pass has spent this many dollars. Accepts a finite amount greater than zero; a ceiling of zero or less could admit nothing and is refused, as is any ceiling over a runner that publishes no price. See [Bounding what a pass may spend](#bounding-what-a-pass-may-spend) |
+| `--max-tool-calls-per-run` | integer | *(unset)* | Stop a run once it makes more than this many tool calls, and record it as `budget_exhausted`. Accepts an integer greater than zero. See [Capping a run's tool calls and turns](#capping-a-runs-tool-calls-and-turns) |
+| `--max-turns-per-run` | integer | *(unset)* | Stop a run once it takes more than this many model turns, and record it as `budget_exhausted`. Accepts an integer greater than zero. See [Capping a run's tool calls and turns](#capping-a-runs-tool-calls-and-turns) |
 | `--no-cache` | bool | `false` | Execute every run instead of serving a completed one. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--reuse-completed` | bool | `false` | Serve any completed run for the same case and scenario, whatever model config produced it. See [Reusing a completed run](#reusing-a-completed-run) |
 | `--case` | glob | *(unset)* | Cover only the cases whose `id` matches. Repeatable. See [Covering part of a suite](#covering-part-of-a-suite) |
@@ -406,6 +408,12 @@ would otherwise carry them: the top-level stability lists (`always_pass`, `alway
 decide whether to keep or revert a change. See [Hillclimb a
 skill](../how-to/hillclimb-a-skill.md#the-rule).
 
+`tool_usage` lists, per scenario, every tool its measured runs called: how many of those
+runs called it, the calls and repeated calls summed across them, and the largest result any
+one call returned. `measured_runs` counts the runs that carried a
+[`transcript`](#what-a-runs-transcript-shows) breakdown. Scenarios with no measured run are
+left out, and `tool_usage` is absent when none was measured.
+
 ### Keep-or-revert verdict
 
 When `--previous` resolves to a prior iteration, `iteration-summary.json` carries a
@@ -423,7 +431,11 @@ into a verdict rather than left for the reader to eyeball:
   drives the verdict because it pools every scored assertion rather than collapsing a case
   with three assertions and one with one assertion to the same single vote a run pass rate
   would give them; the run pass-rate delta and its own interval are reported alongside each
-  verdict for context.
+  verdict for context, as are `pass_at_k_delta` and `pass_pow_k_delta` (and their
+  intervals) when either iteration drew more than one attempt per case: `pass_at_k` is the
+  fraction of cases where at least one attempt passed, best-of-N, and `pass_pow_k` is the
+  fraction where every attempt did, the matched aggregate `pass@k` is often mistaken for.
+  Both are absent when no case in either iteration drew a graded attempt.
 - `recommendation` is `keep` when the test split improved, `revert` when it regressed
   (checked before overfitting, since a held-out regression is reason enough on its own),
   `suspected_overfitting` when train improved while a measured (`indistinguishable`) test
@@ -1130,7 +1142,7 @@ Validated before `run` executes. Unknown fields are rejected.
 | `name` | string | no | Non-empty. For humans reading a report; `id` remains the key |
 | `description` | string | no | Non-empty. For humans reading a report |
 | `prompt` | string | yes | Non-empty |
-| `expected_output` | string | yes | Non-empty reference output for graders |
+| `expected_output` | string | yes | Non-empty reference output for graders. Every `llm` grader sends it to the judge as ground truth. See [What the judge is shown](#what-the-judge-is-shown) |
 | `files` | (string \| object)[] | no | Relative paths inside the skill directory, staged into the run workspace. A bare string is writable; an object names `path` and `mode` (`writable`, the default, or `read_only`). See [Read-only fixtures](#read-only-fixtures) |
 | `graders` | object[] | no | Typed checks (see below) |
 | `skill_disclosure` | enum | no | `announced` (default) or `unannounced`. See [Measuring triggering](#measuring-triggering) |
@@ -1326,12 +1338,14 @@ every reader and to every runner.
 
 | `type` | Fields | Checks |
 | ------ | ------ | ------ |
-| `regex` | `pattern`, `target`, `negate`, `flags`, `count` | The target matches the pattern. Invalid patterns are rejected at manifest parse time |
-| `contains` | `text`, `target`, `case`, `negate` | The target contains the text. `case` is `insensitive` (default) or `sensitive` |
+| `regex` | `pattern`, `target`, `negate`, `flags`, `count`, `normalize` | The target matches the pattern. Invalid patterns are rejected at manifest parse time. The target and the pattern are folded first unless `normalize` is `false`; see [Unicode folding](#unicode-folding) |
+| `contains` | `text`, `target`, `case`, `negate`, `normalize` | The target contains the text. `case` is `insensitive` (default) or `sensitive`. Both sides are folded first unless `normalize` is `false`; see [Unicode folding](#unicode-folding) |
+| `identifier` | `identifier`, `target`, `case`, `normalize`, `min`, `max` | The target names the identifier as a whole token, between `min` (default 1) and `max` (default unbounded) times. `case` is `sensitive` (default) or `insensitive`. See [Matching an identifier as a whole token](#matching-an-identifier-as-a-whole-token) |
 | `file_exists` | `path`, `exists` | The run produced a file at `path`, which may be a glob. `exists` defaults to `true`; set it to `false` to assert that nothing matches |
 | `tool_used` | `tool`, `input_match`, `min_calls`, `max_calls` | The transcript shows between `min_calls` (default 1) and `max_calls` (default unbounded) calls to the tool, inclusive. With `input_match`, only the calls that named a value matching that pattern are counted |
 | `tool_order` | `tools`, or `before`/`after` | The observed tool sequence contains the listed tools in order, as a subsequence; or, with `before`/`after`, some call to `before` precedes some later call to `after` |
 | `skill_used` | `negate` | The run engaged the skill, by a native skill tool call naming the staged skill or by reading the staged skill directory |
+| `no_fake_tool_calls` | none | Fails only when the final text carries tool-call markup and the run made no real tool call at all. See [Catching tool calls written out as text](#catching-tool-calls-written-out-as-text) |
 | `llm` | `criterion`, `target` | Handed to the LLM judge, which is the only grader that costs a request |
 | `valid_json` | `target` | The target parses as JSON. Evidence carries the line and column of the first parse error |
 | `schema_validation` | `schema`, `target` | The target parses as JSON and validates against the named JSON Schema document. `schema` is a relative path inside the skill directory, resolved the same way `files` and `scaffold` are |
@@ -1544,6 +1558,105 @@ Without `count`, `regex` keeps checking for presence, as it always has.
 `negate` without a `count` means, so `count: 0` would only be a second way to
 write the same check and is rejected when the manifest is parsed.
 
+### Unicode folding
+
+Models write the same text with different code points: `2.1.0-M1` with a
+non-breaking hyphen (U+2011), a quote in curly quotes, a figure in full-width
+digits, or a phrase wrapped across a line break. A `contains` check written
+with ASCII would fail on every one of those, and the failure would be about
+typography rather than about the skill.
+
+So `contains`, `regex`, and `identifier` fold the text before they compare it:
+
+- Unicode NFKC normalization, which turns compatibility forms such as
+  full-width letters, ligatures, and the non-breaking space into their plain
+  equivalents.
+- The hyphen and dash variants U+2010, U+2011, U+2012, U+2013, U+2014, U+2015,
+  and the minus sign U+2212 become `-`.
+- The curly single quotes U+2018, U+2019, U+201A, and U+201B become `'`, and
+  the curly double quotes U+201C, U+201D, U+201E, and U+201F become `"`.
+- For `contains` and `identifier`, every run of whitespace, line breaks
+  included, becomes one space. `regex` keeps whitespace as written, so `^`,
+  `$`, and `\n` still mean what the pattern says.
+
+`regex` folds its pattern the same way as the target, so a pattern written with
+an em dash or a curly quote still finds one. A character the pattern only names
+through an escape, such as `\u{2014}`, is not folded and so never matches
+folded text; write it literally, or set `normalize` to `false`. A pattern that
+no longer compiles once folded is an authoring error.
+
+`contains` and `identifier` fold the text they look for as well as the target,
+unless that text itself carries a character folding would rewrite. A check for
+an em dash or a curly quote is asking about that character, so it is matched
+exactly: a negated `contains` for an em dash passes on text that only has ASCII
+hyphens.
+
+Byte offsets in evidence count into the text that was searched. Whenever that
+is not the target as written, the evidence says so, for example `at byte 12 of
+the folded text` or `of the lowercased text`.
+
+Set `normalize` to `false` to compare the text exactly as written, which is
+what a check about the typography itself needs:
+
+```json
+{ "type": "contains", "text": "2.1.0-M1", "normalize": false }
+```
+
+### Matching an identifier as a whole token
+
+`contains` finds `rubric` inside `rubrics` and, without `case`, inside
+`getRubric`, which is the wrong answer when the case asks whether the run named
+one specific symbol. `identifier` looks for the identifier as a whole token:
+where it starts or ends with a letter, digit, or underscore, the text on that
+side must not carry on with another one. That is the rule a regex `\b` applies,
+without having to escape the identifier into a pattern.
+
+```json
+{ "type": "identifier", "identifier": "Fact.member" }
+```
+
+That passes on `use Fact.member(x)` and fails on `Fact.members`. Unlike
+`contains`, `case` defaults to `sensitive`, because identifiers usually are.
+`min` and `max` bound the number of whole-token occurrences with the same rules
+`tool_used` applies to `min_calls` and `max_calls`, so "never named" is
+written as:
+
+```json
+{ "type": "identifier", "identifier": "deprecatedHelper", "min": 0, "max": 0 }
+```
+
+The identifier is one token, so whitespace in it is rejected when the manifest
+is parsed; a phrase belongs in `contains`.
+
+### Catching tool calls written out as text
+
+A model that has no tools, or ignores the ones it has, can write a tool call
+into its reply as markup, such as `<tool>web_search</tool>`, and then go on to
+invent the results. Every text check reads that as a normal answer.
+`no_fake_tool_calls` fails it:
+
+```json
+{ "type": "no_fake_tool_calls" }
+```
+
+The grader looks for tool-call markup in the final text, case-insensitively:
+`<tool>`, `<tool_call`, `<tool_use`, `<tool_code`, `<tool_response`,
+`<tool_result`, `<function_call`, `<function=`, `<invoke`, `<|channel|>`,
+`<|tool_call`, `<|python_tag|>`, `[TOOL_CALLS]`, and fenced blocks opened as
+`tool_call`, `tool_code`, `tool_use`, or `function_call`.
+
+- No markup: the grader passes, whatever the transcript says.
+- Markup, and the transcript records at least one real tool call: the grader
+  passes, because the run did reach for its tools and the markup may be the
+  model describing them. The markup is not matched against the calls the run
+  made, so one real call passes it however many calls the text claims.
+- Markup, and the transcript records no tool call: the grader fails.
+- Markup, and the runner does not expose its tool calls: the result is
+  unsupported, since whether a real call backed the markup cannot be read.
+
+A skill whose output is meant to contain tool-call markup, such as one that
+documents a tool-calling format, should not declare this grader.
+
 ### Stating that a tool or the skill must not be reached for
 
 A skill that answers a prompt it was never meant to answer is as much a defect
@@ -1599,7 +1712,8 @@ to its tool. `tools` and `before`/`after` are mutually exclusive, and
 
 ### Graders that depend on the transcript
 
-`tool_used`, `tool_order`, and `skill_used` read the normalized transcript.
+`tool_used`, `tool_order`, and `skill_used` read the normalized transcript, and
+so does `no_fake_tool_calls` once it finds markup.
 `claude-code`, `codex`, and `cursor-agent` all expose their tool calls, so all
 three answer these graders. When a runner emits no readable stream at all, the
 result is recorded as **unsupported**: neither passed nor failed, and excluded
@@ -1696,13 +1810,30 @@ are both ordinary. Under `--grader auto` a suite of typed graders needs no
 credential at all, and the endpoint is resolved once up front so a missing
 credential is reported before any run is graded.
 
+A judge tends to rate output from its own model family more kindly, so when the
+judge model and a graded run's model belong to the same family (`claude`,
+`gpt`, `gemini`, `llama`, `mistral`, `grok`, `deepseek`, or `qwen`, read from
+the model identifier), `grade` prints a `WARN:` line and records the match as
+`judge_independence` in its JSON output. A run that left the model to
+`claude-code` or `codex` counts as that harness's default family. The warning
+never fails the pass: a same-family judge is sometimes the only one available,
+and the warning says how much weight its verdicts carry.
+
 #### What the judge is shown
 
+A judge shown only the run's output grades whether the output sounds right,
+not whether it answers the question, so every payload also carries the case's
+`prompt` and its `expected_output`. The system prompt tells the judge to read
+the run's material as an answer to `prompt`, to treat `expected_output` as
+ground truth wherever the two disagree on a fact, and to accept an answer that
+leaves out something `expected_output` covers unless the assertion itself
+requires it.
+
 A prose assertion, and an `llm` grader that does not declare `target`, get the
-default `final_text` payload, unchanged from before `target` existed:
+default `final_text` payload:
 
 ```json
-{ "assertion": "...", "final_text": "...", "outputs": { "<name>": "..." } }
+{ "assertion": "...", "prompt": "...", "expected_output": "...", "final_text": "...", "outputs": { "<name>": "..." } }
 ```
 
 `any_output` gets the same shape, and now the same scope: `outputs` walks
@@ -1715,8 +1846,16 @@ way. `transcript`, `{"file": ...}`, `{"files": ...}`, `created_files`, and
 is no longer implicitly looking at the run's output:
 
 ```json
-{ "assertion": "...", "target": "transcript", "content": "..." }
+{ "assertion": "...", "prompt": "...", "expected_output": "...", "target": "transcript", "content": "..." }
 ```
+
+An answer that is empty or only whitespace fails its `llm` assertion without a
+judge being asked, with evidence naming the empty target, since a judge shown
+nothing still returns a verdict and a lenient one passes assertions that read
+as satisfied by saying nothing. This applies to `final_text`, `any_output`
+(the final text and every output file together), `transcript`, `{"file": ...}`,
+and `{"files": ...}`. An empty `created_files` or `mock_calls` listing is an
+observation an assertion may be about, so it is still put to the judge.
 
 A target that resolves to nothing (a named file the run never wrote) reports
 why instead of sending an empty string:
@@ -1752,6 +1891,13 @@ reported via an `artifacts_omitted` field rather than passing silently. A
 transcript keeps its tail and drops its head, since the run's outcome and its
 most recent tool calls sit at the end; every other target keeps its head and
 drops its tail.
+
+`prompt` and `expected_output` share the same 8,000 bytes, but the run's
+answer is what is being graded, so it has first claim. Each of the two keeps
+up to its first 1,000 bytes whatever the run produced, the run's artifacts
+share the rest, and whatever they leave unspent goes to `expected_output` and
+then to `prompt`. A brief cut short carries the same `[truncated after N
+bytes]` marker. The assertion is never truncated.
 
 A transcript's cut falls between messages, not through one: it is line-delimited,
 one message per line, so an oversized transcript keeps whole messages from the
@@ -1918,10 +2064,10 @@ other field forward as declared there, including `name`, `excluded`,
 | `runner_model_source` | enum | Where `runner_model` came from: `case` (the eval case pinned one), `runner_flag` (`--runner-model` decided it), or `runner_default` (neither named one, so the harness chose; no runner reports that choice back). Absent until the run resolves against a runner |
 | `skill_revision_id` | string | Always `current` today |
 | `attempt` | integer | Which draw of the cell this run is, `1..N` for `--attempts N` |
-| `status` | string | `skipped`, `completed`, or `failed` |
+| `status` | string | `skipped`, `completed`, `failed`, `timeout`, or `budget_exhausted`. See [Timeouts](#timeouts) and [Capping a run's tool calls and turns](#capping-a-runs-tool-calls-and-turns) |
 | `paths.workspace` | string | Relative path to the run workspace |
 | `artifacts` | array | Artifact descriptors (transcript when runner completes, `mock_calls` when the case declares mcp mocks) |
-| `metrics` | object | `duration_ms`, token counts, and `cost` (populated by runner). See [Artifact: `timing.json`](#artifact-timingjson) for what `total_tokens` and `cached_tokens` mean, and [What a run cost](#what-a-run-cost) for `cost` |
+| `metrics` | object | `duration_ms`, token counts, and `cost` (populated by runner). See [Artifact: `timing.json`](#artifact-timingjson) for what `total_tokens` and `cached_tokens` mean, [What a run cost](#what-a-run-cost) for `cost`, and [What a run's transcript shows](#what-a-runs-transcript-shows) for `transcript` |
 | `skill_integrity` | object | Tamper detection result (when runner used) |
 | `read_only_fixture_violations` | string[] | Paths of read-only fixtures whose staged copy no longer matched its source after the run (when runner used). See [Read-only fixtures](#read-only-fixtures) |
 | `warnings` | string[] | Run-level anomalies that do not fail the run on their own, such as a read-only fixture that changed, an expected output that was never written, a path reached outside the workspace, or a usage field the harness wrote in a shape that is not a token count. Also carries the reason a run that was never started was skipped |
@@ -1941,6 +2087,42 @@ Run ordering: eval cases in manifest order, then scenarios in flag order.
 | `parameters` | object | Reserved for parameters a future runner reports back; empty today |
 | `parameter_sources` | object | Reserved alongside `parameters`; empty today |
 | `extra` | object | Reserved for fields not yet modeled; empty today |
+
+### `summaries.by_scenario[]` record
+
+One entry per scenario arm, rolling up every run in that arm.
+
+`pass_at_k` and `pass_pow_k` read a case's own attempts rather than a run's:
+a case with `--attempts N` draws N attempts, and the two rates disagree on
+what one case gets to count as. `pass_at_k` is the fraction of cases where at
+least one attempt passed, best-of-N. `pass_pow_k` is the fraction where every
+attempt passed, the matched aggregate `pass@k` is often mistaken for at N
+greater than one. Both report over cases that drew at least one graded
+attempt; a case still ungraded counts toward neither.
+
+```json
+{
+  "scenario_id": "with_skill",
+  "total_runs": 8,
+  "passed_runs": 6,
+  "skipped_runs": 0,
+  "failed_runs": 2,
+  "pass_at_k": { "successes": 4, "trials": 4, "rate": 1.0, "interval": { "low": 0.5307, "high": 1.0 } },
+  "pass_pow_k": { "successes": 2, "trials": 4, "rate": 0.5, "interval": { "low": 0.1497, "high": 0.8503 } }
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `scenario_id` | enum | `with_skill`, `without_skill`, or `old_skill` |
+| `total_runs` | integer | Runs scaffolded for this scenario, across every case and attempt |
+| `passed_runs` | integer | Runs with `status: completed` |
+| `skipped_runs` | integer | Runs with `status: skipped` |
+| `failed_runs` | integer | Runs with `status: failed`, `timeout`, or `budget_exhausted` |
+| `pass_at_k.successes` / `.trials` | integer | Cases with at least one passing attempt, out of cases that drew a graded attempt |
+| `pass_at_k.rate` | number or null | `successes / trials`, absent when `trials` is zero |
+| `pass_at_k.interval` | object or null | Wilson score interval around `rate`, absent alongside it |
+| `pass_pow_k.successes` / `.trials` / `.rate` / `.interval` | same as above | Same shape as `pass_at_k`, counting cases where every attempt passed |
 
 ---
 
@@ -2081,6 +2263,28 @@ where a run's other anomalies are read.
 
 Token counts and duration are also copied into `report.json` run metrics after
 the runner completes.
+
+### What a run's transcript shows
+
+A token total says a run was expensive, not why. `metrics.transcript` breaks a
+run down by what its harness did, read back from the run's own transcript once
+the run ends:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `turns` | integer | Model turns the run took |
+| `tool_calls` | integer | Tool calls the run made, across every tool |
+| `repeated_tool_calls` | integer | Calls with the same tool and arguments as an earlier call in the same run. A call whose arguments the harness did not record is never counted as a repeat |
+| `peak_turn_input_tokens` | integer | The most input tokens any single turn sent, cache reads and writes included. Absent for `codex`, whose usage covers every model call in a turn at once, and for `cursor-agent`, which reports none |
+| `tools[]` | array | One entry per tool the run called, ordered by tool name: `tool`, `calls`, `repeated_calls`, and `largest_result_bytes`, the size of the largest result that tool handed back. `largest_result_bytes` is absent when no call to the tool reported a result |
+
+Result sizes are measured from the transcript as persisted, after secrets are
+redacted from it, so a result that carried a secret reads a few bytes off. A run
+that never executed, and a run written before this field existed, carry no
+`transcript`.
+
+`eval iteration-summary` totals these per scenario under `tool_usage`, and the
+HTML report tables them per scenario and per run.
 
 ### What a run cost
 
@@ -2903,7 +3107,7 @@ that cell is only honoured under `--environment isolated`.
 | Control | `claude-code` | `codex` | `cursor-agent` |
 | ------- | ------------- | ------- | -------------- |
 | tool allowlist | `--allowedTools` | no | no |
-| turn cap | no | no | no |
+| turn cap | `--max-turns` | no | no |
 | system prompt append | `--append-system-prompt` | no | no |
 | mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | `config.toml` in `$CODEX_HOME` | no |
 | sandbox levels | `--permission-mode` | `-s` | `--force` |
@@ -2911,6 +3115,9 @@ that cell is only honoured under `--environment isolated`.
 | conversation seeding | no | no | no |
 | run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no |
 | cost reporting | reported | no | no |
+
+`--max-turns` is the one driven flag a harness leaves out of its own `--help`:
+`claude` accepts it and rejects an unknown option, which is what was checked.
 
 `cursor-agent` accepts a sandbox level, but `--force` is its only documented
 non-interactive grant: both of trg's permission grants collapse onto that one
@@ -3071,6 +3278,35 @@ is neither, and exits `0`: it did every run and paid what it said it would.
 A genuine assertion or grading failure still exits `1`, which wins over `2`, so
 a budget stop is not allowed to hide a suite that also failed on its merits. See [Exit codes](#exit-codes) and the `budget` field of
 [`report.json`](#artifact-reportjson).
+
+---
+
+## Capping a run's tool calls and turns
+
+`--max-cost-usd` bounds a pass, not a run, and a single run can spend the whole
+ceiling looping on one search. `--max-tool-calls-per-run` and
+`--max-turns-per-run` bound each run on its own. A run that goes past either cap
+is stopped and recorded with `status: budget_exhausted` and a `failure_kind` of
+`tool_call_cap` or `turn_cap`, naming the cap it crossed. Landing exactly on a
+cap is not crossing it.
+
+| Cap | `claude-code` | `codex` | `cursor-agent` |
+| --- | ------------- | ------- | -------------- |
+| tool calls | stopped by trg | stopped by trg | stopped by trg |
+| turns | `--max-turns` | stopped by trg | stopped by trg |
+
+Where the harness enforces a cap itself, trg passes it through and leaves the
+run alone. Everywhere else trg counts the calls and turns as the harness streams
+them and stops the run, the same way a timeout does, once the stream shows the
+one past the cap. A run trg stopped reports its tokens as unreported and its
+cost as unpriced, because the harness never wrote the summary they come from. A
+`claude-code` run stopped by its own `--max-turns` keeps both. `codex` streams no
+event per model call, so its turns are inferred from the gaps between its tool
+calls, and the count can differ from what `codex` itself would call a turn.
+
+A capped run is never retried by `--retries`: going past a cap is a property of
+the run, not a failure in transit. It is graded as a run that did not complete,
+and it does not change the exit code on its own, unlike `--max-cost-usd`.
 
 ---
 

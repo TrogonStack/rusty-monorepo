@@ -149,7 +149,7 @@ pub fn collect_report_metrics(report_dir: &Path) -> Result<ReportMetrics, EvalEr
     for run in &runs {
         metrics.total_runs += 1;
         match run.status.as_str() {
-            "failed" => metrics.failed_runs += 1,
+            "failed" | "timeout" | "budget_exhausted" => metrics.failed_runs += 1,
             "skipped" => metrics.skipped_runs += 1,
             "completed" => metrics.completed_runs += 1,
             _ => {}
@@ -1260,6 +1260,7 @@ mod tests {
                     output_tokens: Some(metrics.output_tokens),
                     cached_tokens: None,
                     cost: None,
+                    transcript: None,
                 },
                 cache: None,
                 skill_integrity: None,

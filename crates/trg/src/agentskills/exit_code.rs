@@ -40,7 +40,9 @@ pub enum ExitCode {
     /// code that means the skill is what to go and look at.
     GateFailed,
 
-    /// The cost ceiling refused a run, or spend went strictly past it.
+    /// The cost ceiling refused a run, or spend went strictly past it. A run stopped by
+    /// `--max-tool-calls-per-run` or `--max-turns-per-run` is not this: it is a run that
+    /// did not complete, and lands wherever the gates put it.
     BudgetExhausted,
 
     /// The tool could not do its job, so nothing was learned about the skill either way.

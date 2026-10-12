@@ -10,7 +10,9 @@ use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
 use tracing::field::Empty;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::agentskills::budget::{Admission, CostCeiling, CostLedger, FAILURE_KIND_BUDGET};
+use crate::agentskills::budget::{
+    Admission, CostCeiling, CostLedger, MaxToolCalls, MaxTurns, RunCaps, FAILURE_KIND_BUDGET,
+};
 use crate::agentskills::cache::{
     apply_cache_hit, compute_fixture_hash, record_completion, runner_kind_label, try_resolve_cache, CacheKey,
     CacheKeyInput, CacheOptions, ReuseKeyInput, PROMPT_CONTRACT_VERSION,
@@ -35,14 +37,14 @@ use crate::agentskills::model_name::ModelName;
 use crate::agentskills::outputs::index_output_artifacts;
 use crate::agentskills::permission_outcome::PermissionOutcome;
 use crate::agentskills::report::{
-    build_report_bundle, recompute_model_capture_status, write_report_bundle, BudgetReport, BuildReportOptions,
-    EnvironmentPolicy, PermissionGrant, ReportBundle, RunNotStarted, RunRecord, ScenarioKind, SkillIntegrityReport,
-    SkillStaging, WriteReportOptions,
+    build_report_bundle, recompute_model_capture_status, recompute_scenario_summaries, write_report_bundle,
+    BudgetReport, BuildReportOptions, EnvironmentPolicy, PermissionGrant, ReportBundle, RunNotStarted, RunRecord,
+    ScenarioKind, SkillIntegrityReport, SkillStaging, WriteReportOptions,
 };
 use crate::agentskills::runner::capabilities::{ControlSupport, HarnessControl};
 use crate::agentskills::runner::{
-    availability, compute_skill_digest, detect_tampering, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
-    SkillDigest, TelemetryForwarding,
+    availability, compute_skill_digest, detect_tampering, measure_transcript, EvalRunOutcome, EvalRunRequest, Runner,
+    RunnerError, SkillDigest, TelemetryForwarding,
 };
 use crate::agentskills::sampling::AttemptCount;
 use crate::agentskills::scenario_selection::ScenarioSelection;
@@ -203,6 +205,20 @@ pub struct RunArgs {
         help = "Refuse to start further runs once the pass has spent this many US dollars. The ledger is checked before each run starts, so a pass can still overshoot by whatever the runs already in flight cost. Only the claude-code runner reports cost today, so this ceiling never binds a codex or cursor-agent pass"
     )]
     pub max_cost_usd: Option<CostCeiling>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Stop a run once it makes more than N tool calls and record it as budget_exhausted. Every runner is stopped by trg killing the harness when its stream shows the call that went past the cap"
+    )]
+    pub max_tool_calls_per_run: Option<MaxToolCalls>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Stop a run once it takes more than N model turns and record it as budget_exhausted. claude-code enforces this itself through --max-turns; codex and cursor-agent are killed when their stream shows the turn that went past the cap, and codex turns are inferred from the gaps between its tool calls"
+    )]
+    pub max_turns_per_run: Option<MaxTurns>,
 
     #[arg(
         long,
@@ -556,6 +572,10 @@ impl RunArgs {
                 TelemetryForwarding::requested(self.forward_telemetry),
                 self.concurrency,
                 cost_ledger,
+                RunCaps {
+                    tool_calls: self.max_tool_calls_per_run,
+                    turns: self.max_turns_per_run,
+                },
             )?;
             budget_exhausted = runs_skipped > 0 || cost_ledger.overspent();
         }
@@ -717,6 +737,7 @@ fn execute_runs(
     telemetry_forwarding: TelemetryForwarding,
     concurrency: RunConcurrency,
     cost_ledger: &CostLedger,
+    caps: RunCaps,
 ) -> std::result::Result<usize, ExitCode> {
     let eval_dir = bundle.document.suite.eval_dir.clone();
     let (skill_md, old_skill_md, suite) = step("load run inputs", || {
@@ -773,6 +794,7 @@ fn execute_runs(
         evals_hash: bundle.document.suite.evals_hash.clone(),
         eval_dir,
         cost_ledger,
+        caps,
     };
     tracing::info_span!(
         "eval step",
@@ -783,7 +805,7 @@ fn execute_runs(
     .in_scope(|| execution.execute_all(&mut bundle.document.runs, concurrency));
 
     step("rewrite report", || {
-        rebuild_summaries(&mut bundle);
+        recompute_scenario_summaries(&mut bundle.document);
         recompute_model_capture_status(&mut bundle.document);
 
         let runs_skipped = bundle
@@ -854,6 +876,7 @@ struct RunExecution<'a> {
     evals_hash: String,
     eval_dir: EvalDirName,
     cost_ledger: &'a CostLedger,
+    caps: RunCaps,
 }
 
 impl RunExecution<'_> {
@@ -1062,7 +1085,7 @@ impl RunExecution<'_> {
         if let Some(grant) = &run.tool_grant {
             span.record(EVAL_TOOL_GRANT, grant.to_string().as_str());
         }
-        if run.status == "failed" {
+        if matches!(run.status.as_str(), "failed" | "timeout" | "budget_exhausted") {
             record_failure(&span, run.failure_kind.as_deref().unwrap_or(RUN_FAILED));
         }
         record_run(run);
@@ -1217,6 +1240,7 @@ impl RunExecution<'_> {
             skill_staging: self.skill_staging,
             scaffold_hash,
             companion_hash,
+            caps: self.caps,
         };
         let reuse_input = ReuseKeyInput::of(&key_input);
         let cache_key = CacheKey::from_input(&key_input);
@@ -1286,6 +1310,7 @@ impl RunExecution<'_> {
             eval_dir: self.eval_dir.clone(),
             mcp_config,
             telemetry_forwarding: self.telemetry_forwarding,
+            caps: self.caps,
         };
 
         let digest_before = match integrity {
@@ -1357,7 +1382,8 @@ impl RunExecution<'_> {
                     &stderr_path,
                     self.report_dir,
                     &workspace_dir,
-                )
+                );
+                run.metrics.transcript = measure_transcript(self.runner, &transcript_path);
             });
         }
         run.runner_invocations = invocations;
@@ -1918,37 +1944,164 @@ fn artifact_relative_path(path: &Path, report_dir: &Path) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
-fn rebuild_summaries(bundle: &mut ReportBundle) {
-    let mut counts: HashMap<ScenarioKind, (usize, usize, usize, usize)> = HashMap::new();
-    for run in &bundle.document.runs {
-        let entry = counts.entry(run.scenario_id).or_insert((0, 0, 0, 0));
-        entry.0 += 1;
-        match run.status.as_str() {
-            "completed" => entry.1 += 1,
-            "skipped" => entry.2 += 1,
-            "failed" | "timeout" => entry.3 += 1,
-            _ => {}
-        }
-    }
-    for summary in bundle.document.summaries.by_scenario.iter_mut() {
-        if let Some((total, passed, skipped, failed)) = counts.get(&summary.scenario_id) {
-            summary.total_runs = *total;
-            summary.passed_runs = *passed;
-            summary.skipped_runs = *skipped;
-            summary.failed_runs = *failed;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::evals::EvalSplit;
+    use crate::agentskills::proportion::ScoredRate;
     use crate::agentskills::redact::redact_transcript_bytes;
-    use crate::agentskills::report::ScenarioKind;
+    use crate::agentskills::report::{
+        DimensionsSection, ProducerSection, ReportDocument, ReportSection, RunMetrics, RunPaths, ScenarioKind,
+        ScenarioSummary, SuiteSection, SummariesSection,
+    };
     use crate::agentskills::transcript::{
         ToolName, ToolVisibility, TranscriptFormat, WorkspaceBoundary, WorkspaceEscape,
     };
     use std::path::{Path, PathBuf};
+
+    fn case_run(
+        run_id: &str,
+        eval_case_id: &str,
+        scenario: ScenarioKind,
+        attempt: u32,
+        case_score: Option<f64>,
+    ) -> RunRecord {
+        RunRecord {
+            runner_model: None,
+            runner_model_source: None,
+            id: run_id.to_string(),
+            eval_case_id: eval_case_id.to_string(),
+            eval_slug: eval_case_id.to_string(),
+            split: EvalSplit::Train,
+            scenario_id: scenario,
+            iteration: 1,
+            model_config_id: "default".to_string(),
+            skill_revision_id: "current".to_string(),
+            attempt,
+            status: "completed".to_string(),
+            runner_invocations: 1,
+            failure_kind: None,
+            paths: RunPaths {
+                workspace: format!("runs/{run_id}/workspace"),
+                outputs: format!("runs/{run_id}/workspace/outputs"),
+            },
+            mirror_path: format!("iteration-1/{eval_case_id}/{}/", scenario.as_str()),
+            tool_grant: None,
+            artifacts: Vec::new(),
+            metrics: RunMetrics::default(),
+            cache: None,
+            skill_integrity: None,
+            read_only_fixture_violations: Vec::new(),
+            warnings: Vec::new(),
+            mock_violations: Vec::new(),
+            case_score,
+            trace: None,
+            grade_trace: None,
+        }
+    }
+
+    fn bundle_with_runs(runs: Vec<RunRecord>, scenarios: &[ScenarioKind]) -> ReportBundle {
+        ReportBundle {
+            report_id: "report-1".to_string(),
+            skill_name: "demo-skill".to_string(),
+            workspace_dirs: Vec::new(),
+            document: ReportDocument {
+                report: ReportSection {
+                    id: "report-1".to_string(),
+                    generated_at: "2026-01-01T00:00:00Z".to_string(),
+                    iteration: 1,
+                    producer: ProducerSection {
+                        name: "trg".to_string(),
+                        version: "0.0.0".to_string(),
+                    },
+                    runner: None,
+                    runner_binary: None,
+                    runner_version: None,
+                    environment: Default::default(),
+                    permission: Default::default(),
+                    allowed_tools: None,
+                    telemetry_forwarding: TelemetryForwarding::Off,
+                    ci: None,
+                    trace: None,
+                },
+                suite: SuiteSection {
+                    skill_name: "demo-skill".to_string(),
+                    skill_path: "demo-skill".to_string(),
+                    skill_hash: "sha256:abc".to_string(),
+                    evals_path: "demo-skill/evals/evals.json".to_string(),
+                    evals_hash: "sha256:def".to_string(),
+                    eval_dir: Default::default(),
+                    old_skill_path: None,
+                    old_skill_hash: None,
+                    case_selection: None,
+                },
+                dimensions: DimensionsSection {
+                    eval_cases: Vec::new(),
+                    assertions: Vec::new(),
+                    skill_revisions: Vec::new(),
+                    model_configs: Vec::new(),
+                    scenarios: Vec::new(),
+                    grading_strategies: Vec::new(),
+                },
+                runs,
+                assertion_results: Vec::new(),
+                summaries: SummariesSection {
+                    by_scenario: scenarios
+                        .iter()
+                        .map(|scenario| ScenarioSummary {
+                            scenario_id: *scenario,
+                            total_runs: 0,
+                            passed_runs: 0,
+                            skipped_runs: 0,
+                            failed_runs: 0,
+                            pass_at_k: ScoredRate::default(),
+                            pass_pow_k: ScoredRate::default(),
+                        })
+                        .collect(),
+                    human_feedback: None,
+                },
+                improvement_feedback: Vec::new(),
+                comparisons: Vec::new(),
+                iteration_summary: None,
+                budget: None,
+            },
+        }
+    }
+
+    #[test]
+    fn rebuild_summaries_separates_pass_at_k_from_pass_pow_k() {
+        let runs = vec![
+            case_run("run-001", "alpha", ScenarioKind::WithSkill, 1, Some(1.0)),
+            case_run("run-002", "alpha", ScenarioKind::WithSkill, 2, Some(0.0)),
+            case_run("run-003", "beta", ScenarioKind::WithSkill, 1, Some(1.0)),
+            case_run("run-004", "beta", ScenarioKind::WithSkill, 2, Some(1.0)),
+        ];
+        let mut bundle = bundle_with_runs(runs, &[ScenarioKind::WithSkill]);
+
+        recompute_scenario_summaries(&mut bundle.document);
+
+        let summary = &bundle.document.summaries.by_scenario[0];
+        assert_eq!(summary.pass_at_k.successes, 2);
+        assert_eq!(summary.pass_at_k.trials, 2);
+        assert_eq!(summary.pass_at_k.rate, Some(1.0));
+        assert_eq!(summary.pass_pow_k.successes, 1);
+        assert_eq!(summary.pass_pow_k.trials, 2);
+        assert_eq!(summary.pass_pow_k.rate, Some(0.5));
+    }
+
+    #[test]
+    fn rebuild_summaries_ignores_ungraded_attempts_for_the_k_rates() {
+        let runs = vec![case_run("run-001", "alpha", ScenarioKind::WithSkill, 1, None)];
+        let mut bundle = bundle_with_runs(runs, &[ScenarioKind::WithSkill]);
+
+        recompute_scenario_summaries(&mut bundle.document);
+
+        let summary = &bundle.document.summaries.by_scenario[0];
+        assert_eq!(summary.pass_at_k.trials, 0);
+        assert_eq!(summary.pass_at_k.rate, None);
+        assert_eq!(summary.pass_pow_k.trials, 0);
+        assert_eq!(summary.pass_pow_k.rate, None);
+    }
 
     #[test]
     fn a_path_reached_outside_the_workspace_becomes_a_run_warning() {
@@ -2053,6 +2206,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs {
                 strict_ci: false,
                 fail_on_runner_failure: false,
@@ -2164,6 +2319,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -2298,6 +2455,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -2348,6 +2507,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -2414,6 +2575,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -2564,6 +2727,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
     }
@@ -2679,6 +2844,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -2737,6 +2904,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -2795,6 +2964,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -2845,6 +3016,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -2897,6 +3070,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -2966,6 +3141,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }));
 
@@ -3134,6 +3311,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
     }
@@ -3421,6 +3600,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -3458,6 +3639,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -3512,6 +3695,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -3549,6 +3734,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -3600,6 +3787,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -3680,6 +3869,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -3754,6 +3945,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -3895,6 +4088,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -3965,6 +4160,8 @@ mod tests {
                 tags: Vec::new(),
                 split: SplitArg::All,
                 max_cost_usd: None,
+                max_tool_calls_per_run: None,
+                max_turns_per_run: None,
                 ci: EvalCiArgs::default(),
             }
             .handle(&crate::fs::RealFS);
@@ -4040,6 +4237,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         }
         .handle(&crate::fs::RealFS);
@@ -4094,6 +4293,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         });
 
@@ -4629,6 +4830,8 @@ mod tests {
             tags: Vec::new(),
             split: SplitArg::All,
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ci: EvalCiArgs::default(),
         };
 
@@ -4681,6 +4884,8 @@ mod tests {
 
         let report = read_report(&run_with_fake_runner(RunArgs {
             max_cost_usd: None,
+            max_tool_calls_per_run: None,
+            max_turns_per_run: None,
             ..base_run_args(&skill_dir, &out_dir)
         }));
 

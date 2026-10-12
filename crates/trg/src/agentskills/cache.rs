@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::budget::RunCaps;
 use super::evals::EvalDirName;
 use super::mocks::MOCK_CALLS_LOG_NAME;
 use super::report::{EnvironmentPolicy, PermissionGrant, RunRecord, ScenarioKind, SkillStaging};
@@ -127,6 +128,14 @@ pub struct CacheKeyInput {
     /// serializes as it always did, which leaves entries written before this field readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub companion_hash: Option<String>,
+    /// What the run was allowed to spend in tool calls and turns.
+    ///
+    /// A cap decides whether a run was stopped as `budget_exhausted` or allowed to
+    /// finish, so a run answers only for the caps it ran under. An unbounded run
+    /// serializes as it did before this field existed, which keeps entries already on
+    /// disk readable.
+    #[serde(default, skip_serializing_if = "RunCaps::is_unbounded")]
+    pub caps: RunCaps,
 }
 
 /// What a completed run has to match to be served to a run that asked for any completed
@@ -149,6 +158,10 @@ pub struct CacheKeyInput {
 /// could do, so serving a run made under one grant to a request made under another answers
 /// a question nobody asked, and does it invisibly: the report would attribute the reused
 /// run the grant of the request rather than the grant it actually ran with.
+///
+/// Nor the run caps. A run that made forty tool calls under no cap completed; the same run
+/// under a cap of five would have been stopped and recorded as `budget_exhausted`, which
+/// is the very outcome the cap was asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReuseKeyInput {
     pub eval_case_id: String,
@@ -165,6 +178,8 @@ pub struct ReuseKeyInput {
     pub companion_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_grant: Option<ToolGrant>,
+    #[serde(default, skip_serializing_if = "RunCaps::is_unbounded")]
+    pub caps: RunCaps,
 }
 
 impl ReuseKeyInput {
@@ -180,6 +195,7 @@ impl ReuseKeyInput {
             scaffold_hash: key_input.scaffold_hash.clone(),
             companion_hash: key_input.companion_hash.clone(),
             tool_grant: key_input.tool_grant.clone(),
+            caps: key_input.caps,
         }
     }
 
@@ -598,6 +614,7 @@ mod tests {
             permission: PermissionGrant::default(),
             tool_grant: None,
             skill_staging: SkillStaging::default(),
+            caps: RunCaps::default(),
             scaffold_hash: None,
             companion_hash: None,
         }
@@ -721,6 +738,36 @@ mod tests {
         );
     }
 
+    /// A run allowed forty tool calls completed; the same run allowed five would have been
+    /// stopped, so the two are different runs and neither may be served for the other.
+    #[test]
+    fn a_run_under_other_caps_is_a_different_run() {
+        let unbounded = sample_key_input(ScenarioKind::WithSkill, "sha256:skill", "sha256:fixture");
+        let capped = CacheKeyInput {
+            caps: RunCaps {
+                tool_calls: Some("5".parse().unwrap()),
+                turns: None,
+            },
+            ..unbounded.clone()
+        };
+
+        assert_ne!(
+            CacheKey::from_input(&unbounded),
+            CacheKey::from_input(&capped),
+            "the caps a run ran under belong in its identity"
+        );
+        assert_ne!(
+            ReuseKeyInput::of(&unbounded),
+            ReuseKeyInput::of(&capped),
+            "a reused run answers only for the caps it ran under"
+        );
+        let serialized = serde_json::to_string(&unbounded).unwrap();
+        assert!(
+            !serialized.contains("caps"),
+            "an unbounded run must serialize as it did before caps existed: {serialized}"
+        );
+    }
+
     /// A run that inherited this machine is not the run a scrubbed invocation asked
     /// for, so the completed one must not be served in its place.
     #[test]
@@ -785,6 +832,7 @@ mod tests {
                 output_tokens: None,
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,
@@ -845,6 +893,7 @@ mod tests {
                 output_tokens: Some(4),
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,
@@ -937,6 +986,7 @@ mod tests {
                 output_tokens: Some(4),
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,
@@ -1072,6 +1122,7 @@ mod tests {
                 output_tokens: None,
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,
@@ -1153,6 +1204,7 @@ mod tests {
                 output_tokens: None,
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,
@@ -1220,6 +1272,7 @@ mod tests {
                 output_tokens: None,
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,
@@ -1295,6 +1348,7 @@ mod tests {
                 output_tokens: None,
                 cached_tokens: None,
                 cost: None,
+                transcript: None,
             },
             cache: None,
             skill_integrity: None,

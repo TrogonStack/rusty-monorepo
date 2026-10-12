@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
@@ -24,11 +24,13 @@ use super::layout::{ensure_iteration_available, slugs_for_suite, write_docs_mirr
 use super::model_name::{ModelName, ModelSource};
 use super::outputs::OUTPUTS_DIR;
 use super::permission_outcome::PermissionOutcome;
+use super::proportion::ScoredRate;
 use super::runner::capabilities::HarnessControl;
 use super::runner::{Runner, TelemetryForwarding, FAILURE_KIND_UNSUPPORTED};
 use super::sampling::AttemptCount;
 use super::span_reference::SpanReference;
 use super::tool_grant::ToolGrant;
+use super::transcript_metrics::TranscriptMetrics;
 use super::validation::ValidationError;
 
 #[derive(
@@ -732,6 +734,20 @@ impl RunRecord {
         self.grade_trace.as_ref()
     }
 
+    /// How this attempt counts toward its case's pass@k and pass^k, when it counts at all.
+    ///
+    /// An attempt the harness failed, timed out, or stopped at a cap is a draw that did
+    /// not pass, whatever its assertions say: grading still scores a started run, and a
+    /// run that wrote a correct answer and then looped past its cap would otherwise read
+    /// as a pass here and as a loss in the iteration summary. A completed attempt counts
+    /// by its own score. A skipped or not yet graded attempt counts as nothing.
+    pub fn k_attempt_outcome(&self) -> Option<bool> {
+        match self.status.as_str() {
+            "failed" | "timeout" | "budget_exhausted" => Some(false),
+            _ => self.case_score.map(|score| score >= 1.0),
+        }
+    }
+
     /// The one way a run is recorded as never having reached the harness.
     pub fn not_started(&mut self, reason: RunNotStarted) {
         self.status = RUN_STATUS_SKIPPED.to_string();
@@ -904,6 +920,9 @@ pub struct RunMetrics {
     /// that priced everything but this run, so a reader totalling a mixed history counted
     /// the first as a run that cost nothing.
     pub cost: Option<RunCost>,
+    /// Turn and per-tool counts read off the run's transcript; absent for a run that
+    /// left no transcript, and for every run recorded before these were measured.
+    pub transcript: Option<TranscriptMetrics>,
 }
 
 #[derive(Deserialize)]
@@ -927,6 +946,8 @@ struct DeclaredRunMetrics {
     /// a number here.
     #[serde(default)]
     cost_usd: Option<f64>,
+    #[serde(default)]
+    transcript: Option<TranscriptMetrics>,
 }
 
 /// The shape a run's metrics are written in, which is the shape every earlier release
@@ -955,6 +976,10 @@ struct SerializedRunMetrics<'a> {
     /// The price alone, for readers written before `cost` could say why a run carries
     /// none. Absent for exactly the runs that carry no price.
     cost_usd: Option<f64>,
+    /// Turn and per-tool counts read off the run's transcript; absent for a run that
+    /// left no transcript, and for every run recorded before these were measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transcript: Option<&'a TranscriptMetrics>,
 }
 
 impl<'a> From<&'a RunMetrics> for SerializedRunMetrics<'a> {
@@ -968,6 +993,7 @@ impl<'a> From<&'a RunMetrics> for SerializedRunMetrics<'a> {
             cached_tokens: metrics.cached_tokens,
             cost: metrics.cost.as_ref(),
             cost_usd: metrics.cost.as_ref().and_then(RunCost::usd),
+            transcript: metrics.transcript.as_ref(),
         }
     }
 }
@@ -1001,6 +1027,7 @@ impl<'de> Deserialize<'de> for RunMetrics {
             cost: declared
                 .cost
                 .or_else(|| declared.cost_usd.map(|usd| RunCost::Priced { usd })),
+            transcript: declared.transcript,
         })
     }
 }
@@ -1019,6 +1046,16 @@ pub struct ScenarioSummary {
     pub passed_runs: usize,
     pub skipped_runs: usize,
     pub failed_runs: usize,
+    /// Fraction of this scenario's cases where at least one attempt passed every scored
+    /// assertion ("pass@k", best-of-N), pooled with a Wilson interval across the cases
+    /// this scenario graded. Easy to mistake for `pass_pow_k`: the two agree only when a
+    /// case was drawn once.
+    #[serde(default)]
+    pub pass_at_k: ScoredRate,
+    /// Fraction of this scenario's cases where every attempt passed ("pass^k"), the
+    /// matched aggregate `pass_at_k` is often mistaken for.
+    #[serde(default)]
+    pub pass_pow_k: ScoredRate,
 }
 
 pub fn build_report_bundle(
@@ -1370,6 +1407,54 @@ pub fn recompute_model_capture_status(document: &mut ReportDocument) {
     }
 }
 
+/// Recomputes each scenario's run counts and `pass_at_k`/`pass_pow_k` rates from the
+/// document's own runs.
+///
+/// `case_score` is set by grading, which runs after a bundle's runs are first written,
+/// so this is meant to run again both right after execution and again after grading:
+/// a summary built only once, before grading, would keep reporting zero graded trials
+/// for the lifetime of the report.
+pub fn recompute_scenario_summaries(document: &mut ReportDocument) {
+    let mut counts: HashMap<ScenarioKind, (usize, usize, usize, usize)> = HashMap::new();
+    let mut case_attempts: HashMap<ScenarioKind, HashMap<&str, Vec<bool>>> = HashMap::new();
+    for run in &document.runs {
+        let entry = counts.entry(run.scenario_id).or_insert((0, 0, 0, 0));
+        entry.0 += 1;
+        match run.status.as_str() {
+            "completed" => entry.1 += 1,
+            "skipped" => entry.2 += 1,
+            "failed" | "timeout" | "budget_exhausted" => entry.3 += 1,
+            _ => {}
+        }
+        if let Some(passed) = run.k_attempt_outcome() {
+            case_attempts
+                .entry(run.scenario_id)
+                .or_default()
+                .entry(run.eval_case_id.as_str())
+                .or_default()
+                .push(passed);
+        }
+    }
+    for summary in document.summaries.by_scenario.iter_mut() {
+        if let Some((total, passed, skipped, failed)) = counts.get(&summary.scenario_id) {
+            summary.total_runs = *total;
+            summary.passed_runs = *passed;
+            summary.skipped_runs = *skipped;
+            summary.failed_runs = *failed;
+        }
+
+        let k_counts = super::proportion::k_case_counts(
+            case_attempts
+                .get(&summary.scenario_id)
+                .into_iter()
+                .flat_map(|cases| cases.values())
+                .filter_map(|attempts| super::proportion::case_k_outcome(attempts.iter().copied())),
+        );
+        summary.pass_at_k = ScoredRate::from_counts(k_counts.any_pass, k_counts.trials);
+        summary.pass_pow_k = ScoredRate::from_counts(k_counts.all_pass, k_counts.trials);
+    }
+}
+
 fn build_runs(
     suite: &EvalSuite,
     scenarios: &[ScenarioKind],
@@ -1465,6 +1550,8 @@ fn build_summaries(scenarios: &[ScenarioKind], suite: &EvalSuite, attempts: Opti
                 passed_runs: 0,
                 skipped_runs: total_per_scenario,
                 failed_runs: 0,
+                pass_at_k: ScoredRate::default(),
+                pass_pow_k: ScoredRate::default(),
             })
             .collect(),
         human_feedback: None,
@@ -2416,6 +2503,7 @@ mod tests {
 
     mod run_cost {
         use super::*;
+        use crate::agentskills::transcript_metrics::{ObservedToolCall, TurnCount};
 
         /// A harness that prices nothing and a harness that priced everything but this run
         /// are two different facts, and the field that held only a number carried neither.
@@ -2456,6 +2544,32 @@ mod tests {
             let metrics: RunMetrics = serde_json::from_value(serde_json::json!({ "cost_usd": 0.42 })).unwrap();
 
             assert_eq!(metrics.cost, Some(RunCost::Priced { usd: 0.42 }));
+        }
+
+        #[test]
+        fn transcript_metrics_round_trip_and_stay_absent_for_runs_that_never_measured_them() {
+            let measured = RunMetrics {
+                transcript: Some(TranscriptMetrics::measure(
+                    TurnCount::new(2),
+                    Some(900),
+                    [ObservedToolCall {
+                        tool: "Read",
+                        arguments: Some("{}"),
+                        result: Some("abc"),
+                    }],
+                )),
+                ..RunMetrics::default()
+            };
+
+            let json = serde_json::to_value(&measured).unwrap();
+            let unmeasured = serde_json::to_value(RunMetrics::default()).unwrap();
+
+            assert_eq!(json["transcript"]["tools"][0]["largest_result_bytes"], 3);
+            assert_eq!(
+                serde_json::from_value::<RunMetrics>(json).unwrap().transcript,
+                measured.transcript
+            );
+            assert!(unmeasured.get("transcript").is_none());
         }
 
         #[test]

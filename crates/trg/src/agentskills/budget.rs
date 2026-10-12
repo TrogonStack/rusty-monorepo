@@ -7,11 +7,14 @@
 //! to catch it.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use super::transcript_metrics::{ToolCallCount, TurnCount};
 
 /// The failure kind recorded on a run the ledger refused to start.
 pub const FAILURE_KIND_BUDGET: &str = "budget";
@@ -270,6 +273,117 @@ impl CostLedger {
     }
 }
 
+/// The failure kind recorded on a run stopped for making more tool calls than its cap.
+pub const FAILURE_KIND_TOOL_CALL_CAP: &str = "tool_call_cap";
+
+/// The failure kind recorded on a run stopped for taking more turns than its cap.
+pub const FAILURE_KIND_TURN_CAP: &str = "turn_cap";
+
+fn parse_cap(value: &str, what: &str) -> Result<NonZeroU32, String> {
+    let count: u32 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{value}' is not a whole number of {what}"))?;
+    NonZeroU32::new(count).ok_or_else(|| {
+        format!("a cap of zero {what} stops every run before it starts, which is not a cap, it is a way to run nothing")
+    })
+}
+
+/// The most tool calls one run may make before it is stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MaxToolCalls(NonZeroU32);
+
+impl MaxToolCalls {
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl FromStr for MaxToolCalls {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_cap(value, "tool calls").map(Self)
+    }
+}
+
+impl fmt::Display for MaxToolCalls {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// The most model turns one run may take before it is stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MaxTurns(NonZeroU32);
+
+impl MaxTurns {
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl FromStr for MaxTurns {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_cap(value, "turns").map(Self)
+    }
+}
+
+impl fmt::Display for MaxTurns {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// What one run may spend in tool calls and turns, each unbounded when absent.
+///
+/// The pass-level [`CostCeiling`] only refuses runs it has not started yet, so a single
+/// run that loops on a tool or floods its context spends without limit until the clock
+/// ends it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCaps {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<MaxToolCalls>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<MaxTurns>,
+}
+
+impl RunCaps {
+    pub fn is_unbounded(&self) -> bool {
+        self.tool_calls.is_none() && self.turns.is_none()
+    }
+
+    /// The cap a run that has made `tool_calls` tool calls over `turns` turns has gone past.
+    pub fn crossed(self, tool_calls: ToolCallCount, turns: TurnCount) -> Option<RunCap> {
+        if let Some(cap) = self.tool_calls.filter(|cap| tool_calls.get() > u64::from(cap.get())) {
+            return Some(RunCap::ToolCalls(cap));
+        }
+        self.turns
+            .filter(|cap| turns.get() > u64::from(cap.get()))
+            .map(RunCap::Turns)
+    }
+}
+
+/// Which of a run's caps stopped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCap {
+    ToolCalls(MaxToolCalls),
+    Turns(MaxTurns),
+}
+
+impl RunCap {
+    pub fn failure_kind(self) -> &'static str {
+        match self {
+            Self::ToolCalls(_) => FAILURE_KIND_TOOL_CALL_CAP,
+            Self::Turns(_) => FAILURE_KIND_TURN_CAP,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +568,35 @@ mod tests {
             HarnessPricing::Publishes.price(Some(0.25)),
             Some(RunCost::Priced { usd: 0.25 })
         );
+    }
+
+    #[test]
+    fn a_cap_of_zero_or_garbage_is_refused() {
+        assert!("0".parse::<MaxToolCalls>().is_err());
+        assert!("0".parse::<MaxTurns>().is_err());
+        assert!("-1".parse::<MaxTurns>().is_err());
+        assert!("many".parse::<MaxToolCalls>().is_err());
+        assert_eq!("25".parse::<MaxToolCalls>().unwrap().get(), 25);
+    }
+
+    #[test]
+    fn a_run_crosses_a_cap_only_once_it_goes_past_it() {
+        let caps = RunCaps {
+            tool_calls: Some("2".parse().unwrap()),
+            turns: Some("3".parse().unwrap()),
+        };
+
+        let crossed = |tool_calls, turns| caps.crossed(ToolCallCount::new(tool_calls), TurnCount::new(turns));
+        assert_eq!(crossed(2, 3), None);
+        assert_eq!(
+            crossed(3, 0).map(RunCap::failure_kind),
+            Some(FAILURE_KIND_TOOL_CALL_CAP)
+        );
+        assert_eq!(crossed(0, 4).map(RunCap::failure_kind), Some(FAILURE_KIND_TURN_CAP));
+        assert_eq!(
+            RunCaps::default().crossed(ToolCallCount::new(u64::MAX), TurnCount::new(u64::MAX)),
+            None
+        );
+        assert!(RunCaps::default().is_unbounded());
     }
 }

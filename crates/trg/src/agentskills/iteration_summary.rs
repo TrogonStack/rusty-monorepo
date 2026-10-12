@@ -14,6 +14,7 @@ use super::headroom::{describe_headroom_warning, evaluate_headroom, HeadroomThre
 use super::layout;
 use super::proportion::{self, Interval, Proportion};
 use super::report::ScenarioKind;
+use super::transcript_metrics::{tally_tools, RunCount, ToolTally, TranscriptMetrics};
 
 pub const OUTPUT_FILE_NAME: &str = "iteration-summary.json";
 
@@ -57,6 +58,20 @@ pub struct IterationSummaryDocument {
     /// is no previous iteration to compare against.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_or_revert: Option<KeepOrRevertSection>,
+    /// How each scenario's runs used each tool, from the runs whose transcripts were
+    /// measured. Empty for a report recorded before transcripts were measured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_usage: Vec<ScenarioToolUsage>,
+}
+
+/// Every tool one scenario's runs called, so a tool whose results flood a turn or whose
+/// calls keep repeating stands out from the run totals it is buried in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+pub struct ScenarioToolUsage {
+    pub scenario: ScenarioKind,
+    /// Runs whose transcripts were measured.
+    pub measured_runs: RunCount,
+    pub tools: Vec<ToolTally>,
 }
 
 /// Whether the eval suite is the same one the previous iteration ran, which the
@@ -85,6 +100,20 @@ pub struct SplitDelta {
     pub run_pass_rate_delta: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_pass_rate_delta_interval: Option<Interval>,
+    /// Change in the fraction of cases where at least one attempt passed ("pass@k"),
+    /// `None` when a split drew no graded case in one or both iterations. Distinct from
+    /// `run_pass_rate_delta`: that pools attempts, this pools cases, so the two read
+    /// differently once a case draws more than one attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_k_delta: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_at_k_delta_interval: Option<Interval>,
+    /// Change in the fraction of cases where every attempt passed ("pass^k"), the matched
+    /// aggregate `pass_at_k_delta` is often mistaken for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_pow_k_delta: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_pow_k_delta_interval: Option<Interval>,
 }
 
 /// The verdict for one split's `with_skill` delta against the previous iteration, derived
@@ -254,6 +283,14 @@ struct RunForSummary {
     attempt: u32,
     status: String,
     paths: RunPathsForSummary,
+    #[serde(default)]
+    metrics: RunMetricsForSummary,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RunMetricsForSummary {
+    #[serde(default)]
+    transcript: Option<TranscriptMetrics>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -377,6 +414,7 @@ pub fn build_iteration_summary_document(
         by_split,
         headroom,
         keep_or_revert,
+        tool_usage: tool_usage(&report),
     };
 
     if options.withhold_test_detail {
@@ -511,6 +549,38 @@ fn build_keep_or_revert_section(
     }
 }
 
+fn tool_usage(report: &ReportForSummary) -> Vec<ScenarioToolUsage> {
+    let mut by_scenario: BTreeMap<ScenarioKind, Vec<&TranscriptMetrics>> = BTreeMap::new();
+    for run in &report.runs {
+        if let Some(transcript) = &run.metrics.transcript {
+            by_scenario.entry(run.scenario_id).or_default().push(transcript);
+        }
+    }
+    by_scenario
+        .into_iter()
+        .map(|(scenario, runs)| ScenarioToolUsage {
+            scenario,
+            measured_runs: RunCount::of(runs.len()),
+            tools: tally_tools(runs),
+        })
+        .collect()
+}
+
+fn tool_usage_row(scenario: ScenarioKind, tally: &ToolTally) -> String {
+    let mut row = format!(
+        "{} | {}: {} calls in {} runs, {} repeated",
+        scenario.as_str(),
+        tally.tool,
+        tally.calls,
+        tally.runs,
+        tally.repeated_calls
+    );
+    if let Some(bytes) = tally.largest_result_bytes {
+        row.push_str(&format!(", largest result {bytes} bytes"));
+    }
+    row
+}
+
 fn suite_comparison(current: &ReportForSummary, previous: &ReportForSummary) -> SuiteComparison {
     if current.suite.evals_hash == previous.suite.evals_hash {
         SuiteComparison::SameSuite
@@ -552,6 +622,9 @@ struct ScenarioTally {
     assertion_failed: u32,
     run_passed: u32,
     run_failed: u32,
+    /// Each case's own attempts, scored or not, so pass@k and pass^k can be read per case
+    /// rather than pooled with every other case's attempts the way `run_passed` is.
+    case_attempts: BTreeMap<String, Vec<bool>>,
 }
 
 impl ScenarioTally {
@@ -561,6 +634,28 @@ impl ScenarioTally {
 
     fn run_proportion(&self) -> Option<Proportion> {
         Proportion::observed(self.run_passed as usize, self.run_failed as usize)
+    }
+
+    /// Fraction of cases where at least one attempt passed every scored assertion
+    /// ("pass@k"), `None` when nothing in this tally was ever scored.
+    fn pass_at_k_proportion(&self) -> Option<Proportion> {
+        let counts = self.case_k_counts();
+        Proportion::observed(counts.any_pass, counts.trials - counts.any_pass)
+    }
+
+    /// Fraction of cases where every attempt passed ("pass^k"), the matched aggregate
+    /// `pass_at_k_proportion` is often mistaken for.
+    fn pass_pow_k_proportion(&self) -> Option<Proportion> {
+        let counts = self.case_k_counts();
+        Proportion::observed(counts.all_pass, counts.trials - counts.all_pass)
+    }
+
+    fn case_k_counts(&self) -> proportion::KCaseCounts {
+        proportion::k_case_counts(
+            self.case_attempts
+                .values()
+                .filter_map(|attempts| proportion::case_k_outcome(attempts.iter().copied())),
+        )
     }
 }
 
@@ -580,7 +675,16 @@ fn tally_with_skill(
         if run.split != split || run.scenario_id != ScenarioKind::WithSkill {
             continue;
         }
-        if !matches!(classify_run(run, mode), RunDisposition::Completed) {
+        let disposition = classify_run(run, mode);
+        if disposition == RunDisposition::Failed {
+            tally
+                .case_attempts
+                .entry(run.eval_case_id.clone())
+                .or_default()
+                .push(false);
+            continue;
+        }
+        if disposition != RunDisposition::Completed {
             continue;
         }
 
@@ -607,6 +711,11 @@ fn tally_with_skill(
         } else {
             tally.run_failed += 1;
         }
+        tally
+            .case_attempts
+            .entry(run.eval_case_id.clone())
+            .or_default()
+            .push(failed == 0);
     }
 
     tally
@@ -642,11 +751,37 @@ fn compute_split_verdict(
             _ => (None, None),
         };
 
+    let (pass_at_k_delta, pass_at_k_delta_interval) = match (
+        current_tally.pass_at_k_proportion(),
+        previous_tally.pass_at_k_proportion(),
+    ) {
+        (Some(current), Some(previous)) => (
+            Some(current.rate() - previous.rate()),
+            Some(proportion::difference(current, previous)),
+        ),
+        _ => (None, None),
+    };
+
+    let (pass_pow_k_delta, pass_pow_k_delta_interval) = match (
+        current_tally.pass_pow_k_proportion(),
+        previous_tally.pass_pow_k_proportion(),
+    ) {
+        (Some(current), Some(previous)) => (
+            Some(current.rate() - previous.rate()),
+            Some(proportion::difference(current, previous)),
+        ),
+        _ => (None, None),
+    };
+
     let delta = SplitDelta {
         assertion_pass_rate_delta,
         assertion_pass_rate_delta_interval,
         run_pass_rate_delta,
         run_pass_rate_delta_interval,
+        pass_at_k_delta,
+        pass_at_k_delta_interval,
+        pass_pow_k_delta,
+        pass_pow_k_delta_interval,
     };
 
     if assertion_pass_rate_delta_interval.low() > 0.0 {
@@ -899,6 +1034,16 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
         );
     }
 
+    if !document.tool_usage.is_empty() {
+        print_section(
+            "Tool usage",
+            document
+                .tool_usage
+                .iter()
+                .flat_map(|usage| usage.tools.iter().map(|tally| tool_usage_row(usage.scenario, tally))),
+        );
+    }
+
     if let Some(keep_or_revert) = &document.keep_or_revert {
         println!();
         println!(
@@ -957,12 +1102,29 @@ fn split_verdict_line(verdict: &SplitVerdict) -> String {
 }
 
 fn format_split_delta(delta: &SplitDelta) -> String {
-    format!(
+    let mut line = format!(
         "assertion pass rate {:+.1}pp, 95% CI [{:+.1}pp, {:+.1}pp]",
         delta.assertion_pass_rate_delta * 100.0,
         delta.assertion_pass_rate_delta_interval.low() * 100.0,
         delta.assertion_pass_rate_delta_interval.high() * 100.0
-    )
+    );
+    if let (Some(pass_at_k), Some(interval)) = (delta.pass_at_k_delta, delta.pass_at_k_delta_interval) {
+        line.push_str(&format!(
+            "; pass@k {:+.1}pp, 95% CI [{:+.1}pp, {:+.1}pp]",
+            pass_at_k * 100.0,
+            interval.low() * 100.0,
+            interval.high() * 100.0
+        ));
+    }
+    if let (Some(pass_pow_k), Some(interval)) = (delta.pass_pow_k_delta, delta.pass_pow_k_delta_interval) {
+        line.push_str(&format!(
+            "; pass^k {:+.1}pp, 95% CI [{:+.1}pp, {:+.1}pp]",
+            pass_pow_k * 100.0,
+            interval.low() * 100.0,
+            interval.high() * 100.0
+        ));
+    }
+    line
 }
 
 fn delta_suffix(delta: Option<CrossIterationDelta>) -> String {
@@ -1363,6 +1525,7 @@ fn load_report(report_dir: &Path) -> Result<ReportForSummary> {
     serde_json::from_str(&content).map_err(EvalError::from)
 }
 
+#[derive(PartialEq, Eq)]
 enum RunDisposition {
     Completed,
     Failed,
@@ -1373,7 +1536,7 @@ enum RunDisposition {
 fn classify_run(run: &RunForSummary, mode: FailedRunsMode) -> RunDisposition {
     match run.status.as_str() {
         "skipped" => RunDisposition::Skipped,
-        "failed" | "timeout" => match mode {
+        "failed" | "timeout" | "budget_exhausted" => match mode {
             FailedRunsMode::Exclude => RunDisposition::Excluded,
             FailedRunsMode::Zero | FailedRunsMode::Bucket => RunDisposition::Failed,
         },
@@ -1543,6 +1706,52 @@ mod tests {
             "artifacts": [],
             "metrics": {}
         })
+    }
+
+    #[test]
+    fn tallies_tool_usage_per_scenario_from_measured_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        let report_dir = temp.path().join("report");
+        let measured = |id: &str, scenario: &str, calls: u64, bytes: u64| {
+            let mut run = sample_run(id, "case-a", scenario, 1, "completed");
+            run["metrics"] = serde_json::json!({
+                "transcript": {
+                    "turns": 3,
+                    "tool_calls": calls,
+                    "repeated_tool_calls": 1,
+                    "tools": [{ "tool": "Grep", "calls": calls, "repeated_calls": 1, "largest_result_bytes": bytes }]
+                }
+            });
+            run
+        };
+        write_report(
+            &report_dir,
+            serde_json::json!([
+                measured("run-001", "with_skill", 2, 155_000),
+                measured("run-002", "with_skill", 3, 10),
+                sample_run("run-003", "case-a", "without_skill", 1, "completed"),
+            ]),
+            1,
+            "report-a",
+        );
+
+        let summary = build_iteration_summary_document(&report_dir, IterationSummaryOptions::default()).unwrap();
+
+        assert_eq!(summary.tool_usage.len(), 1);
+        let usage = &summary.tool_usage[0];
+        assert_eq!(usage.scenario, ScenarioKind::WithSkill);
+        assert_eq!(usage.measured_runs, RunCount::new(2));
+        assert_eq!(usage.tools[0].tool, "Grep");
+        assert_eq!(usage.tools[0].calls.get(), 5);
+        assert_eq!(usage.tools[0].repeated_calls.get(), 2);
+        assert_eq!(
+            usage.tools[0].largest_result_bytes.map(|bytes| bytes.get()),
+            Some(155_000)
+        );
+        assert_eq!(
+            tool_usage_row(usage.scenario, &usage.tools[0]),
+            "with_skill | Grep: 5 calls in 2 runs, 2 repeated, largest result 155000 bytes"
+        );
     }
 
     #[test]
@@ -2247,6 +2456,142 @@ mod tests {
             keep_or_revert.recommendation,
             Recommendation::Revert,
             "a held-out regression is reason enough to revert on its own"
+        );
+    }
+
+    fn write_with_skill_attempt(
+        report_dir: &Path,
+        id: &str,
+        eval_case_id: &str,
+        split: &str,
+        attempt: u32,
+        passed: bool,
+    ) -> serde_json::Value {
+        let run = sample_run_with_split(id, eval_case_id, "with_skill", attempt, "completed", split);
+        write_run_artifacts(
+            report_dir,
+            id,
+            Some(&format!(
+                r#"{{"assertion_results":[{{"assertion":"a","passed":{passed}}}]}}"#
+            )),
+            None,
+        );
+        run
+    }
+
+    #[test]
+    fn pass_at_k_and_pass_pow_k_separate_best_of_n_from_the_matched_aggregate() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = vec![
+            write_with_skill_attempt(&previous_dir, "prev-a-1", "case-a", "test", 1, false),
+            write_with_skill_attempt(&previous_dir, "prev-a-2", "case-a", "test", 2, false),
+            write_with_skill_attempt(&previous_dir, "prev-b-1", "case-b", "test", 1, false),
+            write_with_skill_attempt(&previous_dir, "prev-b-2", "case-b", "test", 2, false),
+        ];
+        let current_runs = vec![
+            write_with_skill_attempt(&current_dir, "cur-a-1", "case-a", "test", 1, true),
+            write_with_skill_attempt(&current_dir, "cur-a-2", "case-a", "test", 2, false),
+            write_with_skill_attempt(&current_dir, "cur-b-1", "case-b", "test", 1, true),
+            write_with_skill_attempt(&current_dir, "cur-b-2", "case-b", "test", 2, true),
+        ];
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        let verdict = keep_or_revert
+            .by_split
+            .get(&EvalSplit::Test)
+            .expect("the test split ran in both iterations");
+        let delta = match verdict {
+            SplitVerdict::Improved(delta) | SplitVerdict::Regressed(delta) | SplitVerdict::Indistinguishable(delta) => {
+                delta
+            }
+            SplitVerdict::NoRuns => panic!("the test split ran in both iterations"),
+        };
+
+        assert_eq!(
+            delta.pass_at_k_delta,
+            Some(1.0),
+            "case-a and case-b both went from no attempt passing to at least one"
+        );
+        assert_eq!(
+            delta.pass_pow_k_delta,
+            Some(0.5),
+            "only case-b went from no attempt passing to every attempt passing"
+        );
+        assert!(
+            delta.pass_pow_k_delta.unwrap() < delta.pass_at_k_delta.unwrap(),
+            "best-of-n must not read as the matched aggregate over the same cases"
+        );
+    }
+
+    #[test]
+    fn capped_attempts_count_as_failures_for_pass_pow_k_rather_than_being_invisible() {
+        let root = tempfile::tempdir().unwrap();
+        let skill_root = root.path().join("demo-skill");
+        let previous_dir = skill_root.join("report-iter-1");
+        let current_dir = skill_root.join("report-iter-2");
+
+        let previous_runs = vec![write_with_skill_attempt(
+            &previous_dir,
+            "prev-a-1",
+            "case-a",
+            "test",
+            1,
+            true,
+        )];
+        let mut current_runs = vec![write_with_skill_attempt(
+            &current_dir,
+            "cur-a-1",
+            "case-a",
+            "test",
+            1,
+            true,
+        )];
+        current_runs.push(sample_run_with_split(
+            "cur-a-2",
+            "case-a",
+            "with_skill",
+            2,
+            "budget_exhausted",
+            "test",
+        ));
+        current_runs.push(sample_run_with_split(
+            "cur-a-3",
+            "case-a",
+            "with_skill",
+            3,
+            "timeout",
+            "test",
+        ));
+
+        let summary = build_summary_against_previous(&previous_dir, previous_runs, &current_dir, current_runs);
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        let verdict = keep_or_revert
+            .by_split
+            .get(&EvalSplit::Test)
+            .expect("the test split ran in both iterations");
+        let delta = match verdict {
+            SplitVerdict::Improved(delta) | SplitVerdict::Regressed(delta) | SplitVerdict::Indistinguishable(delta) => {
+                delta
+            }
+            SplitVerdict::NoRuns => panic!("the test split ran in both iterations"),
+        };
+
+        assert_eq!(
+            delta.pass_at_k_delta,
+            Some(0.0),
+            "case-a still has one passing attempt in both iterations"
+        );
+        assert_eq!(
+            delta.pass_pow_k_delta,
+            Some(-1.0),
+            "the capped attempts must count as failures, not be left out of case-a's attempts"
         );
     }
 

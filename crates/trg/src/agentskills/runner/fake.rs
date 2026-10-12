@@ -2,8 +2,9 @@ use std::process::Command;
 
 use super::usage::HarnessTokenUsage;
 use super::{
-    capture_subprocess, completed_outcome, persist_runner_io, prepare_workspace, runner_failure_outcome,
-    timeout_duration, timeout_outcome, EvalRunOutcome, EvalRunRequest, Runner, RunnerError,
+    budget_exhausted_outcome, capture_capped, completed_outcome, persist_runner_io, prepare_workspace,
+    runner_failure_outcome, timeout_duration, timeout_outcome, CapWatch, EvalRunOutcome, EvalRunRequest, Runner,
+    RunnerError,
 };
 
 pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome, RunnerError> {
@@ -13,8 +14,21 @@ pub fn run_bash(request: &EvalRunRequest, script: &str) -> Result<EvalRunOutcome
     command.arg("-c").arg(script).current_dir(request.workspace_dir);
     prepared.environment.apply(&mut command);
 
-    let captured = capture_subprocess(&mut command, timeout_duration(request.timeout_secs))?;
+    let captured = capture_capped(
+        &mut command,
+        timeout_duration(request.timeout_secs),
+        CapWatch::unassisted(Runner::ClaudeCode, request.caps),
+    )?;
     persist_runner_io(Runner::ClaudeCode, request, &captured)?;
+
+    if let Some(cap) = captured.cap_reached {
+        return Ok(budget_exhausted_outcome(
+            Runner::ClaudeCode,
+            cap,
+            captured.duration_ms,
+            captured.exit_code,
+        ));
+    }
 
     if captured.timed_out {
         let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);

@@ -12,6 +12,10 @@
 //! the config home rather than replacing it, so the operator's own MCP servers stay live
 //! beside anything trg adds. That is why the codex `mcp servers` cell is only honoured
 //! where trg owns the config home, which is what `--environment isolated` creates.
+//!
+//! claude-code's `--max-turns` is the one cell its `--help` does not list: the flag is
+//! hidden there, and was read instead off a `claude -p` run on 2026-10-11 (version
+//! 2.1.283) that accepted it where an unknown option is refused outright.
 
 use super::Runner;
 
@@ -169,7 +173,7 @@ impl Runner {
 
         match (self, control) {
             (Self::ClaudeCode, HarnessControl::ToolAllowlist) => ControlSupport::Driven(Flag("--allowedTools")),
-            (Self::ClaudeCode, HarnessControl::TurnCap) => ControlSupport::Absent,
+            (Self::ClaudeCode, HarnessControl::TurnCap) => ControlSupport::Driven(Flag("--max-turns")),
             (Self::ClaudeCode, HarnessControl::SystemPromptAppend) => {
                 ControlSupport::Driven(Flag("--append-system-prompt"))
             }
@@ -248,7 +252,7 @@ mod tests {
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::TurnCap),
-            ControlSupport::Absent
+            ControlSupport::Driven(ControlMechanism::Flag("--max-turns"))
         );
         assert_eq!(
             Runner::ClaudeCode.support(HarnessControl::SystemPromptAppend),
@@ -376,6 +380,7 @@ mod tests {
                     Some(&tool_grant),
                     Some(Path::new("/workspace/mcp-config.json")),
                     Some(&appendix),
+                    Some("3".parse().expect("a positive turn cap")),
                 ),
                 Runner::Codex => super::super::codex::build_args(
                     Path::new("/workspace"),

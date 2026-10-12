@@ -62,28 +62,38 @@ impl StdoutTimeline {
 /// Reads `pipe` to its end, stamping each line as its terminator (or the end of the
 /// stream) arrives.
 pub(super) fn read_stamped<R: Read>(pipe: Option<R>) -> (Vec<u8>, StdoutTimeline) {
+    read_stamped_watching(pipe, |_, _| {})
+}
+
+/// Reads `pipe` like [`read_stamped`], handing `on_line` each line, without its
+/// terminator, as soon as it arrives.
+pub(super) fn read_stamped_watching<R: Read>(
+    pipe: Option<R>,
+    mut on_line: impl FnMut(&[u8], SystemTime),
+) -> (Vec<u8>, StdoutTimeline) {
     let mut bytes = Vec::new();
     let mut arrivals = Vec::new();
     let Some(pipe) = pipe else {
         return (bytes, StdoutTimeline(arrivals));
     };
     let mut reader = BufReader::new(pipe);
+    let mut arrived = |bytes: &[u8], arrivals: &mut Vec<LineArrival>| {
+        let start = arrivals.last().map_or(0, |arrival: &LineArrival| arrival.end);
+        let at = SystemTime::now();
+        arrivals.push(LineArrival { end: bytes.len(), at });
+        let line = &bytes[start..];
+        on_line(line.strip_suffix(b"\n").unwrap_or(line), at);
+    };
     loop {
         match reader.read_until(b'\n', &mut bytes) {
             Ok(0) => break,
-            Ok(_) => arrivals.push(LineArrival {
-                end: bytes.len(),
-                at: SystemTime::now(),
-            }),
+            Ok(_) => arrived(&bytes, &mut arrivals),
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
     if arrivals.last().map_or(0, |arrival| arrival.end) < bytes.len() {
-        arrivals.push(LineArrival {
-            end: bytes.len(),
-            at: SystemTime::now(),
-        });
+        arrived(&bytes, &mut arrivals);
     }
     (bytes, StdoutTimeline(arrivals))
 }
@@ -120,6 +130,19 @@ mod tests {
         let stamps: Vec<SystemTime> = timeline.lines(&bytes).map(|line| line.at).collect();
         assert_eq!(stamps.len(), 200);
         assert!(stamps.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn a_watcher_sees_every_line_as_it_is_stamped() {
+        let raw = b"one\ntwo\r\nthree";
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let (bytes, timeline) = read_stamped_watching(Some(Cursor::new(raw.to_vec())), |line, _| {
+            seen.push(line.to_vec());
+        });
+
+        assert_eq!(bytes, raw);
+        assert_eq!(timeline.lines(&bytes).count(), 3);
+        assert_eq!(seen, [b"one".to_vec(), b"two\r".to_vec(), b"three".to_vec()]);
     }
 
     #[test]

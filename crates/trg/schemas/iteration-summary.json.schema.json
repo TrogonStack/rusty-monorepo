@@ -292,6 +292,18 @@
         }
       ]
     },
+    "ResultBytes": {
+      "description": "The size of one tool result as the harness handed it back to the model, in bytes.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "RunCount": {
+      "description": "How many runs a tally covers.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
     "SaturationCap": {
       "description": "Why `recommendation` cannot be read as ordinary silence on the test split: the split it\ndepends on most had already used up its room before this iteration ran, so no change\ncould have shown as `improved` there regardless of what the change did.",
       "oneOf": [
@@ -309,6 +321,42 @@
         }
       ]
     },
+    "ScenarioKind": {
+      "enum": [
+        "with_skill",
+        "without_skill",
+        "old_skill"
+      ],
+      "type": "string"
+    },
+    "ScenarioToolUsage": {
+      "description": "Every tool one scenario's runs called, so a tool whose results flood a turn or whose\ncalls keep repeating stands out from the run totals it is buried in.",
+      "properties": {
+        "measured_runs": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RunCount"
+            }
+          ],
+          "description": "Runs whose transcripts were measured."
+        },
+        "scenario": {
+          "$ref": "#/$defs/ScenarioKind"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/ToolTally"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "scenario",
+        "measured_runs",
+        "tools"
+      ],
+      "type": "object"
+    },
     "SplitDelta": {
       "description": "The `with_skill` assertion and run pass-rate change between this iteration and the\nprevious one, and the 95% intervals around each. The assertion pass rate drives the\nverdict this rides alongside: it pools every scored assertion rather than collapsing a\ncase with three assertions and one with one assertion to the same single vote a run\npass rate would give them, so it moves on the same evidence the reviewer's bundle does.",
       "properties": {
@@ -318,6 +366,42 @@
         },
         "assertion_pass_rate_delta_interval": {
           "$ref": "#/$defs/Interval"
+        },
+        "pass_at_k_delta": {
+          "description": "Change in the fraction of cases where at least one attempt passed (\"pass@k\"),\n`None` when a split drew no graded case in one or both iterations. Distinct from\n`run_pass_rate_delta`: that pools attempts, this pools cases, so the two read\ndifferently once a case draws more than one attempt.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pass_at_k_delta_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pass_pow_k_delta": {
+          "description": "Change in the fraction of cases where every attempt passed (\"pass^k\"), the matched\naggregate `pass_at_k_delta` is often mistaken for.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "pass_pow_k_delta_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Interval"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "run_pass_rate_delta": {
           "format": "double",
@@ -564,6 +648,51 @@
         "mad_tokens"
       ],
       "type": "object"
+    },
+    "ToolCallCount": {
+      "description": "How many tool calls a run, or one tool within it, made.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ToolTally": {
+      "description": "How every run in a set used one tool.",
+      "properties": {
+        "calls": {
+          "$ref": "#/$defs/ToolCallCount"
+        },
+        "largest_result_bytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResultBytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repeated_calls": {
+          "$ref": "#/$defs/ToolCallCount"
+        },
+        "runs": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RunCount"
+            }
+          ],
+          "description": "Runs that called this tool at least once."
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool",
+        "runs",
+        "calls",
+        "repeated_calls"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/iteration-summary.json.schema.json",
@@ -661,6 +790,13 @@
     "token_outliers": {
       "items": {
         "$ref": "#/$defs/TokenOutlierRecord"
+      },
+      "type": "array"
+    },
+    "tool_usage": {
+      "description": "How each scenario's runs used each tool, from the runs whose transcripts were\nmeasured. Empty for a report recorded before transcripts were measured.",
+      "items": {
+        "$ref": "#/$defs/ScenarioToolUsage"
       },
       "type": "array"
     }
