@@ -1129,15 +1129,15 @@ mod tests {
         assert!(html.contains("pass^k: yes"));
     }
 
-    /// A draw the harness stopped at a cap did not pass, so a case that passed once and
-    /// was then capped is not one where every attempt passed, in the HTML report as much
-    /// as in the iteration summary.
+    /// A draw the harness stopped at a cap did not pass, even when grading scored the
+    /// answer it left behind, so a case that passed once and was then capped is not one
+    /// where every attempt passed, in the HTML report as much as in the iteration summary.
     #[test]
     fn a_capped_attempt_counts_against_pass_pow_k() {
         let mut passed = minimal_run();
         passed.case_score = Some(1.0);
         let mut capped = minimal_run();
-        capped.case_score = None;
+        capped.case_score = Some(1.0);
         capped.status = "budget_exhausted".to_string();
         let arm = ArmGroup {
             scenario: ScenarioKind::WithSkill,
