@@ -33,13 +33,30 @@ LL | mod parse_tests;
    |
    = help: move it to `tests/parse_tests.rs` and declare `mod parse_tests;` in `tests.rs`
 
+error: unit-test module `tests` must load `layout_inline_group_owner/tests.rs`
+  --> $DIR/auxiliary/layout_inline_group_owner.rs:3:1
+   |
+LL | mod tests;
+   | ^^^^^^^^^
+   |
+   = help: declare `#[cfg(test)] mod tests;` in the owning module
+
+error: inline module `parse_tests` declared with a body block
+  --> $DIR/auxiliary/layout_inline_group_owner_tests.rs:1:1
+   |
+LL | / mod parse_tests {
+LL | |     #[test]
+   | |____^
+   |
+   = help: move the contents into `tests/parse_tests.rs` and declare `mod parse_tests;` in the owning module
+
 error: unit-test module `tests` must be declared at module scope
-  --> $DIR/test_module_layout.rs:18:5
+  --> $DIR/test_module_layout.rs:21:5
    |
 LL |     mod tests;
    |     ^^^^^^^^^
    |
    = help: declare the test module in its owning module rather than inside a function
 
-error: aborting due to 5 previous errors
+error: aborting due to 7 previous errors
 

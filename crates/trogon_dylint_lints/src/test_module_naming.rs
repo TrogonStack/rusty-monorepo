@@ -88,7 +88,7 @@ pub(crate) fn check_crate(cx: &LateContext<'_>) {
 }
 
 pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
-    if item.span.from_expansion() || is_integration_or_bench_target() || is_generated_source(cx, item.span) {
+    if is_integration_or_bench_target() || is_generated_source(cx, item.span) {
         return;
     }
 
@@ -96,7 +96,7 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         check_test_function(cx, item);
         return;
     };
-    if is_generated_source(cx, module.spans.inner_span) {
+    if item.span.from_expansion() || is_generated_source(cx, module.spans.inner_span) {
         return;
     }
 
@@ -148,7 +148,7 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         );
         return;
     };
-    let inline = source_path(cx, owner.module().spans.inner_span) == body_path;
+    let inline = same_source_file(cx, owner.module().spans.inner_span, module.spans.inner_span);
     if name != "tests" && !owner.is_test_module() && !inline {
         span_lint_and_then(
             cx,
@@ -206,7 +206,11 @@ fn check_test_function(cx: &LateContext<'_>, item: &Item<'_>) {
     let ItemKind::Fn { ident, .. } = item.kind else {
         return;
     };
-    if !is_test_function(cx.tcx, item.owner_id.def_id) || owner_name(cx, item).is_some() {
+    // Attribute macros such as `#[tokio::test]` re-emit the whole item from
+    // expansion but keep the name the author wrote, while a code generator
+    // names the function itself; only the author's tests are placement errors.
+    if ident.span.from_expansion() || !is_test_function(cx.tcx, item.owner_id.def_id) || owner_name(cx, item).is_some()
+    {
         return;
     }
     span_lint_and_then(
@@ -223,6 +227,8 @@ fn check_test_function(cx: &LateContext<'_>, item: &Item<'_>) {
 /// The owner's module directory follows the standard resolution rules even
 /// when the owner itself was loaded through `#[path]`. Placement compares
 /// resolved files, so any `#[path]` that lands on the expected file passes.
+/// A child of a test module is placed under where that module belongs, not
+/// where it currently sits, so every diagnostic describes the same end state.
 pub(crate) fn test_module_home(
     cx: &LateContext<'_>,
     item: &Item<'_>,
@@ -230,7 +236,12 @@ pub(crate) fn test_module_home(
     module: &Mod<'_>,
 ) -> Option<TestModuleHome> {
     let owner = Owner::of(cx, item)?;
-    let owner_path = source_path(cx, owner.module().spans.inner_span)?;
+    let owner_path = match owner {
+        Owner::Module { item, ident, module } if is_unit_test_module_name(ident.as_str()) => {
+            test_module_home(cx, item, ident.as_str(), module)?.path
+        }
+        _ => source_path(cx, owner.module().spans.inner_span)?,
+    };
     let owner_dir = owner_path.parent()?;
     let stem = owner_path.file_stem()?.to_str()?;
     let module_dir = if matches!(owner, Owner::Crate(_)) || stem == "mod" {
@@ -260,7 +271,7 @@ pub(crate) fn test_module_home(
             format!("mod {name};"),
             host,
         )
-    } else if stem == "mod" || has_file_backed_child(cx, module) {
+    } else if stem == "mod" || has_child_module(cx, module) {
         home(
             module_dir.join("tests.rs"),
             "#[cfg(test)] mod tests;".to_owned(),
@@ -273,17 +284,18 @@ pub(crate) fn test_module_home(
     }
 }
 
-fn has_file_backed_child(cx: &LateContext<'_>, module: &Mod<'_>) -> bool {
-    let source_map = cx.tcx.sess.source_map();
-    let body = source_map.lookup_char_pos(module.spans.inner_span.lo()).file;
+/// An inline child counts too: `inline_module_block` sends it to its own file,
+/// and the suite must already be laid out for the file it will become.
+fn has_child_module(cx: &LateContext<'_>, module: &Mod<'_>) -> bool {
     module.item_ids.iter().any(|&item_id| {
         let child = cx.tcx.hir_item(item_id);
-        let ItemKind::Mod(_, child_module) = child.kind else {
-            return false;
-        };
-        !child.span.from_expansion()
-            && source_map.lookup_char_pos(child_module.spans.inner_span.lo()).file.name != body.name
+        matches!(child.kind, ItemKind::Mod(..)) && !child.span.from_expansion()
     })
+}
+
+fn same_source_file(cx: &LateContext<'_>, left: Span, right: Span) -> bool {
+    let source_map = cx.tcx.sess.source_map();
+    source_map.lookup_char_pos(left.lo()).file.name == source_map.lookup_char_pos(right.lo()).file.name
 }
 
 fn relative_display(path: &Path, base: &Path) -> Option<String> {

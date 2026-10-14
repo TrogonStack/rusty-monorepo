@@ -13,6 +13,9 @@ mod inline_directory;
 #[path = "auxiliary/layout_group_directory/mod.rs"]
 mod group_directory;
 
+#[path = "auxiliary/layout_inline_group_owner.rs"]
+mod inline_group_owner;
+
 fn declares_local_tests() {
     #[path = "auxiliary/layout_wrong.rs"]
     mod tests;
