@@ -227,8 +227,9 @@ fn check_test_function(cx: &LateContext<'_>, item: &Item<'_>) {
 /// The owner's module directory follows the standard resolution rules even
 /// when the owner itself was loaded through `#[path]`. Placement compares
 /// resolved files, so any `#[path]` that lands on the expected file passes.
-/// A child of a test module is placed under where that module belongs, not
-/// where it currently sits, so every diagnostic describes the same end state.
+/// A child of an inline module or of a test module is placed under where that
+/// module belongs, not where it currently sits, so every diagnostic describes
+/// the same end state.
 pub(crate) fn test_module_home(
     cx: &LateContext<'_>,
     item: &Item<'_>,
@@ -236,19 +237,10 @@ pub(crate) fn test_module_home(
     module: &Mod<'_>,
 ) -> Option<TestModuleHome> {
     let owner = Owner::of(cx, item)?;
-    let owner_path = match owner {
-        Owner::Module { item, ident, module } if is_unit_test_module_name(ident.as_str()) => {
-            test_module_home(cx, item, ident.as_str(), module)?.path
-        }
-        _ => source_path(cx, owner.module().spans.inner_span)?,
-    };
+    let owner_path = owner_home(cx, &owner)?;
     let owner_dir = owner_path.parent()?;
     let stem = owner_path.file_stem()?.to_str()?;
-    let module_dir = if matches!(owner, Owner::Crate(_)) || stem == "mod" {
-        owner_dir.to_path_buf()
-    } else {
-        owner_dir.join(stem)
-    };
+    let module_dir = module_dir(&owner, &owner_path)?;
     let home = |path: PathBuf, declaration: String, host: String| {
         Some(TestModuleHome {
             display: relative_display(&path, owner_dir)?,
@@ -282,6 +274,37 @@ pub(crate) fn test_module_home(
         let declaration = format!("#[cfg(test)] #[path = \"{filename}\"] mod tests;");
         home(owner_dir.join(filename), declaration, OWNING_MODULE.to_owned())
     }
+}
+
+/// Where the owner's body belongs: an inline module goes where
+/// `inline_module_block` sends it and a test module where this lint sends it,
+/// so a child's home follows the intended layout rather than the file the
+/// owner is written in today.
+fn owner_home(cx: &LateContext<'_>, owner: &Owner<'_>) -> Option<PathBuf> {
+    let Owner::Module { item, ident, module } = *owner else {
+        return source_path(cx, owner.module().spans.inner_span);
+    };
+    if is_unit_test_module_name(ident.as_str()) {
+        return Some(test_module_home(cx, item, ident.as_str(), module)?.path);
+    }
+    let parent = Owner::of(cx, item)?;
+    if !same_source_file(cx, parent.module().spans.inner_span, module.spans.inner_span) {
+        return source_path(cx, module.spans.inner_span);
+    }
+    let parent_path = owner_home(cx, &parent)?;
+    Some(module_dir(&parent, &parent_path)?.join(format!("{ident}.rs")))
+}
+
+/// The directory the owner's child modules resolve in, which `lib.rs`,
+/// `main.rs`, and `mod.rs` share with the file itself.
+fn module_dir(owner: &Owner<'_>, owner_path: &Path) -> Option<PathBuf> {
+    let owner_dir = owner_path.parent()?;
+    let stem = owner_path.file_stem()?;
+    Some(if matches!(owner, Owner::Crate(_)) || stem == "mod" {
+        owner_dir.to_path_buf()
+    } else {
+        owner_dir.join(stem)
+    })
 }
 
 /// An inline child counts too: `inline_module_block` sends it to its own file,

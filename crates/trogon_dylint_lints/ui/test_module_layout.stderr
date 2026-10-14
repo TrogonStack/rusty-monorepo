@@ -50,13 +50,31 @@ LL | |     #[test]
    |
    = help: move the contents into `tests/parse_tests.rs` and declare `mod parse_tests;` in the owning module
 
+error: inline module `inner` declared with a body block
+  --> $DIR/auxiliary/layout_inline_owner/mod.rs:1:1
+   |
+LL | / mod inner {
+LL | |     #[cfg(test)]
+   | |____^
+   |
+   = help: move the contents into `inner.rs` (or `inner/mod.rs`) and declare it as `mod inner;`
+
+error: inline module `tests` declared with a body block
+  --> $DIR/auxiliary/layout_inline_owner/mod.rs:3:5
+   |
+LL | /     mod tests {
+LL | |         #[test]
+   | |________^
+   |
+   = help: move the contents into `inner_tests.rs` and declare `#[cfg(test)] #[path = "inner_tests.rs"] mod tests;` in the owning module
+
 error: unit-test module `tests` must be declared at module scope
-  --> $DIR/test_module_layout.rs:21:5
+  --> $DIR/test_module_layout.rs:24:5
    |
 LL |     mod tests;
    |     ^^^^^^^^^
    |
    = help: declare the test module in its owning module rather than inside a function
 
-error: aborting due to 7 previous errors
+error: aborting due to 9 previous errors
 
