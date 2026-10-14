@@ -1,5 +1,5 @@
 // edition:2024
-#![allow(dead_code)]
+#![allow(dead_code, test_module_naming, reason = "this fixture isolates constant placement")]
 
 // Module-level constant in a non-`constants` file: this is the violation.
 const MAX_INSPECTED_BODY: usize = 1024 * 1024;

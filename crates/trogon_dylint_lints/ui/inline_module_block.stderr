@@ -15,7 +15,7 @@ LL | / mod tests {
 LL | |     #[test]
    | |____^
    |
-   = help: move the contents into `tests.rs` (or `tests/mod.rs`) and declare it as `mod tests;`
+   = help: move the contents into `inline_module_block_tests.rs` and declare `#[cfg(test)] #[path = "inline_module_block_tests.rs"] mod tests;` in the owning module
 
 error: inline module `outer` declared with a body block
   --> $DIR/inline_module_block.rs:15:1

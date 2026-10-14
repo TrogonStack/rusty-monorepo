@@ -403,8 +403,14 @@ rustc_session::declare_lint! {
     /// physical structure and the module structure in sync. A child module in
     /// its own file still reaches the parent module's private items, so the
     /// usual reason to inline `#[cfg(test)] mod tests { ... }` does not apply.
-    /// Generated files (those carrying an `@generated` marker near the top) are
-    /// exempt, since their module layout is dictated by codegen.
+    /// A test suite in `parser.rs` belongs in sibling `parser_tests.rs`, loaded
+    /// as a child module with `#[cfg(test)] #[path = "parser_tests.rs"] mod tests;`,
+    /// or in `parser/tests.rs` once it spans more than one file, as
+    /// `test_module_naming` describes. Its logical path is still `parser::tests`
+    /// either way, so private access is preserved.
+    /// Cargo integration and benchmark targets, macro-generated declarations,
+    /// and generated sources marked `@generated` or `DO NOT EDIT` near their
+    /// top are exempt.
     ///
     /// ### Example
     ///
@@ -789,37 +795,86 @@ rustc_session::declare_lint! {
 rustc_session::declare_lint! {
     /// ### What it does
     ///
-    /// Detects modules that contain `#[test]` (or `#[tokio::test]`) functions
-    /// but are not named `tests` or `*_tests`.
+    /// Detects unit-test modules whose logical name or resolved source file
+    /// does not follow the owner's test layout, unit tests placed directly in
+    /// the crate root, and reserved test modules or source files compiled into
+    /// a non-test target.
     ///
     /// ### Why is this bad?
     ///
-    /// Test suites live in their own file-backed module (see
-    /// `inline_module_block`), and that module's name becomes its file name. A
-    /// fixed naming rule keeps test files discoverable and uniform: `tests` for
-    /// the sole test module of a parent, and `*_tests` for siblings that split
-    /// tests by concern or `cfg` gate (`parse_tests`, `cov_stub_tests`). Modules
-    /// that only hold test *support* (mocks, fixtures, testkit) carry no `#[test]`
-    /// functions and are left alone.
+    /// A module's unit tests have one place to look: its `tests` child. A suite
+    /// that fits in one file sits beside the implementation it owns, without a
+    /// directory that exists only to hold tests. A suite that outgrows one file
+    /// moves into the owner's module directory rather than scattering more
+    /// files beside the implementation, and its groups stay children of
+    /// `tests`, so the owner still declares a single test module. The
+    /// declaration remains inside the owner, preserving the logical child
+    /// module and its access to private implementation.
+    ///
+    /// A child `tests` module in `parser.rs` loads sibling `parser_tests.rs`.
+    /// Once the suite spans more than one file, `parser.rs` declares
+    /// `#[cfg(test)] mod tests;` instead, the suite lives in `parser/tests.rs`,
+    /// and each group is a `*_tests` child declared there, such as
+    /// `mod parse_tests;` loading `parser/tests/parse_tests.rs`. Groups are
+    /// never siblings of `tests`: a `*_tests` module declared directly in the
+    /// owner is reported wherever its file sits. Crate roots use `lib_tests.rs`
+    /// and `main_tests.rs`, or `src/tests.rs` with groups under `src/tests/`.
+    /// Directory modules backed by `mod.rs` use `tests.rs` beside it, with
+    /// groups under `tests/`. The resolved owner and body files determine
+    /// placement, including when a module is renamed with `#[path]`; equivalent
+    /// path spellings are accepted.
+    ///
+    /// Test-only names (`tests`/`*_tests`) and source filenames are reserved:
+    /// a normal build reports them unless the module is removed by its test
+    /// gate. A filename alone does not confer a production-code exemption.
+    /// Cargo integration and benchmark targets are identified by the
+    /// compiler-process `CARGO_TARGET_TMPDIR` environment variable, including
+    /// custom target paths and `harness = false`. Macro-generated declarations
+    /// and sources marked `@generated` or `DO NOT EDIT` are exempt.
+    ///
+    /// Run both normal targets and test targets. This rule only sees configured
+    /// modules rustc loads; it does not inspect inactive feature/platform
+    /// branches or discover unreferenced files. Test-support modules without
+    /// test functions keep their ordinary names.
     ///
     /// ### Example
     ///
-    /// ```rust
-    /// // in helpers.rs
+    /// ```rust,ignore
+    /// // in parser.rs
     /// #[test]
-    /// fn it_works() {}
+    /// fn accepts_empty_input() {}
     /// ```
     ///
     /// Use instead:
     ///
-    /// ```rust
-    /// // in tests.rs (or parse_tests.rs for a sibling module)
-    /// #[test]
-    /// fn it_works() {}
+    /// ```rust,ignore
+    /// // in parser.rs
+    /// #[cfg(test)]
+    /// #[path = "parser_tests.rs"]
+    /// mod tests;
+    ///
+    /// // in parser_tests.rs
+    /// use super::parse;
+    /// ```
+    ///
+    /// Once the suite spans more than one file:
+    ///
+    /// ```rust,ignore
+    /// // in parser.rs
+    /// #[cfg(test)]
+    /// mod tests;
+    ///
+    /// // in parser/tests.rs
+    /// use super::parse;
+    ///
+    /// mod parse_tests;
+    ///
+    /// // in parser/tests/parse_tests.rs
+    /// use super::super::parse;
     /// ```
     pub TEST_MODULE_NAMING,
     Deny,
-    "name a module of tests `tests` or `*_tests`",
+    "keep unit tests in the owner's `tests` module, in a sibling file or under the owner's module directory",
 }
 
 rustc_session::declare_lint! {
@@ -1162,6 +1217,10 @@ struct TrogonLints {
 }
 
 impl<'tcx> LateLintPass<'tcx> for TrogonLints {
+    fn check_crate(&mut self, cx: &LateContext<'tcx>) {
+        test_module_naming::check_crate(cx);
+    }
+
     fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx LetStmt<'tcx>) {
         self.error_string_comparison.check_local(cx, local);
     }
@@ -1259,6 +1318,7 @@ rustc_session::impl_lint_pass!(
 #[test]
 fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
+    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui_test_module_roots");
 }
 
 #[test]

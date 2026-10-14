@@ -1,4 +1,6 @@
 // edition:2024
+// compile-flags: --test
+#![allow(test_module_naming, reason = "this fixture isolates constructor conversions")]
 #![allow(unused, dead_code)]
 
 use std::borrow::Cow;

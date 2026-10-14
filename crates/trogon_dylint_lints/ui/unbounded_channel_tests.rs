@@ -1,4 +1,5 @@
 // edition:2024
+// compile-flags: --test
 //! UI fixture proving `unbounded_channel` is suppressed in test files. The
 //! fixture is named `*_tests.rs`, so the same constructor that fires in
 //! `unbounded_channel.rs` produces no diagnostic here. Absent a `.stderr`, the

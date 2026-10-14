@@ -1,3 +1,4 @@
+// compile-flags: --test
 //! UI fixture for the `serde_json_macro` lint. Built as an example so the
 //! fixture can depend on the real `serde_json`, whose `json!` macro the lint
 //! resolves by owning crate.

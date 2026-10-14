@@ -1,4 +1,5 @@
 // edition:2024
+#![allow(test_module_naming, reason = "this fixture isolates cycle detection")]
 
 // A single-file fixture has to spell its module tree inline, which
 // `inline_module_block` forbids in real code and which is irrelevant here.

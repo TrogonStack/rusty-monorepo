@@ -1,12 +1,12 @@
+use crate::INLINE_MODULE_BLOCK;
+use crate::test_context::is_integration_or_bench_target;
+use crate::test_module_naming::{TestModuleHome, is_generated_source, is_unit_test_module_name, test_module_home};
 use clippy_utils::diagnostics::span_lint_and_then;
 use rustc_hir::{Item, ItemKind};
 use rustc_lint::LateContext;
-use rustc_span::SourceFile;
-
-use crate::INLINE_MODULE_BLOCK;
 
 pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
-    if item.span.from_expansion() {
+    if item.span.from_expansion() || is_integration_or_bench_target() || is_generated_source(cx, item.span) {
         return;
     }
 
@@ -24,10 +24,7 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         return;
     }
 
-    // Generated files (proto codegen, etc.) emit inline module trees that are
-    // not hand-authored and must not be reshaped to match this policy. Skip any
-    // file carrying the conventional `@generated` marker near its top.
-    if is_generated(&body_file) {
+    if is_generated_source(cx, module.spans.inner_span) {
         return;
     }
 
@@ -37,16 +34,22 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         item.span.with_hi(module.spans.inner_span.lo()),
         format!("inline module `{ident}` declared with a body block"),
         |diag| {
-            diag.help(format!(
-                "move the contents into `{ident}.rs` (or `{ident}/mod.rs`) and declare it as `mod {ident};`"
-            ));
+            if is_unit_test_module_name(ident.as_str())
+                && let Some(TestModuleHome {
+                    display,
+                    declaration,
+                    host,
+                    ..
+                }) = test_module_home(cx, item, ident.as_str(), module)
+            {
+                diag.help(format!(
+                    "move the contents into `{display}` and declare `{declaration}` in {host}"
+                ));
+            } else {
+                diag.help(format!(
+                    "move the contents into `{ident}.rs` (or `{ident}/mod.rs`) and declare it as `mod {ident};`"
+                ));
+            }
         },
     );
-}
-
-fn is_generated(file: &SourceFile) -> bool {
-    let Some(src) = &file.src else {
-        return false;
-    };
-    src.lines().take(5).any(|line| line.contains("@generated"))
 }

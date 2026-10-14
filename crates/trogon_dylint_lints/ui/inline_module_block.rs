@@ -1,5 +1,5 @@
 // edition:2024
-
+// compile-flags: --test
 // Inline module with a body block: this is the violation.
 mod twin {
     pub fn run() {}

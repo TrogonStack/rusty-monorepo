@@ -1,0 +1,11 @@
+error: unit-test module `tests` must load `layout_group_owner/tests.rs`
+  --> $DIR/auxiliary/layout_group_owner.rs:3:1
+   |
+LL | mod tests;
+   | ^^^^^^^^^
+   |
+   = help: declare `#[cfg(test)] mod tests;` in the owning module
+   = note: `#[deny(test_module_naming)]` on by default
+
+error: aborting due to 1 previous error
+

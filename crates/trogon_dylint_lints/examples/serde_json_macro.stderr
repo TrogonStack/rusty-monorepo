@@ -1,5 +1,5 @@
 error: JSON value built with the `serde_json::json!` macro
-  --> $DIR/serde_json_macro.rs:24:5
+  --> $DIR/serde_json_macro.rs:25:5
    |
 LL |     json!({ "error": { "code": code, "message": "boom" } })
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -9,7 +9,7 @@ LL |     json!({ "error": { "code": code, "message": "boom" } })
    = note: `#[deny(serde_json_macro)]` on by default
 
 error: JSON value built with the `serde_json::json!` macro
-  --> $DIR/serde_json_macro.rs:28:5
+  --> $DIR/serde_json_macro.rs:29:5
    |
 LL |     serde_json::json!({ "ok": true })
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -18,7 +18,7 @@ LL |     serde_json::json!({ "ok": true })
    = note: if the shape is genuinely dynamic, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(serde_json_macro, reason = "..."))]`
 
 error: JSON value built with the `serde_json::json!` macro
-  --> $DIR/serde_json_macro.rs:34:10
+  --> $DIR/serde_json_macro.rs:35:10
    |
 LL |     vec![json!({ "id": 1 })]
    |          ^^^^^^^^^^^^^^^^^^
@@ -27,7 +27,7 @@ LL |     vec![json!({ "id": 1 })]
    = note: if the shape is genuinely dynamic, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(serde_json_macro, reason = "..."))]`
 
 error: JSON value built with the `serde_json::json!` macro
-  --> $DIR/serde_json_macro.rs:40:5
+  --> $DIR/serde_json_macro.rs:41:5
    |
 LL |     json!({ "envelope": json!({ "id": 1 }) })
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -36,7 +36,7 @@ LL |     json!({ "envelope": json!({ "id": 1 }) })
    = note: if the shape is genuinely dynamic, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(serde_json_macro, reason = "..."))]`
 
 error: JSON value built with the `serde_json::json!` macro
-  --> $DIR/serde_json_macro.rs:40:25
+  --> $DIR/serde_json_macro.rs:41:25
    |
 LL |     json!({ "envelope": json!({ "id": 1 }) })
    |                         ^^^^^^^^^^^^^^^^^^

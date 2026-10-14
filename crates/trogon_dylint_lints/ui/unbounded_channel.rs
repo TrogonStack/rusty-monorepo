@@ -1,4 +1,5 @@
 // edition:2024
+// compile-flags: --test
 #![allow(unused)]
 
 use std::sync::mpsc;

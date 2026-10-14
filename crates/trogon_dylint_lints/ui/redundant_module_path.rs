@@ -1,5 +1,5 @@
 // edition:2024
-
+#![allow(test_module_naming, reason = "this fixture isolates redundant path attributes")]
 // Redundant: a crate root owns its own directory, so `mod tests;` already
 // resolves to the sibling `tests.rs`. The `#[path]` is noise and must fire.
 #[path = "tests.rs"]
