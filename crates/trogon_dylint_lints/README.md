@@ -56,7 +56,7 @@ per-invocation flags.
 | `telemetry_metric_construction` | deny | metric instruments to be constructed through a generated `trogon_semconv::metric::build_*` constructor |
 | `telemetry_metric_name_literal` | deny | metric instruments to be named with a generated `trogon_semconv` constant |
 | `telemetry_span_name_literal` | deny | spans to be named with a generated `trogon_semconv` constant |
-| `test_module_naming` | deny | unit tests to live in test-only child modules backed by the owner's sibling test files |
+| `test_module_naming` | deny | unit tests to live in the owner's `tests` module, in a sibling file or under the owner's module directory |
 | `unbounded_channel` | deny | a channel to be given an explicit capacity, so a slow consumer applies backpressure |
 | `unstructured_log_fields` | deny | log values to be recorded as `tracing` fields, not format arguments in the message |
 | `weakened_write_precondition` | deny | an unconditional `WritePrecondition::Any` append to name the invariant it depends on |
@@ -94,12 +94,30 @@ mod tests;
 use super::parse;
 ```
 
-An additional child group named `parse_tests` uses sibling
-`parser_parse_tests.rs`. Crate roots use `lib_tests.rs` and `main_tests.rs`.
-Directory modules backed by `mod.rs` may retain sibling `tests.rs` or
-`parse_tests.rs` with ordinary module declarations. The lint checks resolved
-source files and module ownership; a source filename alone cannot exempt a
-reserved test module from a normal build.
+A suite that outgrows one file moves into the owner's module directory instead
+of scattering more files beside the implementation. Its groups stay `*_tests`
+children of `tests`, never siblings of it, so the owner still declares a single
+test module:
+
+```rust
+// parser.rs
+#[cfg(test)]
+mod tests;
+
+// parser/tests.rs
+use super::parse;
+
+mod parse_tests;
+
+// parser/tests/parse_tests.rs
+use super::super::parse;
+```
+
+Crate roots use `lib_tests.rs` and `main_tests.rs`, or `src/tests.rs` with
+groups under `src/tests/`. Directory modules backed by `mod.rs` use `tests.rs`
+beside it, with groups under `tests/`. The lint checks resolved source files
+and module ownership; a source filename alone cannot exempt a reserved test
+module from a normal build.
 
 Cargo integration and benchmark targets, including custom target paths and
 `harness = false`, are identified through Cargo's `CARGO_TARGET_TMPDIR`

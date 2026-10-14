@@ -404,8 +404,10 @@ rustc_session::declare_lint! {
     /// its own file still reaches the parent module's private items, so the
     /// usual reason to inline `#[cfg(test)] mod tests { ... }` does not apply.
     /// A test suite in `parser.rs` belongs in sibling `parser_tests.rs`, loaded
-    /// as a child module with `#[cfg(test)] #[path = "parser_tests.rs"] mod tests;`.
-    /// Its logical path is still `parser::tests`, so private access is preserved.
+    /// as a child module with `#[cfg(test)] #[path = "parser_tests.rs"] mod tests;`,
+    /// or in `parser/tests.rs` once it spans more than one file, as
+    /// `test_module_naming` describes. Its logical path is still `parser::tests`
+    /// either way, so private access is preserved.
     /// Cargo integration and benchmark targets, macro-generated declarations,
     /// and generated sources marked `@generated` or `DO NOT EDIT` near their
     /// top are exempt.
@@ -794,24 +796,33 @@ rustc_session::declare_lint! {
     /// ### What it does
     ///
     /// Detects unit-test modules whose logical name or resolved source file
-    /// does not follow the owner's sibling-file convention, unit tests placed
-    /// directly in the crate root, and reserved test modules or source files
-    /// compiled into a non-test target.
+    /// does not follow the owner's test layout, unit tests placed directly in
+    /// the crate root, and reserved test modules or source files compiled into
+    /// a non-test target.
     ///
     /// ### Why is this bad?
     ///
-    /// A sibling test file keeps the suite beside the implementation it owns
-    /// without introducing a directory solely to hold tests. The declaration
-    /// remains inside the owner, preserving the logical child module and its
-    /// access to private implementation.
+    /// A module's unit tests have one place to look: its `tests` child. A suite
+    /// that fits in one file sits beside the implementation it owns, without a
+    /// directory that exists only to hold tests. A suite that outgrows one file
+    /// moves into the owner's module directory rather than scattering more
+    /// files beside the implementation, and its groups stay children of
+    /// `tests`, so the owner still declares a single test module. The
+    /// declaration remains inside the owner, preserving the logical child
+    /// module and its access to private implementation.
     ///
-    /// A child `tests` module in `parser.rs` must load sibling `parser_tests.rs`;
-    /// an additional child `parse_tests` must load `parser_parse_tests.rs`.
-    /// The same mapping gives crate roots `lib_tests.rs` and `main_tests.rs`.
-    /// Existing directory modules backed by `mod.rs` retain sibling `tests.rs`
-    /// or `parse_tests.rs` with ordinary `mod tests;` declarations.
-    /// The resolved owner and body files determine placement, including when a
-    /// module is renamed with `#[path]`; equivalent path spellings are accepted.
+    /// A child `tests` module in `parser.rs` loads sibling `parser_tests.rs`.
+    /// Once the suite spans more than one file, `parser.rs` declares
+    /// `#[cfg(test)] mod tests;` instead, the suite lives in `parser/tests.rs`,
+    /// and each group is a `*_tests` child declared there, such as
+    /// `mod parse_tests;` loading `parser/tests/parse_tests.rs`. Groups are
+    /// never siblings of `tests`: a `*_tests` module declared directly in the
+    /// owner is reported wherever its file sits. Crate roots use `lib_tests.rs`
+    /// and `main_tests.rs`, or `src/tests.rs` with groups under `src/tests/`.
+    /// Directory modules backed by `mod.rs` use `tests.rs` beside it, with
+    /// groups under `tests/`. The resolved owner and body files determine
+    /// placement, including when a module is renamed with `#[path]`; equivalent
+    /// path spellings are accepted.
     ///
     /// Test-only names (`tests`/`*_tests`) and source filenames are reserved:
     /// a normal build reports them unless the module is removed by its test
@@ -845,9 +856,25 @@ rustc_session::declare_lint! {
     /// // in parser_tests.rs
     /// use super::parse;
     /// ```
+    ///
+    /// Once the suite spans more than one file:
+    ///
+    /// ```rust,ignore
+    /// // in parser.rs
+    /// #[cfg(test)]
+    /// mod tests;
+    ///
+    /// // in parser/tests.rs
+    /// use super::parse;
+    ///
+    /// mod parse_tests;
+    ///
+    /// // in parser/tests/parse_tests.rs
+    /// use super::super::parse;
+    /// ```
     pub TEST_MODULE_NAMING,
     Deny,
-    "keep unit tests in test-only child modules backed by the owner's sibling test files",
+    "keep unit tests in the owner's `tests` module, in a sibling file or under the owner's module directory",
 }
 
 rustc_session::declare_lint! {

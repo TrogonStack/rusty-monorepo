@@ -1,8 +1,6 @@
 use crate::INLINE_MODULE_BLOCK;
 use crate::test_context::is_integration_or_bench_target;
-use crate::test_module_naming::{
-    is_generated_source, is_unit_test_module_name, sibling_test_path, test_module_declaration,
-};
+use crate::test_module_naming::{TestModuleHome, is_generated_source, is_unit_test_module_name, test_module_home};
 use clippy_utils::diagnostics::span_lint_and_then;
 use rustc_hir::{Item, ItemKind};
 use rustc_lint::LateContext;
@@ -37,12 +35,15 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         format!("inline module `{ident}` declared with a body block"),
         |diag| {
             if is_unit_test_module_name(ident.as_str())
-                && let Some(path) = sibling_test_path(cx, item, ident.as_str())
-                && let Some(filename) = path.file_name().and_then(|name| name.to_str())
-                && let Some(declaration) = test_module_declaration(cx, item, ident.as_str())
+                && let Some(TestModuleHome {
+                    display,
+                    declaration,
+                    host,
+                    ..
+                }) = test_module_home(cx, item, ident.as_str(), module)
             {
                 diag.help(format!(
-                    "move the contents into sibling `{filename}` and declare `{declaration}` in the owning module"
+                    "move the contents into `{display}` and declare `{declaration}` in {host}"
                 ));
             } else {
                 diag.help(format!(

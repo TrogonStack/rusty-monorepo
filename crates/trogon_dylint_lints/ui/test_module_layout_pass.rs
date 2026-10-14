@@ -7,6 +7,9 @@ mod owner;
 #[path = "auxiliary/layout_directory/mod.rs"]
 mod directory;
 
+#[path = "auxiliary/layout_split_owner.rs"]
+mod split_owner;
+
 #[path = "auxiliary/layout_generated.rs"]
 mod generated;
 

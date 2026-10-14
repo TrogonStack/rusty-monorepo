@@ -1,7 +1,7 @@
 // edition:2024
 // compile-flags: --test
 
-// Correct sibling test files, including a split test group.
+// A suite that fits in one file, loaded from the owner's sibling test file.
 #[path = "auxiliary/tmn_owner.rs"]
 mod owner;
 

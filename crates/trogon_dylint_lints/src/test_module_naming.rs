@@ -4,10 +4,65 @@ use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::is_test_function;
 use rustc_hir::{Item, ItemKind, Mod, Node};
 use rustc_lint::LateContext;
-use rustc_span::{FileName, Span};
+use rustc_span::{FileName, Ident, Span};
 
 use crate::TEST_MODULE_NAMING;
 use crate::test_context::is_integration_or_bench_target;
+
+const OWNING_MODULE: &str = "the owning module";
+
+/// The file a unit-test module's body belongs in, and the declaration that
+/// loads it from there. `display` is `path` relative to the owner's directory;
+/// `host` names where `declaration` goes.
+pub(crate) struct TestModuleHome {
+    pub(crate) path: PathBuf,
+    pub(crate) display: String,
+    pub(crate) declaration: String,
+    pub(crate) host: String,
+}
+
+enum Owner<'tcx> {
+    Crate(&'tcx Mod<'tcx>),
+    Module {
+        item: &'tcx Item<'tcx>,
+        ident: Ident,
+        module: &'tcx Mod<'tcx>,
+    },
+}
+
+impl<'tcx> Owner<'tcx> {
+    fn of(cx: &LateContext<'tcx>, item: &Item<'_>) -> Option<Self> {
+        let owner = cx.tcx.hir_get_parent_item(item.hir_id()).def_id;
+        match cx.tcx.hir_node_by_def_id(owner) {
+            Node::Item(item) => match item.kind {
+                ItemKind::Mod(ident, module) => Some(Self::Module { item, ident, module }),
+                _ => None,
+            },
+            Node::Crate(module) => Some(Self::Crate(module)),
+            _ => None,
+        }
+    }
+
+    fn module(&self) -> &'tcx Mod<'tcx> {
+        match self {
+            Self::Crate(module) | Self::Module { module, .. } => module,
+        }
+    }
+
+    fn is_test_module(&self) -> bool {
+        matches!(self, Self::Module { ident, .. } if is_unit_test_module_name(ident.as_str()))
+    }
+
+    fn is_mislaid_test_module(&self, cx: &LateContext<'_>) -> bool {
+        let Self::Module { item, ident, module } = *self else {
+            return false;
+        };
+        is_unit_test_module_name(ident.as_str())
+            && !test_module_home(cx, item, ident.as_str(), module).is_some_and(|home| {
+                source_path(cx, module.spans.inner_span).is_some_and(|body| same_file(&body, &home.path))
+            })
+    }
+}
 
 pub(crate) fn check_crate(cx: &LateContext<'_>) {
     if cx.tcx.sess.opts.test || is_integration_or_bench_target() {
@@ -73,17 +128,15 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
             cx,
             TEST_MODULE_NAMING,
             item.span.with_hi(ident.span.hi()),
-            format!("test module `{ident}` is not named `tests` or `*_tests`"),
+            format!("module `{ident}` holds unit tests but is not a `tests` module"),
             |diag| {
-                diag.help(format!(
-                    "extract the tests into a child module named `tests` or `{ident}_tests`, using the owner's sibling test file"
-                ));
+                diag.help("move the tests into the owner's `tests` module, or into a `*_tests` child module of it");
             },
         );
         return;
     }
 
-    let Some(owner) = owner_module(cx, item) else {
+    let Some(owner) = Owner::of(cx, item) else {
         span_lint_and_then(
             cx,
             TEST_MODULE_NAMING,
@@ -95,29 +148,56 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         );
         return;
     };
-    // Inline modules have their own diagnostic, including the correct sibling
-    // path. Reporting the same layout problem twice obscures that action.
-    if source_path(cx, owner.spans.inner_span) == body_path {
+    let inline = source_path(cx, owner.module().spans.inner_span) == body_path;
+    if name != "tests" && !owner.is_test_module() && !inline {
+        span_lint_and_then(
+            cx,
+            TEST_MODULE_NAMING,
+            item.span.with_hi(ident.span.hi()),
+            format!("unit-test module `{ident}` must be a child of the owner's `tests` module"),
+            |diag| {
+                if let Some(TestModuleHome {
+                    display,
+                    declaration,
+                    host,
+                    ..
+                }) = test_module_home(cx, item, name, module)
+                {
+                    diag.help(format!("move it to `{display}` and declare `{declaration}` in {host}"));
+                }
+            },
+        );
         return;
     }
-    let Some(expected) = sibling_test_path(cx, item, name) else {
-        return;
-    };
-    if body_path.is_some_and(|actual| same_file(&actual, &expected)) {
+    // Inline modules have their own diagnostic, including the expected file.
+    // Reporting the same layout problem twice obscures that action.
+    if inline {
         return;
     }
-    let Some(filename) = expected.file_name().and_then(|name| name.to_str()) else {
+    // A child's home follows from where its `tests` owner belongs, so a mislaid
+    // owner is reported once, on itself, rather than again on every child.
+    if owner.is_mislaid_test_module(cx) {
+        return;
+    }
+    let Some(TestModuleHome {
+        path,
+        display,
+        declaration,
+        host,
+    }) = test_module_home(cx, item, name, module)
+    else {
         return;
     };
+    if body_path.is_some_and(|actual| same_file(&actual, &path)) {
+        return;
+    }
     span_lint_and_then(
         cx,
         TEST_MODULE_NAMING,
         item.span.with_hi(ident.span.hi()),
-        format!("unit-test module `{ident}` must load sibling file `{filename}`"),
+        format!("unit-test module `{ident}` must load `{display}`"),
         |diag| {
-            if let Some(declaration) = test_module_declaration(cx, item, name) {
-                diag.help(format!("declare `{declaration}` in the owning module"));
-            }
+            diag.help(format!("declare `{declaration}` in {host}"));
         },
     );
 }
@@ -140,39 +220,80 @@ fn check_test_function(cx: &LateContext<'_>, item: &Item<'_>) {
     );
 }
 
-pub(crate) fn sibling_test_path(cx: &LateContext<'_>, item: &Item<'_>, name: &str) -> Option<PathBuf> {
-    let owner = owner_module(cx, item)?;
-    let path = source_path(cx, owner.spans.inner_span)?;
-    let stem = path.file_stem()?.to_str()?;
-    let filename = match (stem, name) {
-        ("mod", _) => format!("{name}.rs"),
-        (_, "tests") => format!("{stem}_tests.rs"),
-        _ => format!("{stem}_{name}.rs"),
+/// The owner's module directory follows the standard resolution rules even
+/// when the owner itself was loaded through `#[path]`. Placement compares
+/// resolved files, so any `#[path]` that lands on the expected file passes.
+pub(crate) fn test_module_home(
+    cx: &LateContext<'_>,
+    item: &Item<'_>,
+    name: &str,
+    module: &Mod<'_>,
+) -> Option<TestModuleHome> {
+    let owner = Owner::of(cx, item)?;
+    let owner_path = source_path(cx, owner.module().spans.inner_span)?;
+    let owner_dir = owner_path.parent()?;
+    let stem = owner_path.file_stem()?.to_str()?;
+    let module_dir = if matches!(owner, Owner::Crate(_)) || stem == "mod" {
+        owner_dir.to_path_buf()
+    } else {
+        owner_dir.join(stem)
     };
-    Some(path.parent()?.join(filename))
+    let home = |path: PathBuf, declaration: String, host: String| {
+        Some(TestModuleHome {
+            display: relative_display(&path, owner_dir)?,
+            path,
+            declaration,
+            host,
+        })
+    };
+
+    if owner.is_test_module() {
+        home(
+            module_dir.join(format!("{name}.rs")),
+            format!("mod {name};"),
+            OWNING_MODULE.to_owned(),
+        )
+    } else if name != "tests" {
+        let host = format!("`{}`", relative_display(&module_dir.join("tests.rs"), owner_dir)?);
+        home(
+            module_dir.join("tests").join(format!("{name}.rs")),
+            format!("mod {name};"),
+            host,
+        )
+    } else if stem == "mod" || has_file_backed_child(cx, module) {
+        home(
+            module_dir.join("tests.rs"),
+            "#[cfg(test)] mod tests;".to_owned(),
+            OWNING_MODULE.to_owned(),
+        )
+    } else {
+        let filename = format!("{stem}_tests.rs");
+        let declaration = format!("#[cfg(test)] #[path = \"{filename}\"] mod tests;");
+        home(owner_dir.join(filename), declaration, OWNING_MODULE.to_owned())
+    }
 }
 
-pub(crate) fn test_module_declaration(cx: &LateContext<'_>, item: &Item<'_>, name: &str) -> Option<String> {
-    let owner = owner_module(cx, item)?;
-    let owner_path = source_path(cx, owner.spans.inner_span)?;
-    if owner_path.file_stem()?.to_str()? == "mod" {
-        return Some(format!("#[cfg(test)] mod {name};"));
-    }
-    let test_path = sibling_test_path(cx, item, name)?;
-    let filename = test_path.file_name()?.to_str()?;
-    Some(format!("#[cfg(test)] #[path = \"{filename}\"] mod {name};"))
+fn has_file_backed_child(cx: &LateContext<'_>, module: &Mod<'_>) -> bool {
+    let source_map = cx.tcx.sess.source_map();
+    let body = source_map.lookup_char_pos(module.spans.inner_span.lo()).file;
+    module.item_ids.iter().any(|&item_id| {
+        let child = cx.tcx.hir_item(item_id);
+        let ItemKind::Mod(_, child_module) = child.kind else {
+            return false;
+        };
+        !child.span.from_expansion()
+            && source_map.lookup_char_pos(child_module.spans.inner_span.lo()).file.name != body.name
+    })
 }
 
-fn owner_module<'tcx>(cx: &LateContext<'tcx>, item: &Item<'_>) -> Option<&'tcx Mod<'tcx>> {
-    let owner = cx.tcx.hir_get_parent_item(item.hir_id()).def_id;
-    match cx.tcx.hir_node_by_def_id(owner) {
-        Node::Item(Item {
-            kind: ItemKind::Mod(_, module),
-            ..
-        }) => Some(module),
-        Node::Crate(module) => Some(module),
-        _ => None,
-    }
+fn relative_display(path: &Path, base: &Path) -> Option<String> {
+    let segments = path
+        .strip_prefix(base)
+        .ok()?
+        .iter()
+        .map(|segment| segment.to_str())
+        .collect::<Option<Vec<_>>>()?;
+    Some(segments.join("/"))
 }
 
 fn owner_name<'tcx>(cx: &LateContext<'tcx>, item: &Item<'_>) -> Option<&'tcx str> {

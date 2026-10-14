@@ -1,10 +1,10 @@
-error: test module `helpers` is not named `tests` or `*_tests`
+error: module `helpers` holds unit tests but is not a `tests` module
   --> $DIR/test_module_naming.rs:10:1
    |
 LL | mod helpers;
    | ^^^^^^^^^^^
    |
-   = help: extract the tests into a child module named `tests` or `helpers_tests`, using the owner's sibling test file
+   = help: move the tests into the owner's `tests` module, or into a `*_tests` child module of it
    = note: `#[deny(test_module_naming)]` on by default
 
 error: aborting due to 1 previous error
