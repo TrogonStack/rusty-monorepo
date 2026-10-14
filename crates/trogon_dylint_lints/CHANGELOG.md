@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.2.0...trogon_dylint_lints@v0.2.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **trogon_dylint_lints:** Enforce the sibling test-file layout ([#252](https://github.com/TrogonStack/rusty-monorepo/issues/252)) ([6eca394](https://github.com/TrogonStack/rusty-monorepo/commit/6eca394444be07222bd77eae01d95b2689103642))
+
 ## [0.2.0](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.1.0...trogon_dylint_lints@v0.2.0) (2026-10-05)
 
 
