@@ -1,3 +1,4 @@
+// compile-flags: --test
 //! UI fixture proving `telemetry_key_value_literal` is suppressed in test files.
 //! The example is named `*_tests.rs`, so the same inline `KeyValue::new` string
 //! key that fires in `telemetry_key_value_literal.rs` produces no diagnostic

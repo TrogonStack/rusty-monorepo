@@ -1,0 +1,11 @@
+error: unit test `root_test` must live in a child test module
+  --> $DIR/test_module_root_functions.rs:5:4
+   |
+LL | fn root_test() {}
+   |    ^^^^^^^^^
+   |
+   = help: move the test into the owner's sibling test file and load it with `#[cfg(test)]`
+   = note: `#[deny(test_module_naming)]` on by default
+
+error: aborting due to 1 previous error
+

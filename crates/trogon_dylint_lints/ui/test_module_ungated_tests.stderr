@@ -1,0 +1,11 @@
+error: unit-test source is compiled in a non-test target
+  --> $DIR/test_module_ungated_tests.rs:3:1
+   |
+LL | const UNGATED_VALUE: u8 = 1;
+   | ^
+   |
+   = help: keep unit-test sources behind `#[cfg(test)]`; use a production filename for production code
+   = note: `#[deny(test_module_naming)]` on by default
+
+error: aborting due to 1 previous error
+

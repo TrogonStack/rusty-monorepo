@@ -1,3 +1,4 @@
+// compile-flags: --test
 //! UI fixture proving `telemetry_metric_construction` is suppressed in test
 //! files. The example is named `*_tests.rs`, so opening an instrument builder
 //! inline, which is denied in `telemetry_metric_construction.rs`, produces no

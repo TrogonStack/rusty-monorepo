@@ -1,13 +1,9 @@
 // edition:2024
 // compile-flags: --test
 
-// The sole test module of a parent, named `tests`: must NOT be linted.
-#[path = "auxiliary/tmn_tests.rs"]
-mod tests;
-
-// A sibling test module named `*_tests`: must NOT be linted.
-#[path = "auxiliary/tmn_parse_tests.rs"]
-mod parse_tests;
+// Correct sibling test files, including a split test group.
+#[path = "auxiliary/tmn_owner.rs"]
+mod owner;
 
 // A module that holds tests but is misnamed: this is the violation.
 #[path = "auxiliary/tmn_helpers.rs"]

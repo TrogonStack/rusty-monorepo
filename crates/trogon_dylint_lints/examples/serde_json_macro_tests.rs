@@ -1,3 +1,4 @@
+// compile-flags: --test
 //! UI fixture proving `serde_json_macro` is suppressed in test files. The
 //! example is named `*_tests.rs`, so the same `json!` payload that fires in
 //! `serde_json_macro.rs` produces no diagnostic here. Absent a `.stderr`, the

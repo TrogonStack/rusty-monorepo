@@ -1,0 +1,37 @@
+error: unit-test module `tests` must load sibling file `test_module_layout_tests.rs`
+  --> $DIR/test_module_layout.rs:5:1
+   |
+LL | mod tests;
+   | ^^^^^^^^^
+   |
+   = help: declare `#[cfg(test)] #[path = "test_module_layout_tests.rs"] mod tests;` in the owning module
+   = note: `#[deny(test_module_naming)]` on by default
+
+error: unit-test module `tests` must load sibling file `layout_nested_owner_tests.rs`
+  --> $DIR/auxiliary/layout_nested_owner.rs:4:1
+   |
+LL | mod tests;
+   | ^^^^^^^^^
+   |
+   = help: declare `#[cfg(test)] #[path = "layout_nested_owner_tests.rs"] mod tests;` in the owning module
+
+error: inline module `tests` declared with a body block
+  --> $DIR/auxiliary/layout_inline_directory/mod.rs:2:1
+   |
+LL | / mod tests {
+LL | |     #[test]
+   | |____^
+   |
+   = help: move the contents into sibling `tests.rs` and declare `#[cfg(test)] mod tests;` in the owning module
+   = note: `#[deny(inline_module_block)]` on by default
+
+error: unit-test module `tests` must be declared at module scope
+  --> $DIR/test_module_layout.rs:15:5
+   |
+LL |     mod tests;
+   |     ^^^^^^^^^
+   |
+   = help: declare the test module in its owning module rather than inside a function
+
+error: aborting due to 4 previous errors
+

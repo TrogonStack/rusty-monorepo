@@ -1,0 +1,19 @@
+error: unit-test module `payload_tests` is compiled in a non-test target
+  --> $DIR/test_module_layout_production.rs:4:1
+   |
+LL | mod payload_tests;
+   | ^^^^^^^^^^^^^^^^^
+   |
+   = help: gate the module with `#[cfg(test)]`; use a production module and filename for production code
+   = note: `#[deny(test_module_naming)]` on by default
+
+error: unit-test module `payload` is compiled in a non-test target
+  --> $DIR/test_module_layout_production.rs:7:1
+   |
+LL | mod payload;
+   | ^^^^^^^^^^^
+   |
+   = help: gate the module with `#[cfg(test)]`; use a production module and filename for production code
+
+error: aborting due to 2 previous errors
+

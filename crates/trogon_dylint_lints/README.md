@@ -56,7 +56,7 @@ per-invocation flags.
 | `telemetry_metric_construction` | deny | metric instruments to be constructed through a generated `trogon_semconv::metric::build_*` constructor |
 | `telemetry_metric_name_literal` | deny | metric instruments to be named with a generated `trogon_semconv` constant |
 | `telemetry_span_name_literal` | deny | spans to be named with a generated `trogon_semconv` constant |
-| `test_module_naming` | deny | a module of tests to be named `tests` or `*_tests` |
+| `test_module_naming` | deny | unit tests to live in test-only child modules backed by the owner's sibling test files |
 | `unbounded_channel` | deny | a channel to be given an explicit capacity, so a slow consumer applies backpressure |
 | `unstructured_log_fields` | deny | log values to be recorded as `tracing` fields, not format arguments in the message |
 | `weakened_write_precondition` | deny | an unconditional `WritePrecondition::Any` append to name the invariant it depends on |
@@ -80,6 +80,34 @@ cargo dylint --all --workspace --no-deps -- --all-features
 Every rule carries its own default level, so there are no flags to pass. Add
 `--all-targets` to also lint test code such as `#[cfg(test)] mod tests { ... }`,
 which a late (HIR) pass only sees once the test target is compiled.
+
+Unit tests for `parser.rs` live beside it in `parser_tests.rs`, while remaining
+logical children of the implementation module:
+
+```rust
+// parser.rs
+#[cfg(test)]
+#[path = "parser_tests.rs"]
+mod tests;
+
+// parser_tests.rs
+use super::parse;
+```
+
+An additional child group named `parse_tests` uses sibling
+`parser_parse_tests.rs`. Crate roots use `lib_tests.rs` and `main_tests.rs`.
+Directory modules backed by `mod.rs` may retain sibling `tests.rs` or
+`parse_tests.rs` with ordinary module declarations. The lint checks resolved
+source files and module ownership; a source filename alone cannot exempt a
+reserved test module from a normal build.
+
+Cargo integration and benchmark targets, including custom target paths and
+`harness = false`, are identified through Cargo's `CARGO_TARGET_TMPDIR`
+compiler environment and are exempt from the unit-test layout rules. Generated
+and macro-generated modules are exempt too. The checks cover modules loaded for
+the selected configuration. Inactive feature/platform branches and orphan
+files require separate source-tree validation. Existing application test files
+are not migrated by adopting the library.
 
 `new_instead_of_from` is the one rule with configuration. By default it skips a
 `new` reachable from outside the crate, to avoid breaking a public API out from

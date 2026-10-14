@@ -7,6 +7,10 @@ use rustc_hir::def_id::LocalDefId;
 use rustc_lint::{LateContext, LintContext};
 use rustc_span::{FileName, RealFileName, Span};
 
+pub(crate) fn is_integration_or_bench_target() -> bool {
+    std::env::var_os("CARGO_TARGET_TMPDIR").is_some()
+}
+
 /// Whether the node `hir_id`, reported at `span`, sits in test code. Covers
 /// `#[test]` functions and `#[cfg(test)]` items, the test and benchmark module
 /// families (`test_support`, `mocks`, ... whether inline or file-backed), test
@@ -14,9 +18,11 @@ use rustc_span::{FileName, RealFileName, Span};
 /// targets. Mirrors `serde_json_macro`, so a site is test code for the same
 /// reasons in every lint that consults this.
 pub(crate) fn is_test_context(cx: &LateContext<'_>, hir_id: HirId, span: Span) -> bool {
-    is_in_test(cx.tcx, hir_id)
-        || is_inside_test_module(cx, cx.tcx.hir_get_parent_item(hir_id).def_id)
-        || is_test_or_bench_source(cx, span)
+    is_integration_or_bench_target()
+        || (cx.tcx.sess.opts.test
+            && (is_in_test(cx.tcx, hir_id)
+                || is_inside_test_module(cx, cx.tcx.hir_get_parent_item(hir_id).def_id)
+                || is_test_or_bench_source(cx, span)))
 }
 
 /// Walks `def_id` itself before its ancestors: `hir_get_parent_item` already
@@ -56,6 +62,12 @@ pub(crate) fn is_test_module_name(name: &str) -> bool {
 /// of `is_test_context`, exposed on its own for callers that have a span but no
 /// `HirId`.
 pub(crate) fn is_test_or_bench_source(cx: &LateContext<'_>, span: Span) -> bool {
+    if is_integration_or_bench_target() {
+        return true;
+    }
+    if !cx.tcx.sess.opts.test {
+        return false;
+    }
     let file = cx.tcx.sess.source_map().lookup_char_pos(span.lo()).file;
     let FileName::Real(real) = &file.name else {
         return false;

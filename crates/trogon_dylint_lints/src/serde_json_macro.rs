@@ -72,9 +72,11 @@ impl SerdeJsonMacro {
 /// file names (`tests.rs`, `parse_tests.rs`), and Cargo `tests/`/`benches/`
 /// targets.
 fn is_test_context<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>, span: Span) -> bool {
-    is_in_test(cx.tcx, expr.hir_id)
-        || is_inside_test_module(cx, cx.tcx.hir_enclosing_body_owner(expr.hir_id))
-        || is_test_or_bench_source(cx, span)
+    crate::test_context::is_integration_or_bench_target()
+        || (cx.tcx.sess.opts.test
+            && (is_in_test(cx.tcx, expr.hir_id)
+                || is_inside_test_module(cx, cx.tcx.hir_enclosing_body_owner(expr.hir_id))
+                || is_test_or_bench_source(cx, span)))
 }
 
 /// Walk the module ancestors of the enclosing body and exempt the invocation
