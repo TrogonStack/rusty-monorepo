@@ -97,6 +97,9 @@ use crate::telemetry::propagation;
 /// forever.
 const OP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Handed to every `op` call; see [`OnePasswordBackend::run`] for why.
+const OP_NO_CACHE: &str = "--cache=false";
+
 /// The `op` subcommands this backend drives, as a closed set so the one that
 /// lands on a span is always a fixed phrase and never an argument.
 #[derive(Debug, Clone, Copy)]
@@ -862,8 +865,16 @@ impl OnePasswordBackend {
         })
     }
 
-    /// Runs `op <command> <args>` under a CLI client span that names the
-    /// subcommand and none of the arguments, which address the item.
+    /// Runs `op <command> --cache=false <args>` under a CLI client span that
+    /// names the subcommand and none of the arguments, which address the item.
+    ///
+    /// `op` answers from a cache by default on Unix, and that cache lives in
+    /// an `op daemon` the CLI spawns on its own and leaves running after this
+    /// process is gone. Nothing here benefits from it: a backend reads an
+    /// item once per `exec run`, and the daemon is where a macOS permission
+    /// prompt nobody is watching for stalls a read, and where Linux collects
+    /// zombies. Every call opts out so the only process `trg` is responsible
+    /// for is the one it spawned.
     async fn run(&self, command: OpCommand, args: &[&str]) -> Result<std::process::Output, SecretsError> {
         let call = CliSpan::start(BackendKind::OnePassword, "op", command.as_str());
         let invocation = || format!("{} {}", command.as_str(), args.join(" "));
@@ -871,6 +882,7 @@ impl OnePasswordBackend {
         let mut process = Command::new(&self.bin);
         process
             .args(command.words())
+            .arg(OP_NO_CACHE)
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -1562,6 +1574,7 @@ mod tests {
             [
                 "item",
                 "get",
+                "--cache=false",
                 "deploy-keys",
                 "--vault",
                 "Ops",
@@ -1636,7 +1649,7 @@ mod tests {
 
         assert_eq!(known.len(), 2);
         assert_eq!(known[0].email, "someone@example.com");
-        assert_eq!(stub.argv(), ["account", "list", "--format", "json"]);
+        assert_eq!(stub.argv(), ["account", "list", "--cache=false", "--format", "json"]);
     }
 
     #[tokio::test]
@@ -1648,7 +1661,15 @@ mod tests {
         assert_eq!(current.state, "ACTIVE");
         assert_eq!(
             stub.argv(),
-            ["account", "get", "--format", "json", "--account", ACCOUNT]
+            [
+                "account",
+                "get",
+                "--cache=false",
+                "--format",
+                "json",
+                "--account",
+                ACCOUNT
+            ]
         );
     }
 
