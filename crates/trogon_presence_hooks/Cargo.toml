@@ -1,0 +1,27 @@
+[package]
+name = "trogon_presence_hooks"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+http = { workspace = true }
+http-body-util = "0.1"
+hyper = { version = "1.9", default-features = false, features = ["client", "http1"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde_json = { workspace = true }
+sha2 = "0.10"
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tracing = { workspace = true }
+trogon_presence = { path = "../trogon_presence" }
+wasmtime = { version = "=49.0.2", default-features = false, features = ["anyhow", "async", "component-model", "cranelift", "pooling-allocator", "runtime", "std", "wat"] }
+wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "=49.0.2", default-features = false, features = ["p2"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+rcgen = "0.14"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util", "time"] }

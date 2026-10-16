@@ -1,0 +1,20 @@
+[package]
+name = "trogon_presence_load"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+
+[dev-dependencies]
+async-nats = { workspace = true, features = ["websockets"] }
+base64 = { workspace = true }
+futures-util = { workspace = true }
+libc = { workspace = true }
+metrics = "0.24"
+nkeys = { version = "0.4.5", features = ["xkeys"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+trogon_presence = { path = "../trogon_presence" }
+trogon_presence_auth = { path = "../trogon_presence_auth" }
+trogon_presence_service = { path = "../trogon_presence_service" }
