@@ -42,11 +42,8 @@ pub(crate) fn decode_unpadded(text: &str) -> Option<Vec<u8>> {
         }
         let produced = chunk.len() - 1;
         let octets = [(word >> 16) as u8, (word >> 8) as u8, word as u8];
-        if chunk.len() < 4 {
-            let spare_bits = 6 * (4 - chunk.len());
-            if word & ((1 << spare_bits) - 1) != 0 {
-                return None;
-            }
+        if word & ((1 << (24 - 8 * produced)) - 1) != 0 {
+            return None;
         }
         out.extend_from_slice(&octets[..produced]);
     }

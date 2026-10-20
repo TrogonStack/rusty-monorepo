@@ -56,7 +56,7 @@ impl AuthorizedActor {
         }
         match key {
             ActorKey::Subject { sub, .. } => self.sub.as_ref() == Some(sub),
-            ActorKey::Client { client_id, .. } => self.client_id.as_ref() == Some(client_id),
+            ActorKey::Client { client_id, .. } => self.sub.is_none() && self.client_id.as_ref() == Some(client_id),
         }
     }
 }

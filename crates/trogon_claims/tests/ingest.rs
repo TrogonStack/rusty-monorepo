@@ -76,7 +76,7 @@ fn a_duplicate_member_is_rejected() {
 
 #[test]
 fn a_duplicate_member_spelled_with_an_escape_is_rejected() {
-    let error = RawClaims::from_slice(br#"{"sub":"a","sub":"b"}"#).unwrap_err();
+    let error = RawClaims::from_slice(br#"{"sub":"a","\u0073ub":"b"}"#).unwrap_err();
     assert_eq!(error, RawClaimsError::Duplicate { name: "sub".to_owned() });
 }
 
@@ -301,6 +301,19 @@ fn may_act_names_an_actor_only_when_both_issuers_are_stated_and_equal() {
 }
 
 #[test]
+fn may_act_with_a_subject_never_names_a_client_only_actor() {
+    let ingested = ingest(
+        r#"{"iss":"i","sub":"u","may_act":{"iss":"https://actor.example.com","sub":"a","client_id":"c"},"act":{"iss":"https://actor.example.com","client_id":"c"}}"#,
+    )
+    .unwrap();
+    assert!(!ingested
+        .identity()
+        .may_act()
+        .unwrap()
+        .names(ingested.actor().unwrap().key()));
+}
+
+#[test]
 fn an_unstated_issuer_never_equals_a_stated_one() {
     let unstated = ingest(r#"{"iss":"i","sub":"u","may_act":{"sub":"a"},"act":{"sub":"a"}}"#).unwrap();
     assert!(!unstated
@@ -501,6 +514,19 @@ fn a_malformed_compact_token_is_rejected() {
         jwt_payload("a.b.c.d").unwrap_err(),
         IngestError::Malformed(RawClaimsError::NotCompactJwt)
     );
+}
+
+#[test]
+fn a_payload_with_non_zero_leftover_bits_is_rejected() {
+    assert!(jwt_payload("a.e30.c").is_ok());
+    assert!(jwt_payload("a.eyAgfQ.c").is_ok());
+    for token in ["a.e31.c", "a.eyAgfR.c"] {
+        assert_eq!(
+            jwt_payload(token).unwrap_err(),
+            IngestError::Malformed(RawClaimsError::InvalidBase64),
+            "{token:?}"
+        );
+    }
 }
 
 #[test]

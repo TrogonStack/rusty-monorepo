@@ -71,5 +71,9 @@ cargo dylint --lib-path "$lib" --workspace --no-deps -- --all-features
 '''
 
 [tasks."claims:check"]
-description = "Check the trogon_claims dependency budget and trybuild goldens"
-run = "scripts/check-trogon-claims.sh"
+description = "Check the trogon_claims dependency budget, then lint and test it with every feature enabled"
+run = [
+  "scripts/check-trogon-claims.sh",
+  "cargo clippy -p trogon_claims_syntax -p trogon_claims_macros -p trogon_claims --all-targets --all-features -- -D warnings",
+  "cargo test -p trogon_claims_syntax -p trogon_claims_macros -p trogon_claims --all-features",
+]
