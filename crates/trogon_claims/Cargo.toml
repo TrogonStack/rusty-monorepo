@@ -39,3 +39,7 @@ trybuild = { workspace = true }
 
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
+[[bench]]
+name = "ingest"
+harness = false
+required-features = ["json"]
