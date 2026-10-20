@@ -103,6 +103,9 @@ jobs:
       - name: Run doc tests
         run: cargo test --workspace --doc
 
+      - name: Check the trogon_claims dependency budget
+        run: mise run claims:check
+
   build:
     name: Build
     runs-on: ubuntu-latest

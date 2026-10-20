@@ -69,3 +69,7 @@ run = '''
 lib="$(ls crates/trogon_dylint_lints/target/release/libtrogon_dylint_lints@* | head -1)"
 cargo dylint --lib-path "$lib" --workspace --no-deps -- --all-features
 '''
+
+[tasks."claims:check"]
+description = "Check the trogon_claims dependency budget and trybuild goldens"
+run = "scripts/check-trogon-claims.sh"
