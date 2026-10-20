@@ -13,3 +13,9 @@ impl ObjectId {
         Self(Cow::Borrowed(value))
     }
 }
+
+impl ObjectId {
+    pub fn from_bytes_base64url_unpadded(bytes: &[u8]) -> Result<Self, crate::errors::ValueObjectError> {
+        Self::try_new(crate::base64url::encode_unpadded(bytes))
+    }
+}
