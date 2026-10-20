@@ -14,6 +14,7 @@ use crate::dynamic_claims::DynamicClaims;
 use crate::principal_key::PrincipalKey;
 use crate::principal_kind::PrincipalKind;
 use crate::role_name::RoleName;
+use crate::verified_binding::{BindingError, Method, VerifiedBinding};
 
 #[derive(Clone, Debug)]
 pub(crate) struct IdentityParts<C: ClaimSet> {
@@ -104,6 +105,10 @@ impl<C: ClaimSet> AuthenticatedIdentity<C> {
     pub fn context(&self) -> &AuthenticationContext {
         &self.context
     }
+
+    pub fn verify_binding<M: Method>(&self, presented: &str) -> Result<VerifiedBinding, BindingError> {
+        self.binding.verify::<M>(presented)
+    }
 }
 
 impl AuthenticatedIdentity<DynamicClaims> {
@@ -139,7 +144,7 @@ impl<C: HasSubject> AuthenticatedIdentity<C> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum Identity<C: ClaimSet = DynamicClaims> {
     Anonymous,
     Authenticated(Arc<AuthenticatedIdentity<C>>),
@@ -166,7 +171,23 @@ impl<C: ClaimSet> Identity<C> {
     }
 }
 
+impl<C: ClaimSet> Clone for Identity<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Anonymous => Self::Anonymous,
+            Self::Authenticated(identity) => Self::Authenticated(Arc::clone(identity)),
+        }
+    }
+}
+
 impl<C: ClaimSet + Clone> Identity<C> {
+    pub fn with_verified_binding(mut self, verified: VerifiedBinding) -> Self {
+        if let Self::Authenticated(identity) = &mut self {
+            Arc::make_mut(identity).binding = Binding::Verified(Box::new(verified));
+        }
+        self
+    }
+
     pub fn with_kind(mut self, kind: PrincipalKind) -> Self {
         if let Self::Authenticated(identity) = &mut self {
             Arc::make_mut(identity).kind = Some(kind);

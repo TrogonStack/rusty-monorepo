@@ -38,6 +38,8 @@ mod macros;
 mod numeric_date;
 mod object_id;
 mod object_type;
+mod principal;
+mod principal_builder;
 mod principal_key;
 mod principal_kind;
 mod prior_actor;
@@ -50,12 +52,14 @@ mod raw_json;
 #[cfg(feature = "json")]
 mod raw_scan;
 mod role_name;
+mod sealed;
 mod subject_id;
 mod subject_mapping;
 mod timestamp;
 mod unsigned63;
 mod utc_offset;
 mod value_object;
+mod verified_binding;
 mod well_known_claim;
 
 #[doc(hidden)]
@@ -95,6 +99,8 @@ pub use kind::{Classified, Kind, Unclassified};
 pub use numeric_date::NumericDate;
 pub use object_id::ObjectId;
 pub use object_type::ObjectType;
+pub use principal::{Principal, SourcedClaim};
+pub use principal_builder::{PrincipalBuildError, PrincipalBuilder};
 pub use principal_key::PrincipalKey;
 pub use principal_kind::PrincipalKind;
 pub use prior_actor::PriorActor;
@@ -110,4 +116,5 @@ pub use subject_mapping::{Base64UrlUnpadded, SubjectMapping, SubjectMappingError
 pub use timestamp::Timestamp;
 pub use unsigned63::Unsigned63;
 pub use utc_offset::UtcOffset;
+pub use verified_binding::{BindingError, BindingMethod, Dpop, Method, MutualTls, VerifiedBinding};
 pub use well_known_claim::WellKnownClaim;
