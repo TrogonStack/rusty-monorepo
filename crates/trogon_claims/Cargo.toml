@@ -36,6 +36,9 @@ http = { workspace = true, optional = true }
 
 [dev-dependencies]
 trybuild = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tokio = { workspace = true }
 
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 

@@ -11,6 +11,8 @@ mod authentication_type;
 #[cfg(feature = "spicedb")]
 mod authorization_subject;
 mod authorized_actor;
+#[cfg(feature = "axum")]
+pub mod axum;
 #[cfg(feature = "spicedb")]
 mod base64_standard;
 mod base64url;
@@ -34,6 +36,8 @@ mod claim_value;
 mod client_id;
 mod confirmation;
 pub mod constants;
+#[cfg(feature = "axum")]
+mod credential_outcome;
 mod current_actor;
 #[cfg(feature = "spicedb")]
 mod current_actor_subject;
@@ -53,6 +57,8 @@ mod issuer;
 mod jwk;
 mod kind;
 mod macros;
+#[cfg(feature = "axum")]
+mod masked;
 mod numeric_date;
 mod object_id;
 #[cfg(feature = "spicedb")]
@@ -62,10 +68,14 @@ mod object_type;
 mod outcome_error;
 #[cfg(feature = "spicedb")]
 mod param_name;
+#[cfg(feature = "axum")]
+mod presented_proof;
 mod principal;
 mod principal_builder;
 mod principal_key;
 mod principal_kind;
+#[cfg(feature = "axum")]
+mod principal_unavailable;
 mod prior_actor;
 #[cfg(feature = "json")]
 mod raw_claims;
@@ -78,10 +88,16 @@ mod raw_scan;
 #[cfg(feature = "spicedb")]
 mod reference_parse_error;
 mod refinement;
+#[cfg(feature = "axum")]
+mod refinement_extract;
 #[cfg(feature = "spicedb")]
 mod relation_name;
+#[cfg(feature = "axum")]
+mod request_extensions;
 mod role_name;
 mod sealed;
+#[cfg(feature = "axum")]
+mod step_up;
 mod subject_id;
 mod subject_mapping;
 #[cfg(feature = "spicedb")]
@@ -89,12 +105,16 @@ mod subject_reference;
 #[cfg(feature = "spicedb")]
 mod subject_set;
 mod timestamp;
+#[cfg(feature = "axum")]
+mod unauthenticated;
 mod unsigned63;
 #[cfg(feature = "spicedb")]
 mod unverified_directed_principal;
 mod utc_offset;
 mod value_object;
 mod verified_binding;
+#[cfg(feature = "axum")]
+mod web_extractors;
 mod well_known_claim;
 
 #[doc(hidden)]

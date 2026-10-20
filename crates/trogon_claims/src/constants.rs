@@ -149,3 +149,16 @@ pub const LOOKUP_PERMISSIONSHIP_HAS_PERMISSION: i32 = 1;
 pub const LOOKUP_PERMISSIONSHIP_CONDITIONAL_PERMISSION: i32 = 2;
 pub const OBJECT_SEPARATOR: char = ':';
 pub const RELATION_SEPARATOR: char = '#';
+
+#[cfg(feature = "axum")]
+pub const CHALLENGE_BEARER: &str = "Bearer";
+#[cfg(feature = "axum")]
+pub const CHALLENGE_BEARER_INVALID_TOKEN: &str = "Bearer error=\"invalid_token\"";
+#[cfg(feature = "axum")]
+pub const CHALLENGE_DPOP: &str = "DPoP";
+#[cfg(feature = "axum")]
+pub const CHALLENGE_DPOP_INVALID_TOKEN: &str = "DPoP error=\"invalid_token\"";
+#[cfg(feature = "axum")]
+pub const CHALLENGE_STEP_UP_ERROR: &str = "Bearer error=\"insufficient_user_authentication\"";
+#[cfg(feature = "axum")]
+pub const STEP_UP_ERROR_DESCRIPTION: &str = "a stronger authentication is required";

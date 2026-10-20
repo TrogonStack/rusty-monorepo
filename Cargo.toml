@@ -27,5 +27,7 @@ libc = "0.2"
 zeroize = "1.8"
 prost = "0.14"
 prost-types = "0.14"
+axum = { version = "0.8", default-features = false }
 axum-core = "0.5"
+tower = { version = "0.5", default-features = false, features = ["util"] }
 trybuild = "1.0"
