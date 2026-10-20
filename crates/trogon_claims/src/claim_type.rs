@@ -27,6 +27,19 @@ impl ClaimType {
         })
     }
 
+    #[cfg(feature = "json")]
+    pub(crate) const fn from_static_unchecked(name: &'static str) -> Self {
+        Self(Repr::Custom(Cow::Borrowed(name)))
+    }
+
+    #[cfg(feature = "json")]
+    pub(crate) fn try_from_member_name(name: &str) -> Result<Self, ValueObjectError> {
+        match WellKnownClaim::from_name(name) {
+            Some(well_known) => Ok(Self(Repr::WellKnown(well_known))),
+            None => Self::try_new(name.to_owned()),
+        }
+    }
+
     pub fn as_str(&self) -> &str {
         match &self.0 {
             Repr::WellKnown(well_known) => well_known.as_str(),

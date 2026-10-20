@@ -25,6 +25,10 @@ mod dynamic_claims;
 mod errors;
 mod identity;
 mod identity_builder;
+#[cfg(feature = "json")]
+pub mod ingest;
+#[cfg(feature = "json")]
+mod ingest_error;
 mod ingest_profile;
 mod ingested;
 mod issuer;
@@ -37,6 +41,14 @@ mod object_type;
 mod principal_key;
 mod principal_kind;
 mod prior_actor;
+#[cfg(feature = "json")]
+mod raw_claims;
+#[cfg(feature = "json")]
+mod raw_claims_error;
+#[cfg(feature = "json")]
+mod raw_json;
+#[cfg(feature = "json")]
+mod raw_scan;
 mod role_name;
 mod subject_id;
 mod subject_mapping;
@@ -73,6 +85,8 @@ pub use dynamic_claims::DynamicClaims;
 pub use errors::{NumericDateError, TimestampError, Unsigned63Error, UtcOffsetError, ValueKind, ValueObjectError};
 pub use identity::{AuthenticatedIdentity, Identity};
 pub use identity_builder::{IdentityBuildError, IdentityBuilder};
+#[cfg(feature = "json")]
+pub use ingest_error::{ClaimValueError, ConfirmationError, IngestError};
 pub use ingest_profile::IngestProfile;
 pub use ingested::Ingested;
 pub use issuer::Issuer;
@@ -84,6 +98,12 @@ pub use object_type::ObjectType;
 pub use principal_key::PrincipalKey;
 pub use principal_kind::PrincipalKind;
 pub use prior_actor::PriorActor;
+#[cfg(feature = "json")]
+pub use raw_claims::RawClaims;
+#[cfg(feature = "json")]
+pub use raw_claims_error::RawClaimsError;
+#[cfg(feature = "json")]
+pub use raw_json::{RawJson, RawKind};
 pub use role_name::RoleName;
 pub use subject_id::SubjectId;
 pub use subject_mapping::{Base64UrlUnpadded, SubjectMapping, SubjectMappingError, Verbatim};

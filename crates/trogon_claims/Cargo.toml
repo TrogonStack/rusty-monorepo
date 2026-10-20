@@ -28,7 +28,7 @@ trogon_claims_macros = { path = "../trogon_claims_macros" }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true, features = ["raw_value"], optional = true }
 prost = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 axum-core = { workspace = true, optional = true }
@@ -38,3 +38,4 @@ http = { workspace = true, optional = true }
 trybuild = { workspace = true }
 
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+
