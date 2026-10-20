@@ -2,6 +2,7 @@ mod actor_error;
 mod actor_issuer;
 mod actor_key;
 mod audience;
+mod authenticated_principal;
 mod authentication_context;
 mod authentication_method;
 mod authentication_type;
@@ -20,6 +21,7 @@ mod client_id;
 mod confirmation;
 pub mod constants;
 mod current_actor;
+mod current_principal;
 mod delegation;
 mod dynamic_claims;
 mod errors;
@@ -51,6 +53,7 @@ mod raw_claims_error;
 mod raw_json;
 #[cfg(feature = "json")]
 mod raw_scan;
+mod refinement;
 mod role_name;
 mod sealed;
 mod subject_id;
@@ -69,6 +72,7 @@ pub use actor_error::ActorError;
 pub use actor_issuer::ActorIssuer;
 pub use actor_key::ActorKey;
 pub use audience::Audience;
+pub use authenticated_principal::{AuthenticatedPrincipal, NotAuthenticatedError, RefinementError};
 pub use authentication_context::AuthenticationContext;
 pub use authentication_method::AuthenticationMethod;
 pub use authentication_type::AuthenticationType;
@@ -84,6 +88,7 @@ pub use claim_value::ClaimValue;
 pub use client_id::ClientId;
 pub use confirmation::Confirmation;
 pub use current_actor::{CurrentActor, PriorActors};
+pub use current_principal::CurrentPrincipal;
 pub use delegation::Delegation;
 pub use dynamic_claims::DynamicClaims;
 pub use errors::{NumericDateError, TimestampError, Unsigned63Error, UtcOffsetError, ValueKind, ValueObjectError};
@@ -110,6 +115,10 @@ pub use raw_claims::RawClaims;
 pub use raw_claims_error::RawClaimsError;
 #[cfg(feature = "json")]
 pub use raw_json::{RawJson, RawKind};
+pub use refinement::{
+    AnyBinding, AnyDelegation, BindingState, BoundProof, Delegated, DelegationState, Direct, KindState, KnownKind,
+    Refined, Refinement, SenderConstrained, WithBinding, WithDelegation, WithKind,
+};
 pub use role_name::RoleName;
 pub use subject_id::SubjectId;
 pub use subject_mapping::{Base64UrlUnpadded, SubjectMapping, SubjectMappingError, Verbatim};
