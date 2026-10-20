@@ -44,8 +44,15 @@ if [ "$syntax_deps" != "0" ]; then
   status=1
 fi
 
-if grep -rlE '/Users|/Volumes|/home|C:\\' crates/trogon_claims/tests/ui; then
+goldens=(crates/trogon_claims/tests/ui crates/trogon_claims/tests/ui_spicedb)
+
+if grep -rlE '/Users|/Volumes|/home|C:\\' "${goldens[@]}"; then
   echo "absolute paths found in trybuild goldens" >&2
+  status=1
+fi
+
+if grep -rlF '$RUST' "${goldens[@]}"; then
+  echo "trybuild goldens quote standard library source, which depends on rust-src being installed" >&2
   status=1
 fi
 
