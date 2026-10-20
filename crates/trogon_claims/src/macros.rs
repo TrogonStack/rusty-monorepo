@@ -11,3 +11,10 @@ macro_rules! object_type {
         $crate::__private::object_type_impl!($crate, $literal)
     };
 }
+
+#[macro_export]
+macro_rules! principal_kind {
+    ($literal:literal) => {
+        $crate::__private::principal_kind_impl!($crate, $literal)
+    };
+}

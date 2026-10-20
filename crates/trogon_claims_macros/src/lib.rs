@@ -16,3 +16,8 @@ pub fn object_id_impl(input: TokenStream) -> TokenStream {
 pub fn object_type_impl(input: TokenStream) -> TokenStream {
     expand(input, Target::ObjectType)
 }
+
+#[proc_macro]
+pub fn principal_kind_impl(input: TokenStream) -> TokenStream {
+    expand(input, Target::PrincipalKind)
+}

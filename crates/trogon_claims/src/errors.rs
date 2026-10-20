@@ -13,6 +13,7 @@ pub enum ValueKind {
     Issuer,
     ObjectId,
     ObjectType,
+    PrincipalKind,
     RoleName,
     SubjectId,
 }
@@ -28,6 +29,7 @@ impl ValueKind {
             Self::Issuer => "issuer",
             Self::ObjectId => "object_id",
             Self::ObjectType => "object_type",
+            Self::PrincipalKind => "principal_kind",
             Self::RoleName => "role_name",
             Self::SubjectId => "subject_id",
         }
