@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/ui_spicedb/fail/prior_actor_current_actor_path.rs:4:75
+  |
+4 |     let _ = SubjectReference::try_from_current_actor::<Base64UrlUnpadded>(&prior, object_type!("service"));
+  |             ------------------------------------------------------------- ^^^^^^ expected `&CurrentActor`, found `&PriorActor`
+  |             |
+  |             arguments to this function are incorrect
+  |
+  = note: expected reference `&CurrentActor`
+             found reference `&PriorActor`
+note: associated function defined here
+ --> src/current_actor_subject.rs
+  |
+  |     pub fn try_from_current_actor<M: SubjectMapping>(
+  |            ^^^^^^^^^^^^^^^^^^^^^^

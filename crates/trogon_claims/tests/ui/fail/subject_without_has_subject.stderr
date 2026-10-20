@@ -1,0 +1,16 @@
+error[E0599]: the method `subject` exists for struct `AuthenticatedPrincipal<NoSubject>`, but its trait bounds were not satisfied
+  --> tests/ui/fail/subject_without_has_subject.rs:12:25
+   |
+ 5 | struct NoSubject;
+   | ---------------- doesn't satisfy `NoSubject: HasSubject`
+...
+12 |         let _ = wrapper.subject();
+   |                         ^^^^^^^ method cannot be called on `AuthenticatedPrincipal<NoSubject>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `NoSubject: HasSubject`
+note: the trait `HasSubject` must be implemented
+  --> src/claim_set.rs
+   |
+   | pub trait HasSubject: ClaimSet {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

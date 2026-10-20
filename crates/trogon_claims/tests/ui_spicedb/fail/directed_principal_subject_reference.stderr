@@ -1,0 +1,13 @@
+error[E0277]: the trait bound `SubjectReference: From<UnverifiedDirectedPrincipal>` is not satisfied
+ --> tests/ui_spicedb/fail/directed_principal_subject_reference.rs:4:13
+  |
+4 |     let _ = SubjectReference::from(hint);
+  |             ^^^^^^^^^^^^^^^^ the trait `From<UnverifiedDirectedPrincipal>` is not implemented for `SubjectReference`
+  |
+help: the trait `From<UnverifiedDirectedPrincipal>` is not implemented for `SubjectReference`
+      but trait `From<SubjectRef<'_>>` is implemented for it
+ --> src/subject_reference.rs
+  |
+  | impl From<SubjectRef<'_>> for SubjectReference {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `SubjectRef<'_>`, found `UnverifiedDirectedPrincipal`

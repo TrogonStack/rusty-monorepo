@@ -1,0 +1,5 @@
+error: object_type "abc//def": a segment must be 3 to 63 bytes, violated at byte 4
+ --> tests/ui/fail/object_type_empty_segment.rs:4:26
+  |
+4 |     let _ = object_type!("abc//def");
+  |                          ^^^^^^^^^^

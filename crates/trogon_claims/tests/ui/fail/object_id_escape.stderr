@@ -1,0 +1,5 @@
+error: escape sequences are not supported; write the characters directly
+ --> tests/ui/fail/object_id_escape.rs:4:24
+  |
+4 |     let _ = object_id!("a\x41");
+  |                        ^^^^^^^

@@ -1,0 +1,20 @@
+[package]
+name = "trogon_claims_syntax"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+description = "Dependency-free validators shared by trogon_claims and its macros"
+license = "Apache-2.0"
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"
+
+[dev-dependencies]
+regex = { workspace = true }

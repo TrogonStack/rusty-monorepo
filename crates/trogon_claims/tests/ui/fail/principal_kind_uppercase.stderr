@@ -1,0 +1,5 @@
+error: principal_kind "Person": a segment must start with a lowercase ASCII letter, found 'P' at byte 0
+ --> tests/ui/fail/principal_kind_uppercase.rs:4:29
+  |
+4 |     let _ = principal_kind!("Person");
+  |                             ^^^^^^^^

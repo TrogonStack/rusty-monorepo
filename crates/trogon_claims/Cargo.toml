@@ -1,0 +1,48 @@
+[package]
+name = "trogon_claims"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+description = "Validated claim, identity, and principal value objects"
+license = "Apache-2.0"
+
+[features]
+serde = ["dep:serde"]
+json = ["dep:serde_json"]
+spicedb = ["dep:prost", "dep:prost-types"]
+axum = ["dep:axum-core", "dep:http"]
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+trogon_claims_syntax = { path = "../trogon_claims_syntax" }
+trogon_claims_macros = { path = "../trogon_claims_macros" }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, features = ["raw_value"], optional = true }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+axum-core = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+
+[dev-dependencies]
+trybuild = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tokio = { workspace = true }
+
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[[bench]]
+name = "ingest"
+harness = false
+required-features = ["json"]
