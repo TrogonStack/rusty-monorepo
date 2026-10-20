@@ -18,3 +18,19 @@ macro_rules! principal_kind {
         $crate::__private::principal_kind_impl!($crate, $literal)
     };
 }
+
+#[cfg(feature = "spicedb")]
+#[macro_export]
+macro_rules! relation_name {
+    ($literal:literal) => {
+        $crate::__private::relation_name_impl!($crate, $literal)
+    };
+}
+
+#[cfg(feature = "spicedb")]
+#[macro_export]
+macro_rules! param_name {
+    ($literal:literal) => {
+        $crate::__private::param_name_impl!($crate, $literal)
+    };
+}

@@ -13,6 +13,8 @@ pub enum SyntaxRule {
     SegmentStart,
     SegmentEnd,
     SegmentLength { min: usize, max: usize },
+    IdentifierStart,
+    IdentifierAlphabet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +81,14 @@ impl fmt::Display for SyntaxViolation {
             SyntaxRule::SegmentEnd => write!(
                 f,
                 "a segment must end with a lowercase ASCII letter or digit, found {offender} at byte {offset}"
+            ),
+            SyntaxRule::IdentifierStart => write!(
+                f,
+                "an identifier must start with an ASCII letter or '_', found {offender} at byte {offset}"
+            ),
+            SyntaxRule::IdentifierAlphabet => write!(
+                f,
+                "invalid character {offender} at byte {offset} (allowed in an identifier: [a-zA-Z0-9_])"
             ),
             SyntaxRule::SegmentLength { min, max } => {
                 write!(f, "a segment must be {min} to {max} bytes, violated at byte {offset}")

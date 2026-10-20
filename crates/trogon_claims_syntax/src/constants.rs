@@ -9,3 +9,5 @@ pub const WILDCARD_BYTE: u8 = b'*';
 pub const CLIENT_ID_MIN_BYTE: u8 = 0x20;
 pub const CLIENT_ID_MAX_BYTE: u8 = 0x7E;
 pub const OBJECT_ID_ALPHABET: &str = "[a-zA-Z0-9/_|\\-=+]";
+pub const RELATION_NAME_MAX_BYTES: usize = 64;
+pub const PARAM_NAME_MAX_BYTES: usize = 64;

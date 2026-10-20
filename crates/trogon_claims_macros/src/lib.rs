@@ -21,3 +21,13 @@ pub fn object_type_impl(input: TokenStream) -> TokenStream {
 pub fn principal_kind_impl(input: TokenStream) -> TokenStream {
     expand(input, Target::PrincipalKind)
 }
+
+#[proc_macro]
+pub fn relation_name_impl(input: TokenStream) -> TokenStream {
+    expand(input, Target::RelationName)
+}
+
+#[proc_macro]
+pub fn param_name_impl(input: TokenStream) -> TokenStream {
+    expand(input, Target::ParamName)
+}

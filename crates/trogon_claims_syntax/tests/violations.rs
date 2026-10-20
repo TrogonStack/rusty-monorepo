@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use trogon_claims_syntax::{
-    validate_client_id, validate_non_empty, validate_object_id, validate_object_type, validate_subject_id, SyntaxRule,
+    validate_client_id, validate_non_empty, validate_object_id, validate_object_type, validate_param_name,
+    validate_relation_name, validate_subject_id, SyntaxRule,
 };
 
 #[test]
@@ -75,4 +76,46 @@ fn object_type_segment_rules_name_the_segment_fault() {
         SyntaxRule::SegmentAlphabet
     );
     assert!(validate_object_type("myapp/document").is_ok());
+}
+
+#[test]
+fn relation_name_is_one_segment_of_three_to_sixty_four_bytes() {
+    assert!(validate_relation_name("view").is_ok());
+    assert!(validate_relation_name("can_edit_2").is_ok());
+    assert_eq!(
+        validate_relation_name("ab").unwrap_err().rule(),
+        SyntaxRule::SegmentLength { min: 3, max: 64 }
+    );
+    assert_eq!(validate_relation_name("").unwrap_err().rule(), SyntaxRule::NonEmpty);
+    assert_eq!(
+        validate_relation_name("a/b_c").unwrap_err().rule(),
+        SyntaxRule::SegmentAlphabet
+    );
+    assert_eq!(
+        validate_relation_name("Edit").unwrap_err().rule(),
+        SyntaxRule::SegmentStart
+    );
+    assert_eq!(
+        validate_relation_name("edit_").unwrap_err().rule(),
+        SyntaxRule::SegmentEnd
+    );
+}
+
+#[test]
+fn param_name_is_a_cel_identifier() {
+    assert!(validate_param_name("user_ip").is_ok());
+    assert!(validate_param_name("_x1").is_ok());
+    assert!(validate_param_name("X").is_ok());
+    assert_eq!(validate_param_name("").unwrap_err().rule(), SyntaxRule::NonEmpty);
+    assert_eq!(
+        validate_param_name("1x").unwrap_err().rule(),
+        SyntaxRule::IdentifierStart
+    );
+    let violation = validate_param_name("user-ip").unwrap_err();
+    assert_eq!(violation.rule(), SyntaxRule::IdentifierAlphabet);
+    assert_eq!(violation.offset(), 4);
+    assert_eq!(
+        validate_param_name(&"a".repeat(65)).unwrap_err().rule(),
+        SyntaxRule::MaxBytes(64)
+    );
 }

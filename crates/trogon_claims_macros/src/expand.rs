@@ -1,5 +1,8 @@
 use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
-use trogon_claims_syntax::{validate_object_id, validate_object_type, validate_principal_kind, SyntaxViolation};
+use trogon_claims_syntax::{
+    validate_object_id, validate_object_type, validate_param_name, validate_principal_kind, validate_relation_name,
+    SyntaxViolation,
+};
 
 use crate::diagnostic::compile_error;
 use crate::literal::string_value;
@@ -9,6 +12,8 @@ pub(crate) enum Target {
     ObjectId,
     ObjectType,
     PrincipalKind,
+    RelationName,
+    ParamName,
 }
 
 impl Target {
@@ -17,6 +22,8 @@ impl Target {
             Target::ObjectId => "object_id",
             Target::ObjectType => "object_type",
             Target::PrincipalKind => "principal_kind",
+            Target::RelationName => "relation_name",
+            Target::ParamName => "param_name",
         }
     }
 
@@ -25,6 +32,8 @@ impl Target {
             Target::ObjectId => "ObjectId",
             Target::ObjectType => "ObjectType",
             Target::PrincipalKind => "PrincipalKind",
+            Target::RelationName => "RelationName",
+            Target::ParamName => "ParamName",
         }
     }
 
@@ -33,6 +42,8 @@ impl Target {
             Target::ObjectId => validate_object_id(value),
             Target::ObjectType => validate_object_type(value),
             Target::PrincipalKind => validate_principal_kind(value),
+            Target::RelationName => validate_relation_name(value),
+            Target::ParamName => validate_param_name(value),
         }
     }
 }
