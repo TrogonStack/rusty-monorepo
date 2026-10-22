@@ -1,0 +1,8 @@
+{
+  "name": "trogon-presence-conformance",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "replay": "node replay.mjs golden"
+  }
+}

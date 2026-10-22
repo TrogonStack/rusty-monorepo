@@ -322,7 +322,7 @@ jobs:
           install_args: rust cargo:cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --workspace --out Xml --timeout 300
+        run: cargo tarpaulin --engine llvm --workspace --out Xml --timeout 300
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

@@ -1,0 +1,32 @@
+[package]
+name = "trogon_presence_auth"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+
+[[bin]]
+name = "trogon-presence-auth"
+path = "src/main.rs"
+
+[dependencies]
+async-nats = { workspace = true }
+base64 = { workspace = true }
+bytes = "1"
+clap = { workspace = true, features = ["env"] }
+ed25519-dalek = "2.2"
+futures-util = { workspace = true }
+getrandom = { workspace = true, features = ["std"] }
+metrics = "0.24"
+nkeys = { version = "0.4.5", features = ["xkeys"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+trogon_presence = { path = "../trogon_presence" }
+trogon_presence_service = { path = "../trogon_presence_service" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
