@@ -5,11 +5,11 @@ use chrono::{SecondsFormat, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::arm_timing::{ArmTiming, TimingFileInput};
 use super::benchmark::FailedRunsMode;
-use super::budget::RunCost;
 use super::case_selection::CaseSelectionRecord;
 use super::dispersion::{self, FlakinessLedger, FlakyAssertionRecord, MetricSample};
-use super::efficiency::{self, ArmReadings, EfficiencySection, EfficiencyTolerances};
+use super::efficiency::{self, EfficiencySection, EfficiencyTolerances, SplitEfficiency};
 use super::eval_suite_drift;
 use super::evals::{EvalError, EvalSplit, Result};
 use super::headroom::{describe_headroom_warning, evaluate_headroom, HeadroomThreshold, HeadroomWarning};
@@ -330,29 +330,6 @@ impl AssertionResultInput {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
-struct TimingFileInput {
-    #[serde(default)]
-    duration_ms: Option<u64>,
-    #[serde(default)]
-    total_tokens: Option<u64>,
-    #[serde(default)]
-    cost: Option<RunCost>,
-    /// Written by every release before a run's cost said which harness could not price
-    /// it, and only ever by a harness that priced its runs.
-    #[serde(default)]
-    cost_usd: Option<f64>,
-}
-
-impl TimingFileInput {
-    fn priced_usd(&self) -> Option<f64> {
-        match &self.cost {
-            Some(cost) => cost.usd(),
-            None => self.cost_usd,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 struct RunSample {
     grading: Option<GradingFileInput>,
@@ -548,35 +525,24 @@ fn build_keep_or_revert_section(
 ) -> KeepOrRevertSection {
     let suites = suite_comparison(report, previous_report);
 
-    let (by_split, capped_by_saturation) = match &suites {
-        SuiteComparison::DifferentSuites { .. } => (BTreeMap::new(), None),
-        SuiteComparison::SameSuite => {
-            let by_split: BTreeMap<EvalSplit, SplitVerdict> = EvalSplit::ALL
-                .into_iter()
-                .map(|split| {
-                    let verdict = compute_split_verdict(report_dir, report, previous_dir, previous_report, split, mode);
-                    (split, verdict)
-                })
-                .collect();
-            let capped_by_saturation = compute_headroom(report_dir, report, Some(EvalSplit::Test), mode, threshold)
-                .map(|_| SaturationCap::TestSplitSaturated);
-            (by_split, capped_by_saturation)
+    let mut by_split: BTreeMap<EvalSplit, SplitVerdict> = BTreeMap::new();
+    let mut efficiency_by_split: BTreeMap<EvalSplit, SplitEfficiency> = BTreeMap::new();
+    let mut capped_by_saturation = None;
+    if suites == SuiteComparison::SameSuite {
+        for split in EvalSplit::ALL {
+            let current = tally_with_skill(report_dir, report, split, mode);
+            let previous = tally_with_skill(previous_dir, previous_report, split, mode);
+            by_split.insert(split, compute_split_verdict(&current, &previous));
+            efficiency_by_split.insert(
+                split,
+                efficiency::judge_split(&current.timing, &previous.timing, tolerances),
+            );
         }
-    };
+        capped_by_saturation = compute_headroom(report_dir, report, Some(EvalSplit::Test), mode, threshold)
+            .map(|_| SaturationCap::TestSplitSaturated);
+    }
 
     let recommendation = derive_recommendation(&by_split);
-
-    let efficiency_by_split = match &suites {
-        SuiteComparison::DifferentSuites { .. } => BTreeMap::new(),
-        SuiteComparison::SameSuite => EvalSplit::ALL
-            .into_iter()
-            .map(|split| {
-                let current = with_skill_readings(report_dir, report, split);
-                let previous = with_skill_readings(previous_dir, previous_report, split);
-                (split, efficiency::judge_split(&current, &previous, tolerances))
-            })
-            .collect(),
-    };
 
     KeepOrRevertSection {
         suites,
@@ -588,38 +554,6 @@ fn build_keep_or_revert_section(
             by_split: efficiency_by_split,
         }),
     }
-}
-
-/// What the completed `with_skill` runs of one split reported per run, read regardless of
-/// `--failed-runs`: that flag decides how a failure scores, and a failed run has no
-/// duration or spend of its own to compare.
-fn with_skill_readings(report_dir: &Path, report: &ReportForSummary, split: EvalSplit) -> ArmReadings {
-    let mut readings = ArmReadings {
-        cost_usd: Some(Vec::new()),
-        ..ArmReadings::default()
-    };
-    for run in &report.runs {
-        if run.split != split || run.scenario_id != ScenarioKind::WithSkill {
-            continue;
-        }
-        if classify_run(run, FailedRunsMode::Bucket) != RunDisposition::Completed {
-            continue;
-        }
-        readings.completed_runs += 1;
-        let timing = load_run_sample(report_dir, &run.paths.workspace).timing;
-        let timing = timing.as_ref();
-        if let Some(duration_ms) = timing.and_then(|timing| timing.duration_ms) {
-            readings.duration_ms.push(duration_ms as f64);
-        }
-        if let Some(total_tokens) = timing.and_then(|timing| timing.total_tokens) {
-            readings.total_tokens.push(total_tokens as f64);
-        }
-        match (timing.and_then(TimingFileInput::priced_usd), readings.cost_usd.as_mut()) {
-            (Some(usd), Some(costs)) => costs.push(usd),
-            _ => readings.cost_usd = None,
-        }
-    }
-    readings
 }
 
 fn tool_usage(report: &ReportForSummary) -> Vec<ScenarioToolUsage> {
@@ -698,6 +632,9 @@ struct ScenarioTally {
     /// Each case's own attempts, scored or not, so pass@k and pass^k can be read per case
     /// rather than pooled with every other case's attempts the way `run_passed` is.
     case_attempts: BTreeMap<String, Vec<bool>>,
+    /// Completed runs only, whatever `--failed-runs` says: that flag decides how a failure
+    /// scores, and a failed run has no duration or spend of its own to compare.
+    timing: ArmTiming,
 }
 
 impl ScenarioTally {
@@ -762,6 +699,7 @@ fn tally_with_skill(
         }
 
         let sample = load_run_sample(report_dir, &run.paths.workspace);
+        tally.timing.record_run(sample.timing.as_ref());
         let Some(grading) = &sample.grading else {
             continue;
         };
@@ -794,17 +732,7 @@ fn tally_with_skill(
     tally
 }
 
-fn compute_split_verdict(
-    report_dir: &Path,
-    report: &ReportForSummary,
-    previous_dir: &Path,
-    previous_report: &ReportForSummary,
-    split: EvalSplit,
-    mode: FailedRunsMode,
-) -> SplitVerdict {
-    let current_tally = tally_with_skill(report_dir, report, split, mode);
-    let previous_tally = tally_with_skill(previous_dir, previous_report, split, mode);
-
+fn compute_split_verdict(current_tally: &ScenarioTally, previous_tally: &ScenarioTally) -> SplitVerdict {
     let (Some(current_assertions), Some(previous_assertions)) = (
         current_tally.assertion_proportion(),
         previous_tally.assertion_proportion(),

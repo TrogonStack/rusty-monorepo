@@ -1,3 +1,4 @@
+pub mod arm_timing;
 pub mod benchmark;
 pub mod budget;
 pub mod cache;

@@ -14,6 +14,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::arm_timing::ArmTiming;
 use super::dispersion;
 use super::evals::EvalSplit;
 use super::shift::Shift;
@@ -212,33 +213,31 @@ impl SplitEfficiency {
     }
 }
 
-/// The per-run readings one iteration's completed with_skill runs on one split reported.
-///
-/// A failed run is left out: its duration is the ceiling it hit and its spend stops
-/// wherever it stopped, so neither says what the skill costs to run.
-#[derive(Debug, Clone, Default)]
-pub struct ArmReadings {
-    pub completed_runs: usize,
-    pub duration_ms: Vec<f64>,
-    pub total_tokens: Vec<f64>,
-    /// `None` when any completed run carried no price.
-    pub cost_usd: Option<Vec<f64>>,
-}
-
-pub fn judge_split(current: &ArmReadings, previous: &ArmReadings, tolerances: EfficiencyTolerances) -> SplitEfficiency {
-    let no_runs = current.completed_runs == 0 || previous.completed_runs == 0;
-    let cost = match (&current.cost_usd, &previous.cost_usd) {
+/// Compares two iterations' completed with_skill runs on one split. A failed run belongs
+/// in neither arm: its duration is the ceiling it hit and its spend stops wherever it
+/// stopped, so neither says what the skill costs to run.
+pub fn judge_split(current: &ArmTiming, previous: &ArmTiming, tolerances: EfficiencyTolerances) -> SplitEfficiency {
+    let no_runs = current.runs() == 0 || previous.runs() == 0;
+    let cost = match (current.per_run_cost_usd(), previous.per_run_cost_usd()) {
         _ if no_runs => Judgement::NoRuns,
-        (Some(current), Some(previous)) => judge(current, previous, tolerances.cost),
+        (Some(current), Some(previous)) => judge(&current, &previous, tolerances.cost),
         _ => Judgement::Unmeasured(UnmeasuredReason::NotEveryRunPriced),
     };
     let duration = match no_runs {
         true => Judgement::NoRuns,
-        false => judge(&current.duration_ms, &previous.duration_ms, tolerances.duration),
+        false => judge(
+            &current.per_run_duration_ms(),
+            &previous.per_run_duration_ms(),
+            tolerances.duration,
+        ),
     };
     let tokens = match no_runs {
         true => Judgement::NoRuns,
-        false => judge(&current.total_tokens, &previous.total_tokens, tolerances.tokens),
+        false => judge(
+            &current.per_run_total_tokens(),
+            &previous.per_run_total_tokens(),
+            tolerances.tokens,
+        ),
     };
     SplitEfficiency {
         cost: cost.into(),
@@ -371,14 +370,19 @@ fn describe_unmeasured(reason: UnmeasuredReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::arm_timing::TimingFileInput;
 
-    fn arm(duration_ms: &[f64], total_tokens: &[f64], cost_usd: Option<&[f64]>) -> ArmReadings {
-        ArmReadings {
-            completed_runs: duration_ms.len(),
-            duration_ms: duration_ms.to_vec(),
-            total_tokens: total_tokens.to_vec(),
-            cost_usd: cost_usd.map(<[f64]>::to_vec),
+    fn arm(duration_ms: &[f64], total_tokens: &[f64], cost_usd: Option<&[f64]>) -> ArmTiming {
+        let mut arm = ArmTiming::default();
+        for (run, (duration_ms, total_tokens)) in duration_ms.iter().zip(total_tokens).enumerate() {
+            arm.record_run(Some(&TimingFileInput {
+                duration_ms: Some(*duration_ms as u64),
+                total_tokens: Some(*total_tokens as u64),
+                cost_usd: cost_usd.map(|costs| costs[run]),
+                ..TimingFileInput::default()
+            }));
         }
+        arm
     }
 
     fn tolerances(cost: f64, duration: f64, tokens: f64) -> EfficiencyTolerances {
@@ -544,7 +548,7 @@ mod tests {
 
     #[test]
     fn a_side_with_no_completed_runs_is_no_runs_not_a_measurement() {
-        let previous = ArmReadings::default();
+        let previous = ArmTiming::default();
         let current = arm(&[1000.0; 5], &[500.0; 5], Some(&[0.10; 5]));
 
         let verdicts = judge_split(&current, &previous, EfficiencyTolerances::default());
