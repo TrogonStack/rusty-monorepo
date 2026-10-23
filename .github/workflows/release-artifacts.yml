@@ -77,8 +77,6 @@ jobs:
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/trg" "$staging/"
           cp LICENSE "$staging/"
-          cp crates/trg/README.md "$staging/"
-          cp -R crates/trg/docs "$staging/docs"
           tar czf "$staging.tar.gz" "$staging"
           echo "ASSET=$staging.tar.gz" >> "$GITHUB_ENV"
 
