@@ -27,41 +27,4 @@ trg --version
 
 ## Documentation
 
-### Reference
-
-- [Config file reference](docs/reference/config.md)
-- [AI skills eval](docs/reference/ai-skills-eval.md)
-- [Output format](docs/reference/output-format.md)
-- [Telemetry](docs/reference/telemetry.md)
-
-### How-to
-
-- [Add an OAuth-protected MCP server](docs/how-to/add-oauth-protected-mcp-server.md)
-- [Store MCP OAuth credentials in OpenBao](docs/how-to/use-openbao-as-a-secrets-backend.md)
-- [Read a config value from a secrets backend](docs/how-to/read-a-config-value-from-a-secrets-backend.md)
-- [Launch a coding agent with `trg exec`](docs/how-to/launch-a-coding-agent-with-trg-exec.md)
-- [Run an eval in CI](docs/how-to/run-in-ci.md)
-- [Run the current skill only](docs/how-to/run-current-skill-only.md)
-- [Run with a skill vs without a skill](docs/how-to/run-with-skill-vs-without-skill.md)
-- [Compare with a skill vs a baseline](docs/how-to/compare-with-skill-vs-baseline.md)
-- [Compare with a skill vs an older skill](docs/how-to/compare-with-skill-vs-old-skill.md)
-- [Run the grade benchmark pipeline](docs/how-to/run-grade-benchmark-pipeline.md)
-- [Author an eval suite](docs/how-to/author-an-eval-suite.md)
-- [Hillclimb a skill](docs/how-to/hillclimb-a-skill.md)
-- [Gate a change on cost and latency](docs/how-to/gate-a-change-on-cost-and-latency.md)
-- [Write graders](docs/how-to/write-graders.md)
-- [Write mechanical grader scripts](docs/how-to/write-mechanical-grader-scripts.md)
-- [Validate graders against human labels](docs/how-to/validate-graders-against-human-labels.md)
-- [Check model scaling](docs/how-to/check-model-scaling.md)
-- [Export telemetry over OTLP](docs/how-to/export-telemetry-over-otlp.md)
-- [Capture GenAI message content](docs/how-to/capture-genai-message-content.md)
-- [Forward telemetry into eval harnesses](docs/how-to/forward-telemetry-to-eval-harnesses.md)
-- [Replay a report bundle into a telemetry backend](docs/how-to/replay-a-report-bundle.md)
-- [Troubleshooting](docs/how-to/troubleshooting.md)
-
-### Explanation
-
-- [Secrets backends](docs/explanation/secrets-backends.md)
-- [Eval lifecycle](docs/explanation/eval-lifecycle.md)
-- [Divergences from agentskills.io](docs/explanation/divergences-from-agentskills-io.md)
-- [Telemetry design](docs/explanation/telemetry-design.md)
+See the [documentation index](docs/README.md).

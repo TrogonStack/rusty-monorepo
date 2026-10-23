@@ -9,3 +9,7 @@
 A Rust-based monorepo for building multiple projects.
 
 </div>
+
+## Projects
+
+- [`trg`](crates/trg/README.md): see the [`trg` documentation](crates/trg/docs/README.md).
