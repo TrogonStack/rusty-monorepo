@@ -98,6 +98,7 @@ mod command_identity {
 mod doc_commands {
     use std::path::{Path, PathBuf};
 
+    use clap::error::ErrorKind;
     use clap::Parser;
 
     use super::Cli;
@@ -314,12 +315,14 @@ mod doc_commands {
                     let tokens = strip_redirections(tokens);
                     checked += 1;
 
-                    if let Err(e) = Cli::try_parse_from(&tokens) {
-                        panic!(
+                    match Cli::try_parse_from(&tokens) {
+                        Ok(_) => {}
+                        Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {}
+                        Err(e) => panic!(
                             "{}:{line_no}: this documented command no longer parses:\n  {}\n\n{e}",
                             file.display(),
                             tokens.join(" "),
-                        );
+                        ),
                     }
                 }
             }

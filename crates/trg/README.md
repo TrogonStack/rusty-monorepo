@@ -14,7 +14,7 @@ mise use -g "github:TrogonStack/rusty-monorepo[version_prefix=trg@v]@latest"
 
 Or pin it in a project's `mise.toml`:
 
-```toml
+```toml trg-example=skip
 [tools]
 "github:TrogonStack/rusty-monorepo" = { version = "0.11.0", version_prefix = "trg@v" }
 ```
