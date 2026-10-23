@@ -17,6 +17,7 @@ use super::headroom::{evaluate_headroom, HeadroomThreshold, HeadroomWarning};
 use super::iteration_summary::detect_previous_report_dir;
 use super::proportion::{self, Interval, Proportion};
 use super::report::{RunRecord, ScenarioKind};
+use super::shift::Shift;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +124,20 @@ pub struct CompletedBucket {
     pub tokens: TokenStats,
     pub missing_grading: usize,
     pub missing_timing: usize,
+    #[serde(skip)]
+    #[schemars(skip)]
+    readings: PerRunReadings,
+}
+
+/// The per-run readings behind a bucket's totals, kept so a delta can say how far two
+/// arms' runs sit apart and not only how far their sums do. Never published: the run
+/// artifacts already carry each reading, and the deltas carry what they add up to.
+#[derive(Debug, Clone, Default)]
+struct PerRunReadings {
+    duration_ms: Vec<f64>,
+    input_tokens: Vec<f64>,
+    total_tokens: Vec<f64>,
+    cost_usd: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -287,6 +302,20 @@ pub struct ScenarioDelta {
     /// between two totals that cover different numbers of runs is not a cost difference.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// How much longer a left run takes than a right run, in milliseconds, with its 95%
+    /// interval. Absent until both arms have at least four timed runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms_shift: Option<Shift>,
+    /// The same per-run shift in USD, published only when both arms priced every run, for
+    /// the reason `cost_usd` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd_per_run_shift: Option<Shift>,
+    /// How many more input tokens a left run reads than a right run, under the same floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens_per_run_shift: Option<Shift>,
+    /// How many more tokens in all a left run spends than a right run, under the same floor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens_per_run_shift: Option<Shift>,
     pub left: ArmObservations,
     pub right: ArmObservations,
 }
@@ -768,6 +797,7 @@ fn summarize_completed(samples: &[RunSample], zero_failed_count: usize) -> Compl
     let mut token_inputs = Vec::new();
     let mut token_outputs = Vec::new();
     let mut costs = Vec::new();
+    let mut readings = PerRunReadings::default();
 
     for sample in samples {
         if sample.missing_grading {
@@ -794,6 +824,7 @@ fn summarize_completed(samples: &[RunSample], zero_failed_count: usize) -> Compl
             push_if_some(&mut token_inputs, timing.input_tokens);
             push_if_some(&mut token_outputs, timing.output_tokens);
             push_if_some(&mut costs, timing.cost());
+            readings.record(timing);
         }
     }
 
@@ -809,6 +840,16 @@ fn summarize_completed(samples: &[RunSample], zero_failed_count: usize) -> Compl
         tokens: token_stats(&token_totals, &token_inputs, &token_outputs, &costs, run_count),
         missing_grading,
         missing_timing,
+        readings,
+    }
+}
+
+impl PerRunReadings {
+    fn record(&mut self, timing: &TimingFileInput) {
+        push_if_some(&mut self.duration_ms, timing.duration_ms.map(|value| value as f64));
+        push_if_some(&mut self.input_tokens, timing.input_tokens.map(|value| value as f64));
+        push_if_some(&mut self.total_tokens, timing.total_tokens.map(|value| value as f64));
+        push_if_some(&mut self.cost_usd, timing.cost().as_ref().and_then(RunCost::usd));
     }
 }
 
@@ -1015,6 +1056,19 @@ fn delta_between(left: Option<&ScenarioBenchmark>, right: Option<&ScenarioBenchm
         duration_ms_mean: left.completed.duration_ms.mean - right.completed.duration_ms.mean,
         tokens_total: diff_optional(left.completed.tokens.total, right.completed.tokens.total),
         cost_usd: diff_optional_f64(whole_arm_cost(&left.completed), whole_arm_cost(&right.completed)),
+        duration_ms_shift: Shift::between(
+            &left.completed.readings.duration_ms,
+            &right.completed.readings.duration_ms,
+        ),
+        cost_usd_per_run_shift: whole_arm_cost_shift(&left.completed, &right.completed),
+        input_tokens_per_run_shift: Shift::between(
+            &left.completed.readings.input_tokens,
+            &right.completed.readings.input_tokens,
+        ),
+        total_tokens_per_run_shift: Shift::between(
+            &left.completed.readings.total_tokens,
+            &right.completed.readings.total_tokens,
+        ),
         left: arm_observations(left),
         right: arm_observations(right),
     })
@@ -1027,6 +1081,12 @@ fn difference_interval(left: &PassFailSummary, right: &PassFailSummary) -> Optio
     let left = Proportion::observed(left.passed, left.failed)?;
     let right = Proportion::observed(right.passed, right.failed)?;
     Some(proportion::difference(left, right))
+}
+
+fn whole_arm_cost_shift(left: &CompletedBucket, right: &CompletedBucket) -> Option<Shift> {
+    whole_arm_cost(left)?;
+    whole_arm_cost(right)?;
+    Shift::between(&left.readings.cost_usd, &right.readings.cost_usd)
 }
 
 fn arm_observations(bench: &ScenarioBenchmark) -> ArmObservations {
@@ -2085,6 +2145,138 @@ mod tests {
             delta.left.duration_median_ms.is_none(),
             "two draws is below the floor a spread needs to describe itself"
         );
+    }
+
+    fn write_arms_with_timing(report_dir: &Path, arms: &[(&str, Option<&str>, Vec<String>)]) {
+        let mut runs = Vec::new();
+        let mut artifacts = Vec::new();
+        for (scenario, iteration_id, timings) in arms {
+            for timing in timings {
+                let run_id = format!("run-{:03}", runs.len() + 1);
+                runs.push(sample_run(&run_id, scenario, "completed", *iteration_id));
+                artifacts.push((run_id, timing.clone()));
+            }
+        }
+        write_report(report_dir, serde_json::Value::Array(runs), None);
+        for (run_id, timing) in artifacts {
+            write_run_artifacts(
+                report_dir,
+                &run_id,
+                Some(r#"{"assertion_results":[{"assertion":"a","passed":true}]}"#),
+                Some(&timing),
+            );
+        }
+    }
+
+    fn priced_timing(duration_ms: u64, input_tokens: u64, total_tokens: u64, usd: f64) -> String {
+        format!(
+            r#"{{ "duration_ms": {duration_ms}, "input_tokens": {input_tokens}, "total_tokens": {total_tokens}, "cost": {{ "kind": "priced", "usd": {usd} }} }}"#
+        )
+    }
+
+    #[test]
+    fn a_scenario_delta_says_how_far_the_runs_of_two_arms_sit_apart() {
+        let temp = tempfile::tempdir().unwrap();
+        let baseline: Vec<String> = [1000, 1100, 1200, 1300, 1050]
+            .into_iter()
+            .map(|duration| priced_timing(duration, 400, 500, 0.10))
+            .collect();
+        let candidate: Vec<String> = [2000, 2100, 2200, 2300, 2050]
+            .into_iter()
+            .map(|duration| priced_timing(duration, 800, 1000, 0.30))
+            .collect();
+        write_arms_with_timing(
+            temp.path(),
+            &[("with_skill", None, candidate), ("without_skill", None, baseline)],
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let delta = benchmark.deltas.with_skill_vs_without_skill.as_ref().unwrap();
+
+        let duration = delta.duration_ms_shift.expect("both arms cleared the floor");
+        assert_eq!(duration.estimate(), 1000.0);
+        assert!(duration.interval().low() > 0.0, "{:?}", duration.interval());
+        let cost = delta.cost_usd_per_run_shift.expect("both arms priced every run");
+        assert!((cost.estimate() - 0.20).abs() < 1e-9);
+        assert!((delta.input_tokens_per_run_shift.unwrap().estimate() - 400.0).abs() < 1e-9);
+        assert!((delta.total_tokens_per_run_shift.unwrap().estimate() - 500.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_scenario_delta_publishes_no_shift_for_an_arm_below_the_floor() {
+        let temp = tempfile::tempdir().unwrap();
+        let three: Vec<String> = (0..3).map(|_| priced_timing(1000, 400, 500, 0.10)).collect();
+        let five: Vec<String> = (0..5).map(|_| priced_timing(2000, 800, 1000, 0.30)).collect();
+        write_arms_with_timing(
+            temp.path(),
+            &[("with_skill", None, five), ("without_skill", None, three)],
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let delta = benchmark.deltas.with_skill_vs_without_skill.as_ref().unwrap();
+
+        assert!(delta.duration_ms_shift.is_none());
+        assert!(delta.cost_usd_per_run_shift.is_none());
+        assert!(delta.input_tokens_per_run_shift.is_none());
+        assert!(delta.total_tokens_per_run_shift.is_none());
+        let published = serde_json::to_value(delta).unwrap();
+        for field in [
+            "duration_ms_shift",
+            "cost_usd_per_run_shift",
+            "input_tokens_per_run_shift",
+            "total_tokens_per_run_shift",
+        ] {
+            assert!(published.get(field).is_none(), "{field} was published as {published}");
+        }
+    }
+
+    #[test]
+    fn a_per_run_cost_shift_is_withheld_unless_both_arms_priced_every_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut candidate: Vec<String> = (0..4).map(|_| priced_timing(2000, 800, 1000, 0.30)).collect();
+        candidate.push(r#"{ "duration_ms": 2000, "input_tokens": 800, "total_tokens": 1000 }"#.to_string());
+        let baseline: Vec<String> = (0..5).map(|_| priced_timing(1000, 400, 500, 0.10)).collect();
+        write_arms_with_timing(
+            temp.path(),
+            &[("with_skill", None, candidate), ("without_skill", None, baseline)],
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let delta = benchmark.deltas.with_skill_vs_without_skill.as_ref().unwrap();
+
+        assert!(delta.cost_usd_per_run_shift.is_none());
+        assert!(delta.duration_ms_shift.is_some());
+    }
+
+    #[test]
+    fn an_iteration_comparison_carries_the_same_per_run_shifts() {
+        let temp = tempfile::tempdir().unwrap();
+        let previous: Vec<String> = [1000, 1100, 1200, 1300]
+            .into_iter()
+            .map(|duration| priced_timing(duration, 400, 500, 0.10))
+            .collect();
+        let current: Vec<String> = [3000, 3100, 3200, 3300]
+            .into_iter()
+            .map(|duration| priced_timing(duration, 400, 500, 0.10))
+            .collect();
+        write_arms_with_timing(
+            temp.path(),
+            &[
+                ("with_skill", Some("iteration-1"), previous),
+                ("with_skill", Some("iteration-2"), current),
+            ],
+        );
+
+        let benchmark = build_benchmark(temp.path(), BenchmarkOptions::default()).unwrap();
+        let comparison = benchmark.iteration_comparison.expect("two iterations ran");
+        let delta = &comparison.by_scenario["with_skill"];
+
+        let duration = delta.duration_ms_shift.expect("both iterations cleared the floor");
+        assert_eq!(duration.estimate(), 2000.0);
+        assert!(duration.interval().low() > 0.0);
+        let cost = delta.cost_usd_per_run_shift.expect("every run was priced");
+        assert_eq!(cost.estimate(), 0.0);
+        assert!(!cost.interval().separates_the_arms());
     }
 
     #[test]

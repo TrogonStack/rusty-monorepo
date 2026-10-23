@@ -6,8 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::benchmark::FailedRunsMode;
+use super::budget::RunCost;
 use super::case_selection::CaseSelectionRecord;
 use super::dispersion::{self, FlakinessLedger, FlakyAssertionRecord, MetricSample};
+use super::efficiency::{self, ArmReadings, EfficiencySection, EfficiencyTolerances};
 use super::eval_suite_drift;
 use super::evals::{EvalError, EvalSplit, Result};
 use super::headroom::{describe_headroom_warning, evaluate_headroom, HeadroomThreshold, HeadroomWarning};
@@ -29,6 +31,7 @@ pub struct IterationSummaryOptions {
     /// decision, this is what makes this command's own output safe to read in full, rather
     /// than relying on the reviewer to know which fields to leave alone.
     pub withhold_test_detail: bool,
+    pub efficiency_tolerances: EfficiencyTolerances,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -170,6 +173,11 @@ pub struct KeepOrRevertSection {
     /// on most could not have shown `improved` here no matter what the change did.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capped_by_saturation: Option<SaturationCap>,
+    /// Whether this iteration's `with_skill` runs cost more, ran longer or spent more
+    /// tokens than the previous iteration's. Kept apart from `recommendation`, which reads
+    /// pass rates only. Absent from a document written before these verdicts existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efficiency: Option<EfficiencySection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -328,6 +336,21 @@ struct TimingFileInput {
     duration_ms: Option<u64>,
     #[serde(default)]
     total_tokens: Option<u64>,
+    #[serde(default)]
+    cost: Option<RunCost>,
+    /// Written by every release before a run's cost said which harness could not price
+    /// it, and only ever by a harness that priced its runs.
+    #[serde(default)]
+    cost_usd: Option<f64>,
+}
+
+impl TimingFileInput {
+    fn priced_usd(&self) -> Option<f64> {
+        match &self.cost {
+            Some(cost) => cost.usd(),
+            None => self.cost_usd,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -384,6 +407,7 @@ pub fn build_iteration_summary_document(
             &previous_report,
             options.failed_runs,
             options.headroom_threshold,
+            options.efficiency_tolerances,
         )
     });
 
@@ -520,6 +544,7 @@ fn build_keep_or_revert_section(
     previous_report: &ReportForSummary,
     mode: FailedRunsMode,
     threshold: HeadroomThreshold,
+    tolerances: EfficiencyTolerances,
 ) -> KeepOrRevertSection {
     let suites = suite_comparison(report, previous_report);
 
@@ -541,12 +566,60 @@ fn build_keep_or_revert_section(
 
     let recommendation = derive_recommendation(&by_split);
 
+    let efficiency_by_split = match &suites {
+        SuiteComparison::DifferentSuites { .. } => BTreeMap::new(),
+        SuiteComparison::SameSuite => EvalSplit::ALL
+            .into_iter()
+            .map(|split| {
+                let current = with_skill_readings(report_dir, report, split);
+                let previous = with_skill_readings(previous_dir, previous_report, split);
+                (split, efficiency::judge_split(&current, &previous, tolerances))
+            })
+            .collect(),
+    };
+
     KeepOrRevertSection {
         suites,
         by_split,
         recommendation,
         capped_by_saturation,
+        efficiency: Some(EfficiencySection {
+            tolerances,
+            by_split: efficiency_by_split,
+        }),
     }
+}
+
+/// What the completed `with_skill` runs of one split reported per run, read regardless of
+/// `--failed-runs`: that flag decides how a failure scores, and a failed run has no
+/// duration or spend of its own to compare.
+fn with_skill_readings(report_dir: &Path, report: &ReportForSummary, split: EvalSplit) -> ArmReadings {
+    let mut readings = ArmReadings {
+        cost_usd: Some(Vec::new()),
+        ..ArmReadings::default()
+    };
+    for run in &report.runs {
+        if run.split != split || run.scenario_id != ScenarioKind::WithSkill {
+            continue;
+        }
+        if classify_run(run, FailedRunsMode::Bucket) != RunDisposition::Completed {
+            continue;
+        }
+        readings.completed_runs += 1;
+        let timing = load_run_sample(report_dir, &run.paths.workspace).timing;
+        let timing = timing.as_ref();
+        if let Some(duration_ms) = timing.and_then(|timing| timing.duration_ms) {
+            readings.duration_ms.push(duration_ms as f64);
+        }
+        if let Some(total_tokens) = timing.and_then(|timing| timing.total_tokens) {
+            readings.total_tokens.push(total_tokens as f64);
+        }
+        match (timing.and_then(TimingFileInput::priced_usd), readings.cost_usd.as_mut()) {
+            (Some(usd), Some(costs)) => costs.push(usd),
+            _ => readings.cost_usd = None,
+        }
+    }
+    readings
 }
 
 fn tool_usage(report: &ReportForSummary) -> Vec<ScenarioToolUsage> {
@@ -1068,6 +1141,21 @@ pub fn print_human_summary(document: &IterationSummaryDocument) {
                         continue;
                     };
                     println!("  {} split: {}", split.as_str(), split_verdict_line(verdict));
+                }
+            }
+        }
+        if let Some(efficiency) = &keep_or_revert.efficiency {
+            if !efficiency.by_split.is_empty() {
+                println!(
+                    "Efficiency (allowed increase per run: cost {}, duration {}, tokens {}):",
+                    efficiency.tolerances.cost, efficiency.tolerances.duration, efficiency.tolerances.tokens
+                );
+                for (split, verdicts) in &efficiency.by_split {
+                    println!(
+                        "  {} split: {}",
+                        split.as_str(),
+                        efficiency::describe_split_efficiency(verdicts)
+                    );
                 }
             }
         }
@@ -1621,6 +1709,9 @@ fn detect_token_outliers(samples: Vec<MetricSample<SummaryRunOrigin>>) -> Vec<To
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agentskills::efficiency::{
+        CostVerdict, DurationVerdict, EfficiencyMetric, IncreaseTolerance, TokenVerdict, UnmeasuredReason,
+    };
     use std::fs;
 
     fn write_report(report_dir: &Path, runs: serde_json::Value, iteration: u32, report_id: &str) {
@@ -2735,6 +2826,265 @@ mod tests {
             "a verdict across two different suites is not a verdict about the change"
         );
         assert_eq!(keep_or_revert.recommendation, Recommendation::Inconclusive);
+    }
+
+    fn write_timed_with_skill_runs(
+        report_dir: &Path,
+        id_prefix: &str,
+        split: &str,
+        timings: &[String],
+    ) -> Vec<serde_json::Value> {
+        timings
+            .iter()
+            .enumerate()
+            .map(|(index, timing)| {
+                let id = format!("{id_prefix}-{index}");
+                write_run_artifacts(
+                    report_dir,
+                    &id,
+                    Some(r#"{"assertion_results":[{"assertion":"a","passed":true}]}"#),
+                    Some(timing),
+                );
+                sample_run_with_split(&id, "case-a", "with_skill", index as u32 + 1, "completed", split)
+            })
+            .collect()
+    }
+
+    fn timings(duration_ms: &[u64], total_tokens: u64, usd: Option<f64>) -> Vec<String> {
+        duration_ms
+            .iter()
+            .map(|duration| match usd {
+                Some(usd) => format!(
+                    r#"{{ "duration_ms": {duration}, "total_tokens": {total_tokens}, "cost": {{ "kind": "priced", "usd": {usd} }} }}"#
+                ),
+                None => format!(r#"{{ "duration_ms": {duration}, "total_tokens": {total_tokens} }}"#),
+            })
+            .collect()
+    }
+
+    fn summary_with_tolerances(
+        previous_dir: &Path,
+        previous_runs: Vec<serde_json::Value>,
+        current_dir: &Path,
+        current_runs: Vec<serde_json::Value>,
+        efficiency_tolerances: EfficiencyTolerances,
+    ) -> IterationSummaryDocument {
+        write_report(
+            previous_dir,
+            serde_json::Value::Array(previous_runs),
+            1,
+            "report-iter-1",
+        );
+        write_report(current_dir, serde_json::Value::Array(current_runs), 2, "report-iter-2");
+        build_iteration_summary_document(
+            current_dir,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous_dir.to_path_buf()),
+                efficiency_tolerances,
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_change_that_costs_more_per_run_is_costlier_without_moving_the_recommendation() {
+        let root = tempfile::tempdir().unwrap();
+        let previous_dir = root.path().join("demo-skill/report-iter-1");
+        let current_dir = root.path().join("demo-skill/report-iter-2");
+        let durations = [1000, 1100, 1200, 1300, 1050];
+        let previous_runs =
+            write_timed_with_skill_runs(&previous_dir, "prev", "test", &timings(&durations, 500, Some(0.10)));
+        let current_runs =
+            write_timed_with_skill_runs(&current_dir, "cur", "test", &timings(&durations, 1500, Some(0.30)));
+
+        let summary = summary_with_tolerances(
+            &previous_dir,
+            previous_runs,
+            &current_dir,
+            current_runs,
+            EfficiencyTolerances::default(),
+        );
+
+        let keep_or_revert = summary.keep_or_revert.as_ref().expect("a previous iteration exists");
+        assert_eq!(keep_or_revert.recommendation, Recommendation::Inconclusive);
+        let efficiency = keep_or_revert.efficiency.as_ref().expect("same suite, so judged");
+        let test = &efficiency.by_split[&EvalSplit::Test];
+        let CostVerdict::Costlier(comparison) = test.cost else {
+            panic!("expected costlier, got {:?}", test.cost);
+        };
+        assert!((comparison.shift.estimate() - 0.20).abs() < 1e-9);
+        assert!((comparison.previous_median - 0.10).abs() < 1e-9);
+        assert!(matches!(test.duration, DurationVerdict::Indistinguishable(_)));
+        assert!(matches!(test.tokens, TokenVerdict::MoreTokens(_)));
+        assert_eq!(efficiency.by_split[&EvalSplit::Train].cost, CostVerdict::NoRuns);
+    }
+
+    #[test]
+    fn an_increase_inside_the_operator_tolerance_is_not_a_regression() {
+        let root = tempfile::tempdir().unwrap();
+        let previous_dir = root.path().join("demo-skill/report-iter-1");
+        let current_dir = root.path().join("demo-skill/report-iter-2");
+        let previous_runs = write_timed_with_skill_runs(
+            &previous_dir,
+            "prev",
+            "test",
+            &timings(&[1000, 1010, 990, 1005, 995], 500, None),
+        );
+        let current_runs = write_timed_with_skill_runs(
+            &current_dir,
+            "cur",
+            "test",
+            &timings(&[1100, 1110, 1090, 1105, 1095], 500, None),
+        );
+
+        let summary = summary_with_tolerances(
+            &previous_dir,
+            previous_runs,
+            &current_dir,
+            current_runs,
+            EfficiencyTolerances {
+                duration: IncreaseTolerance::parse(0.2).unwrap(),
+                ..EfficiencyTolerances::default()
+            },
+        );
+
+        let efficiency = summary.keep_or_revert.unwrap().efficiency.unwrap();
+        assert_eq!(efficiency.tolerances.duration.value(), 0.2);
+        let test = &efficiency.by_split[&EvalSplit::Test];
+        assert!(matches!(test.duration, DurationVerdict::WithinTolerance(_)), "{test:?}");
+        assert!(efficiency.regressed_splits(EfficiencyMetric::Duration).is_empty());
+        assert_eq!(
+            test.cost,
+            CostVerdict::Unmeasured {
+                reason: UnmeasuredReason::NotEveryRunPriced
+            }
+        );
+    }
+
+    #[test]
+    fn efficiency_is_not_judged_across_two_different_suites() {
+        let root = tempfile::tempdir().unwrap();
+        let previous_dir = root.path().join("demo-skill/report-iter-1");
+        let current_dir = root.path().join("demo-skill/report-iter-2");
+        let previous_runs =
+            write_timed_with_skill_runs(&previous_dir, "prev", "test", &timings(&[1000; 5], 500, Some(0.10)));
+        let current_runs =
+            write_timed_with_skill_runs(&current_dir, "cur", "test", &timings(&[9000; 5], 5000, Some(0.90)));
+        write_report_with_hash(
+            &previous_dir,
+            serde_json::Value::Array(previous_runs),
+            1,
+            "report-iter-1",
+            "sha256:before",
+        );
+        write_report_with_hash(
+            &current_dir,
+            serde_json::Value::Array(current_runs),
+            2,
+            "report-iter-2",
+            "sha256:after",
+        );
+
+        let summary = build_iteration_summary_document(
+            &current_dir,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous_dir),
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+
+        let efficiency = summary.keep_or_revert.unwrap().efficiency.unwrap();
+        assert!(efficiency.by_split.is_empty());
+    }
+
+    #[test]
+    fn withheld_test_detail_keeps_the_efficiency_aggregates_and_names_no_case() {
+        let root = tempfile::tempdir().unwrap();
+        let previous_dir = root.path().join("demo-skill/report-iter-1");
+        let current_dir = root.path().join("demo-skill/report-iter-2");
+        let previous_runs =
+            write_timed_with_skill_runs(&previous_dir, "prev", "test", &timings(&[1000; 5], 500, Some(0.10)));
+        let current_runs =
+            write_timed_with_skill_runs(&current_dir, "cur", "test", &timings(&[3000; 5], 500, Some(0.10)));
+        write_report(
+            &previous_dir,
+            serde_json::Value::Array(previous_runs),
+            1,
+            "report-iter-1",
+        );
+        write_report(&current_dir, serde_json::Value::Array(current_runs), 2, "report-iter-2");
+
+        let summary = build_iteration_summary_document(
+            &current_dir,
+            IterationSummaryOptions {
+                previous_report_dir: Some(previous_dir),
+                withhold_test_detail: true,
+                ..IterationSummaryOptions::default()
+            },
+        )
+        .unwrap();
+
+        let efficiency = summary.keep_or_revert.unwrap().efficiency.unwrap();
+        assert!(matches!(
+            efficiency.by_split[&EvalSplit::Test].duration,
+            DurationVerdict::Slower(_)
+        ));
+        let published = serde_json::to_string(&efficiency).unwrap();
+        assert!(!published.contains("case-a"), "{published}");
+    }
+
+    #[test]
+    fn keep_or_revert_with_efficiency_verdicts_matches_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let previous_dir = root.path().join("demo-skill/report-iter-1");
+        let current_dir = root.path().join("demo-skill/report-iter-2");
+        let previous_runs =
+            write_timed_with_skill_runs(&previous_dir, "prev", "test", &timings(&[1000; 5], 500, Some(0.10)));
+        let mut current_runs =
+            write_timed_with_skill_runs(&current_dir, "cur", "test", &timings(&[3000; 5], 400, Some(0.30)));
+        current_runs.extend(write_timed_with_skill_runs(
+            &current_dir,
+            "cur-train",
+            "train",
+            &timings(&[1000; 2], 500, None),
+        ));
+
+        let summary = summary_with_tolerances(
+            &previous_dir,
+            previous_runs,
+            &current_dir,
+            current_runs,
+            EfficiencyTolerances {
+                cost: IncreaseTolerance::parse(0.05).unwrap(),
+                ..EfficiencyTolerances::default()
+            },
+        );
+
+        let json = serde_json::to_value(&summary).unwrap();
+        assert!(json["keep_or_revert"]["efficiency"]["by_split"]["test"]["cost"]["status"] == "costlier");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/iteration-summary.json.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<_> = validator.iter_errors(&json).map(|error| error.to_string()).collect();
+        assert!(errors.is_empty(), "schema errors: {errors:?}");
+
+        let mut written_before = json.clone();
+        written_before["keep_or_revert"]
+            .as_object_mut()
+            .unwrap()
+            .remove("efficiency");
+        let errors: Vec<_> = validator
+            .iter_errors(&written_before)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "a document written before efficiency verdicts: {errors:?}"
+        );
+        let read_back: IterationSummaryDocument = serde_json::from_value(written_before).unwrap();
+        assert!(read_back.keep_or_revert.unwrap().efficiency.is_none());
     }
 
     #[test]

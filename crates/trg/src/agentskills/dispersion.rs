@@ -105,7 +105,7 @@ impl Dispersion {
     }
 }
 
-fn median(values: &mut [f64]) -> Option<f64> {
+pub(crate) fn median(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
     }

@@ -390,7 +390,10 @@ trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
 | `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
-| `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these. Comma-separated. Values: `revert`, `overfitting`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
+| `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these, or when a named efficiency metric regressed on any split. Comma-separated. Values: `revert`, `overfitting`, `cost_regression`, `latency_regression`, `token_regression`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
+| `--max-cost-increase` | proportion | `0` | The increase in cost per run, as a proportion of the previous median, that is not a `costlier` verdict. See [Efficiency verdicts](#efficiency-verdicts) |
+| `--max-duration-increase` | proportion | `0` | The same allowance for duration per run, against a `slower` verdict |
+| `--max-token-increase` | proportion | `0` | The same allowance for total tokens per run, against a `more_tokens` verdict |
 | `--headroom-threshold` | proportion | `0.9` | The `with_skill` arm's Wilson lower bound is reported as saturated (see [Headroom warning](#headroom-warning)) at or above this proportion in `(0, 1]` |
 | `--withhold-test-detail` | flag | off | Drop test-split eval case ids and assertion text from the document, keeping only its aggregate counts, deltas, and intervals |
 
@@ -448,14 +451,98 @@ into a verdict rather than left for the reader to eyeball:
   could not have read `improved` here no matter what the change did. See [Headroom
   warning](#headroom-warning).
 
+- `efficiency` carries the cost, duration, and token verdicts described in [Efficiency
+  verdicts](#efficiency-verdicts). It never changes `recommendation`. A document written
+  before this field existed has no `efficiency`, and it still conforms to the schema.
+
 Absent entirely on a first iteration, since there is no previous run to compare against.
+
+### Efficiency verdicts
+
+`keep_or_revert.efficiency` compares the per-run cost, duration, and total tokens of this
+iteration's completed `with_skill` runs with those of the previous iteration, split by
+split:
+
+```json
+{
+  "tolerances": { "cost": 0.1, "duration": 0.25, "tokens": 0.0 },
+  "by_split": {
+    "test": {
+      "cost": {
+        "status": "costlier",
+        "shift": { "estimate": 0.09, "interval": { "low": 0.06, "high": 0.12 } },
+        "previous_median": 0.145,
+        "current_runs": 6,
+        "previous_runs": 6
+      },
+      "duration": { "status": "unmeasured", "reason": "too_few_readings" },
+      "tokens": { "status": "no_runs" }
+    }
+  }
+}
+```
+
+| `status` | Meaning |
+| -------- | ------- |
+| `costlier`, `slower`, `more_tokens` | The low end of the 95% interval of the shift sits above the tolerance times `previous_median`. This is a regression |
+| `within_tolerance` | The low end of the interval sits above zero, but not above the tolerance times `previous_median`. The increase is real, and the tolerance accepts it. Only a tolerance above zero can produce it, and it never trips `--fail-on` |
+| `cheaper`, `faster`, `fewer_tokens` | The high end of the interval sits below zero |
+| `indistinguishable` | The interval reaches zero, so the runs cannot tell the sides apart |
+| `unmeasured` | Both sides have completed runs, but no interval exists. `reason` is `too_few_readings` when a side has fewer than four runs that reported the metric, or `not_every_run_priced` when a run on either side carried no price |
+| `no_runs` | One side has no completed `with_skill` run on this split |
+
+`shift` is the current run minus the previous run, in the unit of the metric: USD for
+cost, milliseconds for duration, and tokens for tokens. `tolerances` echoes the
+`--max-*-increase` flags, so a reader can check a verdict without the command line.
+
+The method:
+
+- The estimate is the Hodges-Lehmann shift, the median of every difference between a
+  current run and a previous run. The interval is the Moses interval around it, which
+  reads its endpoints off the same sorted differences at ranks taken from the exact
+  Mann-Whitney null distribution. Both assume only that the two sides have the same
+  shape. One slow run cannot drag the estimate, and the same runs always give the same
+  answer, with no seed.
+- The exact distribution is used while the two sides make 10,000 pairs or fewer. Above
+  that, the ranks come from the normal approximation, which is then within one rank of
+  the exact count.
+- Each side needs four runs that reported the metric. At four runs per side, the
+  interval is the full range of the differences, with 97.1% coverage. Below four, no
+  interval reaches 95%.
+- The sides are not paired by case and attempt. Pairing drops each run whose partner
+  failed or was not selected, which shrinks and biases the side that failed more. The
+  unpaired interval keeps every measured run, and is wider because case-to-case
+  variation stays in it.
+- No tie correction is applied. The interval is closed, so a tied endpoint makes it
+  wider, not narrower.
+- Only completed runs count. A failed or timed-out run says nothing about what a
+  successful run costs.
+- `tokens` reads total tokens per run, input and output together.
+- A cost verdict needs a price on every run on both sides, for the same reason a
+  bucket's `cost_usd` does. Unpriced runs are not read as free.
+
+`by_split` is empty when `suites` is `different_suites`, for the same reason the pass-rate
+verdicts are. `--withhold-test-detail` leaves `efficiency` unchanged, because it carries
+no case ids and no assertion text.
+
+The efficiency gates in `--fail-on` fire when the named metric regressed on any split.
+A `within_tolerance` verdict does not count as a regression.
+Each split is its own comparison, so a gate on any of them is the stricter reading. The
+tolerances are what an operator uses to absorb increases they accept.
+
+These verdicts differ from the `--fail-on-token-regression` and
+`--fail-on-duration-regression` flags of `eval run` and `eval verify`. Those flags
+compare one total or one maximum with a baseline, and any increase fails them, however
+noisy. The efficiency verdicts fail only an increase that the runs can tell apart from
+noise and that exceeds the tolerance.
 
 ### Exit codes
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | Success, or `--fail-on` was not asked to gate on the recommendation this iteration produced |
-| `1` | `--fail-on` named a recommendation, and the keep-or-revert verdict matched it |
+| `0` | Success, or nothing that `--fail-on` named matched this iteration |
+| `1` | `--fail-on` named a recommendation that the keep-or-revert verdict matched, or named an efficiency metric that regressed on at least one split |
+| `2` | A flag was refused, for example a negative `--max-cost-increase` |
 | `3` | The report could not be read, the previous report resolved but could not be read, or the document could not be written or serialized |
 
 ### Example
@@ -464,7 +551,12 @@ Absent entirely on a first iteration, since there is no previous run to compare 
 $ trg ai skills eval iteration-summary ./artifacts/my-skill/20260526T120000Z-abc
 
 $ trg ai skills eval iteration-summary ./report --previous ./prior-report --fail-on revert,overfitting
+
+$ trg ai skills eval iteration-summary ./report --previous ./prior-report \
+    --max-duration-increase 0.25 --fail-on cost_regression,latency_regression
 ```
+
+See [Gate a change on cost and latency](../how-to/gate-a-change-on-cost-and-latency.md).
 
 ---
 
@@ -2339,6 +2431,21 @@ next to them, so a difference drawn from a handful of runs is not read as a
 finding. See
 [How many times a cell is drawn](#how-many-times-a-cell-is-drawn).
 
+Each scenario delta, in `deltas` and in `iteration_comparison`, also says how far
+the runs of its left arm sit from those of its right arm, per run:
+
+| Field | Unit | Present when |
+| ----- | ---- | ------------ |
+| `duration_ms_shift` | milliseconds | Both arms have at least four completed runs with a `timing.json` |
+| `input_tokens_per_run_shift` | tokens | The same floor, counted over runs that reported input tokens |
+| `total_tokens_per_run_shift` | tokens | The same floor, counted over runs that reported total tokens |
+| `cost_usd_per_run_shift` | USD | The same floor, and both arms have a `whole` cost |
+
+Each is `{ "estimate": …, "interval": { "low": …, "high": … } }`: the left run minus
+the right run, with its 95% interval. A field is absent, not zero and not null,
+when an arm falls below the floor. The estimate and the interval come from the
+same method as the [efficiency verdicts](#efficiency-verdicts).
+
 ---
 
 ## Artifact: `feedback.json`
@@ -3207,6 +3314,11 @@ because an arm that passed everything or failed everything is an ordinary
 result here and is exactly where the normal approximation reports a width of
 zero. Either field is absent when its side scored nothing, since a difference
 against no draws has no width to report rather than an infinite one.
+
+Cost, duration, and tokens get the same treatment through the per-run shifts on
+each `ScenarioDelta`, described under [`benchmark.json`](#artifact-benchmarkjson).
+Those need four runs an arm, not three, because three draws cannot place a 95%
+interval around a shift at all. See [Efficiency verdicts](#efficiency-verdicts).
 
 `--attempts 1` asks for a single draw, which is the right choice while writing a
 case and reading its transcript. `--attempts 0` is refused, because a cell

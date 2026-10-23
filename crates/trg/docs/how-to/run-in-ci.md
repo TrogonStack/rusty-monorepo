@@ -225,6 +225,12 @@ gates on nothing by itself, so a first iteration with no `--previous` to compare
 always exits `0`. See [Keep-or-revert verdict](../reference/ai-skills-eval.md#keep-or-revert-verdict)
 for the exact rule each recommendation follows.
 
+The recommendation reads pass rates only. To also fail a change that costs more, runs
+longer, or spends more tokens per run than the previous iteration, add
+`cost_regression`, `latency_regression`, or `token_regression`, and set the increase you
+accept with `--max-cost-increase`, `--max-duration-increase`, or `--max-token-increase`.
+See [Gate a change on cost and latency](gate-a-change-on-cost-and-latency.md).
+
 ## Tips
 
 - Cache `target/` between CI runs when building `trg` from source.
