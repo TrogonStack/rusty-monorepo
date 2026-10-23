@@ -485,7 +485,8 @@ split:
 | `status` | Meaning |
 | -------- | ------- |
 | `costlier`, `slower`, `more_tokens` | The low end of the 95% interval of the shift sits above the tolerance times `previous_median`. This is a regression |
-| `within_tolerance` | The low end of the interval sits above zero, but not above the tolerance times `previous_median`. The increase is real, and the tolerance accepts it. Only a tolerance above zero can produce it, and it never trips `--fail-on` |
+| `within_tolerance` | The low end of the interval sits above zero, and the high end does not sit above the tolerance times `previous_median`. The increase is real, and the runs show that it stays inside the tolerance. Only a tolerance above zero can produce it, and it never trips `--fail-on` |
+| `increased` | The low end of the interval sits above zero but not above the tolerance times `previous_median`, and the high end sits above it. The increase is real, but the runs cannot say whether it passes the tolerance. Only a tolerance above zero can produce it, and it never trips `--fail-on` |
 | `cheaper`, `faster`, `fewer_tokens` | The high end of the interval sits below zero |
 | `indistinguishable` | The interval reaches zero, so the runs cannot tell the sides apart |
 | `unmeasured` | Both sides have completed runs, but no interval exists. `reason` is `too_few_readings` when a side has fewer than four runs that reported the metric, or `not_every_run_priced` when a run on either side carried no price |
@@ -526,7 +527,7 @@ verdicts are. `--withhold-test-detail` leaves `efficiency` unchanged, because it
 no case ids and no assertion text.
 
 The efficiency gates in `--fail-on` fire when the named metric regressed on any split.
-A `within_tolerance` verdict does not count as a regression.
+A `within_tolerance` or `increased` verdict does not count as a regression.
 Each split is its own comparison, so a gate on any of them is the stricter reading. The
 tolerances are what an operator uses to absorb increases they accept.
 

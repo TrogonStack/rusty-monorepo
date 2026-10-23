@@ -32,7 +32,7 @@
       "type": "object"
     },
     "CostVerdict": {
-      "description": "Each verdict below reads the same way: the regressing status means the whole interval\nsits above the tolerance, `within_tolerance` means it sits above zero but not wholly\nabove the tolerance, the improving status means it sits entirely below zero, and\n`indistinguishable` means it reaches zero.",
+      "description": "Each verdict below reads the same way: the regressing status means the whole interval\nsits above the tolerance, `within_tolerance` means it sits above zero and wholly inside\nthe tolerance, `increased` means it sits above zero but reaches past the tolerance, so\nthe runs cannot say which side of it the increase falls, the improving status means it\nsits entirely below zero, and `indistinguishable` means it reaches zero.",
       "oneOf": [
         {
           "allOf": [
@@ -77,6 +77,23 @@
           "properties": {
             "status": {
               "const": "within_tolerance",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "increased",
               "type": "string"
             }
           },
@@ -230,6 +247,23 @@
           "properties": {
             "status": {
               "const": "within_tolerance",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "increased",
               "type": "string"
             }
           },
@@ -1028,6 +1062,23 @@
           "properties": {
             "status": {
               "const": "within_tolerance",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "increased",
               "type": "string"
             }
           },

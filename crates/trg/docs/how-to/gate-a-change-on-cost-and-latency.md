@@ -31,8 +31,10 @@ Each metric takes a proportion of the baseline median per run. The default is
 
 A tolerance does not loosen the noise check. A metric regresses only when the
 whole 95% interval of the per-run shift sits above the allowed increase. An
-increase that is real but not past the allowance reads `within_tolerance`, and
-it never fails the job.
+increase whose whole interval sits above zero and inside the allowance reads
+`within_tolerance`. An increase whose interval sits above zero and reaches past
+the allowance reads `increased`, because the runs cannot say whether it passes
+the allowance. Neither one fails the job.
 
 ## 2. Compare the candidate with the baseline
 
@@ -40,23 +42,30 @@ it never fails the job.
 $ trg ai skills eval iteration-summary ./artifacts/my-skill/candidate \
     --previous ./artifacts/my-skill/baseline \
     --max-duration-increase 0.5 \
-    --fail-on cost_regression,latency_regression
+    --max-token-increase 0.5 \
+    --fail-on cost_regression,latency_regression,token_regression
 ```
 
 The text output ends with one efficiency line for each split:
 
 ```text
-Efficiency (allowed increase per run: cost 0, duration 0.5, tokens 0):
+Efficiency (allowed increase per run: cost 0, duration 0.5, tokens 0.5):
   train split: cost no runs; duration no runs; tokens no runs
-  test split: cost costlier (+0.0900 USD/run, 95% CI [+0.0600, +0.1200], previous median 0.1450); duration within tolerance (+12000 ms/run, 95% CI [+9900, +14100], previous median 41750); tokens more tokens (+11000 tokens/run, 95% CI [+10100, +11900], previous median 20750)
+  test split: cost costlier (+0.0900 USD/run, 95% CI [+0.0600, +0.1200], previous median 0.1450); duration within tolerance (+12000 ms/run, 95% CI [+9900, +14100], previous median 41750); tokens increased (+11000 tokens/run, 95% CI [+10100, +11900], previous median 20750)
 iteration-summary: cost regressed on the test split, which --fail-on was told to fail on
 ```
 
 Here the duration rose by about 12 seconds per run. The whole interval sits
-above zero, so the increase is real, but it is inside the 50% allowance of
-about 21 seconds, so it reads `within_tolerance` and does not regress. The cost rose with no
-allowance, so `--fail-on cost_regression` exits `1`. The tokens rose too, but
-`token_regression` was not in the list, so it does not affect the exit code.
+above zero, so the increase is real. The high end, 14100 ms, is inside the 50%
+allowance of 20875 ms, so it reads `within_tolerance` and does not regress.
+
+The tokens rose by about 11000 per run. The low end, 10100, is inside the 50%
+allowance of 10375 tokens, but the high end, 11900, is past it. The increase is
+real, but the runs cannot say whether it passes the allowance, so it reads
+`increased`. It does not regress, so `token_regression` does not match. Draw
+more runs to narrow the interval.
+
+The cost rose with no allowance, so `--fail-on cost_regression` exits `1`.
 
 ## 3. Gate the job
 
@@ -85,7 +94,8 @@ counts behind each side.
 | `status` | Meaning |
 | -------- | ------- |
 | `costlier`, `slower`, `more_tokens` | The whole interval sits above the allowed increase |
-| `within_tolerance` | The whole interval sits above zero, but not wholly above the allowed increase. The increase is real and you accepted it |
+| `within_tolerance` | The whole interval sits above zero and inside the allowed increase. The increase is real, and the runs show that it stays inside the allowance |
+| `increased` | The whole interval sits above zero, and it reaches past the allowed increase without sitting wholly above it. The increase is real, but the runs cannot say whether it passes the allowance |
 | `cheaper`, `faster`, `fewer_tokens` | The whole interval sits below zero |
 | `indistinguishable` | The interval reaches zero, so the runs cannot tell the sides apart |
 | `unmeasured` | Too few runs reported the metric, or a run carried no price |

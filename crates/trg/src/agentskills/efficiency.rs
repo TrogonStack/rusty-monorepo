@@ -122,15 +122,17 @@ pub enum UnmeasuredReason {
 }
 
 /// Each verdict below reads the same way: the regressing status means the whole interval
-/// sits above the tolerance, `within_tolerance` means it sits above zero but not wholly
-/// above the tolerance, the improving status means it sits entirely below zero, and
-/// `indistinguishable` means it reaches zero.
+/// sits above the tolerance, `within_tolerance` means it sits above zero and wholly inside
+/// the tolerance, `increased` means it sits above zero but reaches past the tolerance, so
+/// the runs cannot say which side of it the increase falls, the improving status means it
+/// sits entirely below zero, and `indistinguishable` means it reaches zero.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum CostVerdict {
     Cheaper(ShiftComparison),
     Costlier(ShiftComparison),
     WithinTolerance(ShiftComparison),
+    Increased(ShiftComparison),
     Indistinguishable(ShiftComparison),
     Unmeasured { reason: UnmeasuredReason },
     NoRuns,
@@ -142,6 +144,7 @@ pub enum DurationVerdict {
     Faster(ShiftComparison),
     Slower(ShiftComparison),
     WithinTolerance(ShiftComparison),
+    Increased(ShiftComparison),
     Indistinguishable(ShiftComparison),
     Unmeasured { reason: UnmeasuredReason },
     NoRuns,
@@ -153,6 +156,7 @@ pub enum TokenVerdict {
     FewerTokens(ShiftComparison),
     MoreTokens(ShiftComparison),
     WithinTolerance(ShiftComparison),
+    Increased(ShiftComparison),
     Indistinguishable(ShiftComparison),
     Unmeasured { reason: UnmeasuredReason },
     NoRuns,
@@ -250,6 +254,7 @@ enum Judgement {
     Lower(ShiftComparison),
     Higher(ShiftComparison),
     HigherWithinTolerance(ShiftComparison),
+    HigherPossiblyBeyondTolerance(ShiftComparison),
     Straddling(ShiftComparison),
     Unmeasured(UnmeasuredReason),
     NoRuns,
@@ -272,8 +277,10 @@ fn judge(current: &[f64], previous: &[f64], tolerance: IncreaseTolerance) -> Jud
     let interval = shift.interval();
     if interval.low() > allowed_increase {
         Judgement::Higher(comparison)
-    } else if interval.low() > 0.0 {
+    } else if interval.low() > 0.0 && interval.high() <= allowed_increase {
         Judgement::HigherWithinTolerance(comparison)
+    } else if interval.low() > 0.0 {
+        Judgement::HigherPossiblyBeyondTolerance(comparison)
     } else if interval.high() < 0.0 {
         Judgement::Lower(comparison)
     } else {
@@ -287,6 +294,7 @@ impl From<Judgement> for CostVerdict {
             Judgement::Lower(comparison) => Self::Cheaper(comparison),
             Judgement::Higher(comparison) => Self::Costlier(comparison),
             Judgement::HigherWithinTolerance(comparison) => Self::WithinTolerance(comparison),
+            Judgement::HigherPossiblyBeyondTolerance(comparison) => Self::Increased(comparison),
             Judgement::Straddling(comparison) => Self::Indistinguishable(comparison),
             Judgement::Unmeasured(reason) => Self::Unmeasured { reason },
             Judgement::NoRuns => Self::NoRuns,
@@ -300,6 +308,7 @@ impl From<Judgement> for DurationVerdict {
             Judgement::Lower(comparison) => Self::Faster(comparison),
             Judgement::Higher(comparison) => Self::Slower(comparison),
             Judgement::HigherWithinTolerance(comparison) => Self::WithinTolerance(comparison),
+            Judgement::HigherPossiblyBeyondTolerance(comparison) => Self::Increased(comparison),
             Judgement::Straddling(comparison) => Self::Indistinguishable(comparison),
             Judgement::Unmeasured(reason) => Self::Unmeasured { reason },
             Judgement::NoRuns => Self::NoRuns,
@@ -313,6 +322,7 @@ impl From<Judgement> for TokenVerdict {
             Judgement::Lower(comparison) => Self::FewerTokens(comparison),
             Judgement::Higher(comparison) => Self::MoreTokens(comparison),
             Judgement::HigherWithinTolerance(comparison) => Self::WithinTolerance(comparison),
+            Judgement::HigherPossiblyBeyondTolerance(comparison) => Self::Increased(comparison),
             Judgement::Straddling(comparison) => Self::Indistinguishable(comparison),
             Judgement::Unmeasured(reason) => Self::Unmeasured { reason },
             Judgement::NoRuns => Self::NoRuns,
@@ -326,6 +336,7 @@ pub fn describe_split_efficiency(verdicts: &SplitEfficiency) -> String {
         CostVerdict::Cheaper(comparison) => describe("cheaper", comparison, "USD", 4),
         CostVerdict::Costlier(comparison) => describe("costlier", comparison, "USD", 4),
         CostVerdict::WithinTolerance(comparison) => describe("within tolerance", comparison, "USD", 4),
+        CostVerdict::Increased(comparison) => describe("increased", comparison, "USD", 4),
         CostVerdict::Indistinguishable(comparison) => describe("indistinguishable", comparison, "USD", 4),
         CostVerdict::Unmeasured { reason } => describe_unmeasured(*reason),
         CostVerdict::NoRuns => "no runs".to_string(),
@@ -334,6 +345,7 @@ pub fn describe_split_efficiency(verdicts: &SplitEfficiency) -> String {
         DurationVerdict::Faster(comparison) => describe("faster", comparison, "ms", 0),
         DurationVerdict::Slower(comparison) => describe("slower", comparison, "ms", 0),
         DurationVerdict::WithinTolerance(comparison) => describe("within tolerance", comparison, "ms", 0),
+        DurationVerdict::Increased(comparison) => describe("increased", comparison, "ms", 0),
         DurationVerdict::Indistinguishable(comparison) => describe("indistinguishable", comparison, "ms", 0),
         DurationVerdict::Unmeasured { reason } => describe_unmeasured(*reason),
         DurationVerdict::NoRuns => "no runs".to_string(),
@@ -342,6 +354,7 @@ pub fn describe_split_efficiency(verdicts: &SplitEfficiency) -> String {
         TokenVerdict::FewerTokens(comparison) => describe("fewer tokens", comparison, "tokens", 0),
         TokenVerdict::MoreTokens(comparison) => describe("more tokens", comparison, "tokens", 0),
         TokenVerdict::WithinTolerance(comparison) => describe("within tolerance", comparison, "tokens", 0),
+        TokenVerdict::Increased(comparison) => describe("increased", comparison, "tokens", 0),
         TokenVerdict::Indistinguishable(comparison) => describe("indistinguishable", comparison, "tokens", 0),
         TokenVerdict::Unmeasured { reason } => describe_unmeasured(*reason),
         TokenVerdict::NoRuns => "no runs".to_string(),
@@ -502,6 +515,78 @@ mod tests {
             !matches!(verdicts.tokens, TokenVerdict::WithinTolerance(_)),
             "{verdicts:?}"
         );
+    }
+
+    #[test]
+    fn a_zero_tolerance_reads_every_real_increase_as_a_regression() {
+        let previous = arm(&[1000.0; 4], &[500.0; 4], Some(&[0.10; 4]));
+        for duration_ms in [[1001.0, 1002.0, 1003.0, 1004.0], [1100.0, 1150.0, 1200.0, 1251.0]] {
+            let current = arm(
+                &duration_ms,
+                &[510.0, 520.0, 530.0, 540.0],
+                Some(&[0.11, 0.12, 0.13, 0.14]),
+            );
+
+            let verdicts = judge_split(&current, &previous, EfficiencyTolerances::default());
+
+            assert!(matches!(verdicts.cost, CostVerdict::Costlier(_)), "{verdicts:?}");
+            assert!(matches!(verdicts.duration, DurationVerdict::Slower(_)), "{verdicts:?}");
+            assert!(matches!(verdicts.tokens, TokenVerdict::MoreTokens(_)), "{verdicts:?}");
+        }
+    }
+
+    #[test]
+    fn an_interval_whose_high_end_meets_the_allowance_is_within_tolerance() {
+        let previous = arm(&[1000.0; 4], &[500.0; 4], None);
+        let current = arm(&[1100.0, 1150.0, 1200.0, 1250.0], &[500.0; 4], None);
+
+        let verdicts = judge_split(&current, &previous, tolerances(0.0, 0.25, 0.0));
+
+        let DurationVerdict::WithinTolerance(comparison) = verdicts.duration else {
+            panic!("{verdicts:?}");
+        };
+        assert_eq!(comparison.shift.interval().high(), 250.0);
+        assert!(!verdicts.regressed(EfficiencyMetric::Duration));
+    }
+
+    #[test]
+    fn an_interval_whose_high_end_passes_the_allowance_is_only_an_increase() {
+        let previous = arm(&[1000.0; 4], &[500.0; 4], None);
+        let current = arm(&[1100.0, 1150.0, 1200.0, 1251.0], &[500.0; 4], None);
+
+        let verdicts = judge_split(&current, &previous, tolerances(0.0, 0.25, 0.0));
+
+        let DurationVerdict::Increased(comparison) = verdicts.duration else {
+            panic!("{verdicts:?}");
+        };
+        assert_eq!(comparison.shift.interval().low(), 100.0);
+        assert_eq!(comparison.shift.interval().high(), 251.0);
+        assert!(!verdicts.regressed(EfficiencyMetric::Duration));
+    }
+
+    #[test]
+    fn an_increase_the_runs_cannot_place_against_the_allowance_is_named_the_same_for_every_metric() {
+        let previous = arm(&[1000.0; 4], &[500.0; 4], Some(&[0.10; 4]));
+        let current = arm(
+            &[1100.0, 1150.0, 1200.0, 1251.0],
+            &[510.0, 520.0, 530.0, 540.0],
+            Some(&[0.11, 0.12, 0.13, 0.14]),
+        );
+
+        let verdicts = judge_split(&current, &previous, tolerances(0.25, 0.25, 0.05));
+
+        for (metric, status) in [
+            (EfficiencyMetric::Cost, serde_json::to_value(verdicts.cost).unwrap()),
+            (
+                EfficiencyMetric::Duration,
+                serde_json::to_value(verdicts.duration).unwrap(),
+            ),
+            (EfficiencyMetric::Tokens, serde_json::to_value(verdicts.tokens).unwrap()),
+        ] {
+            assert_eq!(status["status"], "increased", "{verdicts:?}");
+            assert!(!verdicts.regressed(metric));
+        }
+        assert!(describe_split_efficiency(&verdicts).contains("tokens increased (+25 tokens/run"));
     }
 
     #[test]
