@@ -1,3 +1,4 @@
+pub mod arm_timing;
 pub mod benchmark;
 pub mod budget;
 pub mod cache;
@@ -12,6 +13,7 @@ pub mod concurrency;
 pub mod dispersion;
 #[cfg(test)]
 mod doc_examples;
+pub mod efficiency;
 pub mod errors;
 pub mod eval_suite_drift;
 pub mod eval_telemetry;
@@ -47,6 +49,7 @@ pub mod sampling;
 pub mod scaling;
 pub mod scenario_selection;
 pub mod schemas;
+pub mod shift;
 pub mod skill_trust;
 pub mod span_reference;
 pub mod system_prompt_appendix;

@@ -528,6 +528,141 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     );
 }
 
+fn write_priced_timings(report_dir: &Path, runs: &[(String, &str, &str, bool)], duration_ms: u64, usd: f64) {
+    for (index, (id, _, _, _)) in runs.iter().enumerate() {
+        fs::write(
+            report_dir.join(format!("runs/{id}/timing.json")),
+            format!(
+                r#"{{"duration_ms":{},"total_tokens":1000,"cost":{{"kind":"priced","usd":{usd}}}}}"#,
+                duration_ms + index as u64 * 10
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// A change that holds its pass rate but costs three times as much per run is a `keep` by
+/// every pass-rate rule, so only the efficiency gates can stop it, and only when asked to
+/// or when the increase is past what the operator said they would pay.
+#[test]
+fn fail_on_cost_and_latency_regressions_gates_a_change_that_holds_its_pass_rate() {
+    let temp = tempfile::tempdir().unwrap();
+    let previous_dir = temp.path().join("report-iter-1");
+    let current_dir = temp.path().join("report-iter-2");
+
+    let previous_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("prev-{i}"), "case-a", "test", true)).collect();
+    let current_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("cur-{i}"), "case-a", "test", true)).collect();
+
+    write_iteration_report(&previous_dir, 1, "report-iter-1", &previous_runs);
+    write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
+    write_priced_timings(&previous_dir, &previous_runs, 1000, 0.10);
+    write_priced_timings(&current_dir, &current_runs, 1000, 0.30);
+
+    let summarize = |extra: &[&str]| {
+        trg()
+            .args(["ai", "skills", "eval", "iteration-summary"])
+            .arg(&current_dir)
+            .arg("--previous")
+            .arg(&previous_dir)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let ungated = summarize(&[]);
+    assert_eq!(ungated.status.code(), Some(0), "got {}", stderr_of(&ungated));
+
+    let cost_gated = summarize(&["--fail-on", "cost_regression"]);
+    assert_eq!(cost_gated.status.code(), Some(1), "got {}", stderr_of(&cost_gated));
+    assert!(
+        stderr_of(&cost_gated).contains("cost regressed on the test split"),
+        "expected the gate to name the metric and split, got {}",
+        stderr_of(&cost_gated)
+    );
+
+    let latency_gated = summarize(&["--fail-on", "latency_regression,token_regression"]);
+    assert_eq!(
+        latency_gated.status.code(),
+        Some(0),
+        "the runs took as long and spent as many tokens as before, got {}",
+        stderr_of(&latency_gated)
+    );
+
+    let tolerated = summarize(&[
+        "--fail-on",
+        "cost_regression",
+        "--max-cost-increase",
+        "3",
+        "--output-format",
+        "json",
+    ]);
+    assert_eq!(
+        tolerated.status.code(),
+        Some(0),
+        "a 200% increase is inside a 300% allowance, got {}",
+        stderr_of(&tolerated)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&tolerated.stdout).unwrap();
+    assert_eq!(
+        document["keep_or_revert"]["efficiency"]["by_split"]["test"]["cost"]["status"], "within_tolerance",
+        "the increase is real and its whole interval sits inside the allowance, so it is named as one even though it does not gate"
+    );
+
+    let refused = summarize(&["--max-cost-increase", "-0.1"]);
+    assert_eq!(refused.status.code(), Some(2), "got {}", stderr_of(&refused));
+}
+
+/// An increase the runs cannot place on either side of the allowance is named, so a reader
+/// knows to draw more runs, but only an increase shown to pass the allowance gates.
+#[test]
+fn an_increase_that_may_pass_the_allowance_is_named_without_gating() {
+    let temp = tempfile::tempdir().unwrap();
+    let previous_dir = temp.path().join("report-iter-1");
+    let current_dir = temp.path().join("report-iter-2");
+
+    let previous_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("prev-{i}"), "case-a", "test", true)).collect();
+    let current_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("cur-{i}"), "case-a", "test", true)).collect();
+
+    write_iteration_report(&previous_dir, 1, "report-iter-1", &previous_runs);
+    write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
+    write_priced_timings(&previous_dir, &previous_runs, 1000, 0.10);
+    for (index, (id, _, _, _)) in current_runs.iter().enumerate() {
+        let usd = 0.11 + index as f64 / 100.0;
+        fs::write(
+            current_dir.join(format!("runs/{id}/timing.json")),
+            format!(r#"{{"duration_ms":1000,"total_tokens":1000,"cost":{{"kind":"priced","usd":{usd}}}}}"#),
+        )
+        .unwrap();
+    }
+
+    let summarize = |extra: &[&str]| {
+        trg()
+            .args(["ai", "skills", "eval", "iteration-summary"])
+            .arg(&current_dir)
+            .arg("--previous")
+            .arg(&previous_dir)
+            .args(["--fail-on", "cost_regression", "--output-format", "json"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let strict = summarize(&[]);
+    assert_eq!(strict.status.code(), Some(1), "got {}", stderr_of(&strict));
+
+    let unplaced = summarize(&["--max-cost-increase", "0.3"]);
+    assert_eq!(unplaced.status.code(), Some(0), "got {}", stderr_of(&unplaced));
+    let document: serde_json::Value = serde_json::from_slice(&unplaced.stdout).unwrap();
+    let cost = &document["keep_or_revert"]["efficiency"]["by_split"]["test"]["cost"];
+    assert_eq!(cost["status"], "increased", "{cost}");
+    assert!(cost["shift"]["interval"]["low"].as_f64().unwrap() > 0.0, "{cost}");
+    assert!(cost["shift"]["interval"]["high"].as_f64().unwrap() > 0.03, "{cost}");
+}
+
 /// A `--previous` the caller named but that cannot be read is a broken tool invocation, not
 /// silence about there being nothing to compare against: it has to fail closed at the same
 /// exit code every other unreadable-bundle path in this walk reports, not the clean exit a

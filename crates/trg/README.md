@@ -25,6 +25,7 @@
 - [Run the grade benchmark pipeline](docs/how-to/run-grade-benchmark-pipeline.md)
 - [Author an eval suite](docs/how-to/author-an-eval-suite.md)
 - [Hillclimb a skill](docs/how-to/hillclimb-a-skill.md)
+- [Gate a change on cost and latency](docs/how-to/gate-a-change-on-cost-and-latency.md)
 - [Write graders](docs/how-to/write-graders.md)
 - [Write mechanical grader scripts](docs/how-to/write-mechanical-grader-scripts.md)
 - [Validate graders against human labels](docs/how-to/validate-graders-against-human-labels.md)

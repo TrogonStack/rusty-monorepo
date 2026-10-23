@@ -120,6 +120,10 @@ verdict](../reference/ai-skills-eval.md#keep-or-revert-verdict). Add
 `--fail-on revert,overfitting` to turn this into an exit code in a script or
 CI job; see [Keep-or-revert gate](run-in-ci.md#keep-or-revert-gate).
 
+The recommendation does not read cost or latency. A `keep` that costs more
+per run shows as `costlier` under `keep_or_revert.efficiency`; see [Gate a
+change on cost and latency](gate-a-change-on-cost-and-latency.md).
+
 ## 7. Act, then build the next bundle
 
 On `keep`, leave the change in place. On anything else, put the skill's
