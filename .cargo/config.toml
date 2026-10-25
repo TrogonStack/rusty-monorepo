@@ -1,6 +1,11 @@
 [build]
 rustflags = ["-D", "warnings"]
 
+# Tests spawn trg, which would otherwise export to whatever collector the
+# shell points OTEL_* at. Set OTEL_SDK_DISABLED=false to export anyway.
+[env]
+OTEL_SDK_DISABLED = "true"
+
 [net]
 git-fetch-with-cli = true
 
