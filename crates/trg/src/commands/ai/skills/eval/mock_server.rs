@@ -12,7 +12,7 @@
 //! those types are shaped around being the client half of the protocol, and bending them
 //! into a from-scratch server for three methods would cost more than it saves.
 
-use crate::agentskills::exit_code::ExitCode;
+use crate::exit_code::ExitCode;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead, Write};

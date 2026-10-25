@@ -4312,10 +4312,7 @@ mod tests {
             Ok(_) => panic!("an unreadable final answer was read as if it had been written"),
         };
 
-        assert_eq!(
-            err.reported_as(),
-            crate::agentskills::exit_code::ExitCode::InfrastructureFailure
-        );
+        assert_eq!(err.reported_as(), crate::exit_code::ExitCode::InfrastructureFailure);
         assert!(
             err.to_string().contains(FINAL_MD),
             "the report has to name the file nothing could read, got: {err}"

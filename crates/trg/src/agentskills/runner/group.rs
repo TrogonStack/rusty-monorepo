@@ -7,7 +7,7 @@
 //! pipes the reader threads never see end of file, so the timeout that was supposed to
 //! bound the run never returns at all.
 
-use crate::agentskills::exit_code::TerminationSignal;
+use crate::exit_code::TerminationSignal;
 use crate::telemetry::INTERRUPT_FLUSH_TIMEOUT;
 use std::fs::File;
 use std::io::{Read, Write};

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::agentskills::models::SkillProperties;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
@@ -22,22 +23,22 @@ pub struct ReadPropertiesArgs {
 }
 
 impl ReadPropertiesArgs {
-    pub fn handle(self, fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         let skill_path = resolve_skill_path(&self.path);
         let props = match crate::agentskills::parser::read_properties(fs, &skill_path) {
             Ok((props, _)) => props,
             Err(e) => {
                 eprintln!("✗ Failed to read properties: {}", e);
-                return 1;
+                return ExitCode::Failed;
             }
         };
 
         if self.output_format.is_json() {
-            return print_json(&props, 0);
+            return print_json(&props, ExitCode::Success);
         }
 
         print_properties(&props);
-        0
+        ExitCode::Success
     }
 }
 

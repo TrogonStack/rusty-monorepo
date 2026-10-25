@@ -5,6 +5,7 @@ mod validate;
 
 use std::path::{Path, PathBuf};
 
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use clap::Subcommand;
 
@@ -27,10 +28,10 @@ pub enum SkillsCommands {
 }
 
 impl SkillsCommands {
-    pub fn handle(self, fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         match self {
             Self::Validate(args) => args.handle(fs),
-            Self::Eval(args) => args.handle(fs).into(),
+            Self::Eval(args) => args.handle(fs),
             Self::ReadProperties(args) => args.handle(fs),
             Self::ToPrompt(args) => args.handle(fs),
         }

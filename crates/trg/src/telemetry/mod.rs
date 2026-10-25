@@ -52,8 +52,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-use crate::agentskills::exit_code::{ExitCode, TerminationSignal};
 use crate::agentskills::runner::group::{install_termination_handler, with_termination_signals_blocked};
+use crate::exit_code::{ExitCode, TerminationSignal};
 
 /// Bound on provider shutdown so a slow or unreachable collector can never
 /// hang `trg`'s exit.
@@ -431,9 +431,9 @@ impl Telemetry {
     /// Never panics and never writes to stdout: an unreachable collector or
     /// a export failure only ever reaches the file log, since `trg mcp
     /// proxy` needs stdout free for JSON-RPC.
-    pub fn shutdown(self, exit_code: i32) {
-        self.root_span.record("process.exit.code", exit_code);
-        if exit_code != 0 {
+    pub fn shutdown(self, exit_code: ExitCode) {
+        self.root_span.record("process.exit.code", exit_code.code());
+        if !exit_code.is_success() {
             self.root_span.record("error.type", "nonzero_exit");
         }
         drop(self.root_span);

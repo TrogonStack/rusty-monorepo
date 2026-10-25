@@ -5,9 +5,9 @@ use serde::Serialize;
 use serde::Deserialize;
 
 use super::evals::{check_workspace, EvalError, WorkspaceCheckOptions, WorkspaceCheckReport};
-use super::exit_code::ExitCode;
 use super::grading::{case_score, describe_pass_rate, GradingFile};
 use super::report::RunRecord;
+use crate::exit_code::ExitCode;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CiPolicy {

@@ -5,6 +5,7 @@ pub mod agentskills;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod exit_code;
 pub mod fs;
 pub mod oauth;
 pub mod output;

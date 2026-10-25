@@ -22,6 +22,7 @@ use serde::Serialize;
 use tracing::field::Empty;
 use tracing::Instrument;
 
+use crate::exit_code::ExitCode;
 use crate::output::OutputFormat;
 use crate::secrets::onepassword;
 use crate::secrets::openbao::{Health, TokenSource};
@@ -109,8 +110,8 @@ impl Report {
         !self.checks.iter().any(|c| matches!(c.outcome, Outcome::Failed { .. }))
     }
 
-    pub fn exit_code(&self) -> i32 {
-        i32::from(!self.is_healthy())
+    pub fn exit_code(&self) -> ExitCode {
+        ExitCode::from_success(self.is_healthy())
     }
 
     /// Aligned so the outcomes read down a column, since the whole point is to
@@ -457,8 +458,8 @@ impl Diagnosis {
         self.backends.iter().all(Report::is_healthy)
     }
 
-    pub fn exit_code(&self) -> i32 {
-        i32::from(!self.is_healthy())
+    pub fn exit_code(&self) -> ExitCode {
+        ExitCode::from_success(self.is_healthy())
     }
 
     pub fn to_text(&self) -> String {
@@ -532,12 +533,12 @@ fn unbuildable(name: &str, kind: Option<&'static str>, e: &BackendError) -> Repo
     }
 }
 
-pub async fn run(registry: &Registry, args: &DoctorArgs) -> i32 {
+pub async fn run(registry: &Registry, args: &DoctorArgs) -> ExitCode {
     let diagnosis = match diagnose_all(registry, args.backend.as_deref()).await {
         Ok(diagnosis) => diagnosis,
         Err(e) => {
             eprintln!("{e}");
-            return 1;
+            return ExitCode::Failed;
         }
     };
 
@@ -547,7 +548,7 @@ pub async fn run(registry: &Registry, args: &DoctorArgs) -> i32 {
             Ok(json) => println!("{json}"),
             Err(e) => {
                 eprintln!("could not render the report: {e}");
-                return 1;
+                return ExitCode::Failed;
             }
         },
     }
@@ -659,7 +660,7 @@ mod tests {
                 outcome(&report, name)
             );
         }
-        assert_eq!(report.exit_code(), 0);
+        assert_eq!(report.exit_code(), ExitCode::Success);
         assert!(matches!(outcome(&report, "subtree"), Outcome::Passed { detail } if detail == "listable, 2 entries"));
     }
 
@@ -680,7 +681,7 @@ mod tests {
         for name in ["mount", "subtree"] {
             assert!(matches!(outcome(&report, name), Outcome::Skipped { .. }), "{name}");
         }
-        assert_eq!(report.exit_code(), 1);
+        assert_eq!(report.exit_code(), ExitCode::Failed);
     }
 
     /// An `addr` pointed at something that answers JSON but is not OpenBao
@@ -792,14 +793,14 @@ mod tests {
             checks: vec![Check::new("subtree", Outcome::skipped("nothing to enumerate"))],
         };
         assert!(skipped.is_healthy());
-        assert_eq!(skipped.exit_code(), 0);
+        assert_eq!(skipped.exit_code(), ExitCode::Success);
 
         let failed = Report {
             checks: vec![Check::new("mount", Outcome::failed("gone", "put it back"))],
             ..skipped
         };
         assert!(!failed.is_healthy());
-        assert_eq!(failed.exit_code(), 1);
+        assert_eq!(failed.exit_code(), ExitCode::Failed);
     }
 
     /// Nothing declared is not nothing used, and the platform check is the one
@@ -902,7 +903,7 @@ mod tests {
             several.to_text()
         );
         assert!(!several.is_healthy());
-        assert_eq!(several.exit_code(), 1);
+        assert_eq!(several.exit_code(), ExitCode::Failed);
     }
 
     #[test]
@@ -918,7 +919,7 @@ mod tests {
         };
 
         assert!(healthy.is_healthy());
-        assert_eq!(healthy.exit_code(), 0);
+        assert_eq!(healthy.exit_code(), ExitCode::Success);
     }
 
     #[test]

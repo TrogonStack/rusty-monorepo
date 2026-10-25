@@ -27,7 +27,6 @@ use crate::agentskills::evals::{
     effective_model, effective_model_source, effective_timeout_secs, missing_expected_output_warnings, EvalCase,
     EvalCheckOptions, EvalDirName, EvalSuite,
 };
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::mocks::{
     materialize_mock_set, resolve_mock_set, MaterializedMcpConfig, MockCallLogEntry, MockServerBinary, MockServerEnv,
@@ -51,6 +50,7 @@ use crate::agentskills::scenario_selection::ScenarioSelection;
 use crate::agentskills::span_reference::SpanReference;
 use crate::agentskills::tool_grant::{effective_tool_grant, ToolGrant};
 use crate::agentskills::workspace_scaffold::ScaffoldPermission;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use crate::telemetry::propagation::LaneParent;

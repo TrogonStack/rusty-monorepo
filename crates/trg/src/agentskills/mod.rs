@@ -18,7 +18,6 @@ pub mod errors;
 pub mod eval_suite_drift;
 pub mod eval_telemetry;
 pub mod evals;
-pub mod exit_code;
 pub mod feedback;
 pub mod grader_agreement;
 pub mod graders;
