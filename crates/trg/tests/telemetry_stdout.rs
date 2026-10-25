@@ -22,6 +22,7 @@ fn config_home_declaring_nothing() -> tempfile::TempDir {
 fn doctor_with_unreachable_otlp(config_home: &std::path::Path) -> std::process::Output {
     let mut cmd = Command::cargo_bin("trg").unwrap();
     cmd.env("XDG_CONFIG_HOME", config_home);
+    cmd.env_remove("OTEL_SDK_DISABLED");
     // Nothing listens on port 1, so the exporter fails fast with a connection
     // error rather than hanging on a timeout.
     cmd.env("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1");
