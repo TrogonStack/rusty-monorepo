@@ -10,5 +10,6 @@
 [workspace.lints.clippy]
 # `process::exit` skips every destructor still on the stack, so buffered
 # output, guards and child-process cleanup silently never run. Return
-# `std::process::ExitCode` from `main` instead.
+# `std::process::ExitCode` from `main` instead. The lint does not look inside
+# `main` itself, so a call there still has to be caught in review.
 exit = "deny"
