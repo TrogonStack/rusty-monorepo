@@ -146,7 +146,7 @@ async fn serve(
         Ok(outcome) => outcome,
         Err(e) => {
             error!(server = server_name, error = %e, "ensure_credentials failed");
-            refuse_over_stdio(&e).await;
+            refuse_over_stdio(server_name, &e).await;
             return Err(e.into());
         }
     };
@@ -211,7 +211,7 @@ fn default_http_client() -> Result<reqwest::Client, TransportBuildError> {
 /// Skipped when stdin is a terminal, where there is no host to answer and
 /// waiting for a request that will never be typed would hang a `trg mcp proxy`
 /// run by hand.
-pub async fn refuse_over_stdio(reason: &dyn Display) {
+pub async fn refuse_over_stdio(server_name: &str, reason: &dyn Display) {
     if std::io::stdin().is_terminal() {
         return;
     }
@@ -228,7 +228,7 @@ pub async fn refuse_over_stdio(reason: &dyn Display) {
             continue;
         };
 
-        if let Err(e) = local.send(refusal(&request, &reason)).await {
+        if let Err(e) = local.send(refusal(server_name, &request, &reason)).await {
             warn!(error = %e, "refusal: local send failed");
             break;
         }
@@ -239,9 +239,9 @@ pub async fn refuse_over_stdio(reason: &dyn Display) {
 
 /// The error answering `request`, recorded as a failed request span under
 /// whatever span is current.
-fn refusal(request: &JsonRpcRequest<ClientRequest>, reason: &str) -> TxJsonRpcMessage<RoleServer> {
+fn refusal(server_name: &str, request: &JsonRpcRequest<ClientRequest>, reason: &str) -> TxJsonRpcMessage<RoleServer> {
     let error = ErrorData::new(ErrorCode::INTERNAL_ERROR, reason.to_string(), None);
-    let connection = Connection::default();
+    let connection = Connection::new(server_name, None);
     RequestSpan::open(
         &request.request,
         &request.id,
@@ -362,7 +362,7 @@ mod tests {
 
         let (answer, trace) = capture(|| {
             let root = tracing::info_span!("trg");
-            root.in_scope(|| refusal(&request, "OAuth: not a terminal"))
+            root.in_scope(|| refusal("weather", &request, "OAuth: not a terminal"))
         });
 
         trace.assert_child_of("initialize", "trg");

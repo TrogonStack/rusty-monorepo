@@ -405,9 +405,9 @@ Durations are histograms in seconds.
 
 | Instrument | Type | Unit | Attributes | Emitted by |
 | ---------- | ---- | ---- | ---------- | ---------- |
-| `mcp.client.operation.duration` | Histogram | `s` | `mcp.method.name`, `gen_ai.tool.name` or `gen_ai.prompt.name`, `mcp.protocol.version`, `network.transport`, `error.type`; `record-mcp` adds `gen_ai.operation.name` and `rpc.response.status_code` | `mcp proxy` (forwarded and refused requests), `eval record-mcp` |
+| `mcp.client.operation.duration` | Histogram | `s` | `mcp.method.name`, `gen_ai.tool.name` or `gen_ai.prompt.name`, `mcp.protocol.version`, `network.transport`, `error.type`; `mcp proxy` adds `trg.mcp.server.name`; `record-mcp` adds `gen_ai.operation.name` and `rpc.response.status_code` | `mcp proxy` (forwarded and refused requests), `eval record-mcp` |
 | `mcp.server.operation.duration` | Histogram | `s` | `mcp.method.name`, `network.transport` (`pipe`), `gen_ai.operation.name` and `gen_ai.tool.name` for tool calls, `rpc.response.status_code`, `error.type` | `eval mock-server` |
-| `mcp.client.session.duration` | Histogram | `s` | `mcp.protocol.version`, `network.transport`, `error.type` | `mcp proxy` |
+| `mcp.client.session.duration` | Histogram | `s` | `trg.mcp.server.name`, `mcp.protocol.version`, `network.transport`, `error.type` | `mcp proxy` |
 | `gen_ai.invoke_workflow.duration` | Histogram | `s` | `gen_ai.operation.name`, `gen_ai.workflow.name`, `error.type` | `eval run` |
 | `gen_ai.invoke_agent.duration` | Histogram | `s` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.agent.name`, `gen_ai.request.model`, `error.type` | `eval run` |
 | `gen_ai.invoke_agent.tool_calls` | Histogram | | Same as `gen_ai.invoke_agent.duration` | `eval run` |
