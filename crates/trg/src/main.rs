@@ -95,19 +95,22 @@ enum Outcome {
 /// A proxy forwards one stdio session for as long as its host keeps it open,
 /// so a worker per core would sit idle for the life of every MCP server an
 /// editor starts.
-fn runtime_for(command: &Commands) -> tokio::runtime::Runtime {
-    let mut builder = match command {
+fn runtime_for(command: &Commands) -> tokio::runtime::Builder {
+    match command {
         Commands::Mcp {
             command: McpCommands::Proxy(_),
         } => tokio::runtime::Builder::new_current_thread(),
         _ => tokio::runtime::Builder::new_multi_thread(),
-    };
-    builder.enable_all().build().expect("a tokio runtime")
+    }
 }
 
 fn main() {
     let (cli, command_identity) = Cli::parse_with_command_identity();
-    runtime_for(&cli.command).block_on(run(cli, command_identity));
+    runtime_for(&cli.command)
+        .enable_all()
+        .build()
+        .expect("a tokio runtime")
+        .block_on(run(cli, command_identity));
 }
 
 async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) {
