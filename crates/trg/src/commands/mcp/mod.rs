@@ -132,7 +132,7 @@ fn emit_proxy_err(e: ProxyError) -> i32 {
 pub async fn report_startup_failure(command: &McpCommands, error: &dyn Display) -> i32 {
     eprintln!("{error}");
     if matches!(command, McpCommands::Proxy(_)) {
-        refuse_over_stdio(error).await;
+        refuse_over_stdio(command.server_name(), error).await;
     }
     1
 }
