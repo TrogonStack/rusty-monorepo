@@ -7,6 +7,7 @@ use std::fmt::Display;
 
 use clap::Subcommand;
 
+use crate::exit_code::ExitCode;
 use auth::AuthCommands;
 use proxy::{refuse_over_stdio, run_mcp_daemon, ProxyError};
 
@@ -105,10 +106,10 @@ impl McpCommands {
         }
     }
 
-    pub async fn handle(self, ctx: &McpContext) -> i32 {
+    pub async fn handle(self, ctx: &McpContext) -> ExitCode {
         match self {
             McpCommands::Proxy(_) => match run_mcp_daemon(ctx).await {
-                Ok(()) => 0,
+                Ok(()) => ExitCode::Success,
                 Err(e) => emit_proxy_err(e),
             },
             McpCommands::Auth(cmd) => cmd.handle(ctx).await,
@@ -116,9 +117,9 @@ impl McpCommands {
     }
 }
 
-fn emit_proxy_err(e: ProxyError) -> i32 {
+fn emit_proxy_err(e: ProxyError) -> ExitCode {
     eprintln!("{e}");
-    1
+    ExitCode::Failed
 }
 
 /// Report a failure that happened before [`McpCommands::handle`] could run.
@@ -129,12 +130,12 @@ fn emit_proxy_err(e: ProxyError) -> i32 {
 ///
 /// Only the proxy gets that treatment. Every other subcommand is typed by a
 /// person who is already looking at stderr.
-pub async fn report_startup_failure(command: &McpCommands, error: &dyn Display) -> i32 {
+pub async fn report_startup_failure(command: &McpCommands, error: &dyn Display) -> ExitCode {
     eprintln!("{error}");
     if matches!(command, McpCommands::Proxy(_)) {
         refuse_over_stdio(command.server_name(), error).await;
     }
-    1
+    ExitCode::Failed
 }
 
 #[cfg(test)]

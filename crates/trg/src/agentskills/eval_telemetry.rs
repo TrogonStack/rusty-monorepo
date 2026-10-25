@@ -7,8 +7,8 @@ use opentelemetry_semantic_conventions::attribute::ERROR_TYPE;
 use tracing::field::Empty;
 
 use super::budget::RunCost;
-use super::exit_code::ExitCode;
 use super::report::RunRecord;
+use crate::exit_code::ExitCode;
 use crate::telemetry::semconv::generated::attributes::{
     gen_ai_operation_name, GEN_AI_OPERATION_NAME, GEN_AI_WORKFLOW_NAME,
 };
@@ -40,6 +40,7 @@ pub fn record_failure(span: &tracing::Span, error_type: &str) {
 pub fn exit_error_type(code: ExitCode) -> Option<&'static str> {
     match code {
         ExitCode::Success => None,
+        ExitCode::Failed => Some("failed"),
         ExitCode::GateFailed => Some("gate_failed"),
         ExitCode::BudgetExhausted => Some("budget_exhausted"),
         ExitCode::InfrastructureFailure => Some("infrastructure_failure"),

@@ -5,6 +5,9 @@ edition = "2021"
 publish = false
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [features]
 default = ["schema-validation"]
 schema-validation = ["dep:jsonschema"]

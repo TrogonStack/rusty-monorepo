@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::agentskills::parser::{find_skill_md, read_properties};
 use crate::agentskills::prompt::{to_prompt_with_location, SkillWithLocation};
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
@@ -24,7 +25,7 @@ pub struct ToPromptArgs {
 }
 
 impl ToPromptArgs {
-    pub fn handle(self, fs: &impl FileSystem) -> i32 {
+    pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         let mut skills = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
@@ -48,7 +49,7 @@ impl ToPromptArgs {
         }
 
         if !failed.is_empty() && skills.is_empty() {
-            return 1;
+            return ExitCode::Failed;
         }
 
         let prompt = to_prompt_with_location(&skills);
@@ -58,7 +59,7 @@ impl ToPromptArgs {
         // were read are usable, but a caller redirecting stdout to a file has
         // nothing else to go on. One code for both formats, because which
         // format was asked for does not change what happened.
-        let code = i32::from(!failed.is_empty());
+        let code = ExitCode::from_success(failed.is_empty());
 
         if self.output_format.is_json() {
             // The paths that failed are named in the document as well as on
@@ -102,7 +103,7 @@ mod partial_reads {
         );
     }
 
-    fn run(fs: &MemFS, paths: &[&str], output_format: OutputFormat) -> i32 {
+    fn run(fs: &MemFS, paths: &[&str], output_format: OutputFormat) -> ExitCode {
         ToPromptArgs {
             paths: paths.iter().map(PathBuf::from).collect(),
             output_format,
@@ -116,8 +117,8 @@ mod partial_reads {
         skill(&fs, "alpha");
         skill(&fs, "beta");
 
-        assert_eq!(run(&fs, &["alpha", "beta"], OutputFormat::Text), 0);
-        assert_eq!(run(&fs, &["alpha", "beta"], OutputFormat::Json), 0);
+        assert_eq!(run(&fs, &["alpha", "beta"], OutputFormat::Text), ExitCode::Success);
+        assert_eq!(run(&fs, &["alpha", "beta"], OutputFormat::Json), ExitCode::Success);
     }
 
     #[test]
@@ -125,15 +126,15 @@ mod partial_reads {
         let fs = MemFS::new();
         skill(&fs, "alpha");
 
-        assert_eq!(run(&fs, &["alpha", "missing"], OutputFormat::Text), 1);
-        assert_eq!(run(&fs, &["alpha", "missing"], OutputFormat::Json), 1);
+        assert_eq!(run(&fs, &["alpha", "missing"], OutputFormat::Text), ExitCode::Failed);
+        assert_eq!(run(&fs, &["alpha", "missing"], OutputFormat::Json), ExitCode::Failed);
     }
 
     #[test]
     fn no_readable_skill_fails_under_either_format() {
         let fs = MemFS::new();
 
-        assert_eq!(run(&fs, &["missing"], OutputFormat::Text), 1);
-        assert_eq!(run(&fs, &["missing"], OutputFormat::Json), 1);
+        assert_eq!(run(&fs, &["missing"], OutputFormat::Text), ExitCode::Failed);
+        assert_eq!(run(&fs, &["missing"], OutputFormat::Json), ExitCode::Failed);
     }
 }

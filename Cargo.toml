@@ -2,6 +2,9 @@
 members = ["crates/trg"]
 resolver = "2"
 
+[workspace.lints.clippy]
+disallowed_methods = "deny"
+
 [workspace.dependencies]
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -23,6 +23,7 @@ use clap::{Args, Subcommand};
 use serde_json::json;
 
 use crate::config::{self, LoadedExec};
+use crate::exit_code::ExitCode;
 use crate::output::{print_json, OutputFormat};
 use crate::telemetry::semconv::trg::EXEC_ENV_VAR_COUNT;
 use crate::telemetry::{propagation, Telemetry};
@@ -88,27 +89,27 @@ pub struct ExecListArgs {
 /// `trg exec list` — a plain config read, no secrets backend involved: the
 /// names are declared in the clear, only the values behind an entry's `env`
 /// are ever resolved through one.
-pub fn list(args: &ExecListArgs) -> i32 {
+pub fn list(args: &ExecListArgs) -> ExitCode {
     match config::list_exec_names() {
         Ok(names) => report_names(&names, args.output_format),
         Err(e) => report_failure(&e.to_string(), args.output_format),
     }
 }
 
-fn report_names(names: &[String], format: OutputFormat) -> i32 {
+fn report_names(names: &[String], format: OutputFormat) -> ExitCode {
     if format.is_json() {
         let document = json!({ "entries": names });
-        return print_json(&document, 0);
+        return print_json(&document, ExitCode::Success);
     }
 
     if names.is_empty() {
         eprintln!("no [exec] entries configured");
-        return 0;
+        return ExitCode::Success;
     }
     for name in names {
         println!("{name}");
     }
-    0
+    ExitCode::Success
 }
 
 /// Resolves everything the launched command needs, including the trace
@@ -202,7 +203,7 @@ impl PreparedLaunch {
     /// Ends `telemetry`, then replaces this process with the command, never
     /// returning on success. On failure, reports why and returns the exit
     /// code to leave with.
-    pub fn exec(self, telemetry: Telemetry) -> i32 {
+    pub fn exec(self, telemetry: Telemetry) -> ExitCode {
         use std::os::unix::process::CommandExt;
         self.exec_with(telemetry, |command| command.exec())
     }
@@ -216,7 +217,7 @@ impl PreparedLaunch {
         self,
         telemetry: Telemetry,
         replace: impl FnOnce(&mut std::process::Command) -> std::io::Error,
-    ) -> i32 {
+    ) -> ExitCode {
         telemetry.end_before_exec();
         let message = self.replace_with(replace);
         report_failure(&message, self.output_format)
@@ -232,13 +233,13 @@ impl PreparedLaunch {
     }
 }
 
-fn report_failure(message: &str, format: OutputFormat) -> i32 {
+fn report_failure(message: &str, format: OutputFormat) -> ExitCode {
     if format.is_json() {
         let document = json!({ "error": message });
-        return print_json(&document, 1);
+        return print_json(&document, ExitCode::Failed);
     }
     eprintln!("{message}");
-    1
+    ExitCode::Failed
 }
 
 #[cfg(test)]
@@ -413,17 +414,17 @@ mod tests {
         // `report_failure` prints to stdout/stderr rather than returning a
         // string, so this only pins the exit code and the format branch it
         // takes; the rendering itself is exercised by hand against `--output-format json`.
-        assert_eq!(report_failure("boom", OutputFormat::Json), 1);
-        assert_eq!(report_failure("boom", OutputFormat::Text), 1);
+        assert_eq!(report_failure("boom", OutputFormat::Json), ExitCode::Failed);
+        assert_eq!(report_failure("boom", OutputFormat::Text), ExitCode::Failed);
     }
 
     #[test]
     fn reporting_names_succeeds_under_either_format_even_with_none_to_show() {
-        assert_eq!(report_names(&[], OutputFormat::Text), 0);
-        assert_eq!(report_names(&[], OutputFormat::Json), 0);
+        assert_eq!(report_names(&[], OutputFormat::Text), ExitCode::Success);
+        assert_eq!(report_names(&[], OutputFormat::Json), ExitCode::Success);
         assert_eq!(
             report_names(&["alpha".to_string(), "zebra".to_string()], OutputFormat::Text),
-            0
+            ExitCode::Success
         );
     }
 
@@ -481,6 +482,6 @@ mod tests {
             );
             std::io::Error::other("exec refused in test")
         });
-        assert_eq!(code, 1);
+        assert_eq!(code, ExitCode::Failed);
     }
 }

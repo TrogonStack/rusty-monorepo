@@ -1,4 +1,4 @@
-//! What a pass concluded, in the vocabulary the process exits with.
+//! What a command concluded, in the vocabulary the process exits with.
 //!
 //! A job that goes red has to say which kind of red it is. A skill that scored badly is a
 //! finding worth reading; a runner that was never installed is a broken job that measured
@@ -30,11 +30,16 @@ impl TerminationSignal {
     }
 }
 
-/// The code a pass exits with, and what that code claims about the pass.
+/// The code a command exits with, and what that code claims about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitCode {
-    /// The pass ran and every gate it was held to passed.
+    /// The command did what it was asked; for a pass, every gate it was held to passed.
     Success,
+
+    /// The command did not do what it was asked, and says why on stderr. Outside the eval
+    /// passes this is the only way to fail, so it makes no claim about a skill being at
+    /// fault, which is what separates it from `GateFailed`.
+    Failed,
 
     /// The pass ran, and the thing under test failed a check that was asked of it. The one
     /// code that means the skill is what to go and look at.
@@ -62,9 +67,19 @@ impl ExitCode {
         }
     }
 
+    /// Whether a command did what it was asked, for the commands with no gate to hold it to.
+    pub fn from_success(succeeded: bool) -> Self {
+        if succeeded {
+            Self::Success
+        } else {
+            Self::Failed
+        }
+    }
+
     pub fn code(self) -> i32 {
         match self {
             Self::Success => 0,
+            Self::Failed => 1,
             Self::GateFailed => 1,
             Self::BudgetExhausted => 2,
             Self::InfrastructureFailure => 3,
@@ -103,9 +118,9 @@ impl ExitCode {
     }
 }
 
-impl From<ExitCode> for i32 {
+impl From<ExitCode> for std::process::ExitCode {
     fn from(code: ExitCode) -> Self {
-        code.code()
+        u8::try_from(code.code()).map_or(Self::FAILURE, Self::from)
     }
 }
 
@@ -126,6 +141,14 @@ mod tests {
         assert_eq!(ExitCode::Success.code(), 0);
         assert_eq!(ExitCode::GateFailed.code(), 1);
         assert_eq!(ExitCode::BudgetExhausted.code(), 2);
+    }
+
+    #[test]
+    fn a_command_that_failed_is_not_a_failed_gate() {
+        assert_ne!(ExitCode::Failed, ExitCode::GateFailed);
+        assert_eq!(ExitCode::Failed.code(), 1);
+        assert_eq!(ExitCode::from_success(true), ExitCode::Success);
+        assert_eq!(ExitCode::from_success(false), ExitCode::Failed);
     }
 
     #[test]

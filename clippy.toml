@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "std::process::exit", reason = "skips every pending destructor; return `std::process::ExitCode` from `main` instead" },
+]

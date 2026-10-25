@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
 use crate::agentskills::benchmark::FailedRunsMode;
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::scaling::{
     any_regression, build_scaling_document, write_scaling, ScalingDocument, ScalingStep, ScalingVerdict,
 };
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;

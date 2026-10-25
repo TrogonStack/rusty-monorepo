@@ -16,6 +16,7 @@ use tracing::field::Empty;
 use tracing::Instrument;
 
 use crate::config::{RawSecretVar, SecretVar, VarSite};
+use crate::exit_code::ExitCode;
 use crate::output::{print_json, OutputFormat};
 use crate::secrets::onepassword::OnePasswordReference;
 use crate::secrets::telemetry::record_error;
@@ -121,7 +122,7 @@ impl PutArgs {
 }
 
 impl SecretCommands {
-    pub async fn handle(self, registry: &Registry) -> i32 {
+    pub async fn handle(self, registry: &Registry) -> ExitCode {
         let span = self.span();
         let result = match self {
             SecretCommands::Get(args) => get(registry, &args).instrument(span.clone()).await,
@@ -133,7 +134,7 @@ impl SecretCommands {
             Err(message) => {
                 record_error(&span, OTHER_ERROR);
                 eprintln!("{message}");
-                1
+                ExitCode::Failed
             }
         }
     }
@@ -165,7 +166,7 @@ fn record_kind(backend: &Backend) {
     tracing::Span::current().record(SECRETS_BACKEND_KIND, backend.kind());
 }
 
-async fn get(registry: &Registry, args: &GetArgs) -> Result<i32, String> {
+async fn get(registry: &Registry, args: &GetArgs) -> Result<ExitCode, String> {
     let raw = args.raw();
     let backend = registry.resolve(&raw.backend).map_err(|e| e.to_string())?;
     record_kind(&backend);
@@ -175,14 +176,14 @@ async fn get(registry: &Registry, args: &GetArgs) -> Result<i32, String> {
     let value = read(&backend, &var).await?;
 
     if args.common.output_format.is_json() {
-        return Ok(print_json(&document(&raw, &value), 0));
+        return Ok(print_json(&document(&raw, &value), ExitCode::Success));
     }
 
     write_value(&value)?;
-    Ok(0)
+    Ok(ExitCode::Success)
 }
 
-async fn put(registry: &Registry, args: &PutArgs) -> Result<i32, String> {
+async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
     let backend = registry.resolve(&args.common.backend).map_err(|e| e.to_string())?;
     record_kind(&backend);
 
@@ -215,13 +216,13 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<i32, String> {
             "replaced": existed,
             "declaration": args.raw().declaration(),
         });
-        return Ok(print_json(&document, 0));
+        return Ok(print_json(&document, ExitCode::Success));
     }
 
     let verb = if existed { "replaced" } else { "wrote" };
     eprintln!("{verb} `{}` at `{}` in `{}`", args.key, args.path, args.common.backend);
     eprintln!("declare it with: {}", args.raw().declaration());
-    Ok(0)
+    Ok(ExitCode::Success)
 }
 
 /// The declared kind of a backend that has already resolved.
@@ -642,7 +643,7 @@ mod tests {
         let command = parse(&["get", "--backend", "work", "--path", "deploy-keys", "--key", "token"]).expect("parse");
 
         let (code, trace) = crate::telemetry::testing::capture(|| current_thread(command.handle(&registry)));
-        assert_eq!(code, 1, "nothing listens there");
+        assert_eq!(code, ExitCode::Failed, "nothing listens there");
 
         let span = trace.span("secret get").expect("the command span");
         assert!(matches!(span.status, Status::Error { .. }));
