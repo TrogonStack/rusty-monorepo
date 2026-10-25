@@ -11,8 +11,8 @@
 //! JSON-RPC.
 //!
 //! [`init`] returns a [`Telemetry`] guard carrying the root span every
-//! subcommand runs inside. [`Telemetry::shutdown`] must run before
-//! `std::process::exit`, and [`Telemetry::end_before_exec`] before any call
+//! subcommand runs inside. [`Telemetry::shutdown`] must run before `main`
+//! returns, and [`Telemetry::end_before_exec`] before any call
 //! that replaces the process image, such as `exec(2)`, since nothing runs
 //! afterward to flush on success.
 
@@ -364,8 +364,8 @@ static MISCONFIGURATION_WARNED: Once = Once::new();
 /// Owns every OTel provider this process created and the root span every
 /// subcommand runs inside.
 ///
-/// Dropping it flushes nothing: call [`Telemetry::shutdown`] before
-/// `std::process::exit`.
+/// Dropping it flushes nothing: call [`Telemetry::shutdown`] before `main`
+/// returns.
 pub struct Telemetry {
     providers: Providers,
     root_span: tracing::Span,

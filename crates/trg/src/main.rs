@@ -1,3 +1,5 @@
+use std::process::ExitCode;
+
 use tracing::Instrument;
 
 use trg::cli::Cli;
@@ -104,16 +106,17 @@ fn runtime_for(command: &Commands) -> tokio::runtime::Builder {
     }
 }
 
-fn main() {
+fn main() -> ExitCode {
     let (cli, command_identity) = Cli::parse_with_command_identity();
-    runtime_for(&cli.command)
-        .enable_all()
-        .build()
-        .expect("a tokio runtime")
-        .block_on(run(cli, command_identity));
+    let runtime = runtime_for(&cli.command).enable_all().build().expect("a tokio runtime");
+    let code = runtime.block_on(run(cli, command_identity));
+    // A blocking task still parked on I/O, such as an OAuth callback listener,
+    // would keep a plain drop of the runtime waiting forever.
+    runtime.shutdown_background();
+    u8::try_from(code).map_or(ExitCode::FAILURE, ExitCode::from)
 }
 
-async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) {
+async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> i32 {
     let telemetry = trg::telemetry::init(command_identity);
     let root_span = telemetry.root_span();
 
@@ -158,12 +161,11 @@ async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) {
     .await;
 
     trg::agentskills::runner::group::yield_to_termination();
-    let exit_code = match outcome {
+    match outcome {
         Outcome::Exit(code) => {
             telemetry.shutdown(code);
             code
         }
         Outcome::Exec(launch) => launch.exec(telemetry),
-    };
-    std::process::exit(exit_code);
+    }
 }

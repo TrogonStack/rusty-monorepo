@@ -1,0 +1,14 @@
+# Reference Clippy policy for every Rust repository. Copy the tables below
+# into the root `Cargo.toml` and keep them in sync with this file; a repo may
+# be stricter than this file, never looser.
+#
+# Workspace lints only reach a crate whose own `Cargo.toml` opts in with:
+#
+#   [lints]
+#   workspace = true
+
+[workspace.lints.clippy]
+# `process::exit` skips every destructor still on the stack, so buffered
+# output, guards and child-process cleanup silently never run. Return
+# `std::process::ExitCode` from `main` instead.
+exit = "deny"
