@@ -10,7 +10,7 @@ use rmcp::{
     transport::{
         async_rw::AsyncRwTransport,
         auth::AuthClient,
-        stdio,
+        stdio_pipes,
         streamable_http_client::{
             StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
         },
@@ -218,7 +218,7 @@ pub async fn refuse_over_stdio(server_name: &str, reason: &dyn Display) {
 
     let reason = reason.to_string();
 
-    let (stdin, stdout) = stdio();
+    let (stdin, stdout) = stdio_pipes();
     let mut local = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
 
     while let Some(msg) = local.receive().await {
@@ -261,7 +261,7 @@ async fn bridge_stdio_to_remote<C>(mut remote: StreamableHttpClientTransport<C>,
 where
     C: StreamableHttpClient + Send + Sync + 'static,
 {
-    let (stdin, stdout) = stdio();
+    let (stdin, stdout) = stdio_pipes();
     let mut local = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
     debug!("bridge: entering loop");
 

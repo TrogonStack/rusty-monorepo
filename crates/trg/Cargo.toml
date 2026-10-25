@@ -21,7 +21,7 @@ toml = { workspace = true }
 secrecy = { workspace = true }
 http = { workspace = true }
 reqwest = { workspace = true, features = ["blocking", "json"] }
-rmcp = { version = "3.1.4", features = [
+rmcp = { version = "3.6.0", features = [
     "auth",
     "client",
     "transport-async-rw",
