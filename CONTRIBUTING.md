@@ -20,7 +20,7 @@ cargo test --workspace
 
 All must pass before merge.
 
-The workspace Clippy policy in `Cargo.toml` mirrors `policies/rust/clippy-lints.toml`, the reference copy shared with other repositories. Change both together.
+The workspace Clippy policy, split across `Cargo.toml` and `clippy.toml`, mirrors `policies/rust/`, the reference copy shared with other repositories. Change them together.
 
 ## Commit Messages
 

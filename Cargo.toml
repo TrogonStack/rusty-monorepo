@@ -3,7 +3,7 @@ members = ["crates/trg"]
 resolver = "2"
 
 [workspace.lints.clippy]
-exit = "deny"
+disallowed_methods = "deny"
 
 [workspace.dependencies]
 clap = { version = "4.6", features = ["derive"] }
