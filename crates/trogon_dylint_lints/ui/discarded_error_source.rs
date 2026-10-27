@@ -4,7 +4,7 @@
 #![allow(unused, dead_code)]
 
 use std::convert::Infallible;
-use std::num::ParseIntError;
+use std::num::{ParseIntError, TryFromIntError};
 
 enum AppError {
     Invalid,
@@ -47,6 +47,21 @@ fn ok_then_ok_or(value: &str) -> Result<u32, AppError> {
 // `.ok()` straight into `ok_or_else`: fires.
 fn ok_then_ok_or_else(value: &str) -> Result<u32, AppError> {
     parse(value).ok().ok_or_else(|| AppError::Invalid)
+}
+
+// A non-`Error` value is still discarded, with advice that fits it: fires.
+fn string_error(value: Result<u32, String>) -> Result<u32, AppError> {
+    value.map_err(|_| AppError::Invalid)
+}
+
+// A `Result` reached through `Box` autoderef: fires.
+fn boxed(value: Box<Result<u32, ParseIntError>>) -> Result<u32, AppError> {
+    value.map_err(|_| AppError::Invalid)
+}
+
+// A `Copy` `Result` reached through a reference: fires.
+fn borrowed(value: &Result<u8, TryFromIntError>) -> Option<u8> {
+    value.map_err(|_| AppError::Invalid).ok()
 }
 
 // The error is handed to a variant: fine.
