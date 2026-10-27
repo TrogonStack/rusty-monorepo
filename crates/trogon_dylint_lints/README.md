@@ -49,6 +49,7 @@ per-invocation flags.
 | `manual_error_impl` | deny | `std::error::Error` to be implemented with the thiserror derive, not by hand |
 | `multi_module_use` | deny | a `use` statement to import items from one module, with no `::` inside its braces |
 | `new_instead_of_from` | warn | a single-field wrapper's `new` that only wraps its argument to be `From` instead |
+| `options_struct_without_default` | deny | a struct of public fields named `...Options` to implement `Default` |
 | `redundant_module_path` | deny | `#[path]` to be dropped when `mod foo;` already resolves to the same file |
 | `serde_json_macro` | deny | JSON payloads to be built from a `Serialize` type, not an ad-hoc `json!` literal |
 | `serde_json_macro_allow_without_reason` | deny | a technical reason to be stated when suppressing `serde_json_macro` |
