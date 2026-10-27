@@ -18,6 +18,7 @@ mod fallible_new;
 mod function_local_macro_rules;
 mod function_local_use;
 mod inline_module_block;
+mod literal_template_replace;
 mod manual_error_impl;
 mod multi_module_use;
 mod new_instead_of_from;
@@ -62,6 +63,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         FUNCTION_LOCAL_MACRO_RULES,
         FUNCTION_LOCAL_USE,
         INLINE_MODULE_BLOCK,
+        LITERAL_TEMPLATE_REPLACE,
         MANUAL_ERROR_IMPL,
         MULTI_MODULE_USE,
         NEW_INSTEAD_OF_FROM,
@@ -493,6 +495,38 @@ rustc_session::declare_lint! {
     pub INLINE_MODULE_BLOCK,
     Deny,
     "declare modules in their own file with `mod foo;`, not inline `mod foo { ... }`",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects `str::replace` or `str::replacen` called on a string literal, or
+    /// on a `const` or `static` `&str`, to fill in placeholders. A receiver that
+    /// is a runtime value, such as a variable, a field, or a `String`, is out of
+    /// scope: replacing inside data is not templating.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// A literal with placeholders replaced at runtime is a template with a
+    /// hand-rolled syntax. The compiler cannot check that the placeholder names
+    /// match the substitutions, and a misspelled one is left in the output
+    /// silently. A standard format string is checked at compile time and
+    /// everyone already reads it.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// let greeting = "Hello, {name}!".replace("{name}", name);
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// let greeting = format!("Hello, {name}!");
+    /// ```
+    pub LITERAL_TEMPLATE_REPLACE,
+    Deny,
+    "fill in a literal template with `format!`, not `str::replace`",
 }
 
 rustc_session::declare_lint! {
@@ -1365,6 +1399,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         assertions_on_fixed_literals::check_expr(cx, expr);
         discarded_error_source::check_expr(cx, expr);
+        literal_template_replace::check_expr(cx, expr);
         unbounded_channel::check_expr(cx, expr);
         self.acyclic_modules.check_expr(cx, expr);
         self.debug_remnants.check_expr(cx, expr);
@@ -1433,6 +1468,7 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     FUNCTION_LOCAL_MACRO_RULES,
     FUNCTION_LOCAL_USE,
     INLINE_MODULE_BLOCK,
+    LITERAL_TEMPLATE_REPLACE,
     MANUAL_ERROR_IMPL,
     NEW_INSTEAD_OF_FROM,
     OPTIONS_STRUCT_WITHOUT_DEFAULT,
