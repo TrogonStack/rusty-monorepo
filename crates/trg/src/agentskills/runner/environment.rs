@@ -544,6 +544,22 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    /// Puts the process back in the directory it started in, even when the test that moved
+    /// it fails, so a failure here never leaves every later test resolving paths elsewhere.
+    struct WorkingDirectoryRestore(PathBuf);
+
+    impl WorkingDirectoryRestore {
+        fn capture() -> Self {
+            Self(std::env::current_dir().unwrap())
+        }
+    }
+
+    impl Drop for WorkingDirectoryRestore {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
     fn host() -> BTreeMap<String, String> {
         [
             ("PATH", "/usr/bin"),
@@ -960,10 +976,10 @@ mod tests {
     #[test]
     fn isolated_absolutizes_a_relative_run_dir_before_recording_its_config_home() {
         let temp = tempdir().unwrap();
-        let original_cwd = std::env::current_dir().unwrap();
+        let _restore = WorkingDirectoryRestore::capture();
         std::env::set_current_dir(temp.path()).unwrap();
 
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        {
             let run_dir = Path::new("run-001");
             let env = RunEnvironment::prepare_from(Runner::Codex, run_dir, EnvironmentPolicy::Isolated, None, &host())
                 .unwrap();
@@ -985,10 +1001,7 @@ mod tests {
                 "recorded {} instead of the run's own config home",
                 recorded.path().display()
             );
-        }));
-
-        std::env::set_current_dir(original_cwd).unwrap();
-        outcome.unwrap();
+        }
     }
 
     #[test]

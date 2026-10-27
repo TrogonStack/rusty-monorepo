@@ -6,6 +6,11 @@
 //! scaffold the checker rejects, or a bundle no schema describes, would otherwise
 //! only be found by whoever ran a real suite next.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test is test code end to end, so a failed setup step should fail the test"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
