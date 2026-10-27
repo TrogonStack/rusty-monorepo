@@ -19,6 +19,7 @@ mod function_local_macro_rules;
 mod function_local_use;
 mod inline_module_block;
 mod manual_error_impl;
+mod multi_module_use;
 mod new_instead_of_from;
 mod redundant_module_path;
 mod serde_json_macro;
@@ -61,6 +62,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         FUNCTION_LOCAL_USE,
         INLINE_MODULE_BLOCK,
         MANUAL_ERROR_IMPL,
+        MULTI_MODULE_USE,
         NEW_INSTEAD_OF_FROM,
         REDUNDANT_MODULE_PATH,
         SERDE_JSON_MACRO,
@@ -77,6 +79,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         WEAKENED_WRITE_PRECONDITION,
     ]);
     lint_store.register_late_pass(|_| Box::<TrogonLints>::default());
+    lint_store.register_early_pass(|| Box::new(multi_module_use::MultiModuleUse));
     lint_store.register_early_pass(|| Box::new(redundant_module_path::RedundantModulePath));
     lint_store
         .register_early_pass(|| Box::new(serde_json_macro_allow_without_reason::SerdeJsonMacroAllowWithoutReason));
@@ -526,6 +529,38 @@ rustc_session::declare_lint! {
     pub MANUAL_ERROR_IMPL,
     Deny,
     "implement `std::error::Error` with the thiserror derive, not by hand",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects a `use` statement whose braces reach into another module: an
+    /// entry inside `{..}` that contains `::`, such as `use foo::{Foo, bar::Bar};`.
+    /// This is the shape rustfmt produces with `imports_granularity = "Module"`.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// When one statement spans several modules, the module an item comes
+    /// from is buried inside a tree, and a one-line change reflows the whole
+    /// tree. One statement per module keeps every import findable by its
+    /// module path and keeps diffs to the line that changed. Stable rustfmt
+    /// cannot enforce this granularity, so the lint does.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// use foo::{Foo, bar::{Bar, Baz}};
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// use foo::Foo;
+    /// use foo::bar::{Bar, Baz};
+    /// ```
+    pub MULTI_MODULE_USE,
+    Deny,
+    "a `use` statement should import items from one module",
 }
 
 rustc_session::declare_lint! {
@@ -1363,6 +1398,8 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     UNSTRUCTURED_LOG_FIELDS,
     WEAKENED_WRITE_PRECONDITION,
 ]);
+
+rustc_session::impl_lint_pass!(multi_module_use::MultiModuleUse => [MULTI_MODULE_USE]);
 
 rustc_session::impl_lint_pass!(redundant_module_path::RedundantModulePath => [REDUNDANT_MODULE_PATH]);
 
