@@ -47,6 +47,7 @@ per-invocation flags.
 | `function_local_use` | deny | `use` imports to be declared at module level, not inside a function body |
 | `inline_module_block` | deny | modules to be declared in their own file with `mod foo;` |
 | `manual_error_impl` | deny | `std::error::Error` to be implemented with the thiserror derive, not by hand |
+| `multi_module_use` | deny | a `use` statement to import items from one module, with no `::` inside its braces |
 | `new_instead_of_from` | warn | a single-field wrapper's `new` that only wraps its argument to be `From` instead |
 | `redundant_module_path` | deny | `#[path]` to be dropped when `mod foo;` already resolves to the same file |
 | `serde_json_macro` | deny | JSON payloads to be built from a `Serialize` type, not an ad-hoc `json!` literal |
