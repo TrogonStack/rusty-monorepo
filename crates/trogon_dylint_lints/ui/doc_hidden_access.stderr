@@ -1,0 +1,84 @@
+error: `kore::slice::memchr` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:5:5
+   |
+LL | use core::slice::memchr;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+   = note: `#[deny(doc_hidden_access)]` on by default
+
+error: `kore::slice::memchr` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:6:5
+   |
+LL | use core::slice::memchr::memrchr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: `std::io::_print` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:7:5
+   |
+LL | use std::io::_print;
+   |     ^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: `kore::slice::memchr` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:8:5
+   |
+LL | use ::core::slice::memchr::memrchr as rooted_memrchr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: `kore::slice::memchr` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:9:5
+   |
+LL | use kore::slice::memchr::memrchr as aliased_memrchr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: `std::io::_print` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:17:5
+   |
+LL |     _print(format_args!("hidden/n"));
+   |     ^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: `kore::slice::memchr` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:21:5
+   |
+LL |     core::slice::memchr::memchr(1, &[1, 2, 3])
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: `std::fmt::Formatter::<'a>::debug_tuple_field1_finish` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:28:11
+   |
+LL |         f.debug_tuple_field1_finish("ByMethod", &self.0)
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: `std::fmt::Formatter::<'a>::debug_tuple_field1_finish` is `#[doc(hidden)]`
+  --> $DIR/doc_hidden_access.rs:36:30
+   |
+LL |         std::fmt::Formatter::debug_tuple_field1_finish(f, "ByAssociatedFunction", &self.0)
+   |                              ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: hidden items are the internals of their crate, exposed only for its own macros, and carry no stability promise; use the public API instead
+   = note: if the crate is owned by this codebase, list it in `owned_crates` under `[doc_hidden_access]` in `dylint.toml`
+
+error: aborting due to 9 previous errors
+

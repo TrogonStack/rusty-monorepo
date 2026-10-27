@@ -12,6 +12,7 @@ mod assertions_on_fixed_literals;
 mod constant_outside_constants_module;
 mod debug_remnants;
 mod discarded_error_source;
+mod doc_hidden_access;
 mod error_string_comparison;
 mod error_type_naming;
 mod fallible_new;
@@ -43,7 +44,7 @@ mod weakened_write_precondition;
 
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::FnKind;
-use rustc_hir::{AmbigArg, Body, Expr, FnDecl, ImplItem, Item, LetStmt, Stmt, Ty};
+use rustc_hir::{AmbigArg, Body, Expr, FnDecl, HirId, ImplItem, Item, LetStmt, Stmt, Ty};
 use rustc_lint::{LateContext, LateLintPass, LintStore};
 use rustc_span::Span;
 
@@ -58,6 +59,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         CONSTANT_OUTSIDE_CONSTANTS_MODULE,
         DEBUG_REMNANTS,
         DISCARDED_ERROR_SOURCE,
+        DOC_HIDDEN_ACCESS,
         ERROR_STRING_COMPARISON,
         ERROR_TYPE_NAMING,
         FALLIBLE_NEW,
@@ -326,6 +328,57 @@ rustc_session::declare_lint! {
     pub DISCARDED_ERROR_SOURCE,
     Warn,
     "the original error should be carried as a source, not discarded",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects a reference to an item of another crate that is marked
+    /// `#[doc(hidden)]`: a path in an expression, type, pattern, or `use` item
+    /// that names a hidden item or goes through a hidden crate or module, or a
+    /// method call to a hidden method or a method of a hidden impl or trait.
+    /// Where an item is defined does not matter, only the path written to it,
+    /// since a hidden module's item re-exported publicly is public API. Code produced by a macro expansion is
+    /// not reported, since a macro reaching into its own crate's hidden items
+    /// is the reason they are hidden.
+    ///
+    /// Crates you own may be listed in a `dylint.toml` in the target
+    /// workspace's root, and their hidden items are allowed:
+    ///
+    /// ```toml
+    /// [doc_hidden_access]
+    /// owned_crates = ["my_macros_runtime"]
+    /// ```
+    ///
+    /// ### Why is this bad?
+    ///
+    /// Hidden items are a crate's internals, exposed only so its own macros
+    /// can expand into other crates. They are not part of the public API and
+    /// carry no stability promise, so a patch release can rename or remove
+    /// them and break the caller.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// use some_crate::__private::Helper;
+    ///
+    /// fn run() {
+    ///     some_crate::__private::register();
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// use some_crate::Helper;
+    ///
+    /// fn run() {
+    ///     some_crate::register();
+    /// }
+    /// ```
+    pub DOC_HIDDEN_ACCESS,
+    Deny,
+    "an item that another crate marks `#[doc(hidden)]` should not be accessed",
 }
 
 rustc_session::declare_lint! {
@@ -1415,6 +1468,7 @@ rustc_session::declare_lint! {
 struct TrogonLints {
     acyclic_modules: acyclic_modules::AcyclicModules,
     debug_remnants: debug_remnants::DebugRemnants,
+    doc_hidden_access: doc_hidden_access::DocHiddenAccess,
     error_string_comparison: error_string_comparison::ErrorStringComparison,
     function_local_use: function_local_use::FunctionLocalUse,
     new_instead_of_from: new_instead_of_from::NewInsteadOfFrom,
@@ -1445,6 +1499,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
         unbounded_channel::check_expr(cx, expr);
         self.acyclic_modules.check_expr(cx, expr);
         self.debug_remnants.check_expr(cx, expr);
+        self.doc_hidden_access.check_expr(cx, expr);
         self.error_string_comparison.check_expr(cx, expr);
         self.serde_json_macro.check_expr(cx, expr);
         self.std_env_access.check_expr(cx, expr);
@@ -1472,6 +1527,10 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'tcx>) {
         function_local_macro_rules::check_stmt(cx, stmt);
         self.function_local_use.check_stmt(cx, stmt);
+    }
+
+    fn check_path(&mut self, cx: &LateContext<'tcx>, path: &rustc_hir::Path<'tcx>, hir_id: HirId) {
+        self.doc_hidden_access.check_path(cx, path, hir_id);
     }
 
     fn check_ty(&mut self, cx: &LateContext<'tcx>, ty: &'tcx Ty<'tcx, AmbigArg>) {
@@ -1504,6 +1563,7 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     CONSTANT_OUTSIDE_CONSTANTS_MODULE,
     DEBUG_REMNANTS,
     DISCARDED_ERROR_SOURCE,
+    DOC_HIDDEN_ACCESS,
     ERROR_STRING_COMPARISON,
     ERROR_TYPE_NAMING,
     FALLIBLE_NEW,
@@ -1547,6 +1607,13 @@ fn ui() {
 fn ui_new_instead_of_from_without_exported_guard() {
     dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_new_instead_of_from_config")
         .dylint_toml("[new_instead_of_from]\navoid_breaking_exported_api = false\n")
+        .run();
+}
+
+#[test]
+fn ui_doc_hidden_access_owned_crates() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_doc_hidden_access_config")
+        .dylint_toml("[doc_hidden_access]\nowned_crates = [\"std\", \"core\"]\n")
         .run();
 }
 
