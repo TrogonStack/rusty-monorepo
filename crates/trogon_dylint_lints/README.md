@@ -40,6 +40,7 @@ per-invocation flags.
 | `constant_outside_constants_module` | deny | module-level constants to be declared in a `constants` module |
 | `debug_remnants` | deny | diagnostics to be recorded as `tracing` events, not writes to stdout or stderr |
 | `discarded_error_source` | warn | a `Result`'s error to be carried as a source, not replaced without being read |
+| `doc_hidden_access` | deny | another crate's `#[doc(hidden)]` items not to be accessed, unless the crate is listed in `owned_crates` |
 | `error_string_comparison` | deny | error display strings not to drive behavior |
 | `error_type_naming` | deny | types implementing `std::error::Error` to carry an `Error` suffix |
 | `fallible_new` | deny | a constructor named `new` not to panic; return `Result` or rename it `try_new` |
