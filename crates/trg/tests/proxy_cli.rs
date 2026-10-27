@@ -15,6 +15,11 @@
 //! opens a socket, waits on a timeout, or depends on what is listening on the
 //! machine running the tests.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test is test code end to end, so a failed setup step should fail the test"
+)]
+
 use std::fs;
 
 use assert_cmd::Command;
@@ -57,7 +62,7 @@ fn trg(config_home: &std::path::Path) -> Command {
 fn proxy(config_home: &std::path::Path, sent: &[ClientJsonRpcMessage]) -> std::process::Output {
     let stdin = sent
         .iter()
-        .map(|msg| serde_json::to_string(msg).expect("an rmcp message serializes") + "\n")
+        .map(|msg| format!("{}\n", serde_json::to_string(msg).expect("an rmcp message serializes")))
         .collect::<String>();
 
     let mut cmd = trg(config_home);

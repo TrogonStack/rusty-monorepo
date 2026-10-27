@@ -906,6 +906,10 @@ impl RunExecution<'_> {
                     scope.spawn(move || {
                         adopt_lane_context(lane_context);
                         parent.in_scope(|| loop {
+                            #[expect(
+                                clippy::disallowed_methods,
+                                reason = "the lock is only ever held across `pop_front`, which cannot leave the queue half-written"
+                            )]
                             let next = queue
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)

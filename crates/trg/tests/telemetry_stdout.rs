@@ -4,6 +4,11 @@
 //! with an unreachable OTLP endpoint and check stdout is exactly what the
 //! command would have produced with telemetry off.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test is test code end to end, so a failed setup step should fail the test"
+)]
+
 use std::fs;
 
 use assert_cmd::Command;

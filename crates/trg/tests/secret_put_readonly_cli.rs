@@ -5,6 +5,11 @@
 //! the pipe to matter only once `trg` has confirmed there is somewhere to
 //! put it.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test is test code end to end, so a failed setup step should fail the test"
+)]
+
 use std::io::Read;
 use std::process::Stdio;
 use std::time::{Duration, Instant};

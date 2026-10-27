@@ -130,6 +130,7 @@ fn group_exists(pgid: i32) -> bool {
     if pgid <= 0 {
         return false;
     }
+    // SAFETY: `kill` with signal 0 only checks that the target exists and touches no memory.
     unsafe { libc::kill(-pgid, 0) == 0 }
 }
 
@@ -137,7 +138,7 @@ fn signal_group(pgid: i32, signal: i32) {
     if pgid <= 0 {
         return;
     }
-    // A negative process identifier addresses every process in the group.
+    // SAFETY: `kill` takes no pointers; a negative process identifier addresses every process in the group.
     unsafe { libc::kill(-pgid, signal) };
 }
 
@@ -175,6 +176,7 @@ pub(crate) fn install_termination_handler() {
 /// instead kill every harness and then `trg` itself, which is the opposite of what asking
 /// for it to be ignored meant.
 fn handle_unless_ignored(signal: i32) {
+    // SAFETY: `sigaction` is a plain C struct for which all zeroes is a valid value, and every pointer passed is either a live local or null where the call accepts null.
     unsafe {
         let mut current: libc::sigaction = std::mem::zeroed();
         if libc::sigaction(signal, std::ptr::null(), &mut current) != 0 {
@@ -197,6 +199,7 @@ fn handle_unless_ignored(signal: i32) {
 /// thread the flush itself depends on, such as an exporter's worker or the watcher, would
 /// only ever end in the timeout.
 pub fn with_termination_signals_blocked<T>(work: impl FnOnce() -> T) -> T {
+    // SAFETY: `sigset_t` is valid when zeroed, and every pointer passed is a live local.
     let previous = unsafe {
         let mut blocked: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut blocked);
@@ -209,6 +212,7 @@ pub fn with_termination_signals_blocked<T>(work: impl FnOnce() -> T) -> T {
     };
     let output = work();
     if let Some(previous) = previous {
+        // SAFETY: `previous` is the mask `pthread_sigmask` filled in above, and a null old-mask pointer is accepted.
         unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) };
     }
     output
@@ -250,7 +254,9 @@ fn start_flush_watcher() {
 }
 
 fn watch_for_termination(wake_read: i32, done_write: i32) {
+    // SAFETY: `start_flush_watcher` hands this thread sole ownership of the descriptor, freshly opened by `cloexec_pipe`.
     let mut wake = unsafe { File::from_raw_fd(wake_read) };
+    // SAFETY: `start_flush_watcher` hands this thread sole ownership of the descriptor, freshly opened by `cloexec_pipe`.
     let mut done = unsafe { File::from_raw_fd(done_write) };
     let mut signal = [0_u8; 1];
     if wake.read_exact(&mut signal).is_err() {
@@ -268,10 +274,12 @@ fn watch_for_termination(wake_read: i32, done_write: i32) {
 /// A pipe whose ends a harness never inherits.
 fn cloexec_pipe() -> Option<(i32, i32)> {
     let mut fds = [0; 2];
+    // SAFETY: `fds` has room for the two descriptors `pipe` writes.
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return None;
     }
     for fd in fds {
+        // SAFETY: `fcntl` with `F_SETFD` takes no pointers, and `fd` was just returned by `pipe`.
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
             close_all(&fds);
             return None;
@@ -282,6 +290,7 @@ fn cloexec_pipe() -> Option<(i32, i32)> {
 
 fn close_all(fds: &[i32]) {
     for &fd in fds {
+        // SAFETY: the caller owns every descriptor in `fds` and never uses one again after it is closed here.
         unsafe { libc::close(fd) };
     }
 }
@@ -294,6 +303,7 @@ extern "C" fn on_termination(signal: i32) {
     for slot in TRACKED_GROUPS.iter() {
         let pgid = slot.load(Ordering::SeqCst);
         if pgid > 0 {
+            // SAFETY: `kill` takes no pointers and is async-signal-safe.
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
     }
@@ -302,6 +312,7 @@ extern "C" fn on_termination(signal: i32) {
     }
     // Hand the signal back to the default disposition so the exit status still reports
     // what actually happened, which is `ExitCode::Interrupted` as a caller reads it.
+    // SAFETY: `sigaction` is valid when zeroed, every pointer passed is a live local or null, and each call here is async-signal-safe.
     unsafe {
         let mut default: libc::sigaction = std::mem::zeroed();
         default.sa_sigaction = libc::SIG_DFL;
@@ -320,6 +331,7 @@ fn wait_for_flush(signal: i32) {
     if wake < 0 || done < 0 {
         return;
     }
+    // SAFETY: the pointer covers exactly the single byte of `byte`, and `write` is async-signal-safe.
     if unsafe { libc::write(wake, std::ptr::addr_of!(byte).cast(), 1) } != 1 {
         return;
     }
@@ -328,11 +340,13 @@ fn wait_for_flush(signal: i32) {
         events: libc::POLLIN,
         revents: 0,
     };
+    // SAFETY: `answer` is one live `pollfd`, matching the count of 1, and `poll` is async-signal-safe.
     unsafe { libc::poll(&mut answer, 1, FLUSH_WAIT.as_millis() as libc::c_int) };
 }
 
 #[cfg(test)]
 pub fn process_is_alive(pid: i32) -> bool {
+    // SAFETY: `kill` with signal 0 only checks that the target exists and touches no memory.
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
@@ -341,8 +355,10 @@ mod tests {
     use super::*;
 
     fn disposition(signal: i32) -> libc::sighandler_t {
+        // SAFETY: `sigaction` is a plain C struct for which all zeroes is a valid value.
         let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
         assert_eq!(
+            // SAFETY: `current` is a live local, and a null new-action pointer only queries the disposition.
             unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) },
             0,
             "sigaction query"
@@ -351,8 +367,10 @@ mod tests {
     }
 
     fn set_disposition(signal: i32, handler: libc::sighandler_t) {
+        // SAFETY: `sigaction` is a plain C struct for which all zeroes is a valid value.
         let mut wanted: libc::sigaction = unsafe { std::mem::zeroed() };
         wanted.sa_sigaction = handler;
+        // SAFETY: `wanted` is a live, initialized `sigaction`, and a null old-action pointer is accepted.
         unsafe {
             libc::sigemptyset(&mut wanted.sa_mask);
             assert_eq!(
@@ -430,6 +448,7 @@ mod tests {
             .parse()
             .expect("a pid");
 
+        // SAFETY: `kill` takes no pointers, and the target is the child this test spawned.
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
         let status = child.wait().expect("child exits");
 
