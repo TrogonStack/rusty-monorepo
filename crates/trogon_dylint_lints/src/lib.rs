@@ -11,6 +11,7 @@ mod acyclic_modules;
 mod assertions_on_fixed_literals;
 mod constant_outside_constants_module;
 mod debug_remnants;
+mod discarded_error_source;
 mod error_string_comparison;
 mod error_type_naming;
 mod fallible_new;
@@ -52,6 +53,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         ASSERTIONS_ON_FIXED_LITERALS,
         CONSTANT_OUTSIDE_CONSTANTS_MODULE,
         DEBUG_REMNANTS,
+        DISCARDED_ERROR_SOURCE,
         ERROR_STRING_COMPARISON,
         ERROR_TYPE_NAMING,
         FALLIBLE_NEW,
@@ -263,6 +265,58 @@ rustc_session::declare_lint! {
     pub DEBUG_REMNANTS,
     Deny,
     "record diagnostics as `tracing` events, not as writes to the process's stdout or stderr",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects code that replaces a `Result`'s error without reading it:
+    /// `map_err` with a closure whose parameter is `_` or a binding the body
+    /// never uses, and `.ok()` fed straight into `ok_or` / `ok_or_else`.
+    ///
+    /// Out of scope: an error type of `()`, `!`, or `Infallible`, since there
+    /// is nothing to lose, and fallbacks such as `unwrap_or_else(|_| ...)`
+    /// and `or_else`.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// The original error says why the operation failed. Replacing it with a
+    /// bare variant leaves `Error::source` empty, so logs and error reports
+    /// stop at the wrapper and the cause is unrecoverable. Carrying the error
+    /// as a `#[source]` field keeps the chain intact at no cost to the caller.
+    /// A deliberate drop is stated at the site with
+    /// `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// #[derive(Debug, thiserror::Error)]
+    /// enum CredentialsError {
+    ///     #[error("invalid JSON")]
+    ///     InvalidJson,
+    /// }
+    ///
+    /// fn parse(document: &str) -> Result<serde_json::Value, CredentialsError> {
+    ///     serde_json::from_str(document).map_err(|_| CredentialsError::InvalidJson)
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// #[derive(Debug, thiserror::Error)]
+    /// enum CredentialsError {
+    ///     #[error("invalid JSON")]
+    ///     InvalidJson(#[source] serde_json::Error),
+    /// }
+    ///
+    /// fn parse(document: &str) -> Result<serde_json::Value, CredentialsError> {
+    ///     serde_json::from_str(document).map_err(CredentialsError::InvalidJson)
+    /// }
+    /// ```
+    pub DISCARDED_ERROR_SOURCE,
+    Warn,
+    "the original error should be carried as a source, not discarded",
 }
 
 rustc_session::declare_lint! {
@@ -1227,6 +1281,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         assertions_on_fixed_literals::check_expr(cx, expr);
+        discarded_error_source::check_expr(cx, expr);
         unbounded_channel::check_expr(cx, expr);
         self.acyclic_modules.check_expr(cx, expr);
         self.debug_remnants.check_expr(cx, expr);
@@ -1287,6 +1342,7 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     ASSERTIONS_ON_FIXED_LITERALS,
     CONSTANT_OUTSIDE_CONSTANTS_MODULE,
     DEBUG_REMNANTS,
+    DISCARDED_ERROR_SOURCE,
     ERROR_STRING_COMPARISON,
     ERROR_TYPE_NAMING,
     FALLIBLE_NEW,
