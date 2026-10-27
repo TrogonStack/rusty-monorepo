@@ -18,6 +18,7 @@ mod fallible_new;
 mod function_local_macro_rules;
 mod function_local_use;
 mod inline_module_block;
+mod iterator_chain_in_for_header;
 mod literal_template_replace;
 mod manual_error_impl;
 mod multi_module_use;
@@ -63,6 +64,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         FUNCTION_LOCAL_MACRO_RULES,
         FUNCTION_LOCAL_USE,
         INLINE_MODULE_BLOCK,
+        ITERATOR_CHAIN_IN_FOR_HEADER,
         LITERAL_TEMPLATE_REPLACE,
         MANUAL_ERROR_IMPL,
         MULTI_MODULE_USE,
@@ -495,6 +497,45 @@ rustc_session::declare_lint! {
     pub INLINE_MODULE_BLOCK,
     Deny,
     "declare modules in their own file with `mod foo;`, not inline `mod foo { ... }`",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects a `for` loop whose iterated expression is a method chain in
+    /// which at least one call takes a closure, such as
+    /// `for x in items.iter().filter(|x| x.ready())`. Adapters that take no
+    /// closure, such as `enumerate`, `rev`, `zip` and `lines`, are left alone.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// The closures in a chain are the logic that decides what the loop
+    /// visits, and the loop header gives them no name. Assigning the chain to
+    /// a variable documents what it selects, and keeps the header down to the
+    /// one thing it should say: what is iterated.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// for bug in descriptions.iter().filter_map(|d| parse(d).ok()).filter(|b| b.priority <= P1) {
+    ///     assign(bug);
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// let urgent_bugs = descriptions
+    ///     .iter()
+    ///     .filter_map(|d| parse(d).ok())
+    ///     .filter(|b| b.priority <= P1);
+    /// for bug in urgent_bugs {
+    ///     assign(bug);
+    /// }
+    /// ```
+    pub ITERATOR_CHAIN_IN_FOR_HEADER,
+    Deny,
+    "name an iterator chain that uses closures with a variable instead of building it in a `for` header",
 }
 
 rustc_session::declare_lint! {
@@ -1399,6 +1440,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         assertions_on_fixed_literals::check_expr(cx, expr);
         discarded_error_source::check_expr(cx, expr);
+        iterator_chain_in_for_header::check_expr(cx, expr);
         literal_template_replace::check_expr(cx, expr);
         unbounded_channel::check_expr(cx, expr);
         self.acyclic_modules.check_expr(cx, expr);
@@ -1468,6 +1510,7 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     FUNCTION_LOCAL_MACRO_RULES,
     FUNCTION_LOCAL_USE,
     INLINE_MODULE_BLOCK,
+    ITERATOR_CHAIN_IN_FOR_HEADER,
     LITERAL_TEMPLATE_REPLACE,
     MANUAL_ERROR_IMPL,
     NEW_INSTEAD_OF_FROM,
