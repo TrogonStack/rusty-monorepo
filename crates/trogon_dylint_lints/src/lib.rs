@@ -21,6 +21,7 @@ mod inline_module_block;
 mod manual_error_impl;
 mod multi_module_use;
 mod new_instead_of_from;
+mod options_struct_without_default;
 mod redundant_module_path;
 mod serde_json_macro;
 mod serde_json_macro_allow_without_reason;
@@ -64,6 +65,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         MANUAL_ERROR_IMPL,
         MULTI_MODULE_USE,
         NEW_INSTEAD_OF_FROM,
+        OPTIONS_STRUCT_WITHOUT_DEFAULT,
         REDUNDANT_MODULE_PATH,
         SERDE_JSON_MACRO,
         SERDE_JSON_MACRO_ALLOW_WITHOUT_REASON,
@@ -623,6 +625,52 @@ rustc_session::declare_lint! {
     pub NEW_INSTEAD_OF_FROM,
     Warn,
     "a single-field wrapper's `new` that only wraps its argument should be `From` instead",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects a struct with named fields whose name ends in `Options` and
+    /// whose fields are all public (`pub`, `pub(crate)`, or `pub(super)`)
+    /// when the type does not implement `Default`, whether derived or
+    /// written by hand.
+    ///
+    /// Out of scope: tuple and unit structs, structs without fields, structs
+    /// with any private field, and structs with type or const generic
+    /// parameters, because whether they implement `Default` depends on the
+    /// arguments chosen at each use.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// A struct of public fields that bundles the options of a function is
+    /// filled in by the caller. Without `Default`, the caller has to name
+    /// every field, and adding a field breaks every call site. With it, the
+    /// caller writes only what differs and takes the rest with struct update
+    /// syntax.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// pub struct ConnectOptions {
+    ///     pub retries: u32,
+    ///     pub verbose: bool,
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// #[derive(Default)]
+    /// pub struct ConnectOptions {
+    ///     pub retries: u32,
+    ///     pub verbose: bool,
+    /// }
+    ///
+    /// let options = ConnectOptions { retries: 3, ..Default::default() };
+    /// ```
+    pub OPTIONS_STRUCT_WITHOUT_DEFAULT,
+    Deny,
+    "an options struct with all public fields should implement `Default`",
 }
 
 rustc_session::declare_lint! {
@@ -1359,6 +1407,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
         error_type_naming::check_item(cx, item);
         inline_module_block::check_item(cx, item);
         manual_error_impl::check_item(cx, item);
+        options_struct_without_default::check_item(cx, item);
         test_module_naming::check_item(cx, item);
     }
 
@@ -1386,6 +1435,7 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     INLINE_MODULE_BLOCK,
     MANUAL_ERROR_IMPL,
     NEW_INSTEAD_OF_FROM,
+    OPTIONS_STRUCT_WITHOUT_DEFAULT,
     SERDE_JSON_MACRO,
     STD_ENV_ACCESS,
     TELEMETRY_ATTRIBUTE_LITERAL,
