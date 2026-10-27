@@ -46,6 +46,7 @@ per-invocation flags.
 | `function_local_macro_rules` | deny | `macro_rules!` definitions to live at module scope |
 | `function_local_use` | deny | `use` imports to be declared at module level, not inside a function body |
 | `inline_module_block` | deny | modules to be declared in their own file with `mod foo;` |
+| `iterator_chain_in_for_header` | deny | a `for` loop to iterate a named variable, not a method chain that takes closures |
 | `literal_template_replace` | deny | a literal template to be filled in with `format!`, not `str::replace` |
 | `manual_error_impl` | deny | `std::error::Error` to be implemented with the thiserror derive, not by hand |
 | `multi_module_use` | deny | a `use` statement to import items from one module, with no `::` inside its braces |
