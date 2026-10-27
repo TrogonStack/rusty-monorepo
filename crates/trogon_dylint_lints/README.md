@@ -39,6 +39,7 @@ per-invocation flags.
 | `assertions_on_fixed_literals` | deny | compile-time assertions to express more than an obvious property of a fixed literal |
 | `constant_outside_constants_module` | deny | module-level constants to be declared in a `constants` module |
 | `debug_remnants` | deny | diagnostics to be recorded as `tracing` events, not writes to stdout or stderr |
+| `discarded_error_source` | warn | a `Result`'s error to be carried as a source, not replaced without being read |
 | `error_string_comparison` | deny | error display strings not to drive behavior |
 | `error_type_naming` | deny | types implementing `std::error::Error` to carry an `Error` suffix |
 | `fallible_new` | deny | a constructor named `new` not to panic; return `Result` or rename it `try_new` |

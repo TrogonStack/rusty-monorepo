@@ -1,0 +1,57 @@
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/discarded_error_source.rs:21:27
+   |
+LL |     parse(value).map_err(|_| AppError::Invalid)
+   |                           ^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+   = note: `#[warn(discarded_error_source)]` on by default
+
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/discarded_error_source.rs:26:27
+   |
+LL |     parse(value).map_err(|error| AppError::Invalid)
+   |                           ^^^^^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/discarded_error_source.rs:31:27
+   |
+LL |     parse(value).map_err(|_error| AppError::Invalid)
+   |                           ^^^^^^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/discarded_error_source.rs:36:27
+   |
+LL |     parse(value).map_err(|_| {
+   |                           ^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/discarded_error_source.rs:44:17
+   |
+LL |     parse(value).ok().ok_or(AppError::Invalid)
+   |                 ^^^^^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/discarded_error_source.rs:49:17
+   |
+LL |     parse(value).ok().ok_or_else(|| AppError::Invalid)
+   |                 ^^^^^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+
+warning: 6 warnings emitted
+
