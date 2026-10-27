@@ -5,6 +5,10 @@
 use core::slice::memchr;
 use core::slice::memchr::memrchr;
 use std::io::_print;
+use ::core::slice::memchr::memrchr as rooted_memrchr;
+use kore::slice::memchr::memrchr as aliased_memrchr;
+
+extern crate core as kore;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Derived(u8);

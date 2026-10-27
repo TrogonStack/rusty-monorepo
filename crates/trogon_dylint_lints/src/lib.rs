@@ -334,9 +334,11 @@ rustc_session::declare_lint! {
     /// ### What it does
     ///
     /// Detects a reference to an item of another crate that is marked
-    /// `#[doc(hidden)]`, or that sits inside a `#[doc(hidden)]` module, impl,
-    /// or trait. The reference may be a path in an expression, type, pattern,
-    /// or `use` item, or a method call. Code produced by a macro expansion is
+    /// `#[doc(hidden)]`: a path in an expression, type, pattern, or `use` item
+    /// that names a hidden item or goes through a hidden crate or module, or a
+    /// method call to a hidden method or a method of a hidden impl or trait.
+    /// Where an item is defined does not matter, only the path written to it,
+    /// since a hidden module's item re-exported publicly is public API. Code produced by a macro expansion is
     /// not reported, since a macro reaching into its own crate's hidden items
     /// is the reason they are hidden.
     ///

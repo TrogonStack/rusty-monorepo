@@ -96,6 +96,9 @@ impl DocHiddenAccess {
             .copied()
             .find(|&krate| cx.tcx.crate_name(krate) == first.ident.name)?;
         let mut current = krate.as_def_id();
+        if self.is_hidden(cx, current) {
+            return Some(current);
+        }
 
         for segment in rest.split_last()?.1 {
             let module = cx
