@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.12.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.11.0...trg@v0.12.0) (2026-10-27)
+
+
+### Features
+
+* **trg:** Export OpenTelemetry traces, metrics and logs over OTLP ([#238](https://github.com/TrogonStack/rusty-monorepo/issues/238)) ([79bb3ce](https://github.com/TrogonStack/rusty-monorepo/commit/79bb3cec4de930df2d660706fd57ad7902d1cf48))
+* **trg:** Harden eval grading and surface run efficiency ([#250](https://github.com/TrogonStack/rusty-monorepo/issues/250)) ([30b203e](https://github.com/TrogonStack/rusty-monorepo/commit/30b203e86f877afd24aa69580bdf72e81126cad8))
+* **trg:** Replay eval report bundles as OTel traces ([#246](https://github.com/TrogonStack/rusty-monorepo/issues/246)) ([85ec0ab](https://github.com/TrogonStack/rusty-monorepo/commit/85ec0ab3e7122a687add8f697ca184c4771b6f30))
+* **trg:** Stop a change that costs more per run from passing as a keep ([#268](https://github.com/TrogonStack/rusty-monorepo/issues/268)) ([e9772bb](https://github.com/TrogonStack/rusty-monorepo/commit/e9772bb51ed3f078783411bdc2526fd44ebeab16))
+* **trg:** Tell trg mcp proxy metrics apart by server ([#271](https://github.com/TrogonStack/rusty-monorepo/issues/271)) ([6cc7db9](https://github.com/TrogonStack/rusty-monorepo/commit/6cc7db91abeb5c880b1ff92679ae841704ebfb5f))
+* **trg:** Trace grading, judge ballots, comparisons and MCP recording ([#242](https://github.com/TrogonStack/rusty-monorepo/issues/242)) ([c415438](https://github.com/TrogonStack/rusty-monorepo/commit/c415438020671ec8504d1557af8942aeab8ce31c))
+* **trg:** Trace secrets backends, exec env merge and doctor ([#239](https://github.com/TrogonStack/rusty-monorepo/issues/239)) ([62630d9](https://github.com/TrogonStack/rusty-monorepo/commit/62630d945b73a744c8593ac2b608ad8a60e34d0f))
+* **trg:** Trace skill eval runs and the harnesses they drive ([#241](https://github.com/TrogonStack/rusty-monorepo/issues/241)) ([509c06f](https://github.com/TrogonStack/rusty-monorepo/commit/509c06f4bc5cbee8121ac5bbff03d7c449bba07e))
+* **trg:** Trace the MCP proxy session and OAuth flow ([#240](https://github.com/TrogonStack/rusty-monorepo/issues/240)) ([02d00ad](https://github.com/TrogonStack/rusty-monorepo/commit/02d00adfc158951536ef2bfd512315e065c9d7c6))
+
+
+### Bug Fixes
+
+* **trg:** Bound the remote close on host EOF so an idle proxy exits ([#273](https://github.com/TrogonStack/rusty-monorepo/issues/273)) ([3bc2532](https://github.com/TrogonStack/rusty-monorepo/commit/3bc2532cb6179c0ae7591e5106ec2d7679130fbb))
+* **trg:** Correct telemetry gaps found while documenting it ([#245](https://github.com/TrogonStack/rusty-monorepo/issues/245)) ([e6428ac](https://github.com/TrogonStack/rusty-monorepo/commit/e6428acb297c704547b84187aa6e276f0c486939))
+* **trg:** Keep cargo test from exporting telemetry to the shell's collector ([#272](https://github.com/TrogonStack/rusty-monorepo/issues/272)) ([ce48997](https://github.com/TrogonStack/rusty-monorepo/commit/ce48997334a15b91b54ffe38565b76eb36c5f1c5))
+* **trg:** Keep MCP proxy stdio off the blocking thread pool ([#274](https://github.com/TrogonStack/rusty-monorepo/issues/274)) ([d688536](https://github.com/TrogonStack/rusty-monorepo/commit/d688536ce264db50d32a452757b8f95195ddee37))
+* **trg:** Keep op from answering reads out of its daemon cache ([#254](https://github.com/TrogonStack/rusty-monorepo/issues/254)) ([1c54b95](https://github.com/TrogonStack/rusty-monorepo/commit/1c54b954bb74abd32796797f5a9a9ea4de34f5df))
+* **trg:** Make rebuilt harness spans reflect what actually ran ([#244](https://github.com/TrogonStack/rusty-monorepo/issues/244)) ([c05ba53](https://github.com/TrogonStack/rusty-monorepo/commit/c05ba5340444bf12309b7f957b8123abe2c52af4))
+* **trg:** Stop each MCP proxy from holding a worker thread per core ([#270](https://github.com/TrogonStack/rusty-monorepo/issues/270)) ([95f47f7](https://github.com/TrogonStack/rusty-monorepo/commit/95f47f76ddc197c39d215b510f7defc7f73ea445))
+
 ## [0.11.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.10.0...trg@v0.11.0) (2026-09-29)
 
 
