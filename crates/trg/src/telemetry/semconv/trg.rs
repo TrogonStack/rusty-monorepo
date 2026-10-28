@@ -85,6 +85,14 @@ pub const SECRETS_MIRROR_NAME: &str = "trg.secrets.mirror.name";
 /// (`find-generic-password`, `item get`, ...). Never its arguments.
 pub const SECRETS_OPERATION: &str = "trg.secrets.operation";
 
+/// The `[secrets.backends.<name>]` entry that answered a read which declared
+/// fallbacks. A config name, never a path or a value.
+pub const SECRETS_ANSWERED_BY: &str = "trg.secrets.answered_by";
+
+/// Whether a read that declared fallbacks was answered by one of them rather
+/// than by its first address.
+pub const SECRETS_FALLBACK_USED: &str = "trg.secrets.fallback.used";
+
 /// How many config vars one secrets fetch served.
 pub const SECRETS_VAR_COUNT: &str = "trg.secrets.var.count";
 

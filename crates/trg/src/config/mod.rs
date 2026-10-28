@@ -29,8 +29,8 @@ pub use secrecy::SecretString;
 use serde::Deserialize;
 use tracing::field::Empty;
 pub use var::{
-    EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretVar, SecretVarError, Segment, VarRef,
-    VarResolveError, VarSite, VarSource, VarTemplate,
+    EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretRead, SecretVar, SecretVarError, Segment,
+    VarRef, VarResolveError, VarSite, VarSource, VarTemplate,
 };
 
 use crate::secrets::{MirrorConfigError, SecretsSection};
@@ -296,11 +296,11 @@ impl PendingMcp {
     ///
     /// Deduplicated, because two vars pointing at the same coordinates are one
     /// read, and sorted so the order a caller sees does not depend on hashing.
-    pub fn secret_vars(&self) -> Vec<SecretVar> {
+    pub fn secret_vars(&self) -> Vec<SecretRead> {
         let Some(vars) = &self.entry.vars else {
             return Vec::new();
         };
-        sorted_distinct(vars.values().filter_map(VarSource::secret).cloned())
+        sorted_distinct(vars.values().filter_map(VarSource::secret_read))
     }
 
     pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedMcp, ConfigError> {
@@ -330,8 +330,8 @@ pub struct PendingExec {
 impl PendingExec {
     /// Every distinct secret this entry's `env` names, deduplicated and
     /// sorted for the same reason [`PendingMcp::secret_vars`] is.
-    pub fn secret_vars(&self) -> Vec<SecretVar> {
-        sorted_distinct(self.entry.env.values().flat_map(EnvValue::secrets).cloned())
+    pub fn secret_vars(&self) -> Vec<SecretRead> {
+        sorted_distinct(self.entry.env.values().flat_map(EnvValue::secret_reads))
     }
 
     pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedExec, ConfigError> {
@@ -345,9 +345,9 @@ impl PendingExec {
 /// Ordered on the rendered form rather than on the address itself: an address
 /// is not comparable across backend kinds, and what this is for is a stable
 /// sequence rather than a meaningful one.
-fn sorted_distinct(vars: impl Iterator<Item = SecretVar>) -> Vec<SecretVar> {
-    let mut out: Vec<SecretVar> = vars.collect();
-    out.sort_by_cached_key(|v| (v.backend().to_string(), v.address().to_string()));
+fn sorted_distinct(vars: impl Iterator<Item = SecretRead>) -> Vec<SecretRead> {
+    let mut out: Vec<SecretRead> = vars.collect();
+    out.sort_by_cached_key(|v| (v.primary().backend().to_string(), v.to_string()));
     out.dedup();
     out
 }
@@ -702,7 +702,7 @@ mod tests {
         let pending = load_mcp_at(&path, "s1").expect("parses without reaching anything");
         assert_eq!(
             pending.secret_vars(),
-            vec![keychain_var("homelab", "agentgateway", "token")]
+            vec![keychain_var("homelab", "agentgateway", "token").into()]
         );
 
         let mut fetched = FetchedSecrets::new();
@@ -796,10 +796,13 @@ mod tests {
         );
         assert_eq!(
             wanted[0],
-            keychain_var("homelab", "agentgateway", "principal"),
+            SecretRead::from(keychain_var("homelab", "agentgateway", "principal")),
             "sorted, so the order does not depend on hashing"
         );
-        assert_eq!(wanted[1], keychain_var("homelab", "agentgateway", "token"));
+        assert_eq!(
+            wanted[1],
+            SecretRead::from(keychain_var("homelab", "agentgateway", "token"))
+        );
     }
 
     #[test]

@@ -15,13 +15,13 @@ use serde_json::{json, Value};
 use tracing::field::Empty;
 use tracing::Instrument;
 
-use crate::config::{RawSecretVar, SecretVar, VarSite};
+use crate::config::{RawSecretVar, SecretRead, SecretVar, VarSite};
 use crate::exit_code::ExitCode;
 use crate::output::{print_json, OutputFormat};
 use crate::secrets::mirror as secrets_mirror;
 use crate::secrets::onepassword::{OnePasswordReference, OpRead};
 use crate::secrets::telemetry::record_error;
-use crate::secrets::{Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
+use crate::secrets::{vars, Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
 use crate::secrets::{Mirror, MirrorError, MirrorOutcome, TargetOutcomes};
 use crate::telemetry::semconv::trg::SECRETS_MIRROR_NAME;
 use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME};
@@ -86,6 +86,25 @@ pub struct GetArgs {
 
     #[command(flatten)]
     pub address: AddressArgs,
+
+    /// Another address to read when this one cannot answer, written as the
+    /// inline table a config holds, for example `'{ backend = "op", ref =
+    /// "op://<vault>/<item>/<field>" }'`. Repeat to add more, tried in order.
+    /// Which backend answered is reported on stderr, never on stdout.
+    #[arg(long = "fallback", value_name = "TABLE", value_parser = parse_fallback)]
+    pub fallbacks: Vec<RawSecretVar>,
+}
+
+/// One `--fallback`, read the way a config would read the same table, so the
+/// flag cannot accept an address the config would refuse.
+fn parse_fallback(text: &str) -> Result<RawSecretVar, String> {
+    #[derive(serde::Deserialize)]
+    struct Fallback {
+        fallback: RawSecretVar,
+    }
+    toml::from_str::<Fallback>(&format!("fallback = {text}"))
+        .map(|parsed| parsed.fallback)
+        .map_err(|e| e.message().to_string())
 }
 
 impl GetArgs {
@@ -195,6 +214,9 @@ fn record_kind(backend: &Backend) {
 
 async fn get(registry: &Registry, args: &GetArgs) -> Result<ExitCode, String> {
     let raw = args.raw();
+    if !args.fallbacks.is_empty() {
+        return get_with_fallbacks(registry, args, &raw).await;
+    }
     let backend = registry.resolve(&raw.backend).map_err(|e| e.to_string())?;
     record_kind(&backend);
     let var =
@@ -207,6 +229,41 @@ async fn get(registry: &Registry, args: &GetArgs) -> Result<ExitCode, String> {
     }
 
     write_value(&value)?;
+    Ok(ExitCode::Success)
+}
+
+/// A read that opted in to more than one address goes through the same fetch
+/// a config var does, so what counts as unable to answer, what is reported and
+/// what is recorded cannot differ between the two.
+///
+/// The first backend is not built up front: one that cannot be built on this
+/// machine is exactly the case a fallback is for.
+async fn get_with_fallbacks(registry: &Registry, args: &GetArgs, raw: &RawSecretVar) -> Result<ExitCode, String> {
+    let primary =
+        SecretVar::resolve_at(kind_of(registry, &raw.backend)?, raw, VarSite::Flags).map_err(|e| e.to_string())?;
+    let mut addresses = vec![primary];
+    for (i, fallback) in args.fallbacks.iter().enumerate() {
+        addresses.push(
+            SecretVar::resolve_at(
+                kind_of(registry, &fallback.backend)?,
+                fallback,
+                VarSite::fallback_flag(i + 1),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    let read = SecretRead::from_addresses(addresses).ok_or("no address to read")?;
+
+    let fetched = vars::fetch(registry, std::slice::from_ref(&read))
+        .await
+        .map_err(|e| e.to_string())?;
+    let value = fetched.get(&read).ok_or("the read answered nothing")?;
+
+    if args.common.output_format.is_json() {
+        return Ok(print_json(&document(raw, value), ExitCode::Success));
+    }
+
+    write_value(value)?;
     Ok(ExitCode::Success)
 }
 
@@ -630,6 +687,54 @@ mod tests {
     #[test]
     fn the_flag_grammar_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    fn get_args(argv: &[&str]) -> Result<GetArgs, clap::Error> {
+        let mut full = vec![
+            "get",
+            "--backend",
+            "homelab",
+            "--path",
+            "exec/github",
+            "--key",
+            "GH_TOKEN",
+        ];
+        full.extend_from_slice(argv);
+        match parse(&full)? {
+            SecretCommands::Get(args) => Ok(args),
+            _ => panic!("expected get"),
+        }
+    }
+
+    #[test]
+    fn get_takes_no_fallback_unless_asked_to() {
+        assert!(get_args(&[]).unwrap().fallbacks.is_empty());
+    }
+
+    #[test]
+    fn get_takes_fallbacks_in_the_order_given() {
+        let args = get_args(&[
+            "--fallback",
+            r#"{ backend = "op", ref = "op://Ops/github/GH_TOKEN" }"#,
+            "--fallback",
+            r#"{ backend = "other", path = "exec/github", key = "GH_TOKEN" }"#,
+        ])
+        .unwrap();
+
+        assert_eq!(args.fallbacks.len(), 2);
+        assert_eq!(args.fallbacks[0].backend, "op");
+        assert_eq!(args.fallbacks[1].backend, "other");
+    }
+
+    #[test]
+    fn a_fallback_that_is_not_an_address_table_is_refused_at_parse_time() {
+        assert!(get_args(&["--fallback", "not a table"]).is_err());
+        assert!(get_args(&["--fallback", r#"{ backend = "op", typo = true }"#]).is_err());
+    }
+
+    #[test]
+    fn put_has_no_fallback_flag() {
+        assert!(parse(&["put", "--backend", "b", "--path", "p", "--key", "k", "--fallback", "{}"]).is_err());
     }
 
     #[tokio::test]
