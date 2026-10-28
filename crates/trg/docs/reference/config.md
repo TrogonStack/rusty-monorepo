@@ -557,6 +557,9 @@ what the table is declared under, limited to ASCII letters, digits, `-` and
   any target.
 - A target may be listed once, across all mirrors. A repeat names both
   mirrors.
+- Mirrors that write the same path in the same backend must share a source,
+  because the `source` key there records one origin. Different keys at one
+  path are fine when the source is the same.
 - `source` is reserved as a target `key`. The mirror writes it next to the
   value, holding the reference the value came from.
 - Every backend must be declared, and each side must be addressed in the
@@ -893,6 +896,7 @@ trg exec run claude -- --resume
 | `` `[secrets.mirrors.<name>]`: target key `source` is reserved `` | A mirror's target key is `source`, which holds the reference the value came from. |
 | `` `[secrets.mirrors.<name>]`: target ... is listed more than once `` | A mirror lists the same target twice. |
 | `` `[secrets.mirrors.<name>]`: target ... is already a target of `[secrets.mirrors.<other>]` `` | Two mirrors would write the same value. |
+| `` `[secrets.mirrors.<name>]`: path `...` in backend `...` is also written by `[secrets.mirrors.<other>]` from a different source `` | Two mirrors with different sources write the same path, so their `source` key would overwrite each other. |
 | `` `[secrets.mirrors.<name>]` <side> ... `` | A side of a mirror, `source` or `targets[<i>]`, failed to resolve as a var does, such as naming an undeclared backend. |
 | `` `<field>` cannot come from a secrets backend `` | A `[secrets.backends.*]` `addr` or `token` used `{ backend = ... }`. |
 | `undefined variable <NAME> referenced; declare it in [mcp.servers.<name>.vars]` | `{ var = "..." }` references a name not present in `vars`. |

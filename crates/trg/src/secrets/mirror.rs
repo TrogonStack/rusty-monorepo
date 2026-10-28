@@ -189,6 +189,16 @@ pub enum MirrorConfigError {
         first: MirrorName,
         target: String,
     },
+
+    #[error(
+        "`[secrets.mirrors.{name}]`: path `{path}` in backend `{backend}` is also written by `[secrets.mirrors.{first}]` from a different source; the `{SOURCE_KEY}` key there records one origin, so mirrors sharing a path must share a source"
+    )]
+    ConflictingSource {
+        name: MirrorName,
+        first: MirrorName,
+        backend: String,
+        path: String,
+    },
 }
 
 impl Mirror {
@@ -222,6 +232,7 @@ impl Mirror {
 pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfigError> {
     let mut out = Vec::with_capacity(secrets.mirrors.len());
     let mut claimed: HashMap<SecretVar, MirrorName> = HashMap::new();
+    let mut paths: HashMap<(String, SecretPath), (MirrorName, SecretVar)> = HashMap::new();
 
     for (name, config) in &secrets.mirrors {
         let mirror = resolve_one(name, config, secrets)?;
@@ -242,6 +253,21 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
                 }
                 None => {
                     claimed.insert(target.var.clone(), name.clone());
+                }
+            }
+            let at = (target.var.backend().to_string(), target.path.clone());
+            match paths.get(&at) {
+                Some((first, source)) if source != &mirror.source => {
+                    return Err(MirrorConfigError::ConflictingSource {
+                        name: name.clone(),
+                        first: first.clone(),
+                        backend: at.0,
+                        path: at.1.to_string(),
+                    })
+                }
+                Some(_) => {}
+                None => {
+                    paths.insert(at, (name.clone(), mirror.source.clone()));
                 }
             }
         }
@@ -897,6 +923,38 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("[secrets.mirrors.zeta]"), "{rendered}");
         assert!(rendered.contains("[secrets.mirrors.signing-key]"), "{rendered}");
+    }
+
+    #[test]
+    fn two_mirrors_with_different_sources_may_not_share_a_target_path() {
+        let text = format!(
+            r#"{SECTION}
+            [mirrors.zeta]
+            source = {{ backend = "src", path = "other", key = "token" }}
+            targets = [{{ backend = "dst", path = "exec/github", key = "other" }}]
+            "#
+        );
+
+        let err = resolve_err(&text);
+
+        assert!(matches!(err, MirrorConfigError::ConflictingSource { .. }), "{err}");
+        let rendered = err.to_string();
+        assert!(rendered.contains("[secrets.mirrors.zeta]"), "{rendered}");
+        assert!(rendered.contains("[secrets.mirrors.signing-key]"), "{rendered}");
+        assert!(rendered.contains("exec/github"), "{rendered}");
+    }
+
+    #[test]
+    fn two_mirrors_with_the_same_source_may_share_a_path_under_different_keys() {
+        let text = format!(
+            r#"{SECTION}
+            [mirrors.zeta]
+            source = {{ backend = "src", path = "deploy", key = "token" }}
+            targets = [{{ backend = "dst", path = "exec/github", key = "other" }}]
+            "#
+        );
+
+        assert!(section(&text).resolve_mirrors().is_ok());
     }
 
     #[test]
