@@ -77,6 +77,10 @@ pub const SECRETS_BACKEND_KIND: &str = "trg.secrets.backend.kind";
 /// name, never a path or a value.
 pub const SECRETS_BACKEND_NAME: &str = "trg.secrets.backend.name";
 
+/// The `[secrets.mirrors.<name>]` table a mirror run was declared under. A
+/// config name, never a path or a value.
+pub const SECRETS_MIRROR_NAME: &str = "trg.secrets.mirror.name";
+
 /// The fixed subcommand a backend CLI was driven with
 /// (`find-generic-password`, `item get`, ...). Never its arguments.
 pub const SECRETS_OPERATION: &str = "trg.secrets.operation";

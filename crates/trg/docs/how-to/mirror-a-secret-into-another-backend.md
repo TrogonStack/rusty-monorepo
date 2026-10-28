@@ -33,9 +33,11 @@ token_file  = "~/.vault-token"
 Each side is addressed the way a var is, in the vocabulary of its backend:
 
 ```toml trg-example=fragment
-[[secrets.mirrors]]
+[secrets.mirrors.github-token]
 source = { backend = "personal", ref = "op://Engineering/deploy-key/token" }
-target = { backend = "homelab", path = "exec/github", key = "token" }
+targets = [
+  { backend = "homelab", path = "exec/github", key = "token" },
+]
 ```
 
 An SSH private key is mirrored in OpenSSH format by ending the reference in
@@ -44,14 +46,18 @@ receives the OpenSSH text, and the `source` key it records is the reference as
 written, query included:
 
 ```toml trg-example=fragment
-[[secrets.mirrors]]
+[secrets.mirrors.signing-key]
 source = { backend = "personal", ref = "op://Engineering/deploy-key/private key?ssh-format=openssh" }
-target = { backend = "homelab", path = "exec/deploy", key = "ssh_private_key" }
+targets = [
+  { backend = "homelab", path = "exec/deploy", key = "ssh_private_key" },
+]
 ```
 
-Declare as many `[[secrets.mirrors]]` entries as you have values. The file is
-checked as a whole when it loads, so a mirror that could never apply is
-reported with its entry number before anything is read or written.
+A mirror is named by the table it is declared under, and `targets` lists every
+place the one value goes. Declare as many `[secrets.mirrors.<name>]` tables as
+you have values. The file is checked as a whole when it loads, so a mirror that
+could never apply is reported with its name before anything is read or
+written.
 
 ## 2. See what would change
 
@@ -60,19 +66,20 @@ trg secret mirror
 ```
 
 ```text
-would create  `op://Engineering/deploy-key/token` from backend `personal` -> `token` at `exec/github` from backend `homelab`
-1 entry: 0 up to date, 1 would create, 0 would update, 0 failed; pass --apply to write
+would create  github-token -> exec/github#token (homelab)
+would create  signing-key -> exec/deploy#ssh_private_key (homelab)
+2 targets: 0 up to date, 2 would create, 0 would update, 0 failed; pass --apply to write
 ```
 
-Nothing is written without `--apply`. Both sides are read, and each entry
-reports one of:
+Nothing is written without `--apply`. Each source is read once, every target
+is read, and each target reports one of:
 
 | Status         | Meaning                                                               |
 | -------------- | --------------------------------------------------------------------- |
 | `would create` | The target holds nothing at that key.                                 |
 | `would update` | The target holds a different value.                                   |
 | `up to date`   | The target already holds the source's value.                          |
-| `failed`       | The entry could not be read or checked. The reason follows, indented. |
+| `failed`       | The target could not be read or checked. The reason follows, indented. |
 
 Values are compared by a fingerprint, and are never printed.
 
@@ -83,20 +90,25 @@ trg secret mirror --apply
 ```
 
 ```text
-created       `op://Engineering/deploy-key/token` from backend `personal` -> `token` at `exec/github` from backend `homelab`
-1 entry: 0 up to date, 1 created, 0 updated, 0 failed
+created       github-token -> exec/github#token (homelab)
+created       signing-key -> exec/deploy#ssh_private_key (homelab)
+2 targets: 0 up to date, 2 created, 0 updated, 0 failed
 ```
 
-An entry that is already up to date is not rewritten. After a write, `trg`
-reads the target back and fails the entry if it does not hold what was
+To run only some mirrors, name them: `trg secret mirror signing-key --apply`.
+A name that is not declared is an error that lists the declared ones.
+
+A target that is already up to date is not rewritten. After a write, `trg`
+reads the target back and fails the target if it does not hold what was
 written.
 
 Keys at the target path that the mirror did not write are kept. The mirror
 adds one of its own, `source`, holding the reference the value came from, so
 whoever finds the entry in the backend can tell where to change it.
 
-An entry that fails does not stop the ones after it, and the exit code is
-nonzero if any did.
+A target that fails does not stop the others, of its mirror or of the ones
+after it, and the exit code is nonzero if any did. A source that cannot be read
+fails every target of its mirror.
 
 ## Read the mirrored value
 
@@ -121,7 +133,7 @@ cleared field never wipes a working secret.
 
 **``target backend `...` is of kind `onepassword`, which `trg` only reads from``**
 
-Mirrors only write to `keychain` and `openbao`. Swap `source` and `target`, or
+Mirrors only write to `keychain` and `openbao`. Swap the source and the target, or
 point the target at a backend `trg` can write to.
 
 **``the target did not read back what was written``**
@@ -131,6 +143,6 @@ token's policy for the path, then run the mirror again.
 
 ## See also
 
-- [Config reference: `[[secrets.mirrors]]`](../reference/config.md#secretsmirrors)
+- [Config reference: `[secrets.mirrors.<name>]`](../reference/config.md#secretsmirrorsname)
 - [Read a config value from a secrets backend](read-a-config-value-from-a-secrets-backend.md)
 - [Why secrets backends are addressed, not searched](../explanation/secrets-backends.md)

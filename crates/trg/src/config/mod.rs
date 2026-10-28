@@ -847,9 +847,9 @@ mod tests {
             kind = "onepassword"
             account = "my.1password.com"
 
-            [[secrets.mirrors]]
+            [secrets.mirrors.signing-key]
             source = { backend = "op", ref = "op://Engineering/deploy-key/token" }
-            target = { backend = "op", ref = "op://Engineering/other-key/token" }
+            targets = [{ backend = "op", ref = "op://Engineering/other-key/token" }]
 
             [mcp.servers.s1]
             url = "https://example.com/mcp"
@@ -861,7 +861,7 @@ mod tests {
             load_secrets_at(&path).err().unwrap(),
         ] {
             assert!(matches!(err, ConfigError::Mirror(_)), "{err}");
-            assert!(err.to_string().contains("entry 1"), "{err}");
+            assert!(err.to_string().contains("[secrets.mirrors.signing-key]"), "{err}");
         }
     }
 

@@ -82,8 +82,10 @@ A value that lives in one backend and is needed in another could be copied with
 `trg secret put` in a pipeline. That works once, and the pipeline is then the
 only record that the two are meant to agree.
 
-A `[[secrets.mirrors]]` entry keeps the pair in the config instead, so running
-`trg secret mirror` again converges on the same state. It is one-way on
+A `[secrets.mirrors.<name>]` table keeps the source and its targets in the
+config instead, so running `trg secret mirror` again converges on the same
+state. The source is read once however many targets it has, and each target
+succeeds or fails on its own. It is one-way on
 purpose: the source is the source of truth, and nothing is ever read back from
 the target as an input. That is also why a mirror cannot target a `onepassword`
 backend, which `trg` does not write to.

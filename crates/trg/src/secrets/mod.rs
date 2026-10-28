@@ -27,7 +27,10 @@ use secrecy::{ExposeSecret, SecretString};
 pub use address::SecretAddress;
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::{KeychainBackend, KeychainReference};
-pub use mirror::{Fingerprint, Mirror, MirrorConfig, MirrorConfigError, MirrorError, MirrorOutcome};
+pub use mirror::{
+    Fingerprint, Mirror, MirrorConfig, MirrorConfigError, MirrorError, MirrorName, MirrorNameError, MirrorOutcome,
+    MirrorTarget, TargetOutcomes,
+};
 pub use onepassword::{
     OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpReferenceError,
     OpReferencePart,

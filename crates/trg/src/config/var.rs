@@ -115,11 +115,10 @@ impl VarSite {
         }
     }
 
-    /// One side of a `[[secrets.mirrors]]` entry, numbered from 1 in file
-    /// order because an entry has no name of its own to point at.
-    pub fn mirror(index: usize, side: &str) -> Self {
+    /// One side of a `[secrets.mirrors.<name>]` table.
+    pub fn mirror(name: &str, side: &str) -> Self {
         Self::Table {
-            table: format!("[[secrets.mirrors]] entry {index}"),
+            table: format!("[secrets.mirrors.{name}]"),
             name: side.to_string(),
         }
     }

@@ -9,13 +9,13 @@
 //! bootstrap acyclic: nothing needed to reach a secret store may itself live in
 //! a secret store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
-use super::mirror::{self, Mirror, MirrorConfig, MirrorConfigError};
+use super::mirror::{self, Mirror, MirrorConfig, MirrorConfigError, MirrorName};
 use super::onepassword::{OnePasswordBackend, OpAccount};
 use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
@@ -30,7 +30,7 @@ pub struct SecretsSection {
     #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
     #[serde(default)]
-    pub mirrors: Vec<MirrorConfig>,
+    pub mirrors: BTreeMap<MirrorName, MirrorConfig>,
 }
 
 impl SecretsSection {
@@ -175,7 +175,7 @@ pub enum BackendError {
 #[derive(Debug, Default, Clone)]
 pub struct Registry {
     declared: HashMap<String, BackendConfig>,
-    mirrors: Vec<MirrorConfig>,
+    mirrors: BTreeMap<MirrorName, MirrorConfig>,
 }
 
 impl Registry {

@@ -149,8 +149,10 @@ spans.
 read from standard input.
 
 `secret mirror` with `error.type`, and one `mirror secret` child span per
-declared mirror with `error.type`. The backend spans of each read and write
-nest under the entry's span.
+mirror that runs, with `trg.secrets.mirror.name` and `error.type`. Under it,
+one `mirror target` span per target with `trg.secrets.backend.name` and
+`error.type`. The backend spans of each read and write nest under the span of
+the mirror or target they serve.
 
 ### `trg doctor`
 
@@ -544,6 +546,7 @@ Attributes in the `trg.*` namespace.
 | `trg.oauth.callback.outcome` | string | `received`, `timeout`, `state_mismatch`, `provider_error` |
 | `trg.secrets.backend.kind` | string | `keychain`, `openbao`, `onepassword` |
 | `trg.secrets.backend.name` | string | The `[secrets.backends.<name>]` entry. Never a path or a value |
+| `trg.secrets.mirror.name` | string | The `[secrets.mirrors.<name>]` table. Never a path or a value |
 | `trg.secrets.operation` | string | The fixed backend CLI subcommand, never its arguments |
 | `trg.secrets.var.count` | int | Config vars one fetch served |
 | `trg.eval.skill.revision` | string | Content hash of the skill revision |

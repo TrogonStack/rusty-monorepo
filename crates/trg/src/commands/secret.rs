@@ -22,7 +22,8 @@ use crate::secrets::mirror as secrets_mirror;
 use crate::secrets::onepassword::OnePasswordReference;
 use crate::secrets::telemetry::record_error;
 use crate::secrets::{Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
-use crate::secrets::{MirrorError, MirrorOutcome};
+use crate::secrets::{Mirror, MirrorError, MirrorOutcome, TargetOutcomes};
+use crate::telemetry::semconv::trg::SECRETS_MIRROR_NAME;
 use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME};
 
 /// `error.type` for a failure this command only has as a message to print,
@@ -35,7 +36,7 @@ pub enum SecretCommands {
     Get(GetArgs),
     /// Write one value into a secrets backend, reading it from stdin
     Put(PutArgs),
-    /// Copy values from their source into the targets `[[secrets.mirrors]]` declares
+    /// Copy values from their source into the targets `[secrets.mirrors.<name>]` declares
     Mirror(MirrorArgs),
 }
 
@@ -129,12 +130,16 @@ impl PutArgs {
 /// the ones other things already read from.
 #[derive(Args)]
 pub struct MirrorArgs {
-    /// Write the targets. Without it nothing is written and each entry
+    /// Mirrors to run, by the name they are declared under. All of them when
+    /// none is given
+    pub names: Vec<String>,
+
+    /// Write the targets. Without it nothing is written and each target
     /// reports what it would do
     #[arg(long)]
     pub apply: bool,
 
-    /// Output format. Neither carries a value, only what each entry did
+    /// Output format. Neither carries a value, only what each target did
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
 }
@@ -247,80 +252,137 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
     Ok(ExitCode::Success)
 }
 
-/// Every declared mirror, in file order.
+/// The declared mirrors, in name order, or only the named ones.
 ///
-/// An entry that fails does not stop the ones after it: the entries are
-/// independent, so one unreachable target should not hide that the rest are
-/// already in sync or still drifted. The exit code still reports the failure.
+/// A mirror that fails does not stop the ones after it, and a target that
+/// fails does not stop the others of its mirror: they are independent, so one
+/// unreachable backend should not hide that the rest are already in sync or
+/// still drifted. The exit code still reports the failure.
 async fn mirror_all(registry: &Registry, args: &MirrorArgs) -> Result<ExitCode, String> {
-    let mirrors = registry.mirrors().map_err(|e| e.to_string())?;
-    if mirrors.is_empty() {
-        return Err("no `[[secrets.mirrors]]` entries are declared".to_string());
+    let declared = registry.mirrors().map_err(|e| e.to_string())?;
+    if declared.is_empty() {
+        return Err("no `[secrets.mirrors.<name>]` tables are declared".to_string());
     }
+    let mirrors = select_mirrors(declared, &args.names)?;
 
     let resolve = |name: &str| registry.resolve(name);
-    let mut results = Vec::with_capacity(mirrors.len());
+    let mut runs = Vec::with_capacity(mirrors.len());
     for entry in &mirrors {
-        let span = tracing::info_span!("mirror secret", "error.type" = Empty, "otel.status_code" = Empty);
-        let result = secrets_mirror::mirror(&resolve, entry, args.apply)
+        let span = tracing::info_span!(
+            "mirror secret",
+            { SECRETS_MIRROR_NAME } = entry.name().as_str(),
+            "error.type" = Empty,
+            "otel.status_code" = Empty,
+        );
+        let run = secrets_mirror::mirror(&resolve, entry, args.apply)
             .instrument(span.clone())
             .await;
-        if let Err(e) = &result {
-            record_error(&span, e.error_type());
+        match &run {
+            Err(e) => record_error(&span, e.error_type()),
+            Ok(targets) if targets.iter().any(Result::is_err) => record_error(&span, "mirror_failed"),
+            Ok(_) => {}
         }
-        results.push(result);
+        runs.push(run);
     }
 
-    let failed = results.iter().filter(|r| r.is_err()).count();
+    let results: Vec<Vec<TargetResult>> = mirrors
+        .iter()
+        .zip(&runs)
+        .map(|(entry, run)| target_results(entry, run))
+        .collect();
+    let failed = results.iter().flatten().filter(|r| r.is_err()).count();
     if failed > 0 {
         record_error(&tracing::Span::current(), "mirror_failed");
     }
+    let code = if failed > 0 {
+        ExitCode::Failed
+    } else {
+        ExitCode::Success
+    };
 
     if args.output_format.is_json() {
         let entries: Vec<Value> = mirrors
             .iter()
             .zip(&results)
-            .map(|(entry, result)| {
-                let mut out = serde_json::Map::new();
-                out.insert("source".to_string(), json!(entry.source().to_string()));
-                out.insert("target".to_string(), json!(entry.target().to_string()));
-                match result {
-                    Ok(outcome) => out.insert("status".to_string(), json!(outcome.label())),
-                    Err(e) => {
-                        out.insert("error".to_string(), json!(e.to_string()));
-                        out.insert("status".to_string(), json!("failed"))
-                    }
-                };
-                Value::Object(out)
+            .map(|(entry, results)| {
+                let targets: Vec<Value> = entry
+                    .targets()
+                    .iter()
+                    .zip(results)
+                    .map(|(target, result)| {
+                        let mut out = serde_json::Map::new();
+                        out.insert("target".to_string(), json!(target.var().to_string()));
+                        match result {
+                            Ok(outcome) => out.insert("status".to_string(), json!(outcome.label())),
+                            Err(e) => {
+                                out.insert("error".to_string(), json!(e.to_string()));
+                                out.insert("status".to_string(), json!("failed"))
+                            }
+                        };
+                        Value::Object(out)
+                    })
+                    .collect();
+                json!({
+                    "name": entry.name().as_str(),
+                    "source": entry.source().to_string(),
+                    "targets": targets,
+                })
             })
             .collect();
-        let code = if failed > 0 {
-            ExitCode::Failed
-        } else {
-            ExitCode::Success
-        };
         return Ok(print_json(&json!({ "applied": args.apply, "entries": entries }), code));
     }
 
-    for (entry, result) in mirrors.iter().zip(&results) {
-        let label = result.as_ref().map_or("failed", |outcome| outcome.label());
-        println!("{label:<13} {} -> {}", entry.source(), entry.target());
-        if let Err(e) = result {
-            eprintln!("  {e}");
+    for (entry, results) in mirrors.iter().zip(&results) {
+        for (target, result) in entry.targets().iter().zip(results) {
+            let label = result.as_ref().map_or("failed", |outcome| outcome.label());
+            println!("{label:<13} {} -> {}", entry.name(), target.describe());
+            if let Err(e) = result {
+                eprintln!("  {e}");
+            }
         }
     }
     println!("{}", mirror_summary(&results, args.apply));
 
-    Ok(if failed > 0 {
-        ExitCode::Failed
-    } else {
-        ExitCode::Success
-    })
+    Ok(code)
 }
 
-fn mirror_summary(results: &[Result<MirrorOutcome, MirrorError>], apply: bool) -> String {
-    let count = |wanted: MirrorOutcome| results.iter().filter(|r| matches!(r, Ok(o) if *o == wanted)).count();
-    let failed = results.iter().filter(|r| r.is_err()).count();
+type TargetResult<'a> = Result<MirrorOutcome, &'a MirrorError>;
+
+/// One result per target, so a source that could not be read reads as every
+/// one of its targets failing.
+fn target_results<'a>(entry: &Mirror, run: &'a Result<TargetOutcomes, MirrorError>) -> Vec<TargetResult<'a>> {
+    match run {
+        Ok(targets) => targets.iter().map(|r| r.as_ref().map(|o| *o)).collect(),
+        Err(e) => entry.targets().iter().map(|_| Err(e)).collect(),
+    }
+}
+
+fn select_mirrors(declared: Vec<Mirror>, names: &[String]) -> Result<Vec<Mirror>, String> {
+    if names.is_empty() {
+        return Ok(declared);
+    }
+    let known = || {
+        declared
+            .iter()
+            .map(|m| format!("`{}`", m.name()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for name in names {
+        if !declared.iter().any(|m| m.name().as_str() == name) {
+            return Err(format!("`{name}` is not a declared mirror; declared: {}", known()));
+        }
+    }
+    Ok(declared
+        .into_iter()
+        .filter(|m| names.iter().any(|n| n == m.name().as_str()))
+        .collect())
+}
+
+fn mirror_summary(results: &[Vec<TargetResult<'_>>], apply: bool) -> String {
+    let all: Vec<&TargetResult<'_>> = results.iter().flatten().collect();
+    let count = |wanted: MirrorOutcome| all.iter().filter(|r| matches!(r, Ok(o) if *o == wanted)).count();
+    let failed = all.iter().filter(|r| r.is_err()).count();
     let mut parts = vec![format!("{} up to date", count(MirrorOutcome::UpToDate))];
     if apply {
         parts.push(format!("{} created", count(MirrorOutcome::Created)));
@@ -330,9 +392,9 @@ fn mirror_summary(results: &[Result<MirrorOutcome, MirrorError>], apply: bool) -
         parts.push(format!("{} would update", count(MirrorOutcome::WouldUpdate)));
     }
     parts.push(format!("{failed} failed"));
-    let noun = if results.len() == 1 { "entry" } else { "entries" };
-    let mut line = format!("{} {noun}: {}", results.len(), parts.join(", "));
-    if !apply && results.iter().any(|r| matches!(r, Ok(o) if o.is_drift())) {
+    let noun = if all.len() == 1 { "target" } else { "targets" };
+    let mut line = format!("{} {noun}: {}", all.len(), parts.join(", "));
+    if !apply && all.iter().any(|r| matches!(r, Ok(o) if o.is_drift())) {
         line.push_str("; pass --apply to write");
     }
     line
@@ -734,28 +796,90 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_counts_what_each_entry_did_and_points_at_apply_only_when_it_would_help() {
+    fn a_mirror_can_be_picked_by_name() {
+        let Ok(SecretCommands::Mirror(args)) = parse(&["mirror", "a", "b", "--apply"]) else {
+            panic!("names should parse")
+        };
+        assert_eq!(args.names, ["a", "b"]);
+    }
+
+    fn declared() -> Vec<Mirror> {
+        let section: crate::secrets::SecretsSection = toml::from_str(
+            r#"
+            [backends.src]
+            kind = "keychain"
+
+            [backends.dst]
+            kind = "keychain"
+
+            [mirrors.zeta]
+            source = { backend = "src", path = "a", key = "k" }
+            targets = [{ backend = "dst", path = "z", key = "k" }]
+
+            [mirrors.alpha]
+            source = { backend = "src", path = "a", key = "k" }
+            targets = [{ backend = "dst", path = "al", key = "k" }]
+
+            [mirrors.mid]
+            source = { backend = "src", path = "a", key = "k" }
+            targets = [{ backend = "dst", path = "m", key = "k" }]
+            "#,
+        )
+        .expect("section");
+        section.resolve_mirrors().expect("mirrors")
+    }
+
+    fn names(mirrors: &[Mirror]) -> Vec<String> {
+        mirrors.iter().map(|m| m.name().to_string()).collect()
+    }
+
+    #[test]
+    fn no_names_selects_every_mirror_in_sorted_order() {
+        let picked = select_mirrors(declared(), &[]).unwrap();
+        assert_eq!(names(&picked), ["alpha", "mid", "zeta"]);
+    }
+
+    #[test]
+    fn a_subset_keeps_sorted_order_whatever_order_it_was_named_in() {
+        let picked = select_mirrors(declared(), &["zeta".to_string(), "alpha".to_string()]).unwrap();
+        assert_eq!(names(&picked), ["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn a_name_given_twice_runs_its_mirror_once() {
+        let picked = select_mirrors(declared(), &["mid".to_string(), "mid".to_string()]).unwrap();
+        assert_eq!(names(&picked), ["mid"]);
+    }
+
+    #[test]
+    fn an_unknown_name_is_an_error_that_lists_the_declared_names() {
+        let err = select_mirrors(declared(), &["alpha".to_string(), "ghost".to_string()]).unwrap_err();
+        assert!(err.contains("`ghost`"), "{err}");
+        assert!(err.contains("`alpha`, `mid`, `zeta`"), "{err}");
+    }
+
+    #[test]
+    fn the_summary_counts_what_each_target_did_and_points_at_apply_only_when_it_would_help() {
+        let broken = MirrorError::EmptySource;
         let results = vec![
-            Ok(MirrorOutcome::UpToDate),
-            Ok(MirrorOutcome::WouldCreate),
-            Ok(MirrorOutcome::WouldUpdate),
-            Err(MirrorError::EmptySource),
+            vec![Ok(MirrorOutcome::UpToDate), Ok(MirrorOutcome::WouldCreate)],
+            vec![Ok(MirrorOutcome::WouldUpdate), Err(&broken)],
         ];
         assert_eq!(
             mirror_summary(&results, false),
-            "4 entries: 1 up to date, 1 would create, 1 would update, 1 failed; pass --apply to write"
+            "4 targets: 1 up to date, 1 would create, 1 would update, 1 failed; pass --apply to write"
         );
 
-        let applied = vec![Ok(MirrorOutcome::Created), Ok(MirrorOutcome::Updated)];
+        let applied = vec![vec![Ok(MirrorOutcome::Created), Ok(MirrorOutcome::Updated)]];
         assert_eq!(
             mirror_summary(&applied, true),
-            "2 entries: 0 up to date, 1 created, 1 updated, 0 failed"
+            "2 targets: 0 up to date, 1 created, 1 updated, 0 failed"
         );
 
-        let settled = vec![Ok(MirrorOutcome::UpToDate)];
+        let settled = vec![vec![Ok(MirrorOutcome::UpToDate)]];
         assert_eq!(
             mirror_summary(&settled, false),
-            "1 entry: 1 up to date, 0 would create, 0 would update, 0 failed"
+            "1 target: 1 up to date, 0 would create, 0 would update, 0 failed"
         );
     }
 
