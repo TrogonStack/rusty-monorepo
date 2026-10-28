@@ -127,8 +127,10 @@ where
     // answer never has to consider a shape the group cannot hold.
     let mut at_path: BTreeMap<(&str, &SecretPath), Vec<(&SecretVar, &SecretKey)>> = BTreeMap::new();
     let mut in_item: BTreeMap<(&str, &OnePasswordItem), Vec<(&SecretVar, &OnePasswordReference)>> = BTreeMap::new();
+    let mut derived: Vec<(&str, &SecretVar, &OnePasswordReference)> = Vec::new();
     for var in wanted {
         match var.address() {
+            SecretAddress::OnePassword(r) if r.query().is_some() => derived.push((var.backend(), var, r.as_ref())),
             SecretAddress::Keychain(r) => at_path
                 .entry((var.backend(), r.path()))
                 .or_default()
@@ -216,6 +218,21 @@ where
         for (var, value) in selected {
             out.insert(var, value);
         }
+    }
+
+    for (backend_name, var, reference) in derived {
+        let span = round_trip_span(backend_name, 1);
+        let value = traced(span.clone(), async {
+            let backend = build(&resolve, &mut built, backend_name, var)?;
+            span.record(SECRETS_BACKEND_KIND, backend.kind());
+            backend
+                .read(reference)
+                .await
+                .map_err(|cause| read_error(var, cause))?
+                .ok_or_else(|| missing_entry(var))
+        })
+        .await?;
+        out.insert(var.clone(), value);
     }
 
     Ok(out)
@@ -434,6 +451,22 @@ mod tests {
             "a sectioned reference must not pick up the unsectioned field of the same name"
         );
         assert_eq!(fake.get_count(), 1, "two references into one item is one round trip");
+    }
+
+    #[tokio::test]
+    async fn a_derived_reference_is_read_by_itself_beside_the_plain_ones() {
+        let fake = seeded(&[("Ops/deploy", &[("TOKEN", "t"), ("private key", "k")])]).await;
+        let backend = Backend::Fake(fake.clone());
+
+        let wanted = vec![
+            op_var("op", "op://Ops/deploy/TOKEN"),
+            op_var("op", "op://Ops/deploy/private key?ssh-format=openssh"),
+        ];
+        let fetched = fetch_with(|_| Ok(backend.clone()), &wanted).await.unwrap();
+
+        assert_eq!(fetched.get(&wanted[0]).unwrap().expose_secret(), "t");
+        assert_eq!(fetched.get(&wanted[1]).unwrap().expose_secret(), "k");
+        assert_eq!(fake.get_count(), 2, "one item read and one derived read");
     }
 
     /// 1Password items are managed in 1Password, so there is no

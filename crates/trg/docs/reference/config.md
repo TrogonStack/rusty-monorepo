@@ -399,9 +399,24 @@ One read fetches the whole item, so several references into the same item
 cost one `op item get` between them, same as a single OpenBao or Keychain read
 yields every key stored at a path.
 
-The query parameters `op read` accepts, such as `?attribute=otp`, are rejected
-here: what they name is derived at read time rather than a field the item
-stores, and a var is a reference to a stored value.
+A reference may end in one query parameter that 1Password documents for
+`op read`:
+
+| Query                        | Value read                                                       |
+| ---------------------------- | ---------------------------------------------------------------- |
+| `?ssh-format=openssh`        | An SSH key's private key in OpenSSH format.                      |
+| `?attribute=<attribute>`     | An attribute of the field or file attachment instead of its value. `attr` is accepted as the same key. |
+
+`<attribute>` is one of `type`, `value`, `id`, `purpose`, `otp`, `content`,
+`size` or `name`. `otp` reads the current one-time password. Any other query,
+key or value, and more than one parameter, is rejected with the accepted forms
+named, because ignoring a query would hand back the stored value in place of
+what was asked for. A reference renders back exactly as written, so the
+`source` a mirror records is the reference from the config.
+
+A reference with a query is read with its own `op read`, since `op item get`
+lists stored fields and not derived ones. It therefore does not share a read
+with the other references into its item.
 
 ```toml
 [secrets.backends.personal]
@@ -849,7 +864,7 @@ trg exec run claude -- --resume
 | `` 1Password secret reference `...` must be `op://<vault>/<item>/<field>` or `op://<vault>/<item>/<section>/<field>` `` | The reference has too few or too many segments. |
 | `` 1Password secret reference `...` must not contain an empty segment `` | A `//` or a trailing `/` left a vault, item, section, or field name empty. |
 | `` 1Password secret reference `...` must not start with `-` in its <vault/item> `` | The vault or the item/title started with `-`, which `op` would read as a flag rather than a value to look up. Only the vault and item are checked this way; a section or field named `-foo` is unaffected. |
-| `` 1Password secret reference `...` carries `?<query>`, which is not supported by this backend `` | A query such as `?attribute=otp` names something derived at read time rather than a stored field. |
+| `` 1Password secret reference `...` carries `?<query>`, which is not a query `op read` documents; ... `` | The query is not `attribute=<attribute>`, `attr=<attribute>` or `ssh-format=openssh`, or a second parameter follows it. |
 | `` `<field>` in 1Password item `<item>` is ambiguous: ...; name a section, or address the field by its id, to pick one `` | More than one field matched that name: 1Password does not require labels to be unique within a section or across an item's sections. The message lists each match as `<section>/<field>` (or bare `<field>` when unsectioned), never a value. |
 | `` `[[secrets.mirrors]]` entry <n>: target backend `<name>` is of kind `<kind>`, which `trg` only reads from `` | A mirror's target names a `onepassword` backend. |
 | `` `[[secrets.mirrors]]` entry <n>: source and target are the same address `` | Both sides of a mirror address the same value. |

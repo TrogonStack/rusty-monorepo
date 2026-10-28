@@ -395,12 +395,19 @@ async fn read_key(backend: &Backend, path: &SecretPath, key: &SecretKey, name: &
     })
 }
 
-/// A 1Password read answers with the whole item, so the field is selected out
+/// A plain 1Password read answers with the whole item, so the field is selected out
 /// of that here rather than asked for by itself. Several references into one
 /// item therefore still cost one `op item get`, the same way several keys at
 /// one path cost one round trip.
 async fn read_field(backend: &Backend, reference: &OnePasswordReference, name: &str) -> Result<SecretString, String> {
     let item = reference.item();
+    if reference.query().is_some() {
+        return backend
+            .read(reference)
+            .await
+            .map_err(|e| format!("could not read `{reference}` from `{name}`: {e}"))?
+            .ok_or_else(|| format!("no item `{item}` in `{name}`"));
+    }
     let fields = backend
         .get_item(item)
         .await

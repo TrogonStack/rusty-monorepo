@@ -567,6 +567,21 @@ impl Backend {
         }
     }
 
+    /// Read one reference whose value `op` derives, which an item read does
+    /// not list. Kept apart from [`Self::get_item`] for the same reason: no
+    /// other backend answers it.
+    pub async fn read(&self, reference: &OnePasswordReference) -> Result<Option<SecretString>, SecretsError> {
+        match self {
+            Self::OnePassword(b) => b.read(reference).await,
+            #[cfg(test)]
+            Self::Fake(b) => b.read(reference).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "read",
+            }),
+        }
+    }
+
     /// Read the map of values at one path.
     ///
     /// 1Password is not addressed this way and has no arm here: an item is
@@ -750,6 +765,15 @@ pub mod fake {
                 .get(&path)
                 .await?
                 .map(|map| OnePasswordItemFields::from_secret_map(item, &map)))
+        }
+
+        /// Stand in for `op read`, answering the stored field whatever the
+        /// query asks for.
+        pub async fn read(&self, reference: &OnePasswordReference) -> Result<Option<SecretString>, SecretsError> {
+            let Some(fields) = self.get_item(reference.item()).await? else {
+                return Ok(None);
+            };
+            Ok(fields.get(reference)?.cloned())
         }
 
         pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {

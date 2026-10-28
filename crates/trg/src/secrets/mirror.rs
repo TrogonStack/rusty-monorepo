@@ -636,6 +636,34 @@ mod tests {
     }
 
     #[test]
+    fn a_source_reference_keeps_its_query() {
+        let text = r#"
+            [backends.op]
+            kind = "onepassword"
+            account = "my.1password.com"
+
+            [backends.dst]
+            kind = "openbao"
+            addr = "http://127.0.0.1:8200"
+            mount = "secret"
+            path_prefix = "trg"
+            owner = "me"
+            token = "t"
+
+            [[mirrors]]
+            source = { backend = "op", ref = "op://Engineering/deploy-key/private key?ssh-format=openssh" }
+            target = { backend = "dst", path = "exec/github", key = "token" }
+        "#;
+
+        let mirrors = section(text).resolve_mirrors().expect("mirrors");
+
+        assert_eq!(
+            mirrors[0].source_reference(),
+            "op://Engineering/deploy-key/private key?ssh-format=openssh"
+        );
+    }
+
+    #[test]
     fn an_unknown_field_in_an_entry_is_rejected() {
         let text = r#"
             [[mirrors]]

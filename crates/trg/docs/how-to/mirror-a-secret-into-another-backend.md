@@ -38,6 +38,17 @@ source = { backend = "personal", ref = "op://Engineering/deploy-key/token" }
 target = { backend = "homelab", path = "exec/github", key = "token" }
 ```
 
+An SSH private key is mirrored in OpenSSH format by ending the reference in
+`?ssh-format=openssh`, which 1Password's `op read` documents. The target
+receives the OpenSSH text, and the `source` key it records is the reference as
+written, query included:
+
+```toml trg-example=fragment
+[[secrets.mirrors]]
+source = { backend = "personal", ref = "op://Engineering/deploy-key/private key?ssh-format=openssh" }
+target = { backend = "homelab", path = "exec/deploy", key = "ssh_private_key" }
+```
+
 Declare as many `[[secrets.mirrors]]` entries as you have values. The file is
 checked as a whole when it loads, so a mirror that could never apply is
 reported with its entry number before anything is read or written.
