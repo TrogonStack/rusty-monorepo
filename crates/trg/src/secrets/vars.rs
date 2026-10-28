@@ -180,7 +180,9 @@ where
 
     for (read, primary) in read_primaries(&resolve, &mut built, wanted).await? {
         let value = if read.has_fallbacks() {
-            resolve_chain(&resolve, &mut built, read, primary).await?
+            let (value, answered_by) = resolve_chain(&resolve, &mut built, read, primary).await?;
+            out.record_answered_by(read.clone(), answered_by);
+            value
         } else {
             match primary {
                 Primary::Answered(value) => value,
@@ -390,7 +392,7 @@ async fn resolve_chain<F>(
     built: &mut HashMap<String, Backend>,
     read: &SecretRead,
     primary: Primary,
-) -> Result<SecretString, VarFetchError>
+) -> Result<(SecretString, String), VarFetchError>
 where
     F: Fn(&str) -> Result<Backend, BackendError>,
 {
@@ -406,7 +408,7 @@ where
             Primary::Answered(value) => {
                 span.record(SECRETS_ANSWERED_BY, read.primary().backend());
                 span.record(SECRETS_FALLBACK_USED, false);
-                return Ok(value);
+                return Ok((value, read.primary().backend().to_string()));
             }
             Primary::Declined(reason) => reason,
         };
@@ -422,7 +424,7 @@ where
                     span.record(SECRETS_ANSWERED_BY, fallback.backend());
                     span.record(SECRETS_FALLBACK_USED, true);
                     eprintln!("{}", fallback_notice(read, fallback, &attempts));
-                    return Ok(value);
+                    return Ok((value, fallback.backend().to_string()));
                 }
                 Err(e) if e.allows_fallback() => attempts.push(e.to_string()),
                 Err(e) => return Err(e),
@@ -950,6 +952,7 @@ mod tests {
         let fetched = fetch_chain(&stores, &read).await.unwrap();
 
         assert_eq!(fetched.get(&read).unwrap().expose_secret(), "from-bao");
+        assert_eq!(fetched.answered_by(&read), Some("bao"));
         assert_eq!(
             stores.op.get_count(),
             0,
@@ -966,6 +969,7 @@ mod tests {
         let fetched = fetch_chain(&stores, &read).await.unwrap();
 
         assert_eq!(fetched.get(&read).unwrap().expose_secret(), "from-op");
+        assert_eq!(fetched.answered_by(&read), Some("op"));
     }
 
     /// A reference with a query is derived by `op` rather than listed on the
@@ -984,6 +988,7 @@ mod tests {
         let fetched = fetch_chain(&stores, &read).await.unwrap();
 
         assert_eq!(fetched.get(&read).unwrap().expose_secret(), "key-material");
+        assert_eq!(fetched.answered_by(&read), Some("op"));
     }
 
     /// A field one item lacks may be on another, so a field miss on a derived

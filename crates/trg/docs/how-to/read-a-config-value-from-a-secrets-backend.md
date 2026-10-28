@@ -201,6 +201,9 @@ stdout still carries only the value:
 warning: backend `local` could not answer, so the value was read from backend `personal`
 ```
 
+With `--output-format json`, the document gains an `answered_by` field naming
+the backend that answered. It is present only when `--fallback` is given.
+
 This is for values you read. It does not apply to the credentials `trg mcp auth
 login` writes, and `trg secret put` takes a single address. See
 [Why secrets backends are addressed, not searched](../explanation/secrets-backends.md#a-read-can-name-its-own-fallbacks)

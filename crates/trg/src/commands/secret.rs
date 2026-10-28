@@ -260,7 +260,11 @@ async fn get_with_fallbacks(registry: &Registry, args: &GetArgs, raw: &RawSecret
     let value = fetched.get(&read).ok_or("the read answered nothing")?;
 
     if args.common.output_format.is_json() {
-        return Ok(print_json(&document(raw, value), ExitCode::Success));
+        let mut out = document(raw, value);
+        if let (Some(answered_by), Some(map)) = (fetched.answered_by(&read), out.as_object_mut()) {
+            map.insert("answered_by".to_string(), json!(answered_by));
+        }
+        return Ok(print_json(&out, ExitCode::Success));
     }
 
     write_value(value)?;

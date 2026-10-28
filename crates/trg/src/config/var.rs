@@ -523,7 +523,10 @@ impl fmt::Display for SecretVar {
 /// lookup. Fetching first, in one batch, keeps the number of round trips to
 /// one per distinct path no matter how many vars reference it.
 #[derive(Debug, Default)]
-pub struct FetchedSecrets(HashMap<SecretRead, SecretString>);
+pub struct FetchedSecrets {
+    values: HashMap<SecretRead, SecretString>,
+    answered_by: HashMap<SecretRead, String>,
+}
 
 impl FetchedSecrets {
     pub fn new() -> Self {
@@ -531,19 +534,29 @@ impl FetchedSecrets {
     }
 
     pub fn insert(&mut self, read: impl Into<SecretRead>, value: SecretString) {
-        self.0.insert(read.into(), value);
+        self.values.insert(read.into(), value);
     }
 
     pub fn get(&self, read: &SecretRead) -> Option<&SecretString> {
-        self.0.get(read)
+        self.values.get(read)
+    }
+
+    /// Noted only for a read that listed fallbacks, because for any other the
+    /// answer can only have come from its one address.
+    pub fn record_answered_by(&mut self, read: SecretRead, backend: String) {
+        self.answered_by.insert(read, backend);
+    }
+
+    pub fn answered_by(&self, read: &SecretRead) -> Option<&str> {
+        self.answered_by.get(read).map(String::as_str)
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.values.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.values.is_empty()
     }
 }
 
