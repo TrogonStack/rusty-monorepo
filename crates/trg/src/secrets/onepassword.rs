@@ -836,6 +836,18 @@ pub struct OnePasswordBackend {
     timeout: Duration,
 }
 
+/// What `op read` answered for one reference.
+///
+/// The two misses stay apart because the remedies differ: an item that is not
+/// there is created, while a field that is not on an item that is there is a
+/// typo in the reference.
+#[derive(Debug)]
+pub enum OpRead {
+    Value(SecretString),
+    MissingItem,
+    MissingField,
+}
+
 impl OnePasswordBackend {
     pub fn new(account: OpAccount) -> Self {
         Self {
@@ -911,7 +923,7 @@ impl OnePasswordBackend {
     ///
     /// One call per reference, because there is no item to share between
     /// them: each answer is computed by `op` for that reference alone.
-    pub async fn read(&self, reference: &OnePasswordReference) -> Result<Option<SecretString>, SecretsError> {
+    pub async fn read(&self, reference: &OnePasswordReference) -> Result<OpRead, SecretsError> {
         let out = self
             .run(
                 OpCommand::Read,
@@ -927,13 +939,16 @@ impl OnePasswordBackend {
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stderr = stderr.trim();
-            if stderr.contains("isn't an item in the") || stderr.contains("does not have a field") {
-                return Ok(None);
+            if stderr.contains("isn't an item in the") {
+                return Ok(OpRead::MissingItem);
+            }
+            if stderr.contains("does not have a field") {
+                return Ok(OpRead::MissingField);
             }
             return Err(self.failed(OpCommand::Read, stderr));
         }
 
-        Ok(Some(SecretString::from(
+        Ok(OpRead::Value(SecretString::from(
             String::from_utf8_lossy(&out.stdout).into_owned(),
         )))
     }
@@ -1780,8 +1795,10 @@ mod tests {
             .backend()
             .read(&reference("op://Ops/deploy-keys/private key?ssh-format=openssh"))
             .await
-            .expect("read")
-            .expect("some");
+            .expect("read");
+        let OpRead::Value(value) = value else {
+            panic!("a value expected: {value:?}")
+        };
 
         assert_eq!(value.expose_secret(), "-----BEGIN OPENSSH PRIVATE KEY-----");
         assert_eq!(
@@ -1800,42 +1817,45 @@ mod tests {
     #[tokio::test]
     async fn an_op_read_of_a_missing_item_is_a_miss_not_an_error() {
         let stub = StubOp::answering(1, "", NOT_AN_ITEM);
-        assert!(stub
-            .backend()
-            .read(&reference("op://Ops/missing/key?ssh-format=openssh"))
-            .await
-            .expect("read")
-            .is_none());
+        assert!(matches!(
+            stub.backend()
+                .read(&reference("op://Ops/missing/key?ssh-format=openssh"))
+                .await
+                .expect("read"),
+            OpRead::MissingItem
+        ));
     }
 
     #[tokio::test]
-    async fn an_op_read_of_a_missing_item_is_a_miss_with_the_message_op_gives() {
+    async fn an_op_read_of_a_missing_item_is_a_missing_item_with_the_message_op_gives() {
         let stub = StubOp::answering(
             1,
             "",
             "[ERROR] 2026/10/28 17:13:42 could not read secret 'op://Ops/missing/password': could not get item Ops/missing: \"missing\" isn't an item in the \"Ops\" vault. Specify the item with its UUID, name, or domain.",
         );
-        assert!(stub
-            .backend()
-            .read(&reference("op://Ops/missing/password"))
-            .await
-            .expect("read")
-            .is_none());
+        assert!(matches!(
+            stub.backend()
+                .read(&reference("op://Ops/missing/password"))
+                .await
+                .expect("read"),
+            OpRead::MissingItem
+        ));
     }
 
     #[tokio::test]
-    async fn an_op_read_of_a_missing_field_is_a_miss_with_the_message_op_gives() {
+    async fn an_op_read_of_a_missing_field_is_a_missing_field_with_the_message_op_gives() {
         let stub = StubOp::answering(
             1,
             "",
             "[ERROR] 2026/10/28 17:13:43 could not read secret 'op://Ops/deploy-keys/nope?ssh-format=openssh': item 'Ops/deploy-keys' does not have a field 'nope'",
         );
-        assert!(stub
-            .backend()
-            .read(&reference("op://Ops/deploy-keys/nope?ssh-format=openssh"))
-            .await
-            .expect("read")
-            .is_none());
+        assert!(matches!(
+            stub.backend()
+                .read(&reference("op://Ops/deploy-keys/nope?ssh-format=openssh"))
+                .await
+                .expect("read"),
+            OpRead::MissingField
+        ));
     }
 
     #[tokio::test]

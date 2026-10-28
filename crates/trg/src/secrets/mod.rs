@@ -32,8 +32,8 @@ pub use mirror::{
     MirrorTarget, TargetOutcomes,
 };
 pub use onepassword::{
-    OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpReferenceError,
-    OpReferencePart,
+    OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpRead,
+    OpReferenceError, OpReferencePart,
 };
 pub use openbao::{OpenBaoBackend, OpenbaoReference, TokenError};
 pub use vars::VarFetchError;
@@ -573,7 +573,7 @@ impl Backend {
     /// Read one reference whose value `op` derives, which an item read does
     /// not list. Kept apart from [`Self::get_item`] for the same reason: no
     /// other backend answers it.
-    pub async fn read(&self, reference: &OnePasswordReference) -> Result<Option<SecretString>, SecretsError> {
+    pub async fn read(&self, reference: &OnePasswordReference) -> Result<OpRead, SecretsError> {
         match self {
             Self::OnePassword(b) => b.read(reference).await,
             #[cfg(test)]
@@ -772,11 +772,14 @@ pub mod fake {
 
         /// Stand in for `op read`, answering the stored field whatever the
         /// query asks for.
-        pub async fn read(&self, reference: &OnePasswordReference) -> Result<Option<SecretString>, SecretsError> {
+        pub async fn read(&self, reference: &OnePasswordReference) -> Result<OpRead, SecretsError> {
             let Some(fields) = self.get_item(reference.item()).await? else {
-                return Ok(None);
+                return Ok(OpRead::MissingItem);
             };
-            Ok(fields.get(reference)?.cloned())
+            Ok(fields
+                .get(reference)?
+                .cloned()
+                .map_or(OpRead::MissingField, OpRead::Value))
         }
 
         pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {

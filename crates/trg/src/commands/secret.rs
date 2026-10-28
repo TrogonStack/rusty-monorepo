@@ -19,7 +19,7 @@ use crate::config::{RawSecretVar, SecretVar, VarSite};
 use crate::exit_code::ExitCode;
 use crate::output::{print_json, OutputFormat};
 use crate::secrets::mirror as secrets_mirror;
-use crate::secrets::onepassword::OnePasswordReference;
+use crate::secrets::onepassword::{OnePasswordReference, OpRead};
 use crate::secrets::telemetry::record_error;
 use crate::secrets::{Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
 use crate::secrets::{Mirror, MirrorError, MirrorOutcome, TargetOutcomes};
@@ -464,11 +464,15 @@ async fn read_key(backend: &Backend, path: &SecretPath, key: &SecretKey, name: &
 async fn read_field(backend: &Backend, reference: &OnePasswordReference, name: &str) -> Result<SecretString, String> {
     let item = reference.item();
     if reference.query().is_some() {
-        return backend
+        return match backend
             .read(reference)
             .await
             .map_err(|e| format!("could not read `{reference}` from `{name}`: {e}"))?
-            .ok_or_else(|| format!("no item `{item}` in `{name}`"));
+        {
+            OpRead::Value(value) => Ok(value),
+            OpRead::MissingItem => Err(format!("no item `{item}` in `{name}`")),
+            OpRead::MissingField => Err(format!("no field at `{reference}` on item `{item}` in `{name}`")),
+        };
     }
     let fields = backend
         .get_item(item)
@@ -672,6 +676,34 @@ mod tests {
         assert!(err.contains("token"), "{err}");
         assert!(!err.contains("super-secret"), "{err}");
         assert!(!err.contains("also-secret"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_query_reference_tells_a_missing_field_apart_from_a_missing_item() {
+        let backend = Backend::Fake(FakeBackend::new());
+        let mut map = SecretMap::new();
+        map.insert(key("TOKEN"), SecretString::from("super-secret".to_string()));
+        backend
+            .set(&SecretPath::parse("Ops/deploy-keys").expect("path"), &map)
+            .await
+            .expect("seed");
+        let var = |raw: &str| {
+            SecretVar::new(
+                "fake".to_string(),
+                SecretAddress::OnePassword(Box::new(OnePasswordReference::parse(raw).expect("reference"))),
+            )
+        };
+
+        let field = read(&backend, &var("op://Ops/deploy-keys/nope?ssh-format=openssh"))
+            .await
+            .expect_err("no field");
+        assert!(field.contains("no field at"), "{field}");
+        assert!(!field.contains("no item"), "{field}");
+
+        let item = read(&backend, &var("op://Ops/absent/TOKEN?ssh-format=openssh"))
+            .await
+            .expect_err("no item");
+        assert!(item.contains("no item `"), "{item}");
     }
 
     /// A 1Password item answers with every field at once, so a reference that
