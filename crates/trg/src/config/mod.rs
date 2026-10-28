@@ -33,7 +33,7 @@ pub use var::{
     VarResolveError, VarSite, VarSource, VarTemplate,
 };
 
-use crate::secrets::SecretsSection;
+use crate::secrets::{MirrorConfigError, SecretsSection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -75,6 +75,9 @@ pub enum ConfigError {
 
     #[error("{0}")]
     SecretVar(#[from] SecretVarError),
+
+    #[error("{0}")]
+    Mirror(#[from] MirrorConfigError),
 }
 
 impl ConfigError {
@@ -94,6 +97,7 @@ impl ConfigError {
             Self::NoExecEntries => "no_exec_entries",
             Self::UnknownExecEntry { .. } => "unknown_exec_entry",
             Self::SecretVar(_) => "secret_var",
+            Self::Mirror(_) => "mirror",
         }
     }
 }
@@ -388,7 +392,9 @@ pub fn load_secrets() -> Result<SecretsSection, ConfigError> {
 fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
     let root: FileRoot = toml::from_str(&text)?;
-    Ok(root.secrets.unwrap_or_default())
+    let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
+    Ok(secrets)
 }
 
 /// A config that exists but cannot be read is a different problem from one that
@@ -435,6 +441,7 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigErr
 
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
     let mut servers = root
         .mcp
         .and_then(|m| (!m.servers.is_empty()).then_some(m.servers))
@@ -462,6 +469,7 @@ fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
 
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
     let mut entries = root
         .exec
         .and_then(|e| (!e.is_empty()).then_some(e))
@@ -826,6 +834,35 @@ mod tests {
 
         let loaded = load_mcp_at(&path, "s1").unwrap();
         assert!(loaded.secrets.backends.is_empty());
+    }
+
+    #[test]
+    fn a_mirror_that_could_never_apply_is_a_config_error_for_every_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [secrets.backends.op]
+            kind = "onepassword"
+            account = "my.1password.com"
+
+            [[secrets.mirrors]]
+            source = { backend = "op", ref = "op://Engineering/deploy-key/token" }
+            target = { backend = "op", ref = "op://Engineering/other-key/token" }
+
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+            "#,
+        );
+
+        for err in [
+            load_mcp_at(&path, "s1").err().unwrap(),
+            load_secrets_at(&path).err().unwrap(),
+        ] {
+            assert!(matches!(err, ConfigError::Mirror(_)), "{err}");
+            assert!(err.to_string().contains("entry 1"), "{err}");
+        }
     }
 
     #[test]

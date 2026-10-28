@@ -22,6 +22,10 @@ with a clear `config file not found at <path>` error.
 [secrets.backends.<backend-name>]
 kind = "keychain"                  # or "openbao", "onepassword"
 
+[[secrets.mirrors]]
+source = { backend = "...", ref = "op://..." }      # or path and key
+target = { backend = "...", path = "...", key = "..." }
+
 [mcp.servers.<name>]
 url = "<value>"
 secrets = "<backend-name>"         # optional
@@ -509,6 +513,43 @@ scoped to one subtree is denied before OpenBao looks the mount up, so a refusal
 leaves the mount check reported as skipped rather than claiming a mount that was
 never reached.
 
+## `[[secrets.mirrors]]`
+
+Declares a value to copy from one backend into another with
+`trg secret mirror`. See
+[Mirror a secret into another backend](../how-to/mirror-a-secret-into-another-backend.md).
+
+| Field    | Type  | Required | Notes                                                       |
+| -------- | ----- | -------- | ----------------------------------------------------------- |
+| `source` | table | yes      | Addressed like a var: `backend` plus `ref`, or `path` and `key`, by the backend's kind. |
+| `target` | table | yes      | The same shape, in a backend of kind `keychain` or `openbao`. |
+
+Unknown fields are rejected. Entries are numbered from 1 in file order, and an
+error names the entry it is about.
+
+- The target's backend must be one `trg` can write to. A `onepassword` target
+  is rejected.
+- `source` and `target` must not be the same address, and no two entries may
+  share a target.
+- `source` is reserved as a target `key`. The mirror writes it next to the
+  value, holding the reference the value came from.
+- Both backends must be declared, and each side must be addressed in the
+  vocabulary of its backend's kind, exactly as for a var.
+
+These are checked whenever the config loads, not only by `trg secret mirror`.
+
+### `trg secret mirror`
+
+| Flag              | Notes                                                           |
+| ----------------- | --------------------------------------------------------------- |
+| `--apply`         | Write the targets. Without it nothing is written.               |
+| `--output-format` | `text` (default) or `json`. Neither carries a secret value.     |
+
+Each entry is compared by `<byte length>:<sha256>` of its value with one
+trailing newline removed, so a backend that adds one on write does not make an
+entry look drifted. An empty source value is refused. After a write the target
+is read back and must match. Exit status is nonzero if any entry failed.
+
 ## Validation
 
 - `url` must resolve to a non-empty, non-whitespace string.
@@ -810,6 +851,11 @@ trg exec run claude -- --resume
 | `` 1Password secret reference `...` must not start with `-` in its <vault/item> `` | The vault or the item/title started with `-`, which `op` would read as a flag rather than a value to look up. Only the vault and item are checked this way; a section or field named `-foo` is unaffected. |
 | `` 1Password secret reference `...` carries `?<query>`, which is not supported by this backend `` | A query such as `?attribute=otp` names something derived at read time rather than a stored field. |
 | `` `<field>` in 1Password item `<item>` is ambiguous: ...; name a section, or address the field by its id, to pick one `` | More than one field matched that name: 1Password does not require labels to be unique within a section or across an item's sections. The message lists each match as `<section>/<field>` (or bare `<field>` when unsectioned), never a value. |
+| `` `[[secrets.mirrors]]` entry <n>: target backend `<name>` is of kind `<kind>`, which `trg` only reads from `` | A mirror's target names a `onepassword` backend. |
+| `` `[[secrets.mirrors]]` entry <n>: source and target are the same address `` | Both sides of a mirror address the same value. |
+| `` `[[secrets.mirrors]]` entry <n>: target key `source` is reserved `` | A mirror's target key is `source`, which holds the reference the value came from. |
+| `` `[[secrets.mirrors]]` entry <n>: target ... is already the target of entry <m> `` | Two mirrors would write the same value. |
+| `` `[[secrets.mirrors]]` entry <n> <side> ... `` | A side of a mirror failed to resolve as a var does, such as naming an undeclared backend. |
 | `` `<field>` cannot come from a secrets backend `` | A `[secrets.backends.*]` `addr` or `token` used `{ backend = ... }`. |
 | `undefined variable <NAME> referenced; declare it in [mcp.servers.<name>.vars]` | `{ var = "..." }` references a name not present in `vars`. |
 | TOML parse errors                                 | Unknown fields, malformed TOML, or `{ env = "..." }` used directly in `url`/headers (must go through `vars`). |

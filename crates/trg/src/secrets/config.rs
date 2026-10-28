@@ -15,6 +15,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
+use super::mirror::{self, Mirror, MirrorConfig, MirrorConfigError};
 use super::onepassword::{OnePasswordBackend, OpAccount};
 use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
@@ -28,6 +29,8 @@ use crate::config::{FetchedSecrets, RawVarSource, VarResolveError};
 pub struct SecretsSection {
     #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
+    #[serde(default)]
+    pub mirrors: Vec<MirrorConfig>,
 }
 
 impl SecretsSection {
@@ -43,6 +46,15 @@ impl SecretsSection {
         let mut names: Vec<&str> = self.backends.keys().map(String::as_str).collect();
         names.sort_unstable();
         names
+    }
+
+    /// The declared mirrors, checked against the declared backends.
+    ///
+    /// Run at config load as well as by `trg secret mirror`, so a mirror that
+    /// could never apply is a config error wherever the file is read, not a
+    /// surprise the first time someone mirrors.
+    pub fn resolve_mirrors(&self) -> Result<Vec<Mirror>, MirrorConfigError> {
+        mirror::resolve_all(self)
     }
 }
 
@@ -163,13 +175,24 @@ pub enum BackendError {
 #[derive(Debug, Default, Clone)]
 pub struct Registry {
     declared: HashMap<String, BackendConfig>,
+    mirrors: Vec<MirrorConfig>,
 }
 
 impl Registry {
     pub fn new(section: SecretsSection) -> Self {
         Self {
             declared: section.backends,
+            mirrors: section.mirrors,
         }
+    }
+
+    /// The declared mirrors, checked against the declared backends.
+    pub fn mirrors(&self) -> Result<Vec<Mirror>, MirrorConfigError> {
+        SecretsSection {
+            backends: self.declared.clone(),
+            mirrors: self.mirrors.clone(),
+        }
+        .resolve_mirrors()
     }
 
     pub fn is_empty(&self) -> bool {

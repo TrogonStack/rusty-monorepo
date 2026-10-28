@@ -148,6 +148,10 @@ spans.
 `trg.secrets.backend.kind`, and `error.type`. `read stdin` when the value is
 read from standard input.
 
+`secret mirror` with `error.type`, and one `mirror secret` child span per
+declared mirror with `error.type`. The backend spans of each read and write
+nest under the entry's span.
+
 ### `trg doctor`
 
 `diagnose backend` per backend, with `trg.secrets.backend.name`,

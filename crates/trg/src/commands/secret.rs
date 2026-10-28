@@ -1,4 +1,4 @@
-//! `trg secret get` and `trg secret put`.
+//! `trg secret get`, `trg secret put` and `trg secret mirror`.
 //!
 //! A secret has an identity of its own rather than one borrowed from whichever
 //! MCP server happens to read it, so the arguments here are the inline table
@@ -18,9 +18,11 @@ use tracing::Instrument;
 use crate::config::{RawSecretVar, SecretVar, VarSite};
 use crate::exit_code::ExitCode;
 use crate::output::{print_json, OutputFormat};
+use crate::secrets::mirror as secrets_mirror;
 use crate::secrets::onepassword::OnePasswordReference;
 use crate::secrets::telemetry::record_error;
 use crate::secrets::{Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
+use crate::secrets::{MirrorError, MirrorOutcome};
 use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME};
 
 /// `error.type` for a failure this command only has as a message to print,
@@ -33,6 +35,8 @@ pub enum SecretCommands {
     Get(GetArgs),
     /// Write one value into a secrets backend, reading it from stdin
     Put(PutArgs),
+    /// Copy values from their source into the targets `[[secrets.mirrors]]` declares
+    Mirror(MirrorArgs),
 }
 
 /// What every subcommand needs whatever it addresses.
@@ -121,12 +125,27 @@ impl PutArgs {
     }
 }
 
+/// A mirror writes only when asked to, because the targets it overwrites are
+/// the ones other things already read from.
+#[derive(Args)]
+pub struct MirrorArgs {
+    /// Write the targets. Without it nothing is written and each entry
+    /// reports what it would do
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Output format. Neither carries a value, only what each entry did
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
+}
+
 impl SecretCommands {
     pub async fn handle(self, registry: &Registry) -> ExitCode {
         let span = self.span();
         let result = match self {
             SecretCommands::Get(args) => get(registry, &args).instrument(span.clone()).await,
             SecretCommands::Put(args) => put(registry, &args).instrument(span.clone()).await,
+            SecretCommands::Mirror(args) => mirror_all(registry, &args).instrument(span.clone()).await,
         };
 
         match result {
@@ -157,6 +176,9 @@ impl SecretCommands {
                 "error.type" = Empty,
                 "otel.status_code" = Empty,
             ),
+            SecretCommands::Mirror(_) => {
+                tracing::info_span!("secret mirror", "error.type" = Empty, "otel.status_code" = Empty)
+            }
         }
     }
 }
@@ -223,6 +245,97 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
     eprintln!("{verb} `{}` at `{}` in `{}`", args.key, args.path, args.common.backend);
     eprintln!("declare it with: {}", args.raw().declaration());
     Ok(ExitCode::Success)
+}
+
+/// Every declared mirror, in file order.
+///
+/// An entry that fails does not stop the ones after it: the entries are
+/// independent, so one unreachable target should not hide that the rest are
+/// already in sync or still drifted. The exit code still reports the failure.
+async fn mirror_all(registry: &Registry, args: &MirrorArgs) -> Result<ExitCode, String> {
+    let mirrors = registry.mirrors().map_err(|e| e.to_string())?;
+    if mirrors.is_empty() {
+        return Err("no `[[secrets.mirrors]]` entries are declared".to_string());
+    }
+
+    let resolve = |name: &str| registry.resolve(name);
+    let mut results = Vec::with_capacity(mirrors.len());
+    for entry in &mirrors {
+        let span = tracing::info_span!("mirror secret", "error.type" = Empty, "otel.status_code" = Empty);
+        let result = secrets_mirror::mirror(&resolve, entry, args.apply)
+            .instrument(span.clone())
+            .await;
+        if let Err(e) = &result {
+            record_error(&span, e.error_type());
+        }
+        results.push(result);
+    }
+
+    let failed = results.iter().filter(|r| r.is_err()).count();
+    if failed > 0 {
+        record_error(&tracing::Span::current(), "mirror_failed");
+    }
+
+    if args.output_format.is_json() {
+        let entries: Vec<Value> = mirrors
+            .iter()
+            .zip(&results)
+            .map(|(entry, result)| {
+                let mut out = serde_json::Map::new();
+                out.insert("source".to_string(), json!(entry.source().to_string()));
+                out.insert("target".to_string(), json!(entry.target().to_string()));
+                match result {
+                    Ok(outcome) => out.insert("status".to_string(), json!(outcome.label())),
+                    Err(e) => {
+                        out.insert("error".to_string(), json!(e.to_string()));
+                        out.insert("status".to_string(), json!("failed"))
+                    }
+                };
+                Value::Object(out)
+            })
+            .collect();
+        let code = if failed > 0 {
+            ExitCode::Failed
+        } else {
+            ExitCode::Success
+        };
+        return Ok(print_json(&json!({ "applied": args.apply, "entries": entries }), code));
+    }
+
+    for (entry, result) in mirrors.iter().zip(&results) {
+        let label = result.as_ref().map_or("failed", |outcome| outcome.label());
+        println!("{label:<13} {} -> {}", entry.source(), entry.target());
+        if let Err(e) = result {
+            eprintln!("  {e}");
+        }
+    }
+    println!("{}", mirror_summary(&results, args.apply));
+
+    Ok(if failed > 0 {
+        ExitCode::Failed
+    } else {
+        ExitCode::Success
+    })
+}
+
+fn mirror_summary(results: &[Result<MirrorOutcome, MirrorError>], apply: bool) -> String {
+    let count = |wanted: MirrorOutcome| results.iter().filter(|r| matches!(r, Ok(o) if *o == wanted)).count();
+    let failed = results.iter().filter(|r| r.is_err()).count();
+    let mut parts = vec![format!("{} up to date", count(MirrorOutcome::UpToDate))];
+    if apply {
+        parts.push(format!("{} created", count(MirrorOutcome::Created)));
+        parts.push(format!("{} updated", count(MirrorOutcome::Updated)));
+    } else {
+        parts.push(format!("{} would create", count(MirrorOutcome::WouldCreate)));
+        parts.push(format!("{} would update", count(MirrorOutcome::WouldUpdate)));
+    }
+    parts.push(format!("{failed} failed"));
+    let noun = if results.len() == 1 { "entry" } else { "entries" };
+    let mut line = format!("{} {noun}: {}", results.len(), parts.join(", "));
+    if !apply && results.iter().any(|r| matches!(r, Ok(o) if o.is_drift())) {
+        line.push_str("; pass --apply to write");
+    }
+    line
 }
 
 /// The declared kind of a backend that has already resolved.
@@ -598,6 +711,45 @@ mod tests {
     fn both_forms_parse_on_their_own() {
         assert!(parse(&["get", "--backend", "local", "--path", "mcp/demo", "--key", "token"]).is_ok());
         assert!(parse(&["get", "--backend", "op", "--ref", "op://Ops/deploy-keys/TOKEN"]).is_ok());
+    }
+
+    #[test]
+    fn a_mirror_is_a_dry_run_unless_it_is_told_to_apply() {
+        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror"]) else {
+            panic!("`mirror` should parse")
+        };
+        assert!(!dry.apply, "nothing is written by default");
+
+        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "--apply"]) else {
+            panic!("`mirror --apply` should parse")
+        };
+        assert!(applied.apply, "--apply is what writes");
+    }
+
+    #[test]
+    fn the_summary_counts_what_each_entry_did_and_points_at_apply_only_when_it_would_help() {
+        let results = vec![
+            Ok(MirrorOutcome::UpToDate),
+            Ok(MirrorOutcome::WouldCreate),
+            Ok(MirrorOutcome::WouldUpdate),
+            Err(MirrorError::EmptySource),
+        ];
+        assert_eq!(
+            mirror_summary(&results, false),
+            "4 entries: 1 up to date, 1 would create, 1 would update, 1 failed; pass --apply to write"
+        );
+
+        let applied = vec![Ok(MirrorOutcome::Created), Ok(MirrorOutcome::Updated)];
+        assert_eq!(
+            mirror_summary(&applied, true),
+            "2 entries: 0 up to date, 1 created, 1 updated, 0 failed"
+        );
+
+        let settled = vec![Ok(MirrorOutcome::UpToDate)];
+        assert_eq!(
+            mirror_summary(&settled, false),
+            "1 entry: 1 up to date, 0 would create, 0 would update, 0 failed"
+        );
     }
 
     #[test]

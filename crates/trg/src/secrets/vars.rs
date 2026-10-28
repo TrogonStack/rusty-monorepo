@@ -99,7 +99,7 @@ async fn traced<T>(
 
 /// The same, against any way of naming a backend, so the grouping can be held
 /// to its round-trip count without a reachable instance.
-async fn fetch_with<F>(resolve: F, wanted: &[SecretVar]) -> Result<FetchedSecrets, VarFetchError>
+pub(super) async fn fetch_with<F>(resolve: F, wanted: &[SecretVar]) -> Result<FetchedSecrets, VarFetchError>
 where
     F: Fn(&str) -> Result<Backend, BackendError>,
 {

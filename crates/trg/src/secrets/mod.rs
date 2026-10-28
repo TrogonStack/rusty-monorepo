@@ -13,6 +13,7 @@ pub mod address;
 pub mod config;
 pub mod keychain;
 pub mod kv_v2;
+pub mod mirror;
 pub mod onepassword;
 pub mod openbao;
 pub(crate) mod telemetry;
@@ -26,6 +27,7 @@ use secrecy::{ExposeSecret, SecretString};
 pub use address::SecretAddress;
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::{KeychainBackend, KeychainReference};
+pub use mirror::{Fingerprint, Mirror, MirrorConfig, MirrorConfigError, MirrorError, MirrorOutcome};
 pub use onepassword::{
     OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpReferenceError,
     OpReferencePart,
@@ -675,6 +677,7 @@ pub mod fake {
         /// "the other path errored" from "the other path just isn't there".
         get_failure_at: Arc<Mutex<HashMap<SecretPath, FakeFailure>>>,
         set_failure: Arc<Mutex<bool>>,
+        discard_writes: Arc<Mutex<bool>>,
         gets: Arc<Mutex<usize>>,
     }
 
@@ -718,6 +721,12 @@ pub mod fake {
             *self.set_failure.lock().expect("fake backend lock") = fail;
         }
 
+        /// Acknowledge every subsequent `set` without keeping it, for
+        /// exercising a caller that must not trust an acknowledgement.
+        pub fn set_discard_writes(&self, discard: bool) {
+            *self.discard_writes.lock().expect("fake backend lock") = discard;
+        }
+
         pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
             *self.gets.lock().expect("fake backend lock") += 1;
             if let Some(failure) = self.get_failure_at.lock().expect("fake backend lock").get(path) {
@@ -746,6 +755,9 @@ pub mod fake {
         pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {
             if *self.set_failure.lock().expect("fake backend lock") {
                 return Err(SecretsError::Transport("injected".to_string()));
+            }
+            if *self.discard_writes.lock().expect("fake backend lock") {
+                return Ok(());
             }
             self.entries
                 .lock()

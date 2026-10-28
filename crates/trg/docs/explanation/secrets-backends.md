@@ -76,6 +76,22 @@ inventing a vocabulary native to no backend, and would make a config's address
 something you cannot look up in the documentation of the product the secret
 lives in.
 
+## A mirror is a declaration, not a copy
+
+A value that lives in one backend and is needed in another could be copied with
+`trg secret put` in a pipeline. That works once, and the pipeline is then the
+only record that the two are meant to agree.
+
+A `[[secrets.mirrors]]` entry keeps the pair in the config instead, so running
+`trg secret mirror` again converges on the same state. It is one-way on
+purpose: the source is the source of truth, and nothing is ever read back from
+the target as an input. That is also why a mirror cannot target a `onepassword`
+backend, which `trg` does not write to.
+
+Agreement is judged by a fingerprint of each value, so the comparison never
+prints or logs either one, and it runs against the whole config at load time so
+a mirror that could never apply is refused while the file is in view.
+
 ## Each backend owns its own path layout
 
 | Backend    | Where one server's credentials live                       |
@@ -177,3 +193,4 @@ command.
 - [Config reference: `[secrets.backends.<name>]`](../reference/config.md#secretsbackendsname)
 - [Store MCP OAuth credentials in OpenBao](../how-to/use-openbao-as-a-secrets-backend.md)
 - [Read a config value from a secrets backend](../how-to/read-a-config-value-from-a-secrets-backend.md)
+- [Mirror a secret into another backend](../how-to/mirror-a-secret-into-another-backend.md)
