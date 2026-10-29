@@ -146,21 +146,46 @@ impl PutArgs {
 }
 
 /// A mirror writes only when asked to, because the targets it overwrites are
-/// the ones other things already read from.
+/// the ones other things already read from. Without `apply` nothing is written
+/// and each target reports what it would do.
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct MirrorArgs {
+    #[command(subcommand)]
+    pub action: Option<MirrorAction>,
+
+    #[command(flatten)]
+    pub selection: MirrorSelection,
+}
+
+#[derive(Subcommand)]
+pub enum MirrorAction {
+    /// Write the targets
+    Apply(MirrorSelection),
+}
+
+#[derive(Args)]
+pub struct MirrorSelection {
     /// Mirrors to run, by the name they are declared under. All of them when
     /// none is given
     pub names: Vec<String>,
 
-    /// Write the targets. Without it nothing is written and each target
-    /// reports what it would do
-    #[arg(long)]
-    pub apply: bool,
-
     /// Output format. Neither carries a value, only what each target did
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
+}
+
+impl MirrorArgs {
+    fn apply(&self) -> bool {
+        matches!(self.action, Some(MirrorAction::Apply(_)))
+    }
+
+    fn selection(&self) -> &MirrorSelection {
+        match &self.action {
+            Some(MirrorAction::Apply(selection)) => selection,
+            None => &self.selection,
+        }
+    }
 }
 
 impl SecretCommands {
@@ -319,7 +344,9 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
 /// fails does not stop the others of its mirror: they are independent, so one
 /// unreachable backend should not hide that the rest are already in sync or
 /// still drifted. The exit code still reports the failure.
-async fn mirror_all(registry: &Registry, args: &MirrorArgs) -> Result<ExitCode, String> {
+async fn mirror_all(registry: &Registry, mirror_args: &MirrorArgs) -> Result<ExitCode, String> {
+    let apply = mirror_args.apply();
+    let args = mirror_args.selection();
     let declared = registry.mirrors().map_err(|e| e.to_string())?;
     if declared.is_empty() {
         return Err("no `[secrets.mirrors.<name>]` tables are declared".to_string());
@@ -335,7 +362,7 @@ async fn mirror_all(registry: &Registry, args: &MirrorArgs) -> Result<ExitCode, 
             "error.type" = Empty,
             "otel.status_code" = Empty,
         );
-        let run = secrets_mirror::mirror(&resolve, entry, args.apply)
+        let run = secrets_mirror::mirror(&resolve, entry, apply)
             .instrument(span.clone())
             .await;
         match &run {
@@ -390,7 +417,7 @@ async fn mirror_all(registry: &Registry, args: &MirrorArgs) -> Result<ExitCode, 
                 })
             })
             .collect();
-        return Ok(print_json(&json!({ "applied": args.apply, "entries": entries }), code));
+        return Ok(print_json(&json!({ "applied": apply, "entries": entries }), code));
     }
 
     for (entry, results) in mirrors.iter().zip(&results) {
@@ -402,7 +429,7 @@ async fn mirror_all(registry: &Registry, args: &MirrorArgs) -> Result<ExitCode, 
             }
         }
     }
-    println!("{}", mirror_summary(&results, args.apply));
+    println!("{}", mirror_summary(&results, apply));
 
     Ok(code)
 }
@@ -456,7 +483,7 @@ fn mirror_summary(results: &[Vec<TargetResult<'_>>], apply: bool) -> String {
     let noun = if all.len() == 1 { "target" } else { "targets" };
     let mut line = format!("{} {noun}: {}", all.len(), parts.join(", "));
     if !apply && all.iter().any(|r| matches!(r, Ok(o) if o.is_drift())) {
-        line.push_str("; pass --apply to write");
+        line.push_str("; run `trg secret mirror apply` to write");
     }
     line
 }
@@ -928,20 +955,32 @@ mod tests {
         let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror"]) else {
             panic!("`mirror` should parse")
         };
-        assert!(!dry.apply, "nothing is written by default");
+        assert!(!dry.apply(), "nothing is written by default");
 
-        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "--apply"]) else {
-            panic!("`mirror --apply` should parse")
+        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "apply"]) else {
+            panic!("`mirror apply` should parse")
         };
-        assert!(applied.apply, "--apply is what writes");
+        assert!(applied.apply(), "apply is what writes");
+    }
+
+    #[test]
+    fn the_apply_flag_is_not_accepted() {
+        assert!(parse(&["mirror", "--apply"]).is_err());
     }
 
     #[test]
     fn a_mirror_can_be_picked_by_name() {
-        let Ok(SecretCommands::Mirror(args)) = parse(&["mirror", "a", "b", "--apply"]) else {
+        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror", "a", "b"]) else {
             panic!("names should parse")
         };
-        assert_eq!(args.names, ["a", "b"]);
+        assert!(!dry.apply());
+        assert_eq!(dry.selection().names, ["a", "b"]);
+
+        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "apply", "a", "b"]) else {
+            panic!("names should parse after apply")
+        };
+        assert!(applied.apply());
+        assert_eq!(applied.selection().names, ["a", "b"]);
     }
 
     fn declared() -> Vec<Mirror> {
@@ -1008,7 +1047,7 @@ mod tests {
         ];
         assert_eq!(
             mirror_summary(&results, false),
-            "4 targets: 1 up to date, 1 would create, 1 would update, 1 failed; pass --apply to write"
+            "4 targets: 1 up to date, 1 would create, 1 would update, 1 failed; run `trg secret mirror apply` to write"
         );
 
         let applied = vec![vec![Ok(MirrorOutcome::Created), Ok(MirrorOutcome::Updated)]];
