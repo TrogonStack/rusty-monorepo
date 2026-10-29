@@ -244,7 +244,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
         vec!["verify"],
         vec!["grade", "--report-dir"],
         vec!["benchmark", "--report-dir"],
-        vec!["iteration-summary"],
+        vec!["iteration-summary", "--report-dir"],
         vec!["compare"],
         vec!["next-iteration"],
         vec!["html-report"],
@@ -489,7 +489,7 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
 
     let ungated = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
         .arg("--previous")
         .arg(&previous_dir)
@@ -503,7 +503,7 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     );
 
     let gated = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
         .arg("--previous")
         .arg(&previous_dir)
@@ -518,7 +518,7 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     );
 
     let gated_on_the_other_condition = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
         .arg("--previous")
         .arg(&previous_dir)
@@ -567,7 +567,7 @@ fn fail_on_cost_and_latency_regressions_gates_a_change_that_holds_its_pass_rate(
 
     let summarize = |extra: &[&str]| {
         trg()
-            .args(["ai", "skills", "eval", "iteration-summary"])
+            .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
             .arg(&current_dir)
             .arg("--previous")
             .arg(&previous_dir)
@@ -646,7 +646,7 @@ fn an_increase_that_may_pass_the_allowance_is_named_without_gating() {
 
     let summarize = |extra: &[&str]| {
         trg()
-            .args(["ai", "skills", "eval", "iteration-summary"])
+            .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
             .arg(&current_dir)
             .arg("--previous")
             .arg(&previous_dir)
@@ -683,7 +683,7 @@ fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
 
     let named_but_unreadable = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
         .arg("--previous")
         .arg(&missing_previous)
@@ -698,7 +698,7 @@ fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     );
 
     let none_named = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
         .output()
         .unwrap();
@@ -727,7 +727,7 @@ fn withhold_test_detail_removes_the_held_out_case_id_from_the_json_output() {
     write_iteration_report(&report_dir, 1, "report-iter-1", &runs);
 
     let leaky = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -740,7 +740,7 @@ fn withhold_test_detail_removes_the_held_out_case_id_from_the_json_output() {
     );
 
     let withheld = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .arg("--withhold-test-detail")
@@ -836,7 +836,7 @@ fn benchmark_and_iteration_summary_warn_when_the_with_skill_arm_has_no_headroom_
     );
 
     let summary_text = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&report_dir)
         .output()
         .unwrap();

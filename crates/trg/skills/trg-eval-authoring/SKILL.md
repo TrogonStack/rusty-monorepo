@@ -265,7 +265,7 @@ acceptance bar:
 Per-assertion detail, including how many attempts each rate was drawn from:
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/20260914T120000Z-abcd1234
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260914T120000Z-abcd1234
 ```
 
 Its `helped_by_skill` records carry `with_skill_pass_rate`,
@@ -282,7 +282,7 @@ let it auto-detect, and read `keep_or_revert` instead of the two intervals by
 eye:
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/20260914T130000Z-efgh5678 \
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260914T130000Z-efgh5678 \
     --previous ./artifacts/my-skill/20260914T120000Z-abcd1234
 ```
 

@@ -81,7 +81,7 @@ a reason to run it twice.
 ## Step 4: read the train split, and only the train split, while you are still deciding
 
 ```shell
-trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
   --withhold-test-detail
 ```
 
@@ -122,7 +122,7 @@ Continuing to tune the skill against a saturated test split only produces
 ## Step 6: get the verdict
 
 ```shell
-trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
   --withhold-test-detail
 ```
 
