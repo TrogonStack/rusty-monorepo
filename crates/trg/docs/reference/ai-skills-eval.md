@@ -305,7 +305,7 @@ trg ai skills eval benchmark --report-dir <REPORT_DIR> [OPTIONS]
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
-| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
+| `--previous-report-dir` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket` (report failed runs as a separate bucket, apart from completed runs), `exclude` (drop failed and timed-out runs from aggregation), `zero` (fold them into the completed bucket, scored as zero) |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
 | `--output-format` | enum | `text` | `text` prints the report directory path; `json` prints the `benchmark.json` document on stdout |
