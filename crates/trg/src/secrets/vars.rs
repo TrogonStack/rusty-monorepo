@@ -18,7 +18,7 @@ use tracing::Instrument;
 use crate::config::{FetchedSecrets, SecretVar};
 use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME, SECRETS_VAR_COUNT};
 
-use super::onepassword::{OnePasswordItem, OnePasswordReference};
+use super::onepassword::{OnePasswordItem, OnePasswordReference, OpRead};
 use super::{Backend, BackendError, Registry, SecretAddress, SecretKey, SecretPath, SecretsError};
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +49,12 @@ pub enum VarFetchError {
     #[error("var {var} found no such item; create it in 1Password first")]
     MissingItem { var: SecretVar },
 
+    /// A query reference is answered by `op read` alone, which names no
+    /// fields the item does hold, so unlike [`VarFetchError::MissingKey`] there
+    /// is nothing to list.
+    #[error("var {var} found no such field on that item; check the field name in its reference")]
+    MissingField { var: SecretVar },
+
     #[error("var {var} found no such key there (that entry holds: {present})")]
     MissingKey { var: SecretVar, present: String },
 }
@@ -62,6 +68,7 @@ impl VarFetchError {
             Self::MissingPath { .. } => "missing_path",
             Self::MissingItem { .. } => "missing_item",
             Self::MissingKey { .. } => "missing_key",
+            Self::MissingField { .. } => "missing_field",
         }
     }
 }
@@ -99,7 +106,7 @@ async fn traced<T>(
 
 /// The same, against any way of naming a backend, so the grouping can be held
 /// to its round-trip count without a reachable instance.
-async fn fetch_with<F>(resolve: F, wanted: &[SecretVar]) -> Result<FetchedSecrets, VarFetchError>
+pub(super) async fn fetch_with<F>(resolve: F, wanted: &[SecretVar]) -> Result<FetchedSecrets, VarFetchError>
 where
     F: Fn(&str) -> Result<Backend, BackendError>,
 {
@@ -127,8 +134,10 @@ where
     // answer never has to consider a shape the group cannot hold.
     let mut at_path: BTreeMap<(&str, &SecretPath), Vec<(&SecretVar, &SecretKey)>> = BTreeMap::new();
     let mut in_item: BTreeMap<(&str, &OnePasswordItem), Vec<(&SecretVar, &OnePasswordReference)>> = BTreeMap::new();
+    let mut derived: Vec<(&str, &SecretVar, &OnePasswordReference)> = Vec::new();
     for var in wanted {
         match var.address() {
+            SecretAddress::OnePassword(r) if r.query().is_some() => derived.push((var.backend(), var, r.as_ref())),
             SecretAddress::Keychain(r) => at_path
                 .entry((var.backend(), r.path()))
                 .or_default()
@@ -216,6 +225,21 @@ where
         for (var, value) in selected {
             out.insert(var, value);
         }
+    }
+
+    for (backend_name, var, reference) in derived {
+        let span = round_trip_span(backend_name, 1);
+        let value = traced(span.clone(), async {
+            let backend = build(&resolve, &mut built, backend_name, var)?;
+            span.record(SECRETS_BACKEND_KIND, backend.kind());
+            match backend.read(reference).await.map_err(|cause| read_error(var, cause))? {
+                OpRead::Value(value) => Ok(value),
+                OpRead::MissingItem => Err(missing_entry(var)),
+                OpRead::MissingField => Err(VarFetchError::MissingField { var: var.clone() }),
+            }
+        })
+        .await?;
+        out.insert(var.clone(), value);
     }
 
     Ok(out)
@@ -436,6 +460,22 @@ mod tests {
         assert_eq!(fake.get_count(), 1, "two references into one item is one round trip");
     }
 
+    #[tokio::test]
+    async fn a_derived_reference_is_read_by_itself_beside_the_plain_ones() {
+        let fake = seeded(&[("Ops/deploy", &[("TOKEN", "t"), ("private key", "k")])]).await;
+        let backend = Backend::Fake(fake.clone());
+
+        let wanted = vec![
+            op_var("op", "op://Ops/deploy/TOKEN"),
+            op_var("op", "op://Ops/deploy/private key?ssh-format=openssh"),
+        ];
+        let fetched = fetch_with(|_| Ok(backend.clone()), &wanted).await.unwrap();
+
+        assert_eq!(fetched.get(&wanted[0]).unwrap().expose_secret(), "t");
+        assert_eq!(fetched.get(&wanted[1]).unwrap().expose_secret(), "k");
+        assert_eq!(fake.get_count(), 2, "one item read and one derived read");
+    }
+
     /// 1Password items are managed in 1Password, so there is no
     /// `trg secret put` to offer and the error must not invent one.
     #[tokio::test]
@@ -608,5 +648,34 @@ mod tests {
                 Some("missing_key")
             );
         }
+    }
+
+    /// A mistyped field on an item that exists must not be reported as an item
+    /// to create.
+    #[tokio::test]
+    async fn a_missing_field_on_a_derived_read_is_not_reported_as_a_missing_item() {
+        let fake = seeded(&[("Ops/deploy", &[("TOKEN", "t")])]).await;
+        let backend = Backend::Fake(fake);
+        let wanted = vec![op_var("op", "op://Ops/deploy/nope?ssh-format=openssh")];
+
+        let err = fetch_with(|_| Ok(backend.clone()), &wanted).await.unwrap_err();
+
+        assert!(matches!(err, VarFetchError::MissingField { .. }), "{err}");
+        assert_eq!(err.error_type(), "missing_field");
+        let msg = err.to_string();
+        assert!(msg.contains("no such field"), "{msg}");
+        assert!(!msg.contains("create it"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_missing_item_on_a_derived_read_keeps_the_create_it_message() {
+        let fake = seeded(&[]).await;
+        let backend = Backend::Fake(fake);
+        let wanted = vec![op_var("op", "op://Ops/deploy/key?ssh-format=openssh")];
+
+        let err = fetch_with(|_| Ok(backend.clone()), &wanted).await.unwrap_err();
+
+        assert!(matches!(err, VarFetchError::MissingItem { .. }), "{err}");
+        assert!(err.to_string().contains("create it in 1Password first"), "{err}");
     }
 }

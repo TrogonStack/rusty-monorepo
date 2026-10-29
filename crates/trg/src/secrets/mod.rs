@@ -13,6 +13,7 @@ pub mod address;
 pub mod config;
 pub mod keychain;
 pub mod kv_v2;
+pub mod mirror;
 pub mod onepassword;
 pub mod openbao;
 pub(crate) mod telemetry;
@@ -26,9 +27,13 @@ use secrecy::{ExposeSecret, SecretString};
 pub use address::SecretAddress;
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use keychain::{KeychainBackend, KeychainReference};
+pub use mirror::{
+    Fingerprint, Mirror, MirrorConfig, MirrorConfigError, MirrorError, MirrorName, MirrorNameError, MirrorOutcome,
+    MirrorTarget, TargetOutcomes,
+};
 pub use onepassword::{
-    OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpReferenceError,
-    OpReferencePart,
+    OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpRead,
+    OpReferenceError, OpReferencePart,
 };
 pub use openbao::{OpenBaoBackend, OpenbaoReference, TokenError};
 pub use vars::VarFetchError;
@@ -565,6 +570,21 @@ impl Backend {
         }
     }
 
+    /// Read one reference whose value `op` derives, which an item read does
+    /// not list. Kept apart from [`Self::get_item`] for the same reason: no
+    /// other backend answers it.
+    pub async fn read(&self, reference: &OnePasswordReference) -> Result<OpRead, SecretsError> {
+        match self {
+            Self::OnePassword(b) => b.read(reference).await,
+            #[cfg(test)]
+            Self::Fake(b) => b.read(reference).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "read",
+            }),
+        }
+    }
+
     /// Read the map of values at one path.
     ///
     /// 1Password is not addressed this way and has no arm here: an item is
@@ -675,6 +695,7 @@ pub mod fake {
         /// "the other path errored" from "the other path just isn't there".
         get_failure_at: Arc<Mutex<HashMap<SecretPath, FakeFailure>>>,
         set_failure: Arc<Mutex<bool>>,
+        discard_writes: Arc<Mutex<bool>>,
         gets: Arc<Mutex<usize>>,
     }
 
@@ -718,6 +739,12 @@ pub mod fake {
             *self.set_failure.lock().expect("fake backend lock") = fail;
         }
 
+        /// Acknowledge every subsequent `set` without keeping it, for
+        /// exercising a caller that must not trust an acknowledgement.
+        pub fn set_discard_writes(&self, discard: bool) {
+            *self.discard_writes.lock().expect("fake backend lock") = discard;
+        }
+
         pub async fn get(&self, path: &SecretPath) -> Result<Option<SecretMap>, SecretsError> {
             *self.gets.lock().expect("fake backend lock") += 1;
             if let Some(failure) = self.get_failure_at.lock().expect("fake backend lock").get(path) {
@@ -743,9 +770,24 @@ pub mod fake {
                 .map(|map| OnePasswordItemFields::from_secret_map(item, &map)))
         }
 
+        /// Stand in for `op read`, answering the stored field whatever the
+        /// query asks for.
+        pub async fn read(&self, reference: &OnePasswordReference) -> Result<OpRead, SecretsError> {
+            let Some(fields) = self.get_item(reference.item()).await? else {
+                return Ok(OpRead::MissingItem);
+            };
+            Ok(fields
+                .get(reference)?
+                .cloned()
+                .map_or(OpRead::MissingField, OpRead::Value))
+        }
+
         pub async fn set(&self, path: &SecretPath, map: &SecretMap) -> Result<(), SecretsError> {
             if *self.set_failure.lock().expect("fake backend lock") {
                 return Err(SecretsError::Transport("injected".to_string()));
+            }
+            if *self.discard_writes.lock().expect("fake backend lock") {
+                return Ok(());
             }
             self.entries
                 .lock()

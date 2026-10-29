@@ -115,6 +115,14 @@ impl VarSite {
         }
     }
 
+    /// One side of a `[secrets.mirrors.<name>]` table.
+    pub fn mirror(name: &str, side: &str) -> Self {
+        Self::Table {
+            table: format!("[secrets.mirrors.{name}]"),
+            name: side.to_string(),
+        }
+    }
+
     fn path_key(&self) -> &'static str {
         match self {
             Self::Table { .. } => "`path`/`key`",

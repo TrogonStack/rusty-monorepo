@@ -12,6 +12,7 @@
 - [Add an OAuth-protected MCP server](how-to/add-oauth-protected-mcp-server.md)
 - [Store MCP OAuth credentials in OpenBao](how-to/use-openbao-as-a-secrets-backend.md)
 - [Read a config value from a secrets backend](how-to/read-a-config-value-from-a-secrets-backend.md)
+- [Mirror a secret into another backend](how-to/mirror-a-secret-into-another-backend.md)
 - [Launch a coding agent with `trg exec`](how-to/launch-a-coding-agent-with-trg-exec.md)
 - [Run an eval in CI](how-to/run-in-ci.md)
 - [Run the current skill only](how-to/run-current-skill-only.md)
