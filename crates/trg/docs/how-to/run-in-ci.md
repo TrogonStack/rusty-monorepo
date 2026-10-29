@@ -214,7 +214,7 @@ hillclimb round on whether the change generalized rather than reading the interv
 ```yaml
 - name: Gate on the previous iteration
   run: |
-    trg ai skills eval iteration-summary "$REPORT_DIR" \
+    trg ai skills eval iteration-summary --report-dir "$REPORT_DIR" \
       --previous "$PREVIOUS_REPORT_DIR" \
       --fail-on revert,overfitting
 ```

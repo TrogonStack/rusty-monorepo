@@ -74,7 +74,7 @@ same iteration number and break that auto-detection on the next round.
 ## 4. Read the train split while you decide
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
     --withhold-test-detail
 ```
 
@@ -101,7 +101,7 @@ and [Reference: headroom warning](../reference/ai-skills-eval.md#headroom-warnin
 ## 6. Get the verdict
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
     --withhold-test-detail
 ```
 

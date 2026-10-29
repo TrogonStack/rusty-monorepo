@@ -364,19 +364,14 @@ Summarize assertion stability, skill impact, flakiness, and metric outliers for
 a report bundle, writing `iteration-summary.json`.
 
 ```text
-trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
+trg ai skills eval iteration-summary --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
 | `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
@@ -539,11 +534,11 @@ noise and that exceeds the tolerance.
 ### Example
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-$ trg ai skills eval iteration-summary ./report --previous ./prior-report --fail-on revert,overfitting
+$ trg ai skills eval iteration-summary --report-dir ./report --previous ./prior-report --fail-on revert,overfitting
 
-$ trg ai skills eval iteration-summary ./report --previous ./prior-report \
+$ trg ai skills eval iteration-summary --report-dir ./report --previous ./prior-report \
     --max-duration-increase 0.25 --fail-on cost_regression,latency_regression
 ```
 

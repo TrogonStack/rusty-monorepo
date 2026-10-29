@@ -71,18 +71,18 @@ impl FailOn {
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval iteration-summary ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval iteration-summary ./report --previous ./artifacts/my-skill/prior-report
+  $ trg ai skills eval iteration-summary --report-dir ./report --previous ./artifacts/my-skill/prior-report
 
-  $ trg ai skills eval iteration-summary ./report --output-format json --failed-runs exclude
+  $ trg ai skills eval iteration-summary --report-dir ./report --output-format json --failed-runs exclude
 
-  $ trg ai skills eval iteration-summary ./report --fail-on revert,overfitting
+  $ trg ai skills eval iteration-summary --report-dir ./report --fail-on revert,overfitting
 
-  $ trg ai skills eval iteration-summary ./report --fail-on revert,cost_regression --max-cost-increase 0.1
+  $ trg ai skills eval iteration-summary --report-dir ./report --fail-on revert,cost_regression --max-cost-increase 0.1
 ")]
 pub struct IterationSummaryArgs {
-    #[arg(help = "Path to the report directory containing report.json")]
+    #[arg(long, help = "Path to the report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

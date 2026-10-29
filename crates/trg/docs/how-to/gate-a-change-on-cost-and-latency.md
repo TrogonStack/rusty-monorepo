@@ -39,7 +39,7 @@ the allowance. Neither one fails the job.
 ## 2. Compare the candidate with the baseline
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/candidate \
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/candidate \
     --previous ./artifacts/my-skill/baseline \
     --max-duration-increase 0.5 \
     --max-token-increase 0.5 \
@@ -72,7 +72,7 @@ The cost rose with no allowance, so `--fail-on cost_regression` exits `1`.
 ```yaml
 - name: Gate on cost and latency against the baseline
   run: |
-    trg ai skills eval iteration-summary "$CANDIDATE_REPORT_DIR" \
+    trg ai skills eval iteration-summary --report-dir "$CANDIDATE_REPORT_DIR" \
       --previous "$BASELINE_REPORT_DIR" \
       --max-cost-increase 0.1 \
       --max-duration-increase 0.25 \
