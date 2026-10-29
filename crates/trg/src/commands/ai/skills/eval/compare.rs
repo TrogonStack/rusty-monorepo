@@ -43,16 +43,16 @@ pub struct CompareJsonOutput {
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval compare ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval compare --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval compare ./report --pair with_skill:without_skill --judge none
+  $ trg ai skills eval compare --report-dir ./report --pair with_skill:without_skill --judge none
 
-  $ trg ai skills eval compare ./report --pair with_skill:old_skill --emit-comparison-json
+  $ trg ai skills eval compare --report-dir ./report --pair with_skill:old_skill --emit-comparison-json
 
-  $ trg ai skills eval compare ./report --previous ./artifacts/my-skill/prior-report --output-format json
+  $ trg ai skills eval compare --report-dir ./report --previous ./artifacts/my-skill/prior-report --output-format json
 ")]
 pub struct CompareArgs {
-    #[arg(help = "Path to a generated eval report directory containing report.json")]
+    #[arg(long, help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(
@@ -272,6 +272,7 @@ mod tests {
                 "skills",
                 "eval",
                 "compare",
+                "--report-dir",
                 current.to_str().unwrap(),
                 "--previous",
                 previous.to_str().unwrap(),
@@ -302,6 +303,7 @@ mod tests {
                 "skills",
                 "eval",
                 "compare",
+                "--report-dir",
                 current.to_str().unwrap(),
                 "--previous",
                 previous.to_str().unwrap(),

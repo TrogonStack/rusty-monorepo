@@ -245,7 +245,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
         vec!["grade", "--report-dir"],
         vec!["benchmark", "--report-dir"],
         vec!["iteration-summary", "--report-dir"],
-        vec!["compare"],
+        vec!["compare", "--report-dir"],
         vec!["next-iteration"],
         vec!["html-report"],
         vec!["export"],

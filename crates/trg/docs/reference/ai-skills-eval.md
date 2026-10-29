@@ -762,19 +762,14 @@ in `report.json` (and `comparison.json` under iteration layout directories,
 with `--emit-comparison-json`).
 
 ```text
-trg ai skills eval compare <REPORT_DIR> [OPTIONS]
+trg ai skills eval compare --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
 | `--pair` | string | *(unset)* | Scenario pair to compare, as `<A>:<B>`. Repeatable. Each side is `with_skill`, `without_skill`, or `old_skill`, and the two sides must differ |
 | `--judge` | enum | `none` | Judge used to decide each pair. Values: `none`, `llm`, `script`. With `none`, or with no `--pair` given, the command runs no comparisons |
@@ -788,7 +783,7 @@ trg ai skills eval compare <REPORT_DIR> [OPTIONS]
 ### Example
 
 ```shell
-$ trg ai skills eval compare ./report --pair with_skill:without_skill --judge none
+$ trg ai skills eval compare --report-dir ./report --pair with_skill:without_skill --judge none
 Comparison skipped
 ```
 
