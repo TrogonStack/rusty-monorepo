@@ -29,7 +29,7 @@ an unlabelled bundle.
 ## Compare them
 
 ```shell
-trg ai skills eval scaling ./report-small ./report-large
+trg ai skills eval scaling --report-dir ./report-small --report-dir ./report-large
 ```
 
 List the bundles weakest to strongest. This command never orders them for
@@ -58,7 +58,7 @@ weaker side is listed under that step's `outliers`, with both sides' pass
 rate for that case:
 
 ```shell
-$ trg ai skills eval scaling ./report-small ./report-large
+$ trg ai skills eval scaling --report-dir ./report-small --report-dir ./report-large
 Model scaling across 2 bundles:
   small-run -> large-run: improved (0.750 -> 0.917)
     train: improved (0.750 -> 0.917)
@@ -78,7 +78,7 @@ with the smaller model's phrasing.
 ## Gate on it
 
 ```shell
-trg ai skills eval scaling ./report-small ./report-large --fail-on-regression
+trg ai skills eval scaling --report-dir ./report-small --report-dir ./report-large --fail-on-regression
 ```
 
 `--fail-on-regression` fails the command when any step, on any split, or
