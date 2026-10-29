@@ -323,7 +323,7 @@ mod help_tests {
             "Build an improvement bundle from a prior iteration for skill revision",
         );
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
-        assert!(help.contains("--from"));
+        assert!(help.contains("--report-dir"));
         assert!(help.contains("--allow-eval-suite-drift"));
     }
 

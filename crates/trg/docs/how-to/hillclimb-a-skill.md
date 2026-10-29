@@ -66,7 +66,7 @@ $ trg ai skills eval run \
 
 Leave `--split` at its default of `all` and `--iteration` unset, for the
 whole suite in one report bundle. `--iteration` auto-detects the next number
-for this skill's `--out-dir`, and every later `--previous` or `--from`
+for this skill's `--out-dir`, and every later `--previous` or `--report-dir`
 auto-detects the sibling bundle one number back. Splitting a round into a
 `--split train` run and a `--split test` run would give both bundles the
 same iteration number and break that auto-detection on the next round.
@@ -132,7 +132,7 @@ it is file or version-control management. Either way, build the next
 round's improvement bundle:
 
 ```shell
-$ trg ai skills eval next-iteration --from ./artifacts/my-skill/<report-id>
+$ trg ai skills eval next-iteration --report-dir ./artifacts/my-skill/<report-id>
 ```
 
 Read `improvement.md` and `improvement.json` for the next candidate change.

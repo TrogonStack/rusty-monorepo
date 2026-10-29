@@ -14,25 +14,16 @@ use super::print_json;
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval next-iteration ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval next-iteration --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval next-iteration --from ./artifacts/my-skill/20260526T120000Z-abc
-
-  $ trg ai skills eval next-iteration ./report --allow-eval-suite-drift
+  $ trg ai skills eval next-iteration --report-dir ./report --allow-eval-suite-drift
 ")]
 pub struct NextIterationArgs {
     #[arg(
-        value_name = "DIR",
+        long,
         help = "Path to the previous iteration report directory containing report.json"
     )]
-    pub report_dir: Option<PathBuf>,
-
-    #[arg(
-        long = "from",
-        value_name = "DIR",
-        help = "Path to the previous iteration report directory (alternative to positional DIR)"
-    )]
-    pub from: Option<PathBuf>,
+    pub report_dir: PathBuf,
 
     #[arg(
         long,
@@ -65,14 +56,6 @@ pub struct NextIterationArgs {
 
 impl NextIterationArgs {
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
-        let from_dir = match self.from.or(self.report_dir) {
-            Some(path) => path,
-            None => {
-                eprintln!("Missing report directory: pass DIR or --from <DIR>");
-                return ExitCode::InfrastructureFailure;
-            }
-        };
-
         let options = NextIterationOptions {
             allow_eval_suite_drift: self.allow_eval_suite_drift,
             skill_dir: self.skill_dir,
@@ -80,7 +63,7 @@ impl NextIterationArgs {
             ..NextIterationOptions::default()
         };
 
-        let output = match write_improvement_bundle(&from_dir, options) {
+        let output = match write_improvement_bundle(&self.report_dir, options) {
             Ok(output) => output,
             Err(error) => {
                 eprintln!("Failed to build improvement bundle: {error}");
@@ -117,8 +100,7 @@ mod tests {
         let report_dir = sample_prior_iteration_fixture(&temp, &skill_root);
 
         let status = NextIterationArgs {
-            report_dir: Some(report_dir.clone()),
-            from: None,
+            report_dir: report_dir.clone(),
             skill_dir: Some(skill_root),
             eval_dir: None,
             allow_eval_suite_drift: false,
