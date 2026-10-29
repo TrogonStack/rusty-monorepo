@@ -70,15 +70,15 @@ impl VerifyMode {
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval verify ./artifacts/.../runs/run-001/workspace
+  $ trg ai skills eval verify --workspace-dir ./artifacts/.../runs/run-001/workspace
 
-  $ trg ai skills eval verify ./workspace --mode strict
+  $ trg ai skills eval verify --workspace-dir ./workspace --mode strict
 
-  $ trg ai skills eval verify \"./path/with spaces/.../workspace\" --output-format json
+  $ trg ai skills eval verify --workspace-dir \"./path/with spaces/.../workspace\" --output-format json
 ")]
 pub struct VerifyArgs {
-    #[arg(help = "Path to the workspace directory containing grading.json / timing.json")]
-    pub workspace: Option<PathBuf>,
+    #[arg(long, help = "Path to the workspace directory containing grading.json / timing.json")]
+    pub workspace_dir: Option<PathBuf>,
 
     #[arg(
         long,
@@ -114,8 +114,8 @@ pub struct VerifyArgs {
 
 impl VerifyArgs {
     pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
-        if self.workspace.is_none() && self.skill_dir.is_none() {
-            eprintln!("Either WORKSPACE or --skill-dir is required");
+        if self.workspace_dir.is_none() && self.skill_dir.is_none() {
+            eprintln!("Either --workspace-dir or --skill-dir is required");
             return ExitCode::InfrastructureFailure;
         }
 
@@ -130,7 +130,7 @@ impl VerifyArgs {
             }
         }
 
-        let Some(workspace) = self.workspace else {
+        let Some(workspace) = self.workspace_dir else {
             return ExitCode::Success;
         };
 
@@ -358,7 +358,7 @@ mod tests {
 
     fn verify_args(workspace: Option<PathBuf>, skill_dir: Option<PathBuf>) -> VerifyArgs {
         VerifyArgs {
-            workspace,
+            workspace_dir: workspace,
             skill_dir,
             eval_dir: None,
             mode: VerifyMode::Lenient,

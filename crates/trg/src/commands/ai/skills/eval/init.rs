@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(init_status, ExitCode::Success);
 
         let verify_status = VerifyArgs {
-            workspace: None,
+            workspace_dir: None,
             skill_dir: Some(skill_dir),
             eval_dir: None,
             mode: VerifyMode::Strict,

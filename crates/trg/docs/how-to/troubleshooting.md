@@ -136,7 +136,7 @@ you re-run within the same second with identical entropy.
 No `grading.json` found under the workspace.
 
 ```shell
-$ trg ai skills eval verify ./runs/run-001/workspace
+$ trg ai skills eval verify --workspace-dir ./runs/run-001/workspace
 Bundle verified
   grading files: 0
   timing files: 1
@@ -175,7 +175,7 @@ skill.
 ### `must contain at least one grading.json` (strict mode)
 
 ```shell
-$ trg ai skills eval verify ./workspace --mode strict
+$ trg ai skills eval verify --workspace-dir ./workspace --mode strict
 Bundle verification failed: workspace '...' must contain at least one grading.json
 ```
 

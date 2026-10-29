@@ -122,7 +122,7 @@ $ ./skills/csv-analyzer/evals/grade-all.sh \
 Wrote grading.json (2/3 passed)
 
 $ trg ai skills eval verify \
-    ./artifacts/csv-analyzer/20260526T170000Z-deadbeef/runs/run-001/workspace \
+    --workspace-dir ./artifacts/csv-analyzer/20260526T170000Z-deadbeef/runs/run-001/workspace \
     --mode strict
 Bundle verified
   grading files: 1

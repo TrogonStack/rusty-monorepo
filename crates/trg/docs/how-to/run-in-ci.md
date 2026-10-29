@@ -103,7 +103,7 @@ jobs:
         run: |
           for ws in "$REPORT_DIR"/runs/*/workspace; do
             ./skills/csv-analyzer/evals/grade.sh "$ws" "$(basename "$(dirname "$ws")")"
-            trg ai skills eval verify "$ws" --mode strict
+            trg ai skills eval verify --workspace-dir "$ws" --mode strict
           done
 
       - name: Upload report
@@ -124,7 +124,7 @@ jobs:
 Use `--mode strict` once every run in the bundle is graded:
 
 ```shell
-$ trg ai skills eval verify ./runs/run-001/workspace --mode strict
+$ trg ai skills eval verify --workspace-dir ./runs/run-001/workspace --mode strict
 # exits 1 if the bundle does not conform to the schemas, if any assertion
 # failed, or if grading.json is missing
 ```
@@ -140,7 +140,7 @@ suite did.
 does not need to post-process JSON:
 
 ```shell
-$ trg ai skills eval verify ./runs/run-001/workspace \
+$ trg ai skills eval verify --workspace-dir ./runs/run-001/workspace \
     --min-pass-rate 0.9 \
     --max-tokens 500000 \
     --max-duration-ms 600000
@@ -192,7 +192,7 @@ output:
 ```yaml
 - name: Read pass rate
   run: |
-    trg ai skills eval verify "$WS" --output-format json \
+    trg ai skills eval verify --workspace-dir "$WS" --output-format json \
       | jq '.check.metrics.pass_rate'
 ```
 
