@@ -24,11 +24,11 @@ unwrap_used = "deny"
 
 [dependencies]
 clippy_utils = "=0.1.97"
-dylint_linting = "6.0.1"
+dylint_linting = "6.3.0"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-dylint_testing = "6.0.1"
+dylint_testing = "6.3.0"
 opentelemetry = "0.31"
 serde_json = "1"
 tracing = "0.1"
