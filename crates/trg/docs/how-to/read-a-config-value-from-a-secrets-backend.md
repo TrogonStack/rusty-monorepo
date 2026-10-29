@@ -209,6 +209,34 @@ login` writes, and `trg secret put` takes a single address. See
 [Why secrets backends are addressed, not searched](../explanation/secrets-backends.md#a-read-can-name-its-own-fallbacks)
 for what falls through and what stops the read.
 
+## Read a secret by name
+
+A script that reads the same value should not repeat its address and fallbacks
+as flags. Declare the secret once, under a name:
+
+```toml trg-example=fragment
+[secrets.vars.signing-key]
+backend = "local"
+path = "git/signing"
+key = "SSH_PRIVATE_KEY"
+fallbacks = [
+  { backend = "personal", ref = "op://Private/signing/private key?ssh-format=openssh" },
+]
+```
+
+and read it with `--name`:
+
+```sh
+trg secret get --name signing-key
+```
+
+The table is the same secret table a var takes, so the first address and every
+fallback are read exactly as they are for a var, and stderr names the backend
+that answered when it was not the first. `--name` cannot be combined with
+`--backend`, `--path`, `--key`, `--ref` or `--fallback`. With
+`--output-format json` the document carries `name` and `value`, and
+`answered_by` when the secret declares `fallbacks`.
+
 ## Troubleshooting
 
 **The backend is down and I need to reset a server's credentials**

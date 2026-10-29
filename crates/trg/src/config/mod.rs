@@ -30,7 +30,7 @@ use serde::Deserialize;
 use tracing::field::Empty;
 pub use var::{
     EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretRead, SecretVar, SecretVarError, Segment,
-    VarRef, VarResolveError, VarSite, VarSource, VarTemplate,
+    VarRef, VarResolveError, VarSite, VarSource, VarTemplate, WithFallbacks,
 };
 
 use crate::secrets::{MirrorConfigError, SecretsSection};
@@ -394,6 +394,7 @@ fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
+    secrets.check_named()?;
     Ok(secrets)
 }
 
@@ -442,6 +443,7 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigErr
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
+    secrets.check_named()?;
     let mut servers = root
         .mcp
         .and_then(|m| (!m.servers.is_empty()).then_some(m.servers))
@@ -470,6 +472,7 @@ fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
+    secrets.check_named()?;
     let mut entries = root
         .exec
         .and_then(|e| (!e.is_empty()).then_some(e))
@@ -865,6 +868,36 @@ mod tests {
         ] {
             assert!(matches!(err, ConfigError::Mirror(_)), "{err}");
             assert!(err.to_string().contains("[secrets.mirrors.signing-key]"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_named_secret_that_could_never_be_read_is_a_config_error_for_every_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [secrets.backends.op]
+            kind = "onepassword"
+            account = "my.1password.com"
+
+            [secrets.vars.signing-key]
+            backend = "ghost"
+            path = "git/signing"
+            key = "KEY"
+
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+            "#,
+        );
+
+        for err in [
+            load_mcp_at(&path, "s1").err().unwrap(),
+            load_secrets_at(&path).err().unwrap(),
+        ] {
+            assert!(matches!(err, ConfigError::SecretVar(_)), "{err}");
+            assert!(err.to_string().contains("[secrets.vars.signing-key]"), "{err}");
         }
     }
 

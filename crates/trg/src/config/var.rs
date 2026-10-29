@@ -115,6 +115,14 @@ impl VarSite {
         }
     }
 
+    /// The one address list of a `[secrets.vars.<name>]` table.
+    pub fn named_secret(name: &str) -> Self {
+        Self::Table {
+            table: format!("[secrets.vars.{name}]"),
+            name: "secret".to_string(),
+        }
+    }
+
     /// One side of a `[secrets.mirrors.<name>]` table.
     pub fn mirror(name: &str, side: &str) -> Self {
         Self::Table {

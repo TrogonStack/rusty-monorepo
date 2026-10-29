@@ -23,12 +23,13 @@ use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
 use super::mirror::{self, Mirror, MirrorConfig, MirrorConfigError, MirrorName};
+use super::named::{NamedSecretConfig, NamedSecretError, SecretName};
 use super::onepassword::{OnePasswordBackend, OpAccount};
 use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
 };
 use super::{Backend, BackendKind};
-use crate::config::{FetchedSecrets, RawVarSource, VarResolveError};
+use crate::config::{FetchedSecrets, RawVarSource, SecretRead, SecretVarError, VarResolveError, VarSite};
 
 /// The `[secrets]` table.
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -38,6 +39,8 @@ pub struct SecretsSection {
     pub backends: HashMap<String, BackendConfig>,
     #[serde(default)]
     pub mirrors: BTreeMap<MirrorName, MirrorConfig>,
+    #[serde(default)]
+    pub vars: BTreeMap<SecretName, NamedSecretConfig>,
 }
 
 impl SecretsSection {
@@ -62,6 +65,46 @@ impl SecretsSection {
     /// surprise the first time someone mirrors.
     pub fn resolve_mirrors(&self) -> Result<Vec<Mirror>, MirrorConfigError> {
         mirror::resolve_all(self)
+    }
+
+    /// Every declared named secret, in name order, against the declared
+    /// backends.
+    ///
+    /// Run at config load for the same reason as the mirrors: a secret that
+    /// could never be read is a config error wherever the file is read.
+    pub fn resolve_named_all(&self) -> Result<BTreeMap<SecretName, SecretRead>, SecretVarError> {
+        self.vars
+            .iter()
+            .map(|(name, config)| self.resolve_named_one(name, config).map(|read| (name.clone(), read)))
+            .collect()
+    }
+
+    /// The load-time check alone, for callers that do not want the reads.
+    pub fn check_named(&self) -> Result<(), SecretVarError> {
+        self.resolve_named_all().map(drop)
+    }
+
+    /// The one secret a caller asked for by name.
+    pub fn resolve_named(&self, name: &SecretName) -> Result<SecretRead, NamedSecretError> {
+        let Some(config) = self.vars.get(name) else {
+            return Err(if self.vars.is_empty() {
+                NamedSecretError::NoneDeclared { name: name.clone() }
+            } else {
+                NamedSecretError::Unknown {
+                    name: name.clone(),
+                    declared: self.vars.keys().map(SecretName::as_str).collect::<Vec<_>>().join(", "),
+                }
+            });
+        };
+        Ok(self.resolve_named_one(name, config)?)
+    }
+
+    fn resolve_named_one(&self, name: &SecretName, config: &NamedSecretConfig) -> Result<SecretRead, SecretVarError> {
+        let resolved = config
+            .clone()
+            .into_source()
+            .into_resolved(self, || VarSite::named_secret(name.as_str()))?;
+        Ok(resolved.secret_read().expect("a secret table always reads a secret"))
     }
 }
 
@@ -204,6 +247,7 @@ impl BackendError {
 pub struct Registry {
     declared: HashMap<String, BackendConfig>,
     mirrors: BTreeMap<MirrorName, MirrorConfig>,
+    named: BTreeMap<SecretName, NamedSecretConfig>,
 }
 
 impl Registry {
@@ -211,16 +255,26 @@ impl Registry {
         Self {
             declared: section.backends,
             mirrors: section.mirrors,
+            named: section.vars,
+        }
+    }
+
+    fn section(&self) -> SecretsSection {
+        SecretsSection {
+            backends: self.declared.clone(),
+            mirrors: self.mirrors.clone(),
+            vars: self.named.clone(),
         }
     }
 
     /// The declared mirrors, checked against the declared backends.
     pub fn mirrors(&self) -> Result<Vec<Mirror>, MirrorConfigError> {
-        SecretsSection {
-            backends: self.declared.clone(),
-            mirrors: self.mirrors.clone(),
-        }
-        .resolve_mirrors()
+        self.section().resolve_mirrors()
+    }
+
+    /// What a `[secrets.vars.<name>]` table asks to be read.
+    pub fn named_read(&self, name: &SecretName) -> Result<SecretRead, NamedSecretError> {
+        self.section().resolve_named(name)
     }
 
     pub fn is_empty(&self) -> bool {

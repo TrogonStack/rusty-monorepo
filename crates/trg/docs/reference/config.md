@@ -22,6 +22,10 @@ with a clear `config file not found at <path>` error.
 [secrets.backends.<backend-name>]
 kind = "keychain"                  # or "openbao", "onepassword"
 
+[secrets.vars.<secret-name>]
+backend = "..."                    # with path and key, or ref
+fallbacks = []                     # optional, more secret tables
+
 [secrets.mirrors.<mirror-name>]
 source = { backend = "...", ref = "op://..." }      # or path and key
 targets = [{ backend = "...", path = "...", key = "..." }]
@@ -551,6 +555,48 @@ scoped to one subtree is denied before OpenBao looks the mount up, so a refusal
 leaves the mount check reported as skipped rather than claiming a mount that was
 never reached.
 
+## `[secrets.vars.<name>]`
+
+Declares a secret once, under a name, so `trg secret get --name <name>` reads
+it without the address and fallbacks being typed as flags. The table is a
+secret var as it is written in `[exec.<name>.env]` or `[mcp.servers.<name>.vars]`,
+with the same fields, the same addressing by the backend's kind and the same
+`fallbacks`. See [Read a config value from a secrets backend](../how-to/read-a-config-value-from-a-secrets-backend.md#read-a-secret-by-name).
+
+```toml trg-example=fragment
+[secrets.vars.signing-key]
+backend = "homelab"
+path = "git/signing"
+key = "SSH_PRIVATE_KEY"
+fallbacks = [
+  { backend = "personal", ref = "op://Engineering/deploy-key/private key?ssh-format=openssh" },
+]
+```
+
+| Field       | Type            | Required | Notes                                                                 |
+| ----------- | --------------- | -------- | --------------------------------------------------------------------- |
+| `backend`   | string          | yes      | A declared `[secrets.backends.<name>]` entry.                         |
+| `path`, `key` | strings       | by kind  | For a `keychain` or `openbao` backend. Both are required together.   |
+| `ref`       | string          | by kind  | For a `onepassword` backend.                                          |
+| `fallbacks` | array of tables | no       | At least one when present. Entries are plain secret tables and cannot carry `fallbacks`. |
+
+The name is what the table is declared under, limited to ASCII letters,
+digits, `-` and `_`. A table that is a literal or an `env` var is rejected,
+because only a secret can be named here. These are checked whenever the config
+loads: an undeclared backend, the wrong addressing for a backend's kind, an
+empty `fallbacks` and a nested `fallbacks` are config errors. The table is
+read-only: `trg secret put` and the mirrors do not use it.
+
+### `trg secret get --name NAME`
+
+| Argument or flag  | Notes                                                           |
+| ----------------- | --------------------------------------------------------------- |
+| `--name`          | Read the secret declared under this name. Conflicts with `--backend`, `--path`, `--key`, `--ref` and `--fallback`. An unknown name is an error that lists the declared names. |
+| `--output-format` | `text` (default) or `json`. The document carries `name` and `value`, and `answered_by` when the secret declares `fallbacks`. |
+
+When a fallback answers, stderr names the backend that did, as it does for
+`--fallback`.
+
 ## `[secrets.mirrors.<name>]`
 
 Declares a value to copy from one backend into one or more others with
@@ -915,6 +961,7 @@ trg exec run claude -- --resume
 | `` 1Password secret reference `...` must not start with `-` in its <vault/item> `` | The vault or the item/title started with `-`, which `op` would read as a flag rather than a value to look up. Only the vault and item are checked this way; a section or field named `-foo` is unaffected. |
 | `` 1Password secret reference `...` carries `?<query>`, which is not a query `op read` documents; ... `` | The query is not `attribute=<attribute>`, `attr=<attribute>` or `ssh-format=openssh`, or a second parameter follows it. |
 | `` `<field>` in 1Password item `<item>` is ambiguous: ...; name a section, or address the field by its id, to pick one `` | More than one field matched that name: 1Password does not require labels to be unique within a section or across an item's sections. The message lists each match as `<section>/<field>` (or bare `<field>` when unsectioned), never a value. |
+| `` no secret named `<name>` is declared; declared: ... `` | `trg secret get --name` named a secret with no `[secrets.vars.<name>]` table. |
 | `` `[secrets.mirrors.<name>]`: `targets` must name at least one target `` | A mirror declares an empty `targets` array. |
 | `` `[secrets.mirrors.<name>]`: target backend `<backend>` is of kind `<kind>`, which `trg` only reads from `` | A mirror's target names a `onepassword` backend. |
 | `` `[secrets.mirrors.<name>]`: the source and a target are the same address `` | The source and one target address the same value. |

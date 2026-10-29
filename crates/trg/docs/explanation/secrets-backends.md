@@ -59,6 +59,11 @@ The exception is held to what the design needs.
   `path` and `key` are not shaped alike. Entries cannot carry `fallbacks` of their own.
 - An empty `fallbacks`, or an entry naming an undeclared backend, fails to load.
 
+A secret read by a script can be declared once under `[secrets.vars.<name>]`
+with the same table, and read with `trg secret get --name <name>`. The name
+adds no new rule: it is the same declaration, held under a name instead of
+inside a server.
+
 ### Which failures fall through
 
 The test is whether the backend could not answer, or answered with something
