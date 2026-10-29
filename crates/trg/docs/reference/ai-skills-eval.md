@@ -174,14 +174,8 @@ Graded 1 run(s)
 Verify grading and timing artifacts under a workspace directory.
 
 ```text
-trg ai skills eval verify <WORKSPACE> [OPTIONS]
+trg ai skills eval verify --workspace-dir <WORKSPACE_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `WORKSPACE` | Root directory to scan recursively for `grading.json` and `timing.json` |
 
 `eval grade` writes `grading.json` into the run directory, beside `workspace/`
 rather than inside it. A path whose last component is `workspace` therefore
@@ -192,6 +186,7 @@ the grading for that run.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--workspace-dir` | path | *(unset)* | Root directory to scan recursively for `grading.json` and `timing.json`. Required unless `--skill-dir` is given |
 | `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: hold every artifact against its schema, require at least one `grading.json`, and fail on failed assertions. Refused outright on a build compiled without the `schema-validation` feature. See [What strict mode needs from the build](#what-strict-mode-needs-from-the-build) |
 | `--require-graders` | bool | `false` | Fail when an eval case declares no grader |
 | `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
@@ -218,7 +213,7 @@ unaffected. If you see the refusal, rebuild with the feature; do not reach for
 ### Example (text)
 
 ```shell
-$ trg ai skills eval verify ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
+$ trg ai skills eval verify --workspace-dir ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
 ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 assertions: 3/3 passed (100.00%)
 ci checks: passed
@@ -230,7 +225,7 @@ workspace: ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
 ### Example (JSON)
 
 ```shell
-$ trg ai skills eval verify ./report/runs/run-001/workspace --output-format json
+$ trg ai skills eval verify --workspace-dir ./report/runs/run-001/workspace --output-format json
 {
   "report_dir": "./report",
   "exit_code": 0,

@@ -100,7 +100,7 @@ fn a_pass_with_no_runner_still_writes_a_bundle_verify_can_read() {
     assert!(report_dir.join("report.json").is_file());
 
     trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .assert()
         .success();
@@ -157,7 +157,7 @@ fn a_bundle_that_no_schema_describes_is_reported_even_when_the_suite_scored_noth
     fs::write(&report_path, serde_json::to_string(&report).unwrap()).unwrap();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .args(["--mode", "strict"])
         .output()
@@ -185,7 +185,7 @@ fn a_bundle_that_was_never_graded_is_told_that_and_not_something_else() {
     let report_dir = scaffold_bundle(&skill_dir, &temp.path().join("artifacts"));
 
     let output = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .args(["--mode", "strict"])
         .output()
@@ -241,7 +241,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
     let missing = temp.path().join("no-such-bundle");
 
     for stage in [
-        vec!["verify"],
+        vec!["verify", "--workspace-dir"],
         vec!["grade", "--report-dir"],
         vec!["benchmark", "--report-dir"],
         vec!["iteration-summary", "--report-dir"],
@@ -356,7 +356,7 @@ fn a_workspace_that_is_not_a_directory_reports_a_broken_tool_and_says_which_reas
     let a_file = temp.path().join("report.json");
     fs::write(&a_file, "{}").unwrap();
     let on_a_file = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&a_file)
         .output()
         .unwrap();
@@ -369,7 +369,7 @@ fn a_workspace_that_is_not_a_directory_reports_a_broken_tool_and_says_which_reas
     );
 
     let missing = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(temp.path().join("no-such-bundle"))
         .output()
         .unwrap();
@@ -395,7 +395,7 @@ fn a_grading_artifact_that_cannot_be_parsed_reports_a_broken_tool_and_not_a_fail
     fs::write(report_dir.join("grading.json"), "not json at all").unwrap();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .output()
         .unwrap();

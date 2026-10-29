@@ -126,7 +126,7 @@ result.
 Verify a graded bundle with:
 
 ```shell
-trg ai skills eval verify ./runs/run-001/workspace --mode strict
+trg ai skills eval verify --workspace-dir ./runs/run-001/workspace --mode strict
 ```
 
 ## Validation rules
