@@ -1111,8 +1111,9 @@ fn scaling_reads_a_cleared_gain_as_improved_and_gates_on_a_reversed_order() {
     write_scaling_report(&stronger_dir, "report-large-model", "large-model", &stronger_runs);
 
     let ungated = trg()
-        .args(["ai", "skills", "eval", "scaling"])
+        .args(["ai", "skills", "eval", "scaling", "--report-dir"])
         .arg(&weaker_dir)
+        .arg("--report-dir")
         .arg(&stronger_dir)
         .args(["--output-format", "json"])
         .output()
@@ -1125,8 +1126,9 @@ fn scaling_reads_a_cleared_gain_as_improved_and_gates_on_a_reversed_order() {
     assert!(stronger_dir.join("scaling.json").is_file());
 
     let ungated_reversed = trg()
-        .args(["ai", "skills", "eval", "scaling"])
+        .args(["ai", "skills", "eval", "scaling", "--report-dir"])
         .arg(&stronger_dir)
+        .arg("--report-dir")
         .arg(&weaker_dir)
         .output()
         .unwrap();
@@ -1138,8 +1140,9 @@ fn scaling_reads_a_cleared_gain_as_improved_and_gates_on_a_reversed_order() {
     );
 
     let gated_reversed = trg()
-        .args(["ai", "skills", "eval", "scaling"])
+        .args(["ai", "skills", "eval", "scaling", "--report-dir"])
         .arg(&stronger_dir)
+        .arg("--report-dir")
         .arg(&weaker_dir)
         .arg("--fail-on-regression")
         .output()

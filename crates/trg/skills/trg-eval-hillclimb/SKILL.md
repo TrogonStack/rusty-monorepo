@@ -190,7 +190,7 @@ weakest-to-strongest comparison across a few report bundles sharing the same
 suite:
 
 ```shell
-trg ai skills eval scaling ./report-weaker ./report-stronger
+trg ai skills eval scaling --report-dir ./report-weaker --report-dir ./report-stronger
 ```
 
 This is the same keep-or-revert comparison this loop runs, but across

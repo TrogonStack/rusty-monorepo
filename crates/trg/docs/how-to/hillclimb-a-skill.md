@@ -145,7 +145,7 @@ Then return to step 2.
 ## Optional: catch ambiguous cases
 
 ```shell
-$ trg ai skills eval scaling ./report-weaker ./report-stronger
+$ trg ai skills eval scaling --report-dir ./report-weaker --report-dir ./report-stronger
 ```
 
 Compares the same keep-or-revert verdict across configurations instead of

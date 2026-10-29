@@ -15,17 +15,18 @@ use super::print_report_dir;
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval scaling ./report-small ./report-medium ./report-large
+  $ trg ai skills eval scaling --report-dir ./report-small --report-dir ./report-medium --report-dir ./report-large
 
-  $ trg ai skills eval scaling ./report-small ./report-large --output-format json
+  $ trg ai skills eval scaling --report-dir ./report-small --report-dir ./report-large --output-format json
 
-  $ trg ai skills eval scaling ./report-small ./report-large --fail-on-regression
+  $ trg ai skills eval scaling --report-dir ./report-small --report-dir ./report-large --fail-on-regression
 ")]
 pub struct ScalingArgs {
     #[arg(
+        long = "report-dir",
+        value_name = "REPORT_DIR",
         required = true,
-        num_args = 2..,
-        help = "Report bundle directories, ordered weakest to strongest configuration. This command never ranks models itself; the order is the operator's claim"
+        help = "A report bundle directory. Repeat the flag at least twice, ordered weakest to strongest configuration. This command never ranks models itself; the order is the operator's claim"
     )]
     pub report_dirs: Vec<PathBuf>,
 
@@ -62,7 +63,7 @@ impl ScalingArgs {
             }
         };
 
-        let write_dir = self.report_dirs.last().expect("clap requires at least two report dirs");
+        let write_dir = self.report_dirs.last().expect("clap requires at least one report dir");
         if let Err(error) = write_scaling(write_dir, &document) {
             eprintln!("Failed to write scaling.json: {error}");
             return ExitCode::InfrastructureFailure;

@@ -1139,19 +1139,14 @@ overall rate can, but a case that moves backward is worth an author's look
 regardless.
 
 ```text
-trg ai skills eval scaling <REPORT_DIR> <REPORT_DIR>... [OPTIONS]
+trg ai skills eval scaling --report-dir <REPORT_DIR> --report-dir <REPORT_DIR>... [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR`... | Two or more report bundle directories, ordered weakest to strongest configuration |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path, repeatable | *(required)* | A report bundle directory. Repeat the flag for each bundle, two or more, ordered weakest to strongest configuration |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates, same as `eval benchmark` |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints the `scaling.json` document on stdout |
 | `--fail-on-regression` | flag | off | Exit with the gate-failed code when any step, on any split, or the end-to-end comparison regressed |
@@ -1170,7 +1165,7 @@ list, alongside that bundle's own `report.json`.
 ### Example
 
 ```shell
-$ trg ai skills eval scaling ./report-small-model ./report-large-model --fail-on-regression
+$ trg ai skills eval scaling --report-dir ./report-small-model --report-dir ./report-large-model --fail-on-regression
 Model scaling across 2 bundles:
   small-run -> large-run: improved (0.500 -> 1.000)
     train: improved (0.500 -> 1.000)
