@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 
 pub use eval::EvalArgs;
 pub use read_properties::ReadPropertiesArgs;
@@ -17,7 +17,7 @@ pub use validate::ValidateArgs;
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum SkillsCommands {
-    /// Validate a skill directory
+    /// Validate a skill
     Validate(ValidateArgs),
     /// Run and verify skill evals
     Eval(EvalArgs),
@@ -35,6 +35,27 @@ impl SkillsCommands {
             Self::ReadProperties(args) => args.handle(fs),
             Self::ToPrompt(args) => args.handle(fs),
         }
+    }
+}
+
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+pub struct SkillLocation {
+    #[arg(long, help = "Path to the skill directory")]
+    skill_dir: Option<PathBuf>,
+
+    #[arg(long, help = "Path to the SKILL.md file")]
+    skill_file: Option<PathBuf>,
+}
+
+impl SkillLocation {
+    pub fn resolve(&self) -> PathBuf {
+        let path = self
+            .skill_dir
+            .as_deref()
+            .or(self.skill_file.as_deref())
+            .expect("clap requires one of --skill-dir and --skill-file");
+        resolve_skill_path(path)
     }
 }
 
@@ -73,5 +94,34 @@ mod tests {
         let path = Path::new("/path/to/skill/skill.md");
         let resolved = resolve_skill_path(path);
         assert_eq!(resolved, PathBuf::from("/path/to/skill"));
+    }
+
+    #[derive(clap::Parser)]
+    struct Probe {
+        #[command(flatten)]
+        skill: SkillLocation,
+    }
+
+    fn parse(args: &[&str]) -> Result<Probe, clap::Error> {
+        use clap::Parser;
+        Probe::try_parse_from(std::iter::once("probe").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn a_skill_is_named_by_its_directory() {
+        let probe = parse(&["--skill-dir", "/path/to/skill"]).expect("parse");
+        assert_eq!(probe.skill.resolve(), PathBuf::from("/path/to/skill"));
+    }
+
+    #[test]
+    fn a_skill_is_named_by_its_file() {
+        let probe = parse(&["--skill-file", "/path/to/skill/SKILL.md"]).expect("parse");
+        assert_eq!(probe.skill.resolve(), PathBuf::from("/path/to/skill"));
+    }
+
+    #[test]
+    fn a_skill_needs_exactly_one_of_directory_and_file() {
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["--skill-dir", "a", "--skill-file", "b/SKILL.md"]).is_err());
     }
 }
