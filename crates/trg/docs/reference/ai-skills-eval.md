@@ -830,7 +830,7 @@ server's `command`, one invocation per mocked server. See [How a run drives a
 mock](#how-a-run-drives-a-mock).
 
 It is hidden from `--help`: `eval run` is the only thing that generates the
-`--mocks`, `--server`, and `--calls` arguments it needs, so it exists for a
+`--mocks-dir`, `--server`, and `--calls-file` arguments it needs, so it exists for a
 harness to invoke on the operator's behalf rather than for an operator to
 type by hand.
 
