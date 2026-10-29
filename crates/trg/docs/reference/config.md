@@ -736,7 +736,7 @@ status if there is no matching item; scripts should account for that.
 
 ## `[exec.<name>]`
 
-An entry names a command `trg exec run <name>` execs into, with its own `env`
+An entry names a command `trg exec run --name <name>` execs into, with its own `env`
 resolved the same way a server's `vars` are: a literal, `{ env = ... }`,
 `{ backend = ..., path = ..., key = ... }`, or
 `{ backend = ..., ref = "op://..." }`. `trg exec list` prints every declared
@@ -931,7 +931,7 @@ ANTHROPIC_AUTH_TOKEN = { backend = "homelab", path = "exec/claude", key = "token
 ```
 
 ```sh
-trg exec run claude -- --resume
+trg exec run --name claude -- --resume
 ```
 
 ## Error reference
@@ -981,4 +981,4 @@ trg exec run claude -- --resume
 | `OpenBao rejected the token (...); run bao login and retry` | The token is absent, expired, or lacks a policy for the path. |
 | `OpenBao at <addr> redirected <status> to a different origin` | The instance answered a redirect leaving the `addr` origin, meaning any change of scheme, host, or port. The token is not followed there. Point `addr` at the active node or a load balancer. |
 | `no [exec] entries in config`                     | `[exec]` is missing or empty.                                   |
-| `unknown exec entry <name> — known: ...`          | The name given to `trg exec run` does not match any `[exec.<name>]` key. |
+| `unknown exec entry <name> — known: ...`          | The name given to `trg exec run --name` does not match any `[exec.<name>]` key. |

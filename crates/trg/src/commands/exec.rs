@@ -2,14 +2,10 @@
 //! the same way `trg mcp proxy` resolves a server's vars — and
 //! `trg exec list`, which names the entries `run` will accept.
 //!
-//! `run` and `list` are subcommands rather than `list` living as a flag on
-//! `run`'s own arguments, because `run`'s target is a bare positional
-//! (`trg exec run <name>`) drawn from a namespace an operator controls
-//! (`[exec.<name>]`). A reserved flag can never collide with that namespace;
-//! a reserved word can — a config that ever declares `[exec.list]` would make
-//! `trg exec list` permanently ambiguous between the entry and the listing.
-//! Nesting the free-form name under `run` keeps `list` reserved only at the
-//! top level, where no config places a name.
+//! `run`'s target is named with `--name` (`trg exec run --name <name>`)
+//! rather than read as a bare word, so an entry drawn from the namespace an
+//! operator controls (`[exec.<name>]`) can never be mistaken for a
+//! subcommand: a config that declares `[exec.list]` stays reachable.
 //!
 //! `run` never supervises what it launches. `exec(2)` replaces the current
 //! process image in place, so the launched command inherits this process's
@@ -39,6 +35,7 @@ pub enum ExecCommands {
 #[derive(Args)]
 pub struct ExecArgs {
     /// The `[exec.<name>]` entry to launch
+    #[arg(long)]
     pub name: String,
 
     /// A one-off KEY=VALUE override, applied after the entry's own `env`.
@@ -262,7 +259,7 @@ mod tests {
 
     #[test]
     fn extra_args_after_dashdash_are_captured_verbatim() {
-        let args = parse(&["demo", "--", "--resume"]);
+        let args = parse(&["--name", "demo", "--", "--resume"]);
         assert_eq!(args.name, "demo");
         assert_eq!(args.extra_args, vec!["--resume".to_string()]);
     }
@@ -273,7 +270,7 @@ mod tests {
     #[test]
     fn extra_args_without_a_dashdash_fail_to_parse() {
         use clap::Parser;
-        let full = vec!["trg", "exec", "run", "demo", "--resume"];
+        let full = vec!["trg", "exec", "run", "--name", "demo", "--resume"];
         assert!(crate::cli::Cli::try_parse_from(full).is_err());
     }
 
@@ -283,25 +280,31 @@ mod tests {
     #[test]
     fn an_unrecognized_flag_before_dashdash_fails_to_parse() {
         use clap::Parser;
-        let full = vec!["trg", "exec", "run", "--evn", "DEBUG=1", "demo", "--", "--resume"];
+        let full = vec![
+            "trg", "exec", "run", "--evn", "DEBUG=1", "--name", "demo", "--", "--resume",
+        ];
         assert!(crate::cli::Cli::try_parse_from(full).is_err());
     }
 
     #[test]
     fn trg_s_own_recognized_flags_before_dashdash_still_work() {
-        let args = parse(&["--env", "A=B", "demo", "--", "--resume"]);
+        let args = parse(&["--env", "A=B", "--name", "demo", "--", "--resume"]);
         assert_eq!(args.env, vec![("A".to_string(), "B".to_string())]);
         assert_eq!(args.name, "demo");
         assert_eq!(args.extra_args, vec!["--resume".to_string()]);
     }
 
-    /// A name that collides with the `list` subcommand is still reachable —
-    /// this is the whole reason `list` sits beside `run` rather than beside
-    /// `<name>` directly.
     #[test]
-    fn an_entry_named_list_is_still_reachable_through_run() {
-        let args = parse(&["list"]);
-        assert_eq!(args.name, "list");
+    fn the_entry_is_named_with_a_flag() {
+        let args = parse(&["--name", "demo"]);
+        assert_eq!(args.name, "demo");
+    }
+
+    #[test]
+    fn a_bare_entry_name_is_rejected() {
+        use clap::Parser;
+        let full = vec!["trg", "exec", "run", "demo"];
+        assert!(crate::cli::Cli::try_parse_from(full).is_err());
     }
 
     #[test]
