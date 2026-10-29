@@ -16,7 +16,7 @@ measured against a suite that cannot discriminate is not measuring anything.
 **Change exactly one thing per round. Keep it only when the test split's
 verdict says `keep`.**
 
-`eval iteration-summary --previous` reports `keep_or_revert.recommendation`:
+`eval iteration-summary --previous-report-dir` reports `keep_or_revert.recommendation`:
 
 | `recommendation` | What it means | What to do |
 | ----------------- | -------------- | ---------- |
@@ -68,7 +68,7 @@ trg ai skills eval run --skill-dir ./skills/my-skill --out-dir ./artifacts \
 
 Leave `--split` at its default of `all` and `--iteration` unset. A round
 covers the whole suite in a single report bundle: `--iteration` auto-detects
-the next number for that skill's `--out-dir`, and both `--previous` on later
+the next number for that skill's `--out-dir`, and both `--previous-report-dir` on later
 commands and `--report-dir` on `next-iteration` auto-detect the sibling report
 bundle one iteration back by matching that number. Running the train and
 test splits as two separate invocations would give both bundles the same
@@ -126,7 +126,7 @@ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-i
   --withhold-test-detail
 ```
 
-Once there is a previous round to compare against, `--previous` auto-detects
+Once there is a previous round to compare against, `--previous-report-dir` auto-detects
 it and the output carries a `keep_or_revert` section:
 
 ```json

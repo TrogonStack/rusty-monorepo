@@ -283,7 +283,7 @@ eye:
 
 ```shell
 $ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260914T130000Z-efgh5678 \
-    --previous ./artifacts/my-skill/20260914T120000Z-abcd1234
+    --previous-report-dir ./artifacts/my-skill/20260914T120000Z-abcd1234
 ```
 
 `keep_or_revert.recommendation` is `keep` when the test split improved,

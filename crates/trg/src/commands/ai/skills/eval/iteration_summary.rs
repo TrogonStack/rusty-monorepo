@@ -16,12 +16,12 @@ use super::print_report_dir;
 
 /// A keep-or-revert verdict that should fail the command for CI.
 ///
-/// Unset gates on nothing: a first iteration with no `--previous` to compare against has no
+/// Unset gates on nothing: a first iteration with no `--previous-report-dir` to compare against has no
 /// verdict to match, so it always exits successfully regardless of `--fail-on`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub enum FailOn {
-    /// The test split regressed against `--previous`.
+    /// The test split regressed against `--previous-report-dir`.
     Revert,
     /// The train split improved while the test split did not, which is what a skill that
     /// learned the suite instead of the task looks like.
@@ -73,7 +73,7 @@ Examples:
 
   $ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval iteration-summary --report-dir ./report --previous ./artifacts/my-skill/prior-report
+  $ trg ai skills eval iteration-summary --report-dir ./report --previous-report-dir ./artifacts/my-skill/prior-report
 
   $ trg ai skills eval iteration-summary --report-dir ./report --output-format json --failed-runs exclude
 
@@ -87,10 +87,10 @@ pub struct IterationSummaryArgs {
 
     #[arg(
         long,
-        value_name = "DIR",
+        value_name = "REPORT_DIR",
         help = "Previous iteration report directory for cross-iteration comparison (auto-detected when omitted)"
     )]
-    pub previous: Option<PathBuf>,
+    pub previous_report_dir: Option<PathBuf>,
 
     #[arg(
         long,
@@ -160,7 +160,7 @@ impl IterationSummaryArgs {
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let options = IterationSummaryOptions {
             failed_runs: self.failed_runs,
-            previous_report_dir: self.previous,
+            previous_report_dir: self.previous_report_dir,
             headroom_threshold: self.headroom_threshold,
             withhold_test_detail: self.withhold_test_detail,
             efficiency_tolerances: EfficiencyTolerances {
