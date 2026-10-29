@@ -47,7 +47,7 @@ dir = "crates/trogon_dylint_lints"
 # RUSTUP_TOOLCHAIN, which outranks the crate's own rust-toolchain.toml.
 run = '''
 channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
-rustup run "$channel" cargo test
+rustup run "$channel" cargo test --locked
 '''
 
 [tasks."lints:build"]
