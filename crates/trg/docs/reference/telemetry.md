@@ -129,6 +129,7 @@ Shared by every command that loads config or resolves secrets.
 | `load config` | `error.type` |
 | `fetch secrets` | `trg.secrets.var.count` |
 | `fetch secret` | `trg.secrets.backend.name`, `trg.secrets.backend.kind`, `trg.secrets.var.count` |
+| `resolve secret` | `trg.secrets.answered_by`, `trg.secrets.fallback.used` |
 | `security`, `op` (CLIENT) | The child process attributes, plus `trg.secrets.backend.kind` and `trg.secrets.operation` |
 | `{method} {url.template}` (CLIENT, OpenBao) | `http.request.method`, `url.template`, `server.address`, `server.port`, `http.response.status_code`, `trg.secrets.backend.kind`, `error.type` (the status code when `>= 400`) |
 
@@ -547,6 +548,8 @@ Attributes in the `trg.*` namespace.
 | `trg.secrets.backend.kind` | string | `keychain`, `openbao`, `onepassword` |
 | `trg.secrets.backend.name` | string | The `[secrets.backends.<name>]` entry. Never a path or a value |
 | `trg.secrets.mirror.name` | string | The `[secrets.mirrors.<name>]` table. Never a path or a value |
+| `trg.secrets.answered_by` | string | The `[secrets.backends.<name>]` entry that answered a read that lists fallbacks |
+| `trg.secrets.fallback.used` | bool | Whether an address other than the first answered |
 | `trg.secrets.operation` | string | The fixed backend CLI subcommand, never its arguments |
 | `trg.secrets.var.count` | int | Config vars one fetch served |
 | `trg.eval.skill.revision` | string | Content hash of the skill revision |

@@ -123,6 +123,15 @@ impl VarSite {
         }
     }
 
+    /// One `--fallback` of `trg secret get`, which is written as the same
+    /// inline table a config would hold, so its errors are spelled as TOML too.
+    pub fn fallback_flag(position: usize) -> Self {
+        Self::Table {
+            table: "--fallback".to_string(),
+            name: format!("#{position}"),
+        }
+    }
+
     fn path_key(&self) -> &'static str {
         match self {
             Self::Table { .. } => "`path`/`key`",
@@ -214,6 +223,9 @@ pub enum SecretVarError {
         kind: BackendKind,
         missing: &'static str,
     },
+
+    #[error("{site}: `fallbacks` must list at least one address")]
+    EmptyFallbacks { site: VarSite },
 
     #[error("{site}: {cause}")]
     Reference {
@@ -347,6 +359,76 @@ impl SecretVar {
     }
 }
 
+/// One value, and the addresses it may be read from, in order.
+///
+/// A plain `{ backend, ... }` declaration is a read with nothing after the
+/// first address. `fallbacks = [...]` on that declaration is the opt-in for
+/// more: each entry is a full [`SecretVar`], because a 1Password reference and
+/// an OpenBao path and key are shaped differently and there is no address both
+/// could share.
+///
+/// This is the only type a fallback exists on, and nothing `trg` writes is
+/// one. Credentials are written through a backend named by a bare string, and
+/// `trg secret put` takes a single address, so a write that quietly lands in
+/// the second of two stores is not a state these types can express.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SecretRead {
+    primary: SecretVar,
+    fallbacks: Vec<SecretVar>,
+}
+
+impl SecretRead {
+    pub fn single(primary: SecretVar) -> Self {
+        Self {
+            primary,
+            fallbacks: Vec::new(),
+        }
+    }
+
+    /// `None` for an empty list, which is a read of nothing.
+    pub fn with_fallbacks(primary: SecretVar, fallbacks: Vec<SecretVar>) -> Self {
+        Self { primary, fallbacks }
+    }
+
+    pub fn from_addresses(vars: Vec<SecretVar>) -> Option<Self> {
+        let mut vars = vars.into_iter();
+        let primary = vars.next()?;
+        Some(Self {
+            primary,
+            fallbacks: vars.collect(),
+        })
+    }
+
+    pub fn primary(&self) -> &SecretVar {
+        &self.primary
+    }
+
+    pub fn fallbacks(&self) -> &[SecretVar] {
+        &self.fallbacks
+    }
+
+    pub fn has_fallbacks(&self) -> bool {
+        !self.fallbacks.is_empty()
+    }
+}
+
+impl From<SecretVar> for SecretRead {
+    fn from(primary: SecretVar) -> Self {
+        Self::single(primary)
+    }
+}
+
+impl fmt::Display for SecretRead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.primary)?;
+        for (i, fallback) in self.fallbacks.iter().enumerate() {
+            let lead = if i == 0 { ", falling back to" } else { ", then" };
+            write!(f, "{lead} {fallback}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Read a raw declaration in the vocabulary of one backend kind.
 ///
 /// Split out of [`SecretVar::resolve`] so the dispatch on kind reads as the
@@ -441,27 +523,40 @@ impl fmt::Display for SecretVar {
 /// lookup. Fetching first, in one batch, keeps the number of round trips to
 /// one per distinct path no matter how many vars reference it.
 #[derive(Debug, Default)]
-pub struct FetchedSecrets(HashMap<SecretVar, SecretString>);
+pub struct FetchedSecrets {
+    values: HashMap<SecretRead, SecretString>,
+    answered_by: HashMap<SecretRead, String>,
+}
 
 impl FetchedSecrets {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(&mut self, var: SecretVar, value: SecretString) {
-        self.0.insert(var, value);
+    pub fn insert(&mut self, read: impl Into<SecretRead>, value: SecretString) {
+        self.values.insert(read.into(), value);
     }
 
-    pub fn get(&self, var: &SecretVar) -> Option<&SecretString> {
-        self.0.get(var)
+    pub fn get(&self, read: &SecretRead) -> Option<&SecretString> {
+        self.values.get(read)
+    }
+
+    /// Noted only for a read that listed fallbacks, because for any other the
+    /// answer can only have come from its one address.
+    pub fn record_answered_by(&mut self, read: SecretRead, backend: String) {
+        self.answered_by.insert(read, backend);
+    }
+
+    pub fn answered_by(&self, read: &SecretRead) -> Option<&str> {
+        self.answered_by.get(read).map(String::as_str)
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.values.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.values.is_empty()
     }
 }
 
@@ -469,7 +564,8 @@ impl FetchedSecrets {
 ///
 /// `Literal` is a bare TOML string; `Env` is an inline `{ env, default? }`
 /// table; `Secret` is an inline secret declaration, whose addressing fields
-/// depend on the backend it names.
+/// depend on the backend it names; `SecretWithFallbacks` is that same
+/// declaration plus further ones to read, in order, when it cannot answer.
 /// `VarSource` is intentionally accepted only inside a `vars` table, never directly
 /// in `url` or header values.
 ///
@@ -481,8 +577,10 @@ impl FetchedSecrets {
 #[serde(untagged, deny_unknown_fields)]
 #[serde(bound(deserialize = "S: Deserialize<'de>"))]
 #[serde(expecting = "a string, or an inline table `{ env = \"NAME\", default = \"...\" }`, \
-                     `{ backend = \"NAME\", path = \"...\", key = \"...\" }` \
-                     or `{ backend = \"NAME\", ref = \"op://<vault>/<item>/<field>\" }`")]
+                     `{ backend = \"NAME\", path = \"...\", key = \"...\" }`, \
+                     `{ backend = \"NAME\", ref = \"op://<vault>/<item>/<field>\" }` \
+                     or a secret table with `fallbacks = [ <secret tables>, ... ]`, \
+                     whose entries cannot carry `fallbacks` of their own")]
 pub enum VarSource<S = SecretVar> {
     Literal(String),
     Env {
@@ -491,6 +589,20 @@ pub enum VarSource<S = SecretVar> {
         default: Option<String>,
     },
     Secret(S),
+    SecretWithFallbacks(Box<WithFallbacks<S>>),
+}
+
+/// A secret declaration and the ones to try after it.
+///
+/// The primary is flattened in rather than nested, so it is written exactly as
+/// a declaration without fallbacks is, and an entry of `fallbacks` is that
+/// same plain declaration and so cannot carry a list of its own.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(bound(deserialize = "S: Deserialize<'de>"))]
+pub struct WithFallbacks<S> {
+    #[serde(flatten)]
+    pub primary: S,
+    pub fallbacks: Vec<S>,
 }
 
 /// A [`VarSource`] as deserialised, before its backend is known.
@@ -501,8 +613,14 @@ impl<S> VarSource<S> {
     pub fn secret(&self) -> Option<&S> {
         match self {
             VarSource::Secret(v) => Some(v),
-            VarSource::Literal(_) | VarSource::Env { .. } => None,
+            VarSource::Literal(_) | VarSource::Env { .. } | VarSource::SecretWithFallbacks(_) => None,
         }
+    }
+
+    /// Whether this source reads from a secrets backend at all, in either
+    /// form.
+    pub fn reads_secret(&self) -> bool {
+        matches!(self, VarSource::Secret(_) | VarSource::SecretWithFallbacks(_))
     }
 }
 
@@ -518,6 +636,19 @@ impl RawVarSource {
             VarSource::Literal(s) => VarSource::Literal(s),
             VarSource::Env { env, default } => VarSource::Env { env, default },
             VarSource::Secret(raw) => VarSource::Secret(SecretVar::resolve(&raw, secrets, site())?),
+            VarSource::SecretWithFallbacks(raw) => {
+                if raw.fallbacks.is_empty() {
+                    return Err(SecretVarError::EmptyFallbacks { site: site() });
+                }
+                VarSource::SecretWithFallbacks(Box::new(WithFallbacks {
+                    primary: SecretVar::resolve(&raw.primary, secrets, site())?,
+                    fallbacks: raw
+                        .fallbacks
+                        .iter()
+                        .map(|fallback| SecretVar::resolve(fallback, secrets, site()))
+                        .collect::<Result<_, _>>()?,
+                }))
+            }
         })
     }
 
@@ -534,21 +665,40 @@ impl RawVarSource {
             VarSource::Literal(s) => Ok(s.clone()),
             VarSource::Env { env, default } => resolve_env(env, default.as_deref()),
             VarSource::Secret(raw) => Err(VarResolveError::SecretInDeclaration(raw.backend.clone())),
+            VarSource::SecretWithFallbacks(raw) => {
+                Err(VarResolveError::SecretInDeclaration(raw.primary.backend.clone()))
+            }
         }
     }
 }
 
 impl VarSource {
+    /// The read this source needs fetched, if it has one.
+    ///
+    /// `None` for a source that reads no secret.
+    pub fn secret_read(&self) -> Option<SecretRead> {
+        match self {
+            VarSource::Secret(v) => Some(SecretRead::single(v.clone())),
+            VarSource::SecretWithFallbacks(v) => {
+                Some(SecretRead::with_fallbacks(v.primary.clone(), v.fallbacks.clone()))
+            }
+            VarSource::Literal(_) | VarSource::Env { .. } => None,
+        }
+    }
+
     pub fn resolve(&self, fetched: &FetchedSecrets) -> Result<String, VarResolveError> {
         match self {
             VarSource::Literal(s) => Ok(s.clone()),
             VarSource::Env { env, default } => resolve_env(env, default.as_deref()),
             // Absent here means the caller resolved without fetching first,
             // which is a wiring mistake rather than anything the config said.
-            VarSource::Secret(v) => fetched
-                .get(v)
-                .map(|s| s.expose_secret().to_string())
-                .ok_or_else(|| VarResolveError::SecretNotFetched(v.clone())),
+            VarSource::Secret(_) | VarSource::SecretWithFallbacks(_) => {
+                let read = self.secret_read().expect("a secret source has a read");
+                fetched
+                    .get(&read)
+                    .map(|s| s.expose_secret().to_string())
+                    .ok_or(VarResolveError::SecretNotFetched(read))
+            }
         }
     }
 }
@@ -571,7 +721,7 @@ pub enum VarResolveError {
     UndefinedVar(String),
 
     #[error("secret {0} was resolved before it was read")]
-    SecretNotFetched(SecretVar),
+    SecretNotFetched(SecretRead),
 
     #[error("`[secrets.backends.{0}]` cannot take its own address from a secrets backend")]
     SecretInDeclaration(String),
@@ -601,6 +751,16 @@ impl<S> EnvValue<S> {
         match self {
             EnvValue::Scalar(v) => v.secret().into_iter().collect(),
             EnvValue::Composed(segs) => segs.iter().filter_map(|s| s.secret()).collect(),
+        }
+    }
+}
+
+impl EnvValue {
+    /// Every read this value needs fetched before it can resolve.
+    pub fn secret_reads(&self) -> Vec<SecretRead> {
+        match self {
+            EnvValue::Scalar(v) => v.secret_read().into_iter().collect(),
+            EnvValue::Composed(segs) => segs.iter().filter_map(VarSource::secret_read).collect(),
         }
     }
 }
@@ -850,6 +1010,99 @@ b = { backend = "homelab", path = "agentgateway", key = "token" }
             .resolve(&FetchedSecrets::new())
             .unwrap_err();
         assert!(matches!(err, VarResolveError::SecretNotFetched(_)), "{err}");
+    }
+
+    const WITH_FALLBACKS: &str = r#"{ backend = "homelab", path = "exec/github", key = "GH_TOKEN", fallbacks = [
+        { backend = "op", ref = "op://Ops/github/GH_TOKEN" },
+    ] }"#;
+
+    fn source_of(table: &str) -> Result<RawVarSource, toml::de::Error> {
+        #[derive(Deserialize)]
+        struct W {
+            t: RawVarSource,
+        }
+        toml::from_str::<W>(&format!("t = {table}")).map(|w| w.t)
+    }
+
+    fn with_fallbacks_source() -> RawVarSource {
+        source_of(WITH_FALLBACKS).expect("fallbacks")
+    }
+
+    #[test]
+    fn varsource_deserializes_a_secret_table_with_fallbacks() {
+        let source = with_fallbacks_source();
+        assert!(source.reads_secret());
+        assert!(source.secret().is_none(), "a chain is not one address");
+        let VarSource::SecretWithFallbacks(chain) = source else {
+            panic!("expected a secret with fallbacks");
+        };
+        assert_eq!(chain.primary.backend, "homelab");
+        assert_eq!(chain.fallbacks.len(), 1);
+        assert_eq!(
+            chain.fallbacks[0].reference.as_deref(),
+            Some("op://Ops/github/GH_TOKEN")
+        );
+    }
+
+    /// An entry is an address and nothing else, so a list inside a list has
+    /// no way to be written down.
+    #[test]
+    fn a_fallback_entry_cannot_carry_fallbacks() {
+        let err = source_of(
+            r#"{ backend = "a", path = "p", key = "k", fallbacks = [ { backend = "b", path = "p", key = "k", fallbacks = [] } ] }"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("fallbacks"), "{err}");
+    }
+
+    #[test]
+    fn fallbacks_resolve_to_a_read_with_its_addresses_in_order() {
+        let section = declaring(&[("homelab", "openbao"), ("op", "onepassword")]);
+        let resolved = with_fallbacks_source()
+            .into_resolved(&section, || VarSite::exec_env("acme", "GH_TOKEN"))
+            .expect("resolves");
+
+        let read = resolved.secret_read().expect("a read");
+        assert_eq!(read.primary().backend(), "homelab");
+        assert_eq!(read.fallbacks().len(), 1);
+        assert_eq!(read.fallbacks()[0].backend(), "op");
+    }
+
+    #[test]
+    fn empty_fallbacks_are_refused_where_the_config_is_read() {
+        let source = source_of(r#"{ backend = "a", path = "p", key = "k", fallbacks = [] }"#).unwrap();
+        let err = source
+            .into_resolved(&declaring(&[]), || VarSite::exec_env("acme", "GH_TOKEN"))
+            .unwrap_err();
+        assert!(matches!(err, SecretVarError::EmptyFallbacks { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_fallback_entry_naming_an_undeclared_backend_is_refused() {
+        let err = with_fallbacks_source()
+            .into_resolved(&declaring(&[("homelab", "openbao")]), || {
+                VarSite::exec_env("acme", "GH_TOKEN")
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("op"), "{err}");
+    }
+
+    #[test]
+    fn resolved_fallbacks_resolve_from_what_the_chain_fetched() {
+        let section = declaring(&[("homelab", "openbao"), ("op", "onepassword")]);
+        let resolved = with_fallbacks_source()
+            .into_resolved(&section, || VarSite::exec_env("acme", "GH_TOKEN"))
+            .unwrap();
+        let read = resolved.secret_read().unwrap();
+
+        let mut fetched = FetchedSecrets::new();
+        fetched.insert(read, SecretString::from("t".to_string()));
+
+        assert_eq!(resolved.resolve(&fetched).unwrap(), "t");
+        assert!(matches!(
+            resolved.resolve(&FetchedSecrets::new()).unwrap_err(),
+            VarResolveError::SecretNotFetched(_)
+        ));
     }
 
     #[test]

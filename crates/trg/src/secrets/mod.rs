@@ -178,6 +178,33 @@ impl SecretsError {
             Self::Unsupported { .. } => "unsupported",
         }
     }
+
+    /// Whether a read that hit this may be retried against the next address of
+    /// an opted-in fallback list.
+    ///
+    /// The line is between a backend that could not answer and one that
+    /// answered with something that cannot be trusted. Being unreachable, not
+    /// signed in, refused, or simply not holding the value are all the first
+    /// kind: the next address is a different question to a different store.
+    /// OpenBao answers an expired token and an ACL denial with the same status,
+    /// so the two cannot be told apart and are treated alike. A payload that is
+    /// there but will not decode, or a 1Password field that matches twice, are
+    /// the second kind: moving on would paper over a store that is holding
+    /// something wrong, or pick a secret by luck.
+    pub fn allows_fallback(&self) -> bool {
+        match self {
+            Self::NotFound(_)
+            | Self::Unauthorized { .. }
+            | Self::Unauthenticated { .. }
+            | Self::Unavailable(_)
+            | Self::Transport(_)
+            | Self::PermissionDenied(_) => true,
+            Self::Malformed { .. }
+            | Self::MalformedItem { .. }
+            | Self::AmbiguousField { .. }
+            | Self::Unsupported { .. } => false,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

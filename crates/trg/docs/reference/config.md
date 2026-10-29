@@ -95,6 +95,29 @@ Each entry is one of:
   too, because there is no `kind` to say which of the two it should have been
   written in.
 
+  A secret var may add addresses to try in order after its own, with
+  `fallbacks`:
+
+    ```toml
+    GH_TOKEN = { backend = "homelab", path = "exec/github", key = "GH_TOKEN", fallbacks = [
+      { backend = "personal", ref = "op://Ops/github/GH_TOKEN" },
+    ] }
+    ```
+
+  The var itself is the first address and each entry is a complete address as
+  above. Entries cannot carry `fallbacks`. `fallbacks` must not be empty, and every entry's backend must be declared. It is
+  read-only by construction: a backend's `addr` and `token` reject it, and the
+  `secrets` field on a server names one backend and has no `fallbacks`.
+
+  The first address that answers wins. Not found, an unreachable backend,
+  rejected credentials, and a backend that cannot be set up on this machine
+  (an unset env var, an unreadable `ca_cert_file`) move on to the next
+  address; a value that cannot be decoded, an ambiguous
+  1Password field, and configuration mistakes stop the read. When a later
+  address answers, a warning naming both backends goes to stderr. When none
+  does, the error lists every address tried and why. See
+  [A read can name its own fallbacks](../explanation/secrets-backends.md#a-read-can-name-its-own-fallbacks).
+
   The value is read at load time. The declaration is the secret's whole
   identity and says nothing about which server reads it, so the same inline
   table can be pasted into as many servers as need that value.
@@ -877,6 +900,8 @@ trg exec run claude -- --resume
 | `could not decode header <name>: ...`             | Resolved header value is empty/whitespace or not a valid value. |
 | `duplicate header <name> collides with <existing> after canonicalization` | Two header keys map to the same canonical name (e.g. `Authorization` and `authorization`). |
 | `environment variable <NAME> is required but unset` | A `vars` entry's env had no `default` and the env var was missing. |
+| `` ... `fallbacks` must list at least one address `` | `fallbacks` is empty. |
+| `` secret ... could not be read from any of its addresses `` | Every address, the var's own and each of its `fallbacks`, failed. The message lists each backend tried and why. |
 | `var ... found nothing at that path` | A secret var's `path` has never been written. The message names the `trg secret put` that writes it. |
 | `var ... found no such key there` | The path exists but holds different keys. The message lists the keys that are there, never their values. |
 | `... names backend <name>, which is not declared; declared: ...` | A var's `backend` matches no `[secrets.backends.<name>]` entry, so there is no `kind` to say how the var should have been addressed. |

@@ -173,6 +173,42 @@ writing, because the item is managed in 1Password itself. `path` and `key` are
 not a second spelling of a reference either: a var that uses them here fails to
 load.
 
+## Fall back to another backend
+
+A value held in two stores, for example while it is being copied from one to
+the other, can add `fallbacks` to its declaration. The declaration is tried first, then
+each fallback in order, and the first that answers wins:
+
+```toml trg-example=fragment
+[mcp.servers.memorizer.vars]
+token = { backend = "local", path = "mcp/memorizer", key = "token", fallbacks = [
+  { backend = "personal", ref = "op://Private/memorizer/token" },
+] }
+```
+
+Check it by hand with `--fallback`, which takes the same inline table a config
+holds and may be repeated:
+
+```sh
+trg secret get --backend local --path mcp/memorizer --key token \
+  --fallback '{ backend = "personal", ref = "op://Private/memorizer/token" }'
+```
+
+When the first address cannot answer, stderr says which backend did, and
+stdout still carries only the value:
+
+```text
+warning: backend `local` could not answer, so the value was read from backend `personal`
+```
+
+With `--output-format json`, the document gains an `answered_by` field naming
+the backend that answered. It is present only when `--fallback` is given.
+
+This is for values you read. It does not apply to the credentials `trg mcp auth
+login` writes, and `trg secret put` takes a single address. See
+[Why secrets backends are addressed, not searched](../explanation/secrets-backends.md#a-read-can-name-its-own-fallbacks)
+for what falls through and what stops the read.
+
 ## Troubleshooting
 
 **The backend is down and I need to reset a server's credentials**

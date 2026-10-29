@@ -14,7 +14,9 @@ secrets = "work"
 ```
 
 There is no ordered list of backends, no probing, and no fallback to a second
-backend when the first one fails.
+backend when the first one fails. The one exception is narrow and is written
+out, value by value, in
+[A read can name its own fallbacks](#a-read-can-name-its-own-fallbacks).
 
 The alternative, a search order, is how a lot of credential tooling works, and
 it has a failure mode worth avoiding. When a read misses in the first backend
@@ -27,6 +29,72 @@ question the config answers.
 Failure follows the same rule. If the named backend is unreachable, the
 command fails saying so. It does not quietly fall back to the Keychain and
 leave you with two divergent copies of a rotating credential.
+
+## A read can name its own fallbacks
+
+The rule above exists to keep two machines from disagreeing about where a
+credential lives. That risk belongs to credentials `trg` writes. A value you
+hold and only read, such as an API token or a signing key, has no refresh token
+to lose, so for those one declaration may add `fallbacks`, the addresses to
+try in order after its own:
+
+```toml trg-example=fragment
+[exec.deploy.env]
+GH_TOKEN = { backend = "homelab", path = "exec/github", key = "GH_TOKEN", fallbacks = [
+  { backend = "personal", ref = "op://Ops/github/GH_TOKEN" },
+] }
+```
+
+The exception is held to what the design needs.
+
+- It is opt-in per value. Nothing is searched unless that value's declaration
+  says so, and the `fallbacks` are written in the config, so "where does this value
+  live" is still answered by reading it.
+- It is reads only. The `secrets = "<name>"` field that places OAuth
+  credentials takes one name and has no `fallbacks`, `trg secret put` takes one
+  address, and a backend's own `addr` and `token` cannot use them. A write
+  cannot fall through because there is nowhere in the grammar to ask for it.
+- The declaration itself is the first address and each entry of `fallbacks`
+  is a full address, because a 1Password reference and an OpenBao
+  `path` and `key` are not shaped alike. Entries cannot carry `fallbacks` of their own.
+- An empty `fallbacks`, or an entry naming an undeclared backend, fails to load.
+
+### Which failures fall through
+
+The test is whether the backend could not answer, or answered with something
+that cannot be trusted.
+
+| Falls through to the next address | Stops the read |
+| --- | --- |
+| Not found: no entry, no key, or no item | A value that cannot be decoded |
+| Unreachable, or a transport failure | A 1Password field name that matches more than one field |
+| Rejected credentials, expired or denied | A backend that cannot do the operation at all |
+| A backend that cannot be set up on this machine, for example its `addr` names an unset environment variable, or its `ca_cert_file` cannot be opened | A backend that is undeclared, or misconfigured the same way on every machine, such as a malformed value or a `ca_cert_file` that is read but is not a certificate |
+
+Not found falls through because a list is itself the statement that the first
+store may not hold the value yet, as while values are being copied from one
+store to another. The warning and the trace below are what make a typo in the
+first address visible rather than silently masked.
+
+OpenBao answers an expired token and an ACL denial with the same status, so
+the two cannot be told apart and both fall through.
+
+A value that is present but malformed stops the read, because falling back
+would hide a corrupt store. An ambiguous 1Password field stops it, because
+picking the other address would choose a secret by luck. A configuration
+mistake stops it because it is wrong on every machine, and a fallback that
+happened to answer would hide it for as long as the fallback kept working.
+
+### Which backend answered is never silent
+
+The failure the rule guards against is a read where nothing says which store
+answered. So a fallback that answers writes a warning to stderr naming the
+backend that could not answer, why, and the backend that did. `trg secret get`
+keeps stdout to the value alone. The `resolve secret` span records
+`trg.secrets.answered_by` and `trg.secrets.fallback.used` whether or not a
+fallback was needed.
+
+When every address fails, the error lists each attempted backend and why.
 
 ## Declaring is not connecting
 

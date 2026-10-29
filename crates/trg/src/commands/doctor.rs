@@ -222,6 +222,7 @@ fn token_check(bao: &OpenBaoBackend) -> Check {
         // here holding one. Reported rather than panicked over, because a
         // report that dies is worse than one that names something odd.
         TokenSource::Var(crate::config::VarSource::Secret(v)) => format!("{v}"),
+        TokenSource::Var(crate::config::VarSource::SecretWithFallbacks(_)) => "a fallback list".to_string(),
     };
 
     match bao.token_is_readable() {

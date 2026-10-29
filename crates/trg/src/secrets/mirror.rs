@@ -22,7 +22,7 @@ use tracing::Instrument;
 use super::telemetry::record_error;
 use super::vars::{self, VarFetchError};
 use super::{Backend, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError, SecretsSection};
-use crate::config::{RawSecretVar, SecretVar, SecretVarError, VarSite};
+use crate::config::{RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
 use crate::telemetry::semconv::trg::SECRETS_BACKEND_NAME;
 
 /// The key written next to the value, naming where it came from.
@@ -408,8 +408,9 @@ pub async fn mirror<F>(resolve: &F, mirror: &Mirror, apply: bool) -> Result<Targ
 where
     F: Fn(&str) -> Result<Backend, BackendError>,
 {
-    let fetched = vars::fetch_with(resolve, std::slice::from_ref(&mirror.source)).await?;
-    let Some(value) = fetched.get(&mirror.source) else {
+    let source = SecretRead::from(mirror.source.clone());
+    let fetched = vars::fetch_with(resolve, std::slice::from_ref(&source)).await?;
+    let Some(value) = fetched.get(&source) else {
         unreachable!("a fetch answers for every var it was asked about")
     };
     let wanted = Fingerprint::of(value.expose_secret());
