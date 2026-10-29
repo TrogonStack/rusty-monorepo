@@ -166,8 +166,9 @@ pub enum MirrorAction {
 
 #[derive(Args)]
 pub struct MirrorSelection {
-    /// Mirrors to run, by the name they are declared under. All of them when
-    /// none is given
+    /// A mirror to run, by the name it is declared under. Repeat to run more.
+    /// All of them when none is given
+    #[arg(long = "name", value_name = "NAME")]
     pub names: Vec<String>,
 
     /// Output format. Neither carries a value, only what each target did
@@ -970,17 +971,33 @@ mod tests {
 
     #[test]
     fn a_mirror_can_be_picked_by_name() {
-        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror", "a", "b"]) else {
+        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror", "--name", "a", "--name", "b"]) else {
             panic!("names should parse")
         };
         assert!(!dry.apply());
         assert_eq!(dry.selection().names, ["a", "b"]);
 
-        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "apply", "a", "b"]) else {
+        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "apply", "--name", "a", "--name", "b"]) else {
             panic!("names should parse after apply")
         };
         assert!(applied.apply());
         assert_eq!(applied.selection().names, ["a", "b"]);
+    }
+
+    /// A name is a flag value, so a mirror declared as `apply` is picked for a
+    /// preview rather than read as the subcommand that writes.
+    #[test]
+    fn a_mirror_named_like_a_subcommand_is_still_only_previewed() {
+        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror", "--name", "apply"]) else {
+            panic!("`--name apply` should parse")
+        };
+        assert!(!dry.apply());
+        assert_eq!(dry.selection().names, ["apply"]);
+    }
+
+    #[test]
+    fn a_name_is_not_taken_positionally() {
+        assert!(parse(&["mirror", "a"]).is_err());
     }
 
     fn declared() -> Vec<Mirror> {

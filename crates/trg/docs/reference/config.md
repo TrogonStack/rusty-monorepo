@@ -590,11 +590,11 @@ what the table is declared under, limited to ASCII letters, digits, `-` and
 
 These are checked whenever the config loads, not only by `trg secret mirror`.
 
-### `trg secret mirror [apply] [NAME...]`
+### `trg secret mirror [apply] [--name NAME]...`
 
 | Argument or flag  | Notes                                                           |
 | ----------------- | --------------------------------------------------------------- |
-| `NAME`            | Run only the mirrors declared under these names. All run when none is given. An unknown name is an error that lists the declared ones. |
+| `--name`          | Run only the mirror declared under this name. Repeat to run more. All run when none is given. An unknown name is an error that lists the declared ones. |
 | `apply`           | Write the targets. Without it nothing is written.               |
 | `--output-format` | `text` (default) or `json`. Neither carries a secret value.     |
 

@@ -95,7 +95,7 @@ created       signing-key -> exec/deploy#ssh_private_key (homelab)
 2 targets: 0 up to date, 2 created, 0 updated, 0 failed
 ```
 
-To run only some mirrors, name them: `trg secret mirror apply signing-key`.
+To run only some mirrors, name them: `trg secret mirror apply --name signing-key`.
 A name that is not declared is an error that lists the declared ones.
 
 A target that is already up to date is not rewritten. After a write, `trg`
