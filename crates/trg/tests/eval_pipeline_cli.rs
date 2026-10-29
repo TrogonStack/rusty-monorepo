@@ -125,7 +125,7 @@ fn exporting_a_bundle_with_no_trace_exporter_sends_nothing_and_says_so() {
         export.env_remove(var);
     }
     let output = export
-        .args(["ai", "skills", "eval", "export"])
+        .args(["ai", "skills", "eval", "export", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -248,7 +248,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
         vec!["compare", "--report-dir"],
         vec!["next-iteration"],
         vec!["html-report", "--report-dir"],
-        vec!["export"],
+        vec!["export", "--report-dir"],
         vec!["feedback", "init"],
         vec!["feedback", "list"],
         vec!["feedback", "validate"],
