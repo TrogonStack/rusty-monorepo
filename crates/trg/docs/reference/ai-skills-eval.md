@@ -716,19 +716,14 @@ per grader kind (`mechanical`, `declarative`, `script`, `llm`), with a Wilson
 95% confidence interval around each agreement rate.
 
 ```text
-trg ai skills eval grader-agreement <REPORT_DIR> [OPTIONS]
+trg ai skills eval grader-agreement --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--min-agreement` | proportion | *(unset)* | Fail when the `llm` bucket's agreement interval's Wilson lower bound is below this proportion in `(0, 1]`. Checks the `llm` bucket specifically, not the overall rate, since an LLM judge is the one grader kind whose verdicts are not already deterministic given its inputs. A threshold nobody's labels can answer yet, because no llm-graded assertion has a human verdict, is reported as a gate failure rather than a silent pass |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints the `grader-agreement.json` document on stdout |
 
@@ -743,7 +738,7 @@ trg ai skills eval grader-agreement <REPORT_DIR> [OPTIONS]
 #### Example
 
 ```shell
-$ trg ai skills eval grader-agreement ./artifacts/my-skill/20260526T120000Z-abc --min-agreement 0.9
+$ trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/20260526T120000Z-abc --min-agreement 0.9
 Grader agreement:
   overall: 8/10 agree, 95% CI [0.552, 0.962]
   mechanical: no labelled assertions

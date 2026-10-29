@@ -19,14 +19,14 @@ const GATE_FAILED: &str = "gate_failed";
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval grader-agreement ./report
+  $ trg ai skills eval grader-agreement --report-dir ./report
 
-  $ trg ai skills eval grader-agreement ./report --output-format json
+  $ trg ai skills eval grader-agreement --report-dir ./report --output-format json
 
-  $ trg ai skills eval grader-agreement ./report --min-agreement 0.9
+  $ trg ai skills eval grader-agreement --report-dir ./report --min-agreement 0.9
 ")]
 pub struct GraderAgreementArgs {
-    #[arg(help = "Path to a generated eval report directory containing report.json")]
+    #[arg(long, help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

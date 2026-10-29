@@ -37,7 +37,7 @@ agreement before a round's recommendation rides on it:
 $ trg ai skills eval feedback label ./artifacts/my-skill/<report-id> \
     --run run-001 --assertion case-a:g0 --verdict fail
 
-$ trg ai skills eval grader-agreement ./artifacts/my-skill/<report-id> --min-agreement 0.9
+$ trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/<report-id> --min-agreement 0.9
 ```
 
 `--min-agreement` checks the `llm` bucket's Wilson lower bound and fails
