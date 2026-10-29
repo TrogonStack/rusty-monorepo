@@ -13,7 +13,15 @@
     }
   ],
   "packages": {
-    "crates/trg": {},
+    "crates/trg": {
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='trg')].version"
+        }
+      ]
+    },
     "crates/trogon_dylint_lints": {}
   },
   "plugins": [
