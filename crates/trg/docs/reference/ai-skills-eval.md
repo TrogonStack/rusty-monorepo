@@ -745,7 +745,7 @@ trg ai skills eval compare --report-dir <REPORT_DIR> [OPTIONS]
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
-| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
+| `--previous-report-dir` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
 | `--pair` | string | *(unset)* | Scenario pair to compare, as `<A>:<B>`. Repeatable. Each side is `with_skill`, `without_skill`, or `old_skill`, and the two sides must differ |
 | `--judge` | enum | `none` | Judge used to decide each pair. Values: `none`, `llm`, `script`. With `none`, or with no `--pair` given, the command runs no comparisons |
 | `--judge-provider` | enum | `openai` | Judge backend for `--judge llm`. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
