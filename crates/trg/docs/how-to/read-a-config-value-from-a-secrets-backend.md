@@ -234,7 +234,8 @@ The table is the same secret table a var takes, so the first address and every
 fallback are read exactly as they are for a var, and stderr names the backend
 that answered when it was not the first. `--name` cannot be combined with
 `--backend`, `--path`, `--key`, `--ref` or `--fallback`. With
-`--output-format json` the document carries `name`, `value` and `answered_by`.
+`--output-format json` the document carries `name` and `value`, and
+`answered_by` when the secret declares `fallbacks`.
 
 ## Troubleshooting
 

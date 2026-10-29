@@ -592,7 +592,7 @@ read-only: `trg secret put` and the mirrors do not use it.
 | Argument or flag  | Notes                                                           |
 | ----------------- | --------------------------------------------------------------- |
 | `--name`          | Read the secret declared under this name. Conflicts with `--backend`, `--path`, `--key`, `--ref` and `--fallback`. An unknown name is an error that lists the declared names. |
-| `--output-format` | `text` (default) or `json`. The document carries `name`, `value` and `answered_by`. |
+| `--output-format` | `text` (default) or `json`. The document carries `name` and `value`, and `answered_by` when the secret declares `fallbacks`. |
 
 When a fallback answers, stderr names the backend that did, as it does for
 `--fallback`.
