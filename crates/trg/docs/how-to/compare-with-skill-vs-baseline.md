@@ -131,7 +131,7 @@ Pass-rate deltas do not capture output quality. `eval compare` puts the two
 outputs in front of a judge under blind labels:
 
 ```shell
-$ trg ai skills eval compare ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd \
+$ trg ai skills eval compare --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd \
     --pair with_skill:without_skill \
     --judge llm \
     --judge-model gpt-4o
