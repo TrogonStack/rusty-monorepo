@@ -241,7 +241,7 @@ mod help_tests {
     fn eval_iteration_summary_help_includes_examples() {
         let help = long_help::<IterationSummaryArgs>("iteration-summary", "Summarize assertion stability and outliers");
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
-        assert!(help.contains("--previous"));
+        assert!(help.contains("--previous-report-dir"));
         assert!(help.contains("--output-format"));
     }
 
