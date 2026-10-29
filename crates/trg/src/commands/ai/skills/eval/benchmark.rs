@@ -21,7 +21,7 @@ Examples:
 
   $ trg ai skills eval benchmark --report-dir ./report --failed-runs exclude
 
-  $ trg ai skills eval benchmark --report-dir ./report --previous ./artifacts/my-skill/prior-report --output-format json
+  $ trg ai skills eval benchmark --report-dir ./report --previous-report-dir ./artifacts/my-skill/prior-report --output-format json
 
   $ trg ai skills eval benchmark --report-dir /absolute/path/to/report
 ")]
@@ -31,10 +31,10 @@ pub struct BenchmarkArgs {
 
     #[arg(
         long,
-        value_name = "DIR",
+        value_name = "REPORT_DIR",
         help = "Previous iteration report directory for cross-iteration drift detection (auto-detected when omitted)"
     )]
-    pub previous: Option<PathBuf>,
+    pub previous_report_dir: Option<PathBuf>,
 
     #[arg(
         long,
@@ -72,7 +72,7 @@ impl BenchmarkArgs {
         let options = BenchmarkOptions {
             failed_runs: self.failed_runs,
             allow_eval_suite_drift: self.allow_eval_suite_drift,
-            previous_report_dir: self.previous,
+            previous_report_dir: self.previous_report_dir,
             headroom_threshold: self.headroom_threshold,
         };
 
@@ -209,7 +209,7 @@ mod tests {
                 "benchmark",
                 "--report-dir",
                 current.to_str().unwrap(),
-                "--previous",
+                "--previous-report-dir",
                 previous.to_str().unwrap(),
             ])
             .output()
@@ -239,7 +239,7 @@ mod tests {
                 "benchmark",
                 "--report-dir",
                 current.to_str().unwrap(),
-                "--previous",
+                "--previous-report-dir",
                 previous.to_str().unwrap(),
                 "--allow-eval-suite-drift",
                 "--output-format",
