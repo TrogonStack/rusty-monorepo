@@ -12,12 +12,12 @@ use serde_json::json;
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval feedback init ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval feedback init --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval feedback init ./report --reviewer reviewer@example.com
+  $ trg ai skills eval feedback init --report-dir ./report --reviewer reviewer@example.com
 ")]
 pub struct FeedbackInitArgs {
-    #[arg(help = "Path to a generated eval report directory containing report.json")]
+    #[arg(long, help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

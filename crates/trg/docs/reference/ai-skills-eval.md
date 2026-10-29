@@ -557,26 +557,21 @@ report bundle that does not already have one, then sync the feedback summary
 into `report.json`.
 
 ```text
-trg ai skills eval feedback init <REPORT_DIR> [OPTIONS]
+trg ai skills eval feedback init --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--reviewer` | string | *(defaults to `git config user.email`)* | Reviewer identity recorded in `feedback.json`. The command fails if this is unset and git has no `user.email` configured |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
 
 #### Example
 
 ```shell
-$ trg ai skills eval feedback init ./artifacts/my-skill/20260526T120000Z-abc --reviewer reviewer@example.com
+$ trg ai skills eval feedback init --report-dir ./artifacts/my-skill/20260526T120000Z-abc --reviewer reviewer@example.com
 Initialized feedback for 1 run(s) (0 already existed)
 ```
 
@@ -589,13 +584,7 @@ no `feedback.json` yet.
 trg ai skills eval feedback list <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -624,13 +613,7 @@ feedback summary into `report.json` when validation passes.
 trg ai skills eval feedback validate <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
@@ -662,13 +645,7 @@ assertion again replaces the prior verdict rather than duplicating it.
 trg ai skills eval feedback label <REPORT_DIR> --run <RUN_ID> --assertion <ASSERTION_ID> --verdict <pass|fail> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
