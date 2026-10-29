@@ -611,13 +611,14 @@ Schema-validate every `feedback.json` file in a report bundle, then sync the
 feedback summary into `report.json` when validation passes.
 
 ```text
-trg ai skills eval feedback validate <REPORT_DIR> [OPTIONS]
+trg ai skills eval feedback validate --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
 ##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--output-format` | enum | `text` | `text` prints a human summary or the validation errors; `json` prints a machine-readable document. Under `json`, the verdict rides in the document (`validated`, `errors`) rather than on stderr |
 
 #### Exit codes
@@ -630,7 +631,7 @@ trg ai skills eval feedback validate <REPORT_DIR> [OPTIONS]
 #### Example
 
 ```shell
-$ trg ai skills eval feedback validate ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval feedback validate --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 Validated 1 feedback file(s)
 ```
 

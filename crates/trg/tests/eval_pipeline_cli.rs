@@ -251,7 +251,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
         vec!["export", "--report-dir"],
         vec!["feedback", "init", "--report-dir"],
         vec!["feedback", "list", "--report-dir"],
-        vec!["feedback", "validate"],
+        vec!["feedback", "validate", "--report-dir"],
     ] {
         let output = trg()
             .args(["ai", "skills", "eval"])
