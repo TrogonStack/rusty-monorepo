@@ -69,7 +69,7 @@ trg ai skills eval run --skill-dir ./skills/my-skill --out-dir ./artifacts \
 Leave `--split` at its default of `all` and `--iteration` unset. A round
 covers the whole suite in a single report bundle: `--iteration` auto-detects
 the next number for that skill's `--out-dir`, and both `--previous` on later
-commands and `--from` on `next-iteration` auto-detect the sibling report
+commands and `--report-dir` on `next-iteration` auto-detect the sibling report
 bundle one iteration back by matching that number. Running the train and
 test splits as two separate invocations would give both bundles the same
 iteration number and break that auto-detection for every round after.
@@ -171,7 +171,7 @@ Either way, build the next round's improvement bundle from this round's
 report before starting the next one:
 
 ```shell
-trg ai skills eval next-iteration --from ./artifacts/my-skill/<report-id>
+trg ai skills eval next-iteration --report-dir ./artifacts/my-skill/<report-id>
 ```
 
 Read `improvement.md` and `improvement.json` for the next candidate change.

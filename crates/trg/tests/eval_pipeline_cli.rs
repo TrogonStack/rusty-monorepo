@@ -246,7 +246,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
         vec!["benchmark", "--report-dir"],
         vec!["iteration-summary", "--report-dir"],
         vec!["compare", "--report-dir"],
-        vec!["next-iteration"],
+        vec!["next-iteration", "--report-dir"],
         vec!["html-report", "--report-dir"],
         vec!["export", "--report-dir"],
         vec!["feedback", "init"],
@@ -770,7 +770,7 @@ fn next_iteration_reports_no_test_cases_and_nudges_toward_declaring_one() {
     let report_dir = scaffold_bundle(&skill_dir, &temp.path().join("artifacts"));
 
     let output = trg()
-        .args(["ai", "skills", "eval", "next-iteration"])
+        .args(["ai", "skills", "eval", "next-iteration", "--report-dir"])
         .arg(&report_dir)
         .args(["--skill-dir"])
         .arg(&skill_dir)

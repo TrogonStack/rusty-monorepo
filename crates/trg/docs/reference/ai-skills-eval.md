@@ -790,20 +790,14 @@ Build an improvement bundle from a prior iteration's report bundle, for skill
 revision.
 
 ```text
-trg ai skills eval next-iteration [REPORT_DIR] [OPTIONS]
+trg ai skills eval next-iteration --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the previous iteration report directory containing `report.json`. Optional; `--from` is an alternative to it, and one of the two is required |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--from` | path | *(unset)* | Previous iteration report directory, as an alternative to the positional `REPORT_DIR` |
+| `--report-dir` | path | *(required)* | Path to the previous iteration report directory containing `report.json` |
 | `--skill-dir` | path | *(defaults to `skill_path` from `report.json`)* | Skill directory used to detect eval suite drift |
 | `--eval-dir` | name | `evals` | Directory under `--skill-dir` the current suite is resolved from, for drift detection |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the current `evals/evals.json` hash differs from the prior iteration |
@@ -814,12 +808,12 @@ trg ai skills eval next-iteration [REPORT_DIR] [OPTIONS]
 | Code | Meaning |
 | ---- | ------- |
 | `0` | Bundle written |
-| `1` | Neither `REPORT_DIR` nor `--from` was given, or building the bundle failed |
+| `1` | Building the bundle failed |
 
 ### Example
 
 ```shell
-$ trg ai skills eval next-iteration --from ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval next-iteration --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 Improvement bundle written to ./artifacts/my-skill/next-iteration
   ./artifacts/my-skill/next-iteration/improvement.md
   ./artifacts/my-skill/next-iteration/improvement.json
