@@ -21,7 +21,9 @@ use crate::output::{print_json, OutputFormat};
 use crate::secrets::mirror as secrets_mirror;
 use crate::secrets::onepassword::{OnePasswordReference, OpRead};
 use crate::secrets::telemetry::record_error;
-use crate::secrets::{vars, Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
+use crate::secrets::{
+    vars, Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretName, SecretPath,
+};
 use crate::secrets::{Mirror, MirrorError, MirrorOutcome, TargetOutcomes};
 use crate::telemetry::semconv::trg::SECRETS_MIRROR_NAME;
 use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME};
@@ -64,25 +66,40 @@ pub struct CommonArgs {
 /// [`SecretVar::resolve_at`] settles that, which is the same call config load
 /// makes, so the two surfaces cannot drift on what they accept.
 #[derive(Args)]
-#[group(required = true, multiple = true)]
 pub struct AddressArgs {
     /// The entry within that backend, relative to its configured prefix
-    #[arg(long, requires = "key", conflicts_with = "reference")]
+    #[arg(
+        long,
+        requires = "key",
+        conflicts_with_all = ["reference", "name"],
+        required_unless_present_any = ["reference", "name"]
+    )]
     pub path: Option<String>,
 
     /// The field within that entry
-    #[arg(long, requires = "path", conflicts_with = "reference")]
+    #[arg(long, requires = "path", conflicts_with_all = ["reference", "name"])]
     pub key: Option<String>,
 
     /// A 1Password secret reference, as `Copy Secret Reference` yields it
-    #[arg(long = "ref", value_name = "op://...")]
+    #[arg(long = "ref", value_name = "op://...", conflicts_with = "name")]
     pub reference: Option<String>,
 }
 
 #[derive(Args)]
 pub struct GetArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
+    /// A secret declared under `[secrets.vars.<name>]`, read with the address
+    /// and fallbacks it declares. Takes the place of every address flag
+    #[arg(long, value_name = "NAME", value_parser = SecretName::parse)]
+    pub name: Option<SecretName>,
+
+    /// The `[secrets.backends.<name>]` entry to address
+    #[arg(long, required_unless_present = "name", conflicts_with = "name")]
+    pub backend: Option<String>,
+
+    /// Output format. `json` carries the value in the document exactly as
+    /// `text` writes it to stdout; neither is the safer one to log.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
 
     #[command(flatten)]
     pub address: AddressArgs,
@@ -91,7 +108,7 @@ pub struct GetArgs {
     /// inline table a config holds, for example `'{ backend = "op", ref =
     /// "op://<vault>/<item>/<field>" }'`. Repeat to add more, tried in order.
     /// Which backend answered is reported on stderr, never on stdout.
-    #[arg(long = "fallback", value_name = "TABLE", value_parser = parse_fallback)]
+    #[arg(long = "fallback", value_name = "TABLE", value_parser = parse_fallback, conflicts_with = "name")]
     pub fallbacks: Vec<RawSecretVar>,
 }
 
@@ -110,7 +127,7 @@ fn parse_fallback(text: &str) -> Result<RawSecretVar, String> {
 impl GetArgs {
     fn raw(&self) -> RawSecretVar {
         RawSecretVar {
-            backend: self.common.backend.clone(),
+            backend: self.backend.clone().unwrap_or_default(),
             path: self.address.path.clone(),
             key: self.address.key.clone(),
             reference: self.address.reference.clone(),
@@ -214,7 +231,7 @@ impl SecretCommands {
         match self {
             SecretCommands::Get(args) => tracing::info_span!(
                 "secret get",
-                { SECRETS_BACKEND_NAME } = args.common.backend.as_str(),
+                { SECRETS_BACKEND_NAME } = args.backend.as_deref(),
                 { SECRETS_BACKEND_KIND } = Empty,
                 "error.type" = Empty,
                 "otel.status_code" = Empty,
@@ -239,6 +256,9 @@ fn record_kind(backend: &Backend) {
 }
 
 async fn get(registry: &Registry, args: &GetArgs) -> Result<ExitCode, String> {
+    if let Some(name) = &args.name {
+        return get_named(registry, args, name).await;
+    }
     let raw = args.raw();
     if !args.fallbacks.is_empty() {
         return get_with_fallbacks(registry, args, &raw).await;
@@ -250,7 +270,7 @@ async fn get(registry: &Registry, args: &GetArgs) -> Result<ExitCode, String> {
 
     let value = read(&backend, &var).await?;
 
-    if args.common.output_format.is_json() {
+    if args.output_format.is_json() {
         return Ok(print_json(&document(&raw, &value), ExitCode::Success));
     }
 
@@ -285,11 +305,42 @@ async fn get_with_fallbacks(registry: &Registry, args: &GetArgs, raw: &RawSecret
         .map_err(|e| e.to_string())?;
     let value = fetched.get(&read).ok_or("the read answered nothing")?;
 
-    if args.common.output_format.is_json() {
+    if args.output_format.is_json() {
         let mut out = document(raw, value);
         if let (Some(answered_by), Some(map)) = (fetched.answered_by(&read), out.as_object_mut()) {
             map.insert("answered_by".to_string(), json!(answered_by));
         }
+        return Ok(print_json(&out, ExitCode::Success));
+    }
+
+    write_value(value)?;
+    Ok(ExitCode::Success)
+}
+
+/// A secret read by the name it is declared under goes through the same fetch
+/// as a config var, so what falls through, what is reported and what is
+/// recorded is the same as for `--fallback`.
+async fn get_named(registry: &Registry, args: &GetArgs, name: &SecretName) -> Result<ExitCode, String> {
+    let read = registry.named_read(name).map_err(|e| e.to_string())?;
+    let fetched = vars::fetch(registry, std::slice::from_ref(&read))
+        .await
+        .map_err(|e| e.to_string())?;
+    let value = fetched.get(&read).ok_or("the read answered nothing")?;
+
+    if args.output_format.is_json() {
+        let mut map = serde_json::Map::new();
+        map.insert("name".to_string(), serde_json::Value::String(name.as_str().to_string()));
+        map.insert(
+            "value".to_string(),
+            serde_json::Value::String(value.expose_secret().to_string()),
+        );
+        if let Some(answered_by) = fetched.answered_by(&read) {
+            map.insert(
+                "answered_by".to_string(),
+                serde_json::Value::String(answered_by.to_string()),
+            );
+        }
+        let out = serde_json::Value::Object(map);
         return Ok(print_json(&out, ExitCode::Success));
     }
 
@@ -762,6 +813,48 @@ mod tests {
     fn a_fallback_that_is_not_an_address_table_is_refused_at_parse_time() {
         assert!(get_args(&["--fallback", "not a table"]).is_err());
         assert!(get_args(&["--fallback", r#"{ backend = "op", typo = true }"#]).is_err());
+    }
+
+    #[test]
+    fn get_reads_a_secret_by_name_alone() {
+        let SecretCommands::Get(args) = parse(&["get", "--name", "git-signing-key"]).unwrap() else {
+            panic!("expected get");
+        };
+        assert_eq!(args.name.as_ref().map(SecretName::as_str), Some("git-signing-key"));
+        assert!(args.backend.is_none());
+    }
+
+    #[test]
+    fn a_name_cannot_be_combined_with_any_address_flag() {
+        for extra in [
+            &["--backend", "b"][..],
+            &["--path", "p", "--key", "k"][..],
+            &["--ref", "op://v/i/f"][..],
+            &["--fallback", r#"{ backend = "op", ref = "op://v/i/f" }"#][..],
+        ] {
+            let mut argv = vec!["get", "--name", "n"];
+            argv.extend_from_slice(extra);
+            let err = parse(&argv).err().expect("refused");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict, "{extra:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_secret_name_is_refused_by_clap() {
+        let err = parse(&["get", "--name", "bad name!"]).err().expect("refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{err}");
+        assert!(err.to_string().contains("secret name"), "{err}");
+    }
+
+    #[test]
+    fn get_needs_a_name_or_an_address() {
+        assert!(parse(&["get"]).is_err());
+        assert!(parse(&["get", "--backend", "b"]).is_err());
+    }
+
+    #[test]
+    fn put_has_no_name_flag() {
+        assert!(parse(&["put", "--backend", "b", "--path", "p", "--key", "k", "--name", "n"]).is_err());
     }
 
     #[test]

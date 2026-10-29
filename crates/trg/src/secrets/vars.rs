@@ -972,6 +972,42 @@ mod tests {
         assert_eq!(fetched.answered_by(&read), Some("op"));
     }
 
+    #[tokio::test]
+    async fn a_named_secret_whose_primary_fails_is_answered_by_its_fallback() {
+        let section: crate::secrets::SecretsSection = toml::from_str(
+            r#"
+            [backends.bao]
+            kind = "openbao"
+            addr = "https://bao.example.com"
+            mount = "kv"
+            path_prefix = "trg"
+            owner = "me"
+            token_file = "~/.t"
+
+            [backends.op]
+            kind = "onepassword"
+            account = "my.1password.com"
+
+            [vars.github]
+            backend = "bao"
+            path = "exec/github"
+            key = "GH_TOKEN"
+            fallbacks = [ { backend = "op", ref = "op://Ops/github/GH_TOKEN" } ]
+            "#,
+        )
+        .unwrap();
+        let read = section
+            .resolve_named(&crate::secrets::SecretName::parse("github").unwrap())
+            .unwrap();
+        let stores = Stores::new(&[], &[("Ops/github", &[("GH_TOKEN", "from-op")])]).await;
+        stores.bao.set_get_failure(Some(FakeFailure::Transport));
+
+        let fetched = fetch_chain(&stores, &read).await.unwrap();
+
+        assert_eq!(fetched.get(&read).unwrap().expose_secret(), "from-op");
+        assert_eq!(fetched.answered_by(&read), Some("op"));
+    }
+
     /// A reference with a query is derived by `op` rather than listed on the
     /// item, so it is read by its own call, and as a fallback it must still
     /// answer after the first address cannot.

@@ -14,6 +14,7 @@ pub mod config;
 pub mod keychain;
 pub mod kv_v2;
 pub mod mirror;
+pub mod named;
 pub mod onepassword;
 pub mod openbao;
 pub(crate) mod telemetry;
@@ -31,6 +32,7 @@ pub use mirror::{
     Fingerprint, Mirror, MirrorConfig, MirrorConfigError, MirrorError, MirrorName, MirrorNameError, MirrorOutcome,
     MirrorTarget, TargetOutcomes,
 };
+pub use named::{NamedSecretConfig, NamedSecretError, SecretName, SecretNameError};
 pub use onepassword::{
     OnePasswordBackend, OnePasswordItem, OnePasswordItemFields, OnePasswordReference, OpAccount, OpRead,
     OpReferenceError, OpReferencePart,
