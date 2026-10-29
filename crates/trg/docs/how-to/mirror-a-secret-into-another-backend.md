@@ -68,10 +68,10 @@ trg secret mirror
 ```text
 would create  github-token -> exec/github#token (homelab)
 would create  signing-key -> exec/deploy#ssh_private_key (homelab)
-2 targets: 0 up to date, 2 would create, 0 would update, 0 failed; pass --apply to write
+2 targets: 0 up to date, 2 would create, 0 would update, 0 failed; run `trg secret mirror apply` to write
 ```
 
-Nothing is written without `--apply`. Each source is read once, every target
+Nothing is written without `apply`. Each source is read once, every target
 is read, and each target reports one of:
 
 | Status         | Meaning                                                               |
@@ -86,7 +86,7 @@ Values are compared by a fingerprint, and are never printed.
 ## 3. Write the targets
 
 ```sh
-trg secret mirror --apply
+trg secret mirror apply
 ```
 
 ```text
@@ -95,7 +95,7 @@ created       signing-key -> exec/deploy#ssh_private_key (homelab)
 2 targets: 0 up to date, 2 created, 0 updated, 0 failed
 ```
 
-To run only some mirrors, name them: `trg secret mirror signing-key --apply`.
+To run only some mirrors, name them: `trg secret mirror apply --name signing-key`.
 A name that is not declared is an error that lists the declared ones.
 
 A target that is already up to date is not rewritten. After a write, `trg`
