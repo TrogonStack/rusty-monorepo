@@ -581,13 +581,14 @@ List runs in a report bundle that still need human review, meaning they have
 no `feedback.json` yet.
 
 ```text
-trg ai skills eval feedback list <REPORT_DIR> [OPTIONS]
+trg ai skills eval feedback list --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
 ##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--output-format` | enum | `text` | `text` prints the run IDs pending review, or a message that none are pending; `json` prints a machine-readable document |
 
 #### Exit codes
@@ -599,7 +600,7 @@ json`, not by the exit code.
 #### Example
 
 ```shell
-$ trg ai skills eval feedback list ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval feedback list --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 Runs needing review:
   run-001
 ```
