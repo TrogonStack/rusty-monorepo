@@ -644,13 +644,14 @@ summary into `report.json`. Writing idempotently: labelling the same
 assertion again replaces the prior verdict rather than duplicating it.
 
 ```text
-trg ai skills eval feedback label <REPORT_DIR> --run <RUN_ID> --assertion <ASSERTION_ID> --verdict <pass|fail> [OPTIONS]
+trg ai skills eval feedback label --report-dir <REPORT_DIR> --run <RUN_ID> --assertion <ASSERTION_ID> --verdict <pass|fail> [OPTIONS]
 ```
 
 ##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--run` | string | *(required)* | The run whose `grading.json` the assertion was scored in |
 | `--assertion` | string | *(required)* | The stable assertion id (`<eval-case-id>:g<index>`) to label |
 | `--verdict` | enum | *(required)* | The human reviewer's verdict: `pass` or `fail` |
@@ -668,7 +669,7 @@ trg ai skills eval feedback label <REPORT_DIR> --run <RUN_ID> --assertion <ASSER
 #### Example
 
 ```shell
-$ trg ai skills eval feedback label ./artifacts/my-skill/20260526T120000Z-abc \
+$ trg ai skills eval feedback label --report-dir ./artifacts/my-skill/20260526T120000Z-abc \
     --run run-001 --assertion case-a:g0 --verdict fail \
     --rationale 'evidence quoted the wrong file'
 Recorded verdict 'fail' for case-a:g0 in run run-001

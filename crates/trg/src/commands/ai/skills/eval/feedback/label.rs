@@ -21,13 +21,13 @@ struct FeedbackLabelOutput<'a> {
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval feedback label ./report --run run-001 --assertion case-a:g0 --verdict pass
+  $ trg ai skills eval feedback label --report-dir ./report --run run-001 --assertion case-a:g0 --verdict pass
 
-  $ trg ai skills eval feedback label ./report --run run-001 --assertion case-a:g0 \\
+  $ trg ai skills eval feedback label --report-dir ./report --run run-001 --assertion case-a:g0 \\
       --verdict fail --rationale 'evidence quoted the wrong file'
 ")]
 pub struct FeedbackLabelArgs {
-    #[arg(help = "Path to a generated eval report directory containing report.json")]
+    #[arg(long, help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

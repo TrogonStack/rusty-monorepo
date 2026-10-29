@@ -965,7 +965,7 @@ fn feedback_label_then_grader_agreement_walk_the_real_binary() {
     write_agreement_report(&report_dir, "run-001", true);
 
     trg()
-        .args(["ai", "skills", "eval", "feedback", "label"])
+        .args(["ai", "skills", "eval", "feedback", "label", "--report-dir"])
         .arg(&report_dir)
         .args(["--run", "run-001", "--assertion", "case-a:g0"])
         .args(["--verdict", "pass", "--reviewer", "reviewer@example.com"])
@@ -996,7 +996,7 @@ fn a_confidently_wrong_judge_fails_the_min_agreement_gate() {
     write_agreement_report(&report_dir, "run-001", true);
 
     trg()
-        .args(["ai", "skills", "eval", "feedback", "label"])
+        .args(["ai", "skills", "eval", "feedback", "label", "--report-dir"])
         .arg(&report_dir)
         .args(["--run", "run-001", "--assertion", "case-a:g0"])
         .args(["--verdict", "fail", "--reviewer", "reviewer@example.com"])
