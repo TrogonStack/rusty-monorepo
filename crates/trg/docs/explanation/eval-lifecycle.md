@@ -227,7 +227,7 @@ useful as an overfitting check. See [Reference: `eval
 next-iteration`](../reference/ai-skills-eval.md#eval-next-iteration).
 
 Keeping a revision is a judgment call only as long as the intervals stay a
-number someone has to read. `eval iteration-summary --previous` turns them into
+number someone has to read. `eval iteration-summary --previous-report-dir` turns them into
 a verdict instead: it compares this iteration's `with_skill` pass rate against
 the previous one's, per split, and reports whether the 95% interval of that
 change excludes zero. The train split moving is not evidence the test split

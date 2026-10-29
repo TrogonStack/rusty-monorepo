@@ -1399,9 +1399,9 @@ fn apply_cross_iteration_deltas(
 /// once: an override is read here for the first and only time, and a detected candidate
 /// arrives already parsed from the scan that found it.
 ///
-/// `--previous` left unset and auto-detection finding no sibling are the same thing: there
+/// `--previous-report-dir` left unset and auto-detection finding no sibling are the same thing: there
 /// is nothing to compare against, which is normal on a first iteration and reported as
-/// `Ok(None)`. A `--previous` the caller did name is a claim that a specific report exists;
+/// `Ok(None)`. A `--previous-report-dir` the caller did name is a claim that a specific report exists;
 /// failing to read it is an infrastructure failure the caller asked to be told about, not a
 /// quiet "nothing to compare against", so it is returned as `Err` instead of folded into the
 /// same `None` a first iteration produces.
@@ -2058,7 +2058,7 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "a named --previous that cannot be read must fail the summary, not be silently treated as no previous at all"
+            "a named --previous-report-dir that cannot be read must fail the summary, not be silently treated as no previous at all"
         );
     }
 

@@ -491,7 +491,7 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     let ungated = trg()
         .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&previous_dir)
         .output()
         .unwrap();
@@ -505,7 +505,7 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     let gated = trg()
         .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&previous_dir)
         .args(["--fail-on", "revert"])
         .output()
@@ -520,7 +520,7 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     let gated_on_the_other_condition = trg()
         .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&previous_dir)
         .args(["--fail-on", "overfitting"])
         .output()
@@ -569,7 +569,7 @@ fn fail_on_cost_and_latency_regressions_gates_a_change_that_holds_its_pass_rate(
         trg()
             .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
             .arg(&current_dir)
-            .arg("--previous")
+            .arg("--previous-report-dir")
             .arg(&previous_dir)
             .args(extra)
             .output()
@@ -648,7 +648,7 @@ fn an_increase_that_may_pass_the_allowance_is_named_without_gating() {
         trg()
             .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
             .arg(&current_dir)
-            .arg("--previous")
+            .arg("--previous-report-dir")
             .arg(&previous_dir)
             .args(["--fail-on", "cost_regression", "--output-format", "json"])
             .args(extra)
@@ -668,10 +668,10 @@ fn an_increase_that_may_pass_the_allowance_is_named_without_gating() {
     assert!(cost["shift"]["interval"]["high"].as_f64().unwrap() > 0.03, "{cost}");
 }
 
-/// A `--previous` the caller named but that cannot be read is a broken tool invocation, not
+/// A `--previous-report-dir` the caller named but that cannot be read is a broken tool invocation, not
 /// silence about there being nothing to compare against: it has to fail closed at the same
 /// exit code every other unreadable-bundle path in this walk reports, not the clean exit a
-/// first iteration with no `--previous` at all gets.
+/// first iteration with no `--previous-report-dir` at all gets.
 #[test]
 fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     let temp = tempfile::tempdir().unwrap();
@@ -685,14 +685,14 @@ fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     let named_but_unreadable = trg()
         .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&missing_previous)
         .output()
         .unwrap();
     assert_eq!(
         named_but_unreadable.status.code(),
         Some(3),
-        "a named --previous that cannot be read must fail closed, got {:?} and {}",
+        "a named --previous-report-dir that cannot be read must fail closed, got {:?} and {}",
         named_but_unreadable.status.code(),
         stderr_of(&named_but_unreadable)
     );
@@ -705,7 +705,7 @@ fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     assert_eq!(
         none_named.status.code(),
         Some(0),
-        "no --previous at all has nothing to compare against, and that is fine, got {}",
+        "no --previous-report-dir at all has nothing to compare against, and that is fine, got {}",
         stderr_of(&none_named)
     );
 }

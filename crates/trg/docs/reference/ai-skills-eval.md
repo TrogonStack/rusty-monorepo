@@ -367,7 +367,7 @@ trg ai skills eval iteration-summary --report-dir <REPORT_DIR> [OPTIONS]
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
-| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
+| `--previous-report-dir` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
 | `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these, or when a named efficiency metric regressed on any split. Comma-separated. Values: `revert`, `overfitting`, `cost_regression`, `latency_regression`, `token_regression`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
@@ -399,7 +399,7 @@ left out, and `tool_usage` is absent when none was measured.
 
 ### Keep-or-revert verdict
 
-When `--previous` resolves to a prior iteration, `iteration-summary.json` carries a
+When `--previous-report-dir` resolves to a prior iteration, `iteration-summary.json` carries a
 `keep_or_revert` section built from the same 95% intervals `benchmark` reports, turned
 into a verdict rather than left for the reader to eyeball:
 
@@ -531,9 +531,9 @@ noise and that exceeds the tolerance.
 ```shell
 $ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-$ trg ai skills eval iteration-summary --report-dir ./report --previous ./prior-report --fail-on revert,overfitting
+$ trg ai skills eval iteration-summary --report-dir ./report --previous-report-dir ./prior-report --fail-on revert,overfitting
 
-$ trg ai skills eval iteration-summary --report-dir ./report --previous ./prior-report \
+$ trg ai skills eval iteration-summary --report-dir ./report --previous-report-dir ./prior-report \
     --max-duration-increase 0.25 --fail-on cost_regression,latency_regression
 ```
 

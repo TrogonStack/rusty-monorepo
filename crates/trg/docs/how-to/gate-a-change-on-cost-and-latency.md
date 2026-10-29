@@ -40,7 +40,7 @@ the allowance. Neither one fails the job.
 
 ```shell
 $ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/candidate \
-    --previous ./artifacts/my-skill/baseline \
+    --previous-report-dir ./artifacts/my-skill/baseline \
     --max-duration-increase 0.5 \
     --max-token-increase 0.5 \
     --fail-on cost_regression,latency_regression,token_regression
@@ -73,7 +73,7 @@ The cost rose with no allowance, so `--fail-on cost_regression` exits `1`.
 - name: Gate on cost and latency against the baseline
   run: |
     trg ai skills eval iteration-summary --report-dir "$CANDIDATE_REPORT_DIR" \
-      --previous "$BASELINE_REPORT_DIR" \
+      --previous-report-dir "$BASELINE_REPORT_DIR" \
       --max-cost-increase 0.1 \
       --max-duration-increase 0.25 \
       --fail-on revert,overfitting,cost_regression,latency_regression,token_regression
