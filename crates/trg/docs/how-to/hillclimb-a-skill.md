@@ -34,7 +34,7 @@ If any case uses an `llm` grader, label a sample of its verdicts and check
 agreement before a round's recommendation rides on it:
 
 ```shell
-$ trg ai skills eval feedback label ./artifacts/my-skill/<report-id> \
+$ trg ai skills eval feedback label --report-dir ./artifacts/my-skill/<report-id> \
     --run run-001 --assertion case-a:g0 --verdict fail
 
 $ trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/<report-id> --min-agreement 0.9

@@ -14,7 +14,7 @@ Find it in `grading.json` or `report.json` under `dimensions.assertions`, then
 record your verdict:
 
 ```shell
-trg ai skills eval feedback label ./artifacts/my-skill/20260526T120000Z-abc \
+trg ai skills eval feedback label --report-dir ./artifacts/my-skill/20260526T120000Z-abc \
   --run run-001 --assertion case-a:g0 --verdict fail \
   --rationale 'evidence quoted the wrong file'
 ```

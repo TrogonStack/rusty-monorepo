@@ -37,7 +37,7 @@ or `script`, none of which are ever gated this way. If any case uses an
 before trusting a single round's recommendation to it:
 
 ```shell
-trg ai skills eval feedback label ./artifacts/my-skill/<report-id> \
+trg ai skills eval feedback label --report-dir ./artifacts/my-skill/<report-id> \
   --run run-001 --assertion case-a:g0 --verdict fail \
   --rationale 'evidence quoted the wrong file'
 
