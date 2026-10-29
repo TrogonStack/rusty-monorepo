@@ -17,16 +17,16 @@ use super::print_report_dir;
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval benchmark ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval benchmark --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval benchmark ./report --failed-runs exclude
+  $ trg ai skills eval benchmark --report-dir ./report --failed-runs exclude
 
-  $ trg ai skills eval benchmark ./report --previous ./artifacts/my-skill/prior-report --output-format json
+  $ trg ai skills eval benchmark --report-dir ./report --previous ./artifacts/my-skill/prior-report --output-format json
 
-  $ trg ai skills eval benchmark /absolute/path/to/report
+  $ trg ai skills eval benchmark --report-dir /absolute/path/to/report
 ")]
 pub struct BenchmarkArgs {
-    #[arg(help = "Path to the report directory containing report.json")]
+    #[arg(long, help = "Path to the report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(
@@ -207,6 +207,7 @@ mod tests {
                 "skills",
                 "eval",
                 "benchmark",
+                "--report-dir",
                 current.to_str().unwrap(),
                 "--previous",
                 previous.to_str().unwrap(),
@@ -236,6 +237,7 @@ mod tests {
                 "skills",
                 "eval",
                 "benchmark",
+                "--report-dir",
                 current.to_str().unwrap(),
                 "--previous",
                 previous.to_str().unwrap(),

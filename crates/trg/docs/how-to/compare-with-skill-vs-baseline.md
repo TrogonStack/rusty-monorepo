@@ -107,7 +107,7 @@ $ jq '.summary' \
 computes the delta between them:
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
+$ trg ai skills eval benchmark --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 $ jq '.deltas.with_skill_vs_without_skill' \
     ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd/benchmark.json
 {
