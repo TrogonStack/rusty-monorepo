@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.14.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.13.1...trg@v0.14.0) (2026-10-29)
+
+
+### Features
+
+* **trg:** Read a declared secret by name ([#295](https://github.com/TrogonStack/rusty-monorepo/issues/295)) ([bd4e60a](https://github.com/TrogonStack/rusty-monorepo/commit/bd4e60a6a2d782163dec227e434bfd88b32256bf))
+
+
+### Bug Fixes
+
+* **trg:** Give next-iteration a single way to name the prior report so there is one spelling to learn ([#310](https://github.com/TrogonStack/rusty-monorepo/issues/310)) ([7c2fe37](https://github.com/TrogonStack/rusty-monorepo/commit/7c2fe377894342d4ef5f3a22a80c62d49bbea769))
+* **trg:** Name each report bundle in the scaling order so the order is never positional guesswork ([#308](https://github.com/TrogonStack/rusty-monorepo/issues/308)) ([ae08421](https://github.com/TrogonStack/rusty-monorepo/commit/ae0842160de732cb919334abb34c9c9a74015497))
+* **trg:** Name each skill fed to the prompt by whether it is a directory or a file so a path is never mistaken for a command ([#300](https://github.com/TrogonStack/rusty-monorepo/issues/300)) ([f38545a](https://github.com/TrogonStack/rusty-monorepo/commit/f38545ab165b1ee5c2fb4e4a2cdda027a3bcde9d))
+* **trg:** Name the baseline of the regression gates as a report directory so the value is never mistaken for a file ([#319](https://github.com/TrogonStack/rusty-monorepo/issues/319)) ([ad8047a](https://github.com/TrogonStack/rusty-monorepo/commit/ad8047ae492c88574d1d180bbce10a7f784d9595))
+* **trg:** Name the exec entry explicitly so it never reads as a subcommand ([#297](https://github.com/TrogonStack/rusty-monorepo/issues/297)) ([f26796a](https://github.com/TrogonStack/rusty-monorepo/commit/f26796aa9d7949388400c422f86b30955de36cc4))
+* **trg:** Name the mock server inputs as a directory and a file so each value says what it is ([#320](https://github.com/TrogonStack/rusty-monorepo/issues/320)) ([3300ff0](https://github.com/TrogonStack/rusty-monorepo/commit/3300ff0d2efb6d6b1dd0c60b2d9b030b215a48ca))
+* **trg:** Name the prior report of benchmark as a directory so the value is never mistaken for a file ([#317](https://github.com/TrogonStack/rusty-monorepo/issues/317)) ([3cc0165](https://github.com/TrogonStack/rusty-monorepo/commit/3cc01656381002d70e6f748f5055cadf71580270))
+* **trg:** Name the prior report of compare as a directory so the value is never mistaken for a file ([#318](https://github.com/TrogonStack/rusty-monorepo/issues/318)) ([860533e](https://github.com/TrogonStack/rusty-monorepo/commit/860533e2f0a13ce98a38854e2229dd93e8fc2183))
+* **trg:** Name the prior report of iteration-summary as a directory so the value is never mistaken for a file ([#316](https://github.com/TrogonStack/rusty-monorepo/issues/316)) ([65df4f6](https://github.com/TrogonStack/rusty-monorepo/commit/65df4f61ac3c87ea741cf4076cbcbb323dfbb75c))
+* **trg:** Name the report bundle a human verdict is recorded against so a stage never guesses its input ([#314](https://github.com/TrogonStack/rusty-monorepo/issues/314)) ([0f37bda](https://github.com/TrogonStack/rusty-monorepo/commit/0f37bdaee19cbe5bebf2abd493dfb89b16bb0327))
+* **trg:** Name the report bundle that feedback is started for so a stage never guesses its input ([#311](https://github.com/TrogonStack/rusty-monorepo/issues/311)) ([236b035](https://github.com/TrogonStack/rusty-monorepo/commit/236b035df4b124a4212f68c70f76c19b371de77f))
+* **trg:** Name the report bundle to benchmark so a stage never guesses its input ([#302](https://github.com/TrogonStack/rusty-monorepo/issues/302)) ([ce8264f](https://github.com/TrogonStack/rusty-monorepo/commit/ce8264f4646a5b03a02e2e5f3f53ccb6fab23c97))
+* **trg:** Name the report bundle to compare so a stage never guesses its input ([#305](https://github.com/TrogonStack/rusty-monorepo/issues/305)) ([ff5e697](https://github.com/TrogonStack/rusty-monorepo/commit/ff5e6971b2bf394afd58ee7644da9b9540b8c454))
+* **trg:** Name the report bundle to export so a stage never guesses its input ([#307](https://github.com/TrogonStack/rusty-monorepo/issues/307)) ([caafa36](https://github.com/TrogonStack/rusty-monorepo/commit/caafa367d87aafdf9ba89daf2cb329fcb4a0fee0))
+* **trg:** Name the report bundle to grade so a stage never guesses its input ([#301](https://github.com/TrogonStack/rusty-monorepo/issues/301)) ([1302379](https://github.com/TrogonStack/rusty-monorepo/commit/1302379b4c151701033aa9aef240809488e13509))
+* **trg:** Name the report bundle to render so a stage never guesses its input ([#306](https://github.com/TrogonStack/rusty-monorepo/issues/306)) ([1bd964c](https://github.com/TrogonStack/rusty-monorepo/commit/1bd964c6b8eaed48b669703e34e9d19b533a9649))
+* **trg:** Name the report bundle to summarize so a stage never guesses its input ([#303](https://github.com/TrogonStack/rusty-monorepo/issues/303)) ([7f77676](https://github.com/TrogonStack/rusty-monorepo/commit/7f7767624c22fccf2b2db016fa4a53f9b99d9a19))
+* **trg:** Name the report bundle whose feedback is listed so a stage never guesses its input ([#312](https://github.com/TrogonStack/rusty-monorepo/issues/312)) ([d866d20](https://github.com/TrogonStack/rusty-monorepo/commit/d866d20badf20f4a7308442c2dc7ac6e4acffb33))
+* **trg:** Name the report bundle whose feedback is validated so a stage never guesses its input ([#313](https://github.com/TrogonStack/rusty-monorepo/issues/313)) ([ab97547](https://github.com/TrogonStack/rusty-monorepo/commit/ab9754742a6e3b7450887ed2495df8ca65f25f3a))
+* **trg:** Name the report bundle whose graders are checked so a stage never guesses its input ([#304](https://github.com/TrogonStack/rusty-monorepo/issues/304)) ([56a4e66](https://github.com/TrogonStack/rusty-monorepo/commit/56a4e666b086d255f06bf50d8d17d1472448269f))
+* **trg:** Name the skill to validate by whether it is a directory or a file so every skills command reads the same way ([#298](https://github.com/TrogonStack/rusty-monorepo/issues/298)) ([385269f](https://github.com/TrogonStack/rusty-monorepo/commit/385269f6f2c5f8ba63784ff54269af837bac7878))
+* **trg:** Name the skill whose properties are read by whether it is a directory or a file so every skills command reads the same way ([#299](https://github.com/TrogonStack/rusty-monorepo/issues/299)) ([7ce8842](https://github.com/TrogonStack/rusty-monorepo/commit/7ce8842759ea28e64bb94ab74fd270623b4c6fd3))
+* **trg:** Name the workspace to verify so it is never confused with the skill directory option ([#309](https://github.com/TrogonStack/rusty-monorepo/issues/309)) ([404bca2](https://github.com/TrogonStack/rusty-monorepo/commit/404bca28353d60c0f16b313831b1a1f0eb3ccac5))
+
 ## [0.13.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.13.0...trg@v0.13.1) (2026-10-29)
 
 
