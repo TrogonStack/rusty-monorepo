@@ -64,7 +64,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy with strict warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
     name: Test
@@ -98,10 +98,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --workspace --lib --tests
+        run: cargo test --locked --workspace --lib --tests
 
       - name: Run doc tests
-        run: cargo test --workspace --doc
+        run: cargo test --locked --workspace --doc
 
   build:
     name: Build
@@ -135,10 +135,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build debug
-        run: cargo build --workspace
+        run: cargo build --locked --workspace
 
       - name: Build release
-        run: cargo build --workspace --release
+        run: cargo build --locked --workspace --release
 
   schemas:
     name: Schemas
@@ -176,7 +176,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Regenerate schemas
-        run: cargo run -p trg --bin generate-schemas
+        run: cargo run --locked -p trg --bin generate-schemas
 
       - name: Fail on drift
         run: git diff --exit-code crates/trg/schemas/
@@ -251,7 +251,7 @@ jobs:
       - name: Run OpenBao wire tests
         env:
           BAO_CONFIG: ${{ runner.temp }}/bao-config.toml
-        run: cargo test -p trg --test openbao_live -- --ignored
+        run: cargo test --locked -p trg --test openbao_live -- --ignored
 
       - name: OpenBao logs
         if: failure()
@@ -322,7 +322,7 @@ jobs:
           install_args: rust cargo:cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --workspace --out Xml --timeout 300
+        run: cargo tarpaulin --locked --workspace --out Xml --timeout 300
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
