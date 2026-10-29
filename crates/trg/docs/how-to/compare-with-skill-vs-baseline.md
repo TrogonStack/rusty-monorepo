@@ -83,7 +83,7 @@ For assertion outcomes, grade the bundle and read `benchmark.json`.
 ## 3. Grade both scenarios
 
 ```shell
-$ trg ai skills eval grade ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
+$ trg ai skills eval grade --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 ```
 
 Or add `--grade` to the `eval run` above to do it in the same invocation. Each

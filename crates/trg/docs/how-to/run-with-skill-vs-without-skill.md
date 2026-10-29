@@ -30,7 +30,7 @@ particular order; see [Choosing which scenarios run](../reference/ai-skills-eval
 ## 2. Grade completed runs
 
 ```shell
-$ trg ai skills eval grade ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
+$ trg ai skills eval grade --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 Graded 4 run(s)
   assertions: 6/8 passed

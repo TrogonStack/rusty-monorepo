@@ -242,7 +242,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
 
     for stage in [
         vec!["verify"],
-        vec!["grade"],
+        vec!["grade", "--report-dir"],
         vec!["benchmark"],
         vec!["iteration-summary"],
         vec!["compare"],
@@ -332,7 +332,7 @@ fn a_failed_gate_and_a_broken_tool_do_not_share_a_code() {
         .unwrap();
 
     let broken = trg()
-        .args(["ai", "skills", "eval", "grade"])
+        .args(["ai", "skills", "eval", "grade", "--report-dir"])
         .arg(temp.path().join("no-such-bundle"))
         .output()
         .unwrap();

@@ -33,7 +33,7 @@ domain format, or calling out to another tool.
 directory set to the run workspace:
 
 ```shell
-$ trg ai skills eval grade ./artifacts/csv-analyzer/20260526T170000Z-deadbeef \
+$ trg ai skills eval grade --report-dir ./artifacts/csv-analyzer/20260526T170000Z-deadbeef \
     --grader script \
     --grader-command ./skills/csv-analyzer/evals/grade.sh
 ```

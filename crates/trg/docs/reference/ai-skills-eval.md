@@ -135,19 +135,14 @@ Report directories are named `<timestamp>-<random-hex>`. Re-running without
 Grade a completed eval report bundle, writing `grading.json` per run.
 
 ```text
-trg ai skills eval grade <REPORT_DIR> [OPTIONS]
+trg ai skills eval grade --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a report bundle directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a report bundle directory containing `report.json` |
 | `--grader` | enum | `auto` | Grading strategy. Values: `auto`, `none`, `llm`, `script` |
 | `--grader-provider` | enum | `openai` | Judge backend for LLM grading. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
 | `--grader-model` | string | *(unset)* | Model identifier for LLM grading. Falls back to `TRG_JUDGE_MODEL` |
@@ -166,7 +161,7 @@ trg ai skills eval grade <REPORT_DIR> [OPTIONS]
 ### Example
 
 ```shell
-$ trg ai skills eval grade ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+$ trg ai skills eval grade --report-dir ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 Graded 1 run(s)
   assertions: 1/1 passed

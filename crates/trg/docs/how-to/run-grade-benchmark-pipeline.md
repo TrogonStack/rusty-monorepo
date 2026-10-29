@@ -55,7 +55,7 @@ Keep the composable workflow for local debugging:
 
 ```shell
 REPORT=$(trg ai skills eval run --skill-dir ./skills/my-skill --out-dir ./artifacts --runner codex)
-trg ai skills eval grade "$REPORT" --grader script --grader-command ./grade.sh --strict
+trg ai skills eval grade --report-dir "$REPORT" --grader script --grader-command ./grade.sh --strict
 trg ai skills eval benchmark "$REPORT" --failed-runs exclude
 ```
 

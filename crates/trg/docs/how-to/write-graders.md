@@ -107,7 +107,7 @@ time.
 
 ## How grading consumes graders
 
-`trg ai skills eval grade <report-dir>` (or `eval run --grade`) writes one
+`trg ai skills eval grade --report-dir <report-dir>` (or `eval run --grade`) writes one
 `grading.json` per run, with one entry per grader:
 
 ```json
