@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.12.0...trg@v0.13.0) (2026-10-29)
+
+
+### Features
+
+* **trg:** Keep a secret's copies in sync from one source of truth ([#286](https://github.com/TrogonStack/rusty-monorepo/issues/286)) ([fe9791e](https://github.com/TrogonStack/rusty-monorepo/commit/fe9791e840a4b5801ec4e12a7fcc83dd93a1faa0))
+* **trg:** Let a secret read opt in to an ordered list of backends ([#287](https://github.com/TrogonStack/rusty-monorepo/issues/287)) ([3dcc34c](https://github.com/TrogonStack/rusty-monorepo/commit/3dcc34c230bae6c7323cdb055b502ed9448877dc))
+
 ## [0.12.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.11.0...trg@v0.12.0) (2026-10-27)
 
 
