@@ -937,25 +937,20 @@ hand, the same as any other mock.
 Render a local-only, self-contained HTML report over a report bundle.
 
 ```text
-trg ai skills eval html-report <REPORT_DIR> [OPTIONS]
+trg ai skills eval html-report --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
 | `--output-format` | enum | `text` | `text` prints the report directory path and the HTML file path; `json` prints a machine-readable document |
 
 ### Example
 
 ```shell
-$ trg ai skills eval html-report ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval html-report --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 ./artifacts/my-skill/20260526T120000Z-abc
 html report: ./artifacts/my-skill/20260526T120000Z-abc/report.html
 ```
@@ -2508,7 +2503,7 @@ scenarios recorded separately in the same record.
 alongside `report.json`.
 
 ```text
-trg ai skills eval html-report <REPORT_DIR>
+trg ai skills eval html-report --report-dir <REPORT_DIR>
 ```
 
 `REPORT_DIR` is the directory containing `report.json`, the same directory
