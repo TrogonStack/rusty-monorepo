@@ -973,7 +973,7 @@ fn feedback_label_then_grader_agreement_walk_the_real_binary() {
         .success();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "grader-agreement"])
+        .args(["ai", "skills", "eval", "grader-agreement", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -1004,7 +1004,7 @@ fn a_confidently_wrong_judge_fails_the_min_agreement_gate() {
         .success();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "grader-agreement"])
+        .args(["ai", "skills", "eval", "grader-agreement", "--report-dir"])
         .arg(&report_dir)
         .args(["--min-agreement", "0.5"])
         .output()
