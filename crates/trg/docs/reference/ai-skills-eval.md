@@ -964,7 +964,7 @@ would have exported, for a pass that ran with tracing off or whose trace the
 backend no longer holds. `report.json` is read and never modified.
 
 ```text
-trg ai skills eval export <REPORT_DIR> [OPTIONS]
+trg ai skills eval export --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
 Nothing is sent unless a trace exporter is configured through the standard
@@ -972,16 +972,11 @@ Nothing is sent unless a trace exporter is configured through the standard
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`). Without one the command says nothing
 was exported and exits `0`.
 
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a report bundle directory containing `report.json` |
-
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a report bundle directory containing `report.json` |
 | `--include-traced` | bool | `false` | Also replay runs and grades whose `trace` or `grade_trace` field shows they were already traced live, linking each replayed span to its live span |
 | `--output-format` | enum | `text` | `text` prints the replayed trace id and how many runs were replayed or skipped; `json` prints a machine-readable document |
 
@@ -1116,7 +1111,7 @@ run's `trace` field.
 
 ```shell
 $ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-    trg ai skills eval export ./artifacts/my-skill/20260526T120000Z-abc
+    trg ai skills eval export --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 replayed trace: 4bf92f3577b34da6a3ce929d0e0e4736
 runs replayed: 2
 ```
