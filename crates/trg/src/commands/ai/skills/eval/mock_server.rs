@@ -54,29 +54,33 @@ pub struct MockServerArgs {
     /// Directory holding this server's resolved mock declarations, one `<tool>.json` file
     /// per tool.
     #[arg(long)]
-    pub mocks: PathBuf,
+    pub mocks_dir: PathBuf,
     /// The server name this process answers as, for the calls it logs.
     #[arg(long)]
     pub server: String,
     /// Where to append one JSON line per `tools/call`, violations included.
     #[arg(long)]
-    pub calls: PathBuf,
+    pub calls_file: PathBuf,
 }
 
 impl MockServerArgs {
     pub fn handle(self) -> ExitCode {
         let server = ServerName::from(self.server.as_str());
-        let tools = match load_server_mocks(&self.mocks) {
+        let tools = match load_server_mocks(&self.mocks_dir) {
             Ok(tools) => tools,
             Err(e) => {
-                eprintln!("mock-server: failed to load mocks from {}: {}", self.mocks.display(), e);
+                eprintln!(
+                    "mock-server: failed to load mocks from {}: {}",
+                    self.mocks_dir.display(),
+                    e
+                );
                 return ExitCode::InfrastructureFailure;
             }
         };
-        if let Err(e) = open_call_log(&self.calls) {
+        if let Err(e) = open_call_log(&self.calls_file) {
             eprintln!(
                 "mock-server: failed to open the call log at {}: {}",
-                self.calls.display(),
+                self.calls_file.display(),
                 e
             );
             return ExitCode::InfrastructureFailure;
@@ -85,7 +89,14 @@ impl MockServerArgs {
         let stdin = io::stdin();
         let stdout = io::stdout();
         let durations = OperationDuration::on(&opentelemetry::global::meter("trg"));
-        match run_stdio_loop(stdin.lock(), stdout.lock(), &server, &tools, &self.calls, &durations) {
+        match run_stdio_loop(
+            stdin.lock(),
+            stdout.lock(),
+            &server,
+            &tools,
+            &self.calls_file,
+            &durations,
+        ) {
             Ok(()) => ExitCode::Success,
             Err(e) => {
                 eprintln!("mock-server: {e}");
