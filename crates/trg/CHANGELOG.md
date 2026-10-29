@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.13.0...trg@v0.13.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **trg:** Make writing a mirror a subcommand instead of a flag ([#293](https://github.com/TrogonStack/rusty-monorepo/issues/293)) ([26818cc](https://github.com/TrogonStack/rusty-monorepo/commit/26818cc3ec60f3e11231e4335bb643bb9927c05d))
+
 ## [0.13.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.12.0...trg@v0.13.0) (2026-10-29)
 
 
