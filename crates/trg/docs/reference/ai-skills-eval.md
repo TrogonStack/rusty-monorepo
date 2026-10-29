@@ -194,7 +194,7 @@ the grading for that run.
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
 
 `verify` also accepts the threshold and regression flags (`--min-pass-rate`,
-`--max-tokens`, `--baseline`, `--strict-ci`, and the `--fail-on-*` family). See
+`--max-tokens`, `--baseline-report-dir`, `--strict-ci`, and the `--fail-on-*` family). See
 [Pass-rate thresholds](../how-to/run-in-ci.md#pass-rate-thresholds).
 
 ### What strict mode needs from the build
@@ -3215,7 +3215,7 @@ twice, so a single run of a case is one draw from a distribution rather than a
 measurement of the skill. With one draw per cell, `benchmark.json` reports a
 spread of zero because none was measured, a pass rate that moved between two
 passes cannot be told apart from the agent's own variance, and a regression
-flagged against `--baseline` is as likely to be noise as it is to be the skill.
+flagged against `--baseline-report-dir` is as likely to be noise as it is to be the skill.
 
 Three is the smallest count that answers the question. One reports no spread,
 two cannot say which of the pair was the outlier, and three shows that a cell is

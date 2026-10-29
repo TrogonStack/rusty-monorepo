@@ -2226,7 +2226,7 @@ mod tests {
                 max_input_tokens: None,
                 max_output_tokens: None,
                 max_duration_ms: None,
-                baseline: None,
+                baseline_report_dir: None,
             },
         }
         .handle(&crate::fs::RealFS);

@@ -60,7 +60,7 @@ pub struct EvalCiArgs {
         value_name = "REPORT_DIR",
         help = "Baseline report directory for regression comparisons"
     )]
-    pub baseline: Option<PathBuf>,
+    pub baseline_report_dir: Option<PathBuf>,
 }
 
 impl EvalCiArgs {
@@ -87,7 +87,7 @@ impl EvalCiArgs {
             max_input_tokens: self.max_input_tokens,
             max_output_tokens: self.max_output_tokens,
             max_duration_ms: self.max_duration_ms,
-            baseline: self.baseline.clone(),
+            baseline: self.baseline_report_dir.clone(),
         }
     }
 }
