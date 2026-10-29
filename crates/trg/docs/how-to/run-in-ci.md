@@ -16,7 +16,7 @@ skill regressions on every pull request.
 | Aggregate `benchmark.json` | yes | `eval benchmark`, or `eval run --benchmark` |
 | Fail on assertion pass rate | yes | `--min-pass-rate`, or `--mode strict` on `verify`. Also fails when nothing was scored |
 | Fail on one case's own score | yes | `--min-case-score`, gates each case independently of the bundle average |
-| Fail on regression against a baseline | yes | `--baseline` plus the `--fail-on-*` flags |
+| Fail on regression against a baseline | yes | `--baseline-report-dir` plus the `--fail-on-*` flags |
 | Compare scenarios qualitatively | yes | `eval compare --judge llm` or `--judge script` |
 | Fail on a held-out regression or suspected overfitting | yes | `eval iteration-summary --previous-report-dir --fail-on` |
 
@@ -154,7 +154,7 @@ $ trg ai skills eval verify --workspace-dir ./runs/run-001/workspace \
 | `--max-input-tokens N` | input tokens across all runs exceed `N` |
 | `--max-output-tokens N` | output tokens across all runs exceed `N` |
 | `--max-duration-ms MS` | any single run takes longer than `MS` |
-| `--baseline REPORT_DIR` | regression flags below have something to compare against |
+| `--baseline-report-dir REPORT_DIR` | regression flags below have something to compare against |
 
 Regression gates compare the current bundle to a baseline report directory:
 
