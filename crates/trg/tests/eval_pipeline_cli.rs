@@ -243,7 +243,7 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
     for stage in [
         vec!["verify"],
         vec!["grade", "--report-dir"],
-        vec!["benchmark"],
+        vec!["benchmark", "--report-dir"],
         vec!["iteration-summary"],
         vec!["compare"],
         vec!["next-iteration"],
@@ -800,7 +800,7 @@ fn benchmark_and_iteration_summary_warn_when_the_with_skill_arm_has_no_headroom_
     write_iteration_report(&report_dir, 1, "report-a", &runs);
 
     let benchmark_text = trg()
-        .args(["ai", "skills", "eval", "benchmark"])
+        .args(["ai", "skills", "eval", "benchmark", "--report-dir"])
         .arg(&report_dir)
         .output()
         .unwrap();
@@ -817,7 +817,7 @@ fn benchmark_and_iteration_summary_warn_when_the_with_skill_arm_has_no_headroom_
     );
 
     let benchmark_json = trg()
-        .args(["ai", "skills", "eval", "benchmark"])
+        .args(["ai", "skills", "eval", "benchmark", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -858,7 +858,7 @@ fn headroom_threshold_is_configurable_from_the_command_line() {
     write_iteration_report(&report_dir, 1, "report-a", &runs);
 
     let output = trg()
-        .args(["ai", "skills", "eval", "benchmark"])
+        .args(["ai", "skills", "eval", "benchmark", "--report-dir"])
         .arg(&report_dir)
         .args(["--headroom-threshold", "0.999", "--output-format", "json"])
         .output()

@@ -39,7 +39,7 @@ Graded 4 run(s)
 ## 3. Aggregate into benchmark.json
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
+$ trg ai skills eval benchmark --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 ```
 

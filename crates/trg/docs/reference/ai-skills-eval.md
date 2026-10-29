@@ -302,19 +302,14 @@ Aggregate a report bundle's grading and timing artifacts into `benchmark.json`,
 written both at the report root and under its iteration layout directory.
 
 ```text
-trg ai skills eval benchmark <REPORT_DIR> [OPTIONS]
+trg ai skills eval benchmark --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
 | `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket` (report failed runs as a separate bucket, apart from completed runs), `exclude` (drop failed and timed-out runs from aggregation), `zero` (fold them into the completed bucket, scored as zero) |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
@@ -357,7 +352,7 @@ exit code: a saturated suite is a measurement limit, not a failed gate.
 ### Example
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval benchmark --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 ./artifacts/my-skill/20260526T120000Z-abc
 ```
 

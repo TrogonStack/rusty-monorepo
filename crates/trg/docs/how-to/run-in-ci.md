@@ -202,7 +202,7 @@ output:
 it with `eval run --benchmark`, or aggregate an existing bundle afterwards:
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/csv-analyzer/2026-01-15/report-001
+$ trg ai skills eval benchmark --report-dir ./artifacts/csv-analyzer/2026-01-15/report-001
 ```
 
 ## Keep-or-revert gate

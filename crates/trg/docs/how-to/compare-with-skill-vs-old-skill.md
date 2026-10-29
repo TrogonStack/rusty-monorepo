@@ -81,7 +81,7 @@ Comparison records carry qualitative verdicts, not numbers. The scenario delta
 lives in `benchmark.json` under `deltas.with_skill_vs_old_skill`:
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/csv-analyzer/20260526T160000Z-11223344
+$ trg ai skills eval benchmark --report-dir ./artifacts/csv-analyzer/20260526T160000Z-11223344
 $ jq '.deltas.with_skill_vs_old_skill' \
     ./artifacts/csv-analyzer/20260526T160000Z-11223344/benchmark.json
 {
