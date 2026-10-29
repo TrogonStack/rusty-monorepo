@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use crate::agentskills::parser::{find_skill_md, read_properties};
 use crate::agentskills::prompt::{to_prompt_with_location, SkillWithLocation};
 use crate::exit_code::ExitCode;
@@ -8,12 +6,12 @@ use crate::output::{print_json, OutputFormat};
 use clap::Args;
 use serde_json::json;
 
-use super::resolve_skill_path;
+use super::{resolve_skill_path, SkillLocations};
 
 #[derive(Args)]
 pub struct ToPromptArgs {
-    #[arg(help = "Paths to skill directories or SKILL.md files")]
-    pub paths: Vec<PathBuf>,
+    #[command(flatten)]
+    pub skills: SkillLocations,
 
     #[arg(
         long,
@@ -29,7 +27,7 @@ impl ToPromptArgs {
         let mut skills = Vec::new();
         let mut failed: Vec<String> = Vec::new();
 
-        for path in &self.paths {
+        for path in self.skills.iter() {
             let skill_path = resolve_skill_path(path);
             match read_properties(fs, &skill_path) {
                 Ok((props, _)) => {
@@ -95,6 +93,7 @@ impl ToPromptArgs {
 mod partial_reads {
     use super::*;
     use crate::fs::testutil::MemFS;
+    use std::path::PathBuf;
 
     fn skill(fs: &MemFS, name: &str) {
         fs.insert(
@@ -105,7 +104,7 @@ mod partial_reads {
 
     fn run(fs: &MemFS, paths: &[&str], output_format: OutputFormat) -> ExitCode {
         ToPromptArgs {
-            paths: paths.iter().map(PathBuf::from).collect(),
+            skills: SkillLocations::new(paths.iter().map(PathBuf::from).collect()),
             output_format,
         }
         .handle(fs)
