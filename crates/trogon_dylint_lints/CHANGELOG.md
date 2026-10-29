@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.3.0...trogon_dylint_lints@v0.3.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **lints:** Follow clippy's move from master to main ([#289](https://github.com/TrogonStack/rusty-monorepo/issues/289)) ([68be8ab](https://github.com/TrogonStack/rusty-monorepo/commit/68be8abac399d645d61859561161e5430cc28991))
+
 ## [0.3.0](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.2.1...trogon_dylint_lints@v0.3.0) (2026-10-27)
 
 
