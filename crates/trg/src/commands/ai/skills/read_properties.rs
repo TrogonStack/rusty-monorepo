@@ -1,17 +1,15 @@
-use std::path::PathBuf;
-
 use crate::agentskills::models::SkillProperties;
 use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
 
-use super::resolve_skill_path;
+use super::SkillLocation;
 
 #[derive(Args)]
 pub struct ReadPropertiesArgs {
-    #[arg(help = "Path to skill directory or SKILL.md file")]
-    pub path: PathBuf,
+    #[command(flatten)]
+    pub skill: SkillLocation,
 
     #[arg(
         long,
@@ -24,7 +22,7 @@ pub struct ReadPropertiesArgs {
 
 impl ReadPropertiesArgs {
     pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
-        let skill_path = resolve_skill_path(&self.path);
+        let skill_path = self.skill.resolve();
         let props = match crate::agentskills::parser::read_properties(fs, &skill_path) {
             Ok((props, _)) => props,
             Err(e) => {
