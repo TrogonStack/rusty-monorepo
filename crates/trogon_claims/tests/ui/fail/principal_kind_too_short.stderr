@@ -1,0 +1,5 @@
+error: principal_kind "ab": a segment must be 3 to 64 bytes, violated at byte 0
+ --> tests/ui/fail/principal_kind_too_short.rs:4:29
+  |
+4 |     let _ = principal_kind!("ab");
+  |                             ^^^^

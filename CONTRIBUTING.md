@@ -16,6 +16,7 @@ Run the verification suite:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+mise run claims:check
 ```
 
 All must pass before merge.

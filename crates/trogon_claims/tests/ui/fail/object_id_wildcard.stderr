@@ -1,0 +1,5 @@
+error: object_id "*": the wildcard '*' is not an object id
+ --> tests/ui/fail/object_id_wildcard.rs:4:24
+  |
+4 |     let _ = object_id!("*");
+  |                        ^^^

@@ -1,0 +1,5 @@
+error: principal_kind "a/b": invalid character '/' at byte 1 (allowed in a segment: [a-z0-9_])
+ --> tests/ui/fail/principal_kind_slash.rs:4:29
+  |
+4 |     let _ = principal_kind!("a/b");
+  |                             ^^^^^
