@@ -34,9 +34,3 @@ gh attestation verify trg-<version>-<target>.tar.gz \
   --repo TrogonStack/rusty-monorepo \
   --signer-workflow TrogonStack/rusty-monorepo/.github/workflows/release-artifacts.yml
 ```
-
-Each release also ships `packslip.sigstore.json`, a signed manifest of every artifact, and a SLSA provenance file (`*.intoto.jsonl`) that can be checked with [slsa-verifier](https://github.com/slsa-framework/slsa-verifier).
-
-## Documentation
-
-See the [documentation index](docs/README.md).

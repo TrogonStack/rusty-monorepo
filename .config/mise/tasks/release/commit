@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-#MISE description="Print the commit a release tag points at"
-set -euo pipefail
-
-tag="${1:?usage: release:commit <tag>}"
-
-gh api "repos/${GITHUB_REPOSITORY:?}/commits/${tag//@/%40}" --jq .sha

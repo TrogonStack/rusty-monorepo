@@ -120,9 +120,6 @@ jobs:
       contents: write
       attestations: write
       id-token: write
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      hashes: ${{ steps.meta.outputs.hashes }}
     steps:
       - name: Checkout release tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,73 +144,9 @@ jobs:
         with:
           subject-path: artifacts/sha256sums.txt
 
-      - name: Collect SLSA subjects
-        id: meta
-        env:
-          TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          {
-            echo "tag=$TAG"
-            echo "hashes=$(mise run -q release:subjects artifacts)"
-          } >> "$GITHUB_OUTPUT"
-
       # No --clobber: assets of a published release must never be silently replaced.
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: gh release upload "$TAG" artifacts/*
-
-  slsa-provenance:
-    name: SLSA provenance
-    needs: upload
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-    # Reusable workflows from slsa-github-generator must be referenced by tag, not SHA.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
-    with:
-      base64-subjects: ${{ needs.upload.outputs.hashes }}
-      upload-assets: true
-      upload-tag-name: ${{ needs.upload.outputs.tag }}
-
-  packslip:
-    name: Packslip manifest
-    needs: upload
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      attestations: write
-      id-token: write
-    steps:
-      - name: Checkout release tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install mise
-        uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e # v5.2.3
-        with:
-          version: 2026.9.1
-          install: false
-
-      - name: Resolve tag, version and commit
-        id: release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.upload.outputs.tag }}
-        run: |
-          {
-            echo "tag=$TAG"
-            echo "version=$(mise run -q release:version "$TAG")"
-            echo "commit=$(mise run -q release:commit "$TAG")"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Sign packslip manifest
-        uses: jdx/packslip@44e50e5f64551234b4a382d991bd7f7f7d021d06 # v1
-        with:
-          project: github.com/${{ github.repository }}/trg
-          tag: ${{ steps.release.outputs.tag }}
-          version: ${{ steps.release.outputs.version }}
-          commit: ${{ steps.release.outputs.commit }}
-          download: trg-*.tar.gz
-          bin: trg
