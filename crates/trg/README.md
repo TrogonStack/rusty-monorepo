@@ -34,3 +34,5 @@ gh attestation verify trg-<version>-<target>.tar.gz \
   --repo TrogonStack/rusty-monorepo \
   --signer-workflow TrogonStack/rusty-monorepo/.github/workflows/release-artifacts.yml
 ```
+
+Each release also ships `packslip.sigstore.json`, a signed manifest of every artifact, which `packslip install` and mise can verify.
