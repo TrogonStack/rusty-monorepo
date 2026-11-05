@@ -11,15 +11,18 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-  attestations: write
-  id-token: write
+permissions: {}
 
 jobs:
   build:
     name: Build (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
+    # Manual republishing can attest an arbitrary tag, so it waits for an approval.
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'release-manual' || null }}
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -49,6 +52,7 @@ jobs:
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          [[ "$TAG" =~ ^trg@v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || { echo "not a trg release tag: $TAG" >&2; exit 1; }
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#trg@v}" >> "$GITHUB_OUTPUT"
 
@@ -96,6 +100,14 @@ jobs:
     needs: build
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'release-manual' || null }}
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      hashes: ${{ steps.meta.outputs.hashes }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -112,8 +124,58 @@ jobs:
         working-directory: artifacts
         run: sha256sum trg-* > sha256sums.txt
 
+      - name: Attest checksums
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/sha256sums.txt
+
+      - name: Collect SLSA subjects
+        id: meta
+        working-directory: artifacts
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "hashes=$(sha256sum trg-*.tar.gz | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      # No --clobber: assets of a published release must never be silently replaced.
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
-        run: gh release upload "$TAG" artifacts/* --clobber
+        run: gh release upload "$TAG" artifacts/*
+
+  slsa-provenance:
+    name: SLSA provenance
+    needs: upload
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+    # Reusable workflows from slsa-github-generator must be referenced by tag, not SHA.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.upload.outputs.hashes }}
+      upload-assets: true
+      upload-tag-name: ${{ needs.upload.outputs.tag }}
+
+  packslip:
+    name: Packslip manifest
+    needs: upload
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Download release tarballs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'trg-*.tar.gz' --dir dist
+
+      - name: Sign packslip manifest
+        uses: jdx/packslip@44e50e5f64551234b4a382d991bd7f7f7d021d06 # v1
+        with:
+          artifacts: dist/*.tar.gz
+          bin: trg
