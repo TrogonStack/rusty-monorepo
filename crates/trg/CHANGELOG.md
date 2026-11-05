@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.0...trg@v0.14.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **release:** Harden trg release signing and publish packslip and SLSA provenance ([#326](https://github.com/TrogonStack/rusty-monorepo/issues/326)) ([23f7c95](https://github.com/TrogonStack/rusty-monorepo/commit/23f7c95f039639f83238e71b8cd61270ad5eb90e))
+
 ## [0.14.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.13.1...trg@v0.14.0) (2026-10-29)
 
 
