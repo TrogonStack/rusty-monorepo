@@ -122,7 +122,6 @@ jobs:
       id-token: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
-      hashes: ${{ steps.meta.outputs.hashes }}
     steps:
       - name: Checkout release tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,15 +146,11 @@ jobs:
         with:
           subject-path: artifacts/sha256sums.txt
 
-      - name: Collect SLSA subjects
+      - name: Record release tag
         id: meta
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
-        run: |
-          {
-            echo "tag=$TAG"
-            echo "hashes=$(mise run -q release:subjects artifacts)"
-          } >> "$GITHUB_OUTPUT"
+        run: echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # No --clobber: assets of a published release must never be silently replaced.
       - name: Upload to GitHub Release
@@ -163,20 +158,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: gh release upload "$TAG" artifacts/*
-
-  slsa-provenance:
-    name: SLSA provenance
-    needs: upload
-    permissions:
-      actions: read
-      contents: write
-      id-token: write
-    # Reusable workflows from slsa-github-generator must be referenced by tag, not SHA.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
-    with:
-      base64-subjects: ${{ needs.upload.outputs.hashes }}
-      upload-assets: true
-      upload-tag-name: ${{ needs.upload.outputs.tag }}
 
   packslip:
     name: Packslip manifest
