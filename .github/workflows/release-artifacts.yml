@@ -168,14 +168,24 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - name: Download release tarballs
+      - name: Resolve tag, version and commit
+        id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || github.ref_name }}
-        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'trg-*.tar.gz' --dir dist
+          TAG: ${{ needs.upload.outputs.tag }}
+        run: |
+          {
+            echo "tag=$TAG"
+            echo "version=${TAG#trg@v}"
+            echo "commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/${TAG//@/%40}" --jq .sha)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Sign packslip manifest
         uses: jdx/packslip@44e50e5f64551234b4a382d991bd7f7f7d021d06 # v1
         with:
-          artifacts: dist/*.tar.gz
+          project: github.com/${{ github.repository }}/trg
+          tag: ${{ steps.release.outputs.tag }}
+          version: ${{ steps.release.outputs.version }}
+          commit: ${{ steps.release.outputs.commit }}
+          download: trg-*.tar.gz
           bin: trg
