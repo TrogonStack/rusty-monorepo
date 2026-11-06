@@ -2965,6 +2965,7 @@ dependencies = [
  "axum",
  "axum-core",
  "chrono",
+ "fluent-uri",
  "http",
  "prost",
  "prost-types",

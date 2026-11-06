@@ -1,14 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use regex::Regex;
-use trogon_claims_syntax::{
-    validate_object_id, validate_object_type, validate_principal_kind, OBJECT_ID_MAX_BYTES, OBJECT_TYPE_MAX_BYTES,
-    PRINCIPAL_KIND_MAX_BYTES,
-};
+use trogon_claims_syntax::{validate_object_id, validate_object_type, OBJECT_ID_MAX_BYTES, OBJECT_TYPE_MAX_BYTES};
 
 const OBJECT_TYPE_PATTERN: &str = r"^([a-z][a-z0-9_]{1,61}[a-z0-9]/)*[a-z][a-z0-9_]{1,62}[a-z0-9]$";
 const OBJECT_ID_PATTERN: &str = r"^(([a-zA-Z0-9/_|\-=+]{1,})|\*)$";
-const RELATION_PATTERN: &str = r"^[a-z][a-z0-9_]{1,62}[a-z0-9]$";
 
 struct Xorshift(u64);
 
@@ -36,10 +32,6 @@ fn type_oracle(value: &str) -> bool {
 
 fn id_oracle(value: &str) -> bool {
     Regex::new(OBJECT_ID_PATTERN).unwrap().is_match(value) && value.len() <= OBJECT_ID_MAX_BYTES
-}
-
-fn kind_oracle(value: &str) -> bool {
-    Regex::new(RELATION_PATTERN).unwrap().is_match(value) && value.len() <= PRINCIPAL_KIND_MAX_BYTES
 }
 
 fn object_id_oracle_wildcard_free(value: &str) -> bool {
@@ -87,11 +79,6 @@ fn boundary_cases_match_the_proto_patterns() {
             type_oracle(case),
             "object_type {case:?}"
         );
-        assert_eq!(
-            validate_principal_kind(case).is_ok(),
-            kind_oracle(case),
-            "principal_kind {case:?}"
-        );
     }
 }
 
@@ -100,11 +87,6 @@ fn length_limits_match_at_and_past_the_edge() {
     let segment = |n: usize| "a".repeat(n);
     for n in [2, 3, 62, 63, 64, 65] {
         let value = segment(n);
-        assert_eq!(
-            validate_principal_kind(&value).is_ok(),
-            kind_oracle(&value),
-            "kind len {n}"
-        );
         assert_eq!(
             validate_object_type(&value).is_ok(),
             type_oracle(&value),
@@ -138,7 +120,6 @@ fn random_strings_match_the_proto_patterns() {
     let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
     let id = Regex::new(OBJECT_ID_PATTERN).unwrap();
     let ty = Regex::new(OBJECT_TYPE_PATTERN).unwrap();
-    let kind = Regex::new(RELATION_PATTERN).unwrap();
     for _ in 0..200_000 {
         let value = rng.string(&alphabet, 12);
         assert_eq!(
@@ -151,21 +132,11 @@ fn random_strings_match_the_proto_patterns() {
             ty.is_match(&value),
             "object_type {value:?}"
         );
-        assert_eq!(
-            validate_principal_kind(&value).is_ok(),
-            kind.is_match(&value),
-            "kind {value:?}"
-        );
         let value = rng.string(&type_alphabet, 12);
         assert_eq!(
             validate_object_type(&value).is_ok(),
             ty.is_match(&value),
             "object_type {value:?}"
-        );
-        assert_eq!(
-            validate_principal_kind(&value).is_ok(),
-            kind.is_match(&value),
-            "kind {value:?}"
         );
     }
 }

@@ -157,7 +157,7 @@
 //! |---|---|---|
 //! | none | Value objects, claims, identities, principals and refinements | `thiserror`, `zeroize`, `trogon_claims_syntax` |
 //! | `macros` | `principal_kind!`; backend literal constructors also require `spicedb` | `trogon_claims_macros` |
-//! | `json` | `ingest`, `RawClaims`, `RawJson`, `IngestProfile`-driven identity construction | `serde_json` |
+//! | `json` | `ingest`, `RawClaims`, `RawJson`, `IngestProfile`-driven identity construction | `serde_json`, `fluent-uri` |
 //! | `serde` | Reserved for session serialization. It carries no code yet | `serde` |
 //! | `spicedb` | `ObjectId`, `ObjectType`, backend subject mapping and accessors, object/subject references, check requests, caveat conversion and tri-state outcomes | `prost`, `prost-types` |
 //! | `axum` | The `axum` module: extractors, `WWW-Authenticate` challenges, step-up responses | `axum-core`, `http` |
@@ -407,7 +407,7 @@ pub use relation_name::RelationName;
 pub use role_claim_type::RoleClaimType;
 pub use role_name::RoleName;
 pub use scope::{ScopeName, ScopeNameError, ScopeSet};
-pub use standard_claims::StandardClaims;
+pub use standard_claims::{ParsedStandardClaims, StandardClaims};
 pub use subject_id::SubjectId;
 #[cfg(feature = "spicedb")]
 pub use subject_mapping::{Base64UrlUnpadded, SubjectMapping, SubjectMappingError, Verbatim};

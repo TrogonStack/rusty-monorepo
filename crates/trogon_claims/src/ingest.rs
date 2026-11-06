@@ -5,6 +5,7 @@ mod ingest_claims;
 mod ingest_identity;
 mod introspection;
 mod jwt;
+mod jwt_claims;
 mod projection;
 
 pub use ingest_claims::IngestClaims;

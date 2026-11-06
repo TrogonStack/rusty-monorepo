@@ -28,7 +28,53 @@ pub struct StandardClaims<'a> {
     pub(crate) claims: &'a DynamicClaims,
 }
 
+/// Standard claim values parsed once, with infallible access to the resulting
+/// assertions. Requiredness and token acceptance remain caller policy.
+/// Generic identifiers retain their core contracts; this is not a JWT profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsedStandardClaims<'a> {
+    issuer: Option<Issuer>,
+    subject: Option<SubjectId>,
+    preferred_username: Option<&'a ClaimText>,
+    upn: Option<&'a ClaimText>,
+    display_name: Option<&'a ClaimText>,
+    email: Option<&'a ClaimText>,
+    email_verified: Option<bool>,
+    audiences: Option<Vec<Audience>>,
+    expires_at: Option<NumericDate>,
+    issued_at: Option<NumericDate>,
+    not_before: Option<NumericDate>,
+    authenticated_at: Option<NumericDate>,
+    authentication_methods: Option<Vec<AuthenticationMethod>>,
+    client_id: Option<ClientId>,
+    scopes: Option<ScopeSet>,
+    roles: Option<Vec<RoleName>>,
+    groups: Option<Vec<GroupName>>,
+}
+
 impl<'a> StandardClaims<'a> {
+    pub fn try_parse(self) -> Result<ParsedStandardClaims<'a>, ClaimLookupError> {
+        Ok(ParsedStandardClaims {
+            issuer: self.issuer()?,
+            subject: self.subject()?,
+            preferred_username: self.preferred_username()?,
+            upn: self.upn()?,
+            display_name: self.display_name()?,
+            email: self.email()?,
+            email_verified: self.email_verified()?,
+            audiences: self.audiences()?,
+            expires_at: self.expires_at()?,
+            issued_at: self.issued_at()?,
+            not_before: self.not_before()?,
+            authenticated_at: self.authenticated_at()?,
+            authentication_methods: self.authentication_methods()?,
+            client_id: self.client_id()?,
+            scopes: self.scopes()?,
+            roles: self.roles()?,
+            groups: self.groups()?,
+        })
+    }
+
     fn projection_check(&self, claim: WellKnownClaim) -> Result<(), ClaimLookupError> {
         if self
             .claims
@@ -275,5 +321,83 @@ impl<'a> StandardClaims<'a> {
                 claim: WellKnownClaim::Groups,
             }),
         })
+    }
+}
+
+impl<'a> TryFrom<&'a DynamicClaims> for ParsedStandardClaims<'a> {
+    type Error = ClaimLookupError;
+
+    fn try_from(claims: &'a DynamicClaims) -> Result<Self, Self::Error> {
+        claims.standard().try_parse()
+    }
+}
+
+impl<'a> ParsedStandardClaims<'a> {
+    pub fn issuer(&self) -> Option<&Issuer> {
+        self.issuer.as_ref()
+    }
+
+    pub fn subject(&self) -> Option<&SubjectId> {
+        self.subject.as_ref()
+    }
+
+    pub fn preferred_username(&self) -> Option<&'a ClaimText> {
+        self.preferred_username
+    }
+
+    pub fn upn(&self) -> Option<&'a ClaimText> {
+        self.upn
+    }
+
+    pub fn display_name(&self) -> Option<&'a ClaimText> {
+        self.display_name
+    }
+
+    pub fn email(&self) -> Option<&'a ClaimText> {
+        self.email
+    }
+
+    pub fn email_verified(&self) -> Option<bool> {
+        self.email_verified
+    }
+
+    pub fn audiences(&self) -> Option<&[Audience]> {
+        self.audiences.as_deref()
+    }
+
+    pub fn expires_at(&self) -> Option<NumericDate> {
+        self.expires_at
+    }
+
+    pub fn issued_at(&self) -> Option<NumericDate> {
+        self.issued_at
+    }
+
+    pub fn not_before(&self) -> Option<NumericDate> {
+        self.not_before
+    }
+
+    pub fn authenticated_at(&self) -> Option<NumericDate> {
+        self.authenticated_at
+    }
+
+    pub fn authentication_methods(&self) -> Option<&[AuthenticationMethod]> {
+        self.authentication_methods.as_deref()
+    }
+
+    pub fn client_id(&self) -> Option<&ClientId> {
+        self.client_id.as_ref()
+    }
+
+    pub fn scopes(&self) -> Option<&ScopeSet> {
+        self.scopes.as_ref()
+    }
+
+    pub fn roles(&self) -> Option<&[RoleName]> {
+        self.roles.as_deref()
+    }
+
+    pub fn groups(&self) -> Option<&[GroupName]> {
+        self.groups.as_deref()
     }
 }

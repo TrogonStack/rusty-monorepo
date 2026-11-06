@@ -13,8 +13,8 @@
 //! | [`validate_object_type`] | A SpiceDB object type, optionally namespaced by `/` segments |
 //! | [`validate_relation_name`] | One lowercase segment of 3 to [`RELATION_NAME_MAX_BYTES`] bytes |
 //! | [`validate_param_name`] | A CEL identifier of up to [`PARAM_NAME_MAX_BYTES`] bytes |
-//! | [`validate_principal_kind`] | An application classification of a principal |
-//! | [`validate_subject_id`], [`validate_client_id`], [`validate_non_empty`] | OIDC subject, client id and non-empty text |
+//! | [`validate_principal_kind`] | An opaque, non-empty application classification of a principal |
+//! | [`validate_subject_id`], [`validate_client_id`], [`validate_non_empty`] | Generic subject identifier, OAuth client id and non-empty text |
 //!
 //! ```
 //! use trogon_claims_syntax::validate_object_id;
@@ -41,7 +41,7 @@ mod violation;
 
 pub use constants::{
     CLIENT_ID_MAX_BYTE, CLIENT_ID_MIN_BYTE, OBJECT_ID_ALPHABET, OBJECT_ID_MAX_BYTES, OBJECT_TYPE_MAX_BYTES,
-    OIDC_SUBJECT_MAX_BYTES, PARAM_NAME_MAX_BYTES, PRINCIPAL_KIND_MAX_BYTES, RELATION_NAME_MAX_BYTES, SEGMENT_MIN_BYTES,
+    OIDC_SUBJECT_MAX_BYTES, PARAM_NAME_MAX_BYTES, RELATION_NAME_MAX_BYTES, SEGMENT_MIN_BYTES,
     TYPE_FINAL_SEGMENT_MAX_BYTES, TYPE_INNER_SEGMENT_MAX_BYTES, WILDCARD_BYTE,
 };
 pub use object_id::validate_object_id;

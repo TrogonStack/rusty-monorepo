@@ -9,9 +9,19 @@ use trogon_claims::{ObjectId, ObjectType, ValueKind};
 use trogon_claims::{object_id, object_type};
 
 use trogon_claims::{
-    Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId, Issuer, RoleName,
-    SubjectId, Unsigned63, WellKnownClaim,
+    Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId, Issuer, PrincipalKind,
+    RoleName, SubjectId, Unsigned63, WellKnownClaim,
 };
+
+#[test]
+fn principal_kind_preserves_non_empty_application_classifications() {
+    let long_kind = "classification".repeat(100);
+    for value in ["x", "ab", "Person", "人", "app/Person", " Person ", long_kind.as_str()] {
+        let kind = PrincipalKind::try_new(value.to_owned()).unwrap();
+        assert_eq!(kind.as_str(), value);
+    }
+    assert!(PrincipalKind::try_new("").is_err());
+}
 
 #[test]
 fn non_empty_value_objects_reject_empty_and_keep_everything_else_exact() {

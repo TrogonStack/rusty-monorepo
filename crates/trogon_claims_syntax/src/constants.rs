@@ -1,6 +1,5 @@
 pub const OBJECT_ID_MAX_BYTES: usize = 1024;
 pub const OBJECT_TYPE_MAX_BYTES: usize = 128;
-pub const PRINCIPAL_KIND_MAX_BYTES: usize = 64;
 pub const TYPE_INNER_SEGMENT_MAX_BYTES: usize = 63;
 pub const TYPE_FINAL_SEGMENT_MAX_BYTES: usize = 64;
 pub const SEGMENT_MIN_BYTES: usize = 3;

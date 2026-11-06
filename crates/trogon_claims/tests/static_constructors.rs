@@ -25,8 +25,8 @@ fn static_object_type_rejects_invalid_grammar() {
 
 #[test]
 #[should_panic(expected = "invalid principal kind literal")]
-fn static_principal_kind_rejects_invalid_grammar() {
-    let _ = PrincipalKind::from_static_unchecked("Person");
+fn static_principal_kind_rejects_empty_text() {
+    let _ = PrincipalKind::from_static_unchecked("");
 }
 
 #[cfg(feature = "spicedb")]
@@ -47,6 +47,8 @@ fn static_parameter_name_rejects_invalid_grammar() {
 fn valid_static_construction_remains_const_capable() {
     const KIND: PrincipalKind = PrincipalKind::from_static_unchecked("person");
     assert_eq!(KIND.as_str(), "person");
+    const OPAQUE_KIND: PrincipalKind = PrincipalKind::from_static_unchecked("人/Person");
+    assert_eq!(OPAQUE_KIND.as_str(), "人/Person");
 
     #[cfg(feature = "spicedb")]
     {

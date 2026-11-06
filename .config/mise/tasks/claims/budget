@@ -15,7 +15,7 @@ allowed() {
   case "$feature" in
     "") echo "$dependencies" ;;
     serde) echo "$dependencies serde" ;;
-    json) echo "$dependencies serde_json" ;;
+    json) echo "$dependencies fluent-uri serde_json" ;;
     spicedb) echo "$dependencies prost prost-types" ;;
     axum) echo "$dependencies axum-core http" ;;
     *) echo "unknown claims budget feature '$feature'" >&2; return 1 ;;

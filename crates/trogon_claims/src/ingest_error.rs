@@ -31,6 +31,8 @@ pub enum ConfirmationError {
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ClaimValueError {
+    #[error("a StringOrURI value containing ':' must be an RFC 3986 URI")]
+    InvalidStringOrUri,
     #[error("expected a JSON {expected}")]
     WrongType { expected: &'static str },
     #[error("required member is missing")]

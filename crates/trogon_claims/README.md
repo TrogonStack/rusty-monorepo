@@ -132,6 +132,16 @@ validity. Authentication context (`acr`, `amr`, `auth_time`), role/group/scope
 claims and `may_act` eligibility remain assertions whose acceptability belongs
 to application policy. A resource permission result is a separate type.
 
+`ingest::jwt_payload` additionally parses the JWT representation of `iss`, `sub`
+and `aud` according to [RFC 7519 §2 and §4.1](https://www.rfc-editor.org/rfc/rfc7519.html#section-2).
+For these `StringOrURI` values, a string containing `:` must be a URI under
+[RFC 3986](https://www.rfc-editor.org/rfc/rfc3986.html). The parser preserves
+the original spelling and case. This grammar belongs to JWT ingestion;
+generic `Issuer`, `SubjectId` and `Audience` values remain nonempty opaque text.
+Actor identity members use the same representation rules, with bounded nested
+`act` chains as described by [RFC 8693 §4](https://www.rfc-editor.org/rfc/rfc8693.html#section-4).
+Actor-local `aud`, `exp` and `nbf` do not determine the containing token's validity.
+
 Raw credentials travel separately as `BootstrapCredential`, which has a named
 exposure method, redacted formatting and zeroization on drop. They are not a
 property of `Principal` or `Identity`. Request identity is passed explicitly or
@@ -139,21 +149,31 @@ attached to request extensions; there is no ambient global identity fallback.
 
 ## Typed standard claims
 
-Call `identity.claims().standard()` on an authenticated dynamic identity. The
-typed view exposes issuer, subject, audience, expiration, not-before, issuance
+Call `identity.claims().parse_standard()` to parse the supported standard claims
+into an immutable `ParsedStandardClaims` snapshot. Parsing reports unsupported
+shapes, invalid values and ambiguous singleton claims through `ClaimLookupError`.
+After parsing succeeds, getters return the stored typed values without parsing
+strings again. An absent claim remains `None`; a present empty collection remains
+`Some` with an empty slice.
+
+The snapshot exposes issuer, subject, audience, expiration, not-before, issuance
 and authentication times, client ID, scopes, roles, groups and common user claims.
-Each lookup distinguishes:
+Its guarantees concern representation. Select required fields and acceptance
+policy in the calling application.
+
+`identity.claims().standard()` remains available for selective interpretation of
+individual claims. Each lookup distinguishes:
 
 - `Ok(None)`: the claim is absent.
 - `Ok(Some(value))`: the claim has a supported valid representation.
 - `Err(ClaimLookupError)`: the value has an unsupported shape, is invalid, or is
   ambiguous because a singleton claim has multiple values.
 
-The view preserves JSON shape information: an empty audience array remains a
+Both paths preserve JSON shape information: an empty audience array remains a
 present empty collection; an object, null, or a partly malformed array cannot
 silently become missing or a valid partial value. Generic custom-claim queries
 remain available through validated `ClaimType` values.
-The view reads the claim collection itself. An explicitly configured issuer
+They read the claim collection itself. An explicitly configured issuer
 fallback affects `identity.key().issuer()` without synthesizing an `iss` claim
 or rewriting the attribution of existing claims.
 
@@ -162,6 +182,10 @@ these assertions does not convert it into another vocabulary or grant resource
 access. `NumericDate` accessors interpret timestamps; they do not decide whether
 a token is fresh or expired. Select required fields and acceptance policy in the
 calling application.
+
+`PrincipalKind` is an application classification, represented as nonempty opaque
+text. It has no RFC-defined alphabet or length limit. Backend identifiers use
+their own types and grammars behind `spicedb`.
 
 Generic `name` and `is_in_role` queries inspect projected textual assertions;
 they do not validate the complete JSON shape of a JWT claim. Use the typed
@@ -189,7 +213,7 @@ authorization decisions.
 |---|---|---|
 | none | Value objects, claims, identities, principals, refinements and runtime validation | `thiserror`, `zeroize`, `trogon_claims_syntax` |
 | `macros` | `principal_kind!`; backend literal constructors also require `spicedb` | `trogon_claims_macros` |
-| `json` | `ingest`: JWT payload and introspection to identity | `serde_json` |
+| `json` | `ingest`: JWT payload and introspection to identity | `serde_json`, `fluent-uri` |
 | `serde` | Reserved for session serialization; no code yet | `serde` |
 | `spicedb` | `ObjectId`, `ObjectType`, subject mapping and `HasSubject`/`SubjectRef`, object/subject references, checks and caveat conversion | `prost`, `prost-types` |
 | `axum` | `trogon_claims::axum`: extractors, challenges, step-up responses | `axum-core`, `http` |
