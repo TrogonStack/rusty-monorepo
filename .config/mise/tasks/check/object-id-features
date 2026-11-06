@@ -7,3 +7,4 @@ for feature in serde uuid derive derive,serde derive,uuid; do
 done
 cargo test --locked -p trogon_object_id --all-features
 cargo test --locked -p trogon_object_id --all-features --release --test allocation_tests
+cargo test --locked -p trogon_uuid --release --test allocation_tests
