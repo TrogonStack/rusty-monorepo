@@ -74,6 +74,108 @@ extern crate self as trogon_object_id;
 #[cfg(feature = "derive")]
 pub use trogon_object_id_derive::ObjectIdDomain;
 
+/// Derive checked identifier behavior for a private, transparent payload newtype.
+///
+/// ```
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct ItemId(Text);
+/// let id = ItemId::try_from_raw("abc")?;
+/// assert_eq!(id.to_string(), "item_abc");
+/// # Ok::<(), trogon_object_id::ParseError>(())
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Empty;
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Named { payload: Text }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Pair(Text, Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct PublicPayload(pub Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// struct MissingLayout(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item", payload = Text)]
+/// #[repr(transparent)]
+/// struct RepeatedPayload(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Generic<T>(T);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "")]
+/// #[repr(transparent)]
+/// struct InvalidPrefix(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct ItemId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "order")]
+/// #[repr(transparent)]
+/// struct OrderId(Text);
+/// let _: ItemId = OrderId::try_from_raw("abc").unwrap();
+/// ```
+///
+/// ```compile_fail
+/// mod domain {
+///     use trogon_object_id::{ObjectId, Text};
+///     #[derive(ObjectId)]
+///     #[object_id(prefix = "item")]
+///     #[repr(transparent)]
+///     pub struct ItemId(Text);
+/// }
+/// let forged = domain::ItemId(trogon_object_id::Text::try_from_raw("abc").unwrap());
+/// ```
+#[cfg(feature = "derive")]
+pub use trogon_object_id_derive::ObjectId;
+
 /// Derive parsing, formatting, conversions, and prefix checks for an ordinary enum.
 ///
 /// ```compile_fail
