@@ -14,3 +14,5 @@ A Rust-based monorepo for building multiple projects.
 
 - [`trg`](crates/trg/README.md): see the [`trg` documentation](crates/trg/docs/README.md).
 - [`trogon_dylint_lints`](crates/trogon_dylint_lints/README.md): a [Dylint](https://github.com/trailofbits/dylint) library of Rust policy lints.
+
+- [`trogon_object_id`](crates/trogon_object_id/README.md): domain-specific prefixed identifiers with compile-time type and union checks.
