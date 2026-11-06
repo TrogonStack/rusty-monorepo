@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+#MISE description = "Record the release tag for downstream jobs"
+set -euo pipefail
+printf 'tag=%s\n' "${TAG:?}" >> "${GITHUB_OUTPUT:?}"

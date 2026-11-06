@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description = "Extract the release version from its validated tag"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+version="$(mise run -q release:version "${TAG:?}")"
+printf 'tag=%s\nversion=%s\n' "$TAG" "$version" >> "${GITHUB_OUTPUT:?}"

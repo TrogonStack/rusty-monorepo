@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#MISE description = "Declare the OpenBao test backend"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+cat > "${RUNNER_TEMP}/bao-config.toml" <<'EOF'
+[secrets.backends.ci]
+kind = "openbao"
+addr = "http://127.0.0.1:8200"
+mount = "secret"
+path_prefix = "trg-ci"
+owner = "ci"
+token = "trg-ci-root"
+EOF

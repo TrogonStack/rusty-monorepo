@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description = "Package the requested release source"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+asset="$(mise run -q release:package "${RELEASE_VERSION:?}" "${RELEASE_TARGET:?}" "${RELEASE_SOURCE_ROOT:?}")"
+printf 'ASSET=%s/%s\n' "$MISE_PROJECT_ROOT" "$asset" >> "${GITHUB_ENV:?}"

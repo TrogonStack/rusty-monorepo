@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description = "Verify checked-in trg semantic conventions match Weaver output"
+#MISE depends = ["semconv:generate"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+git diff --exit-code crates/trg/src/telemetry/semconv/generated/
+test -z "$(git status --porcelain -- crates/trg/src/telemetry/semconv/generated/)"

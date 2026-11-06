@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description = "Verify checked-in JSON schemas match the Rust structs"
+#MISE depends = ["schemas:generate"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+git diff --exit-code crates/trg/schemas/

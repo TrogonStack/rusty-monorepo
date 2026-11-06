@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Run OpenBao wire tests"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+cargo test --locked -p trg --test openbao_live -- --ignored

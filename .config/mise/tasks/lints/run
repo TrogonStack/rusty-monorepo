@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+#MISE description = "Run the policy lint rules across every workspace feature"
+#MISE depends = ["lints:build"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+# The library's own directory selects its dylint-link linker configuration.
+libraries=(crates/trogon_dylint_lints/target/release/libtrogon_dylint_lints@*)
+lib="${libraries[0]}"
+test -f "$lib"
+cargo dylint --lib-path "$lib" --workspace --no-deps -- --all-features
