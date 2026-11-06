@@ -28,6 +28,24 @@ Task implementations live under `.config/mise/tasks/`, following
 
 The workspace Clippy policy, split across `Cargo.toml` and `clippy.toml`, mirrors `policies/rust/`, the reference copy shared with other repositories. Change them together.
 
+## Licensing
+
+New Rust crates use Apache-2.0. Inherit the workspace license in the package
+manifest:
+
+```toml
+[package]
+license.workspace = true
+```
+
+Include the full Apache-2.0 text in the crate's `LICENSE`, including its copyright
+notice. The existing [lint crate license](crates/trogon_dylint_lints/LICENSE) is a
+template. Preserve required third-party notices when incorporating existing code.
+
+Existing package licenses remain as declared in their manifests and local license
+files. The root MIT license applies to repository files without a more specific
+license; it is not the default for new Rust crates.
+
 ## Commit Messages
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):

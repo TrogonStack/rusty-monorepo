@@ -1,0 +1,27 @@
+[package]
+name = "trogon_object_id"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Type-safe prefixed identifiers with compile-time domain declarations"
+repository = "https://github.com/TrogonStack/rusty-monorepo"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+uuid = { version = "1.26", features = ["v4", "v7"], optional = true }
+trogon_object_id_derive = { version = "0.1.0", path = "../trogon_object_id_derive", optional = true }
+
+[features]
+default = []
+derive = ["dep:trogon_object_id_derive"]
+serde = ["dep:serde"]
+uuid = ["dep:uuid"]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+stats_alloc = "0.1.10"
