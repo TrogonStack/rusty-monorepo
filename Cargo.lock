@@ -2964,7 +2964,6 @@ dependencies = [
  "proc-macro2",
  "prost",
  "prost-reflect",
- "prost-types",
  "quote",
  "syn 2.0.117",
  "thiserror 2.0.21",
@@ -3061,6 +3060,7 @@ dependencies = [
 name = "uuid_identity_example"
 version = "0.1.0"
 dependencies = [
+ "stats_alloc",
  "trogon_object_id",
  "trogon_uuid",
  "trogon_uuid_build",
