@@ -1728,6 +1728,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost-reflect"
+version = "0.16.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01b80ea363c31af2de2b92e3c07ed1156628f7838c4afb4df75ee78a37fedbd1"
+dependencies = [
+ "prost",
+ "prost-types",
+]
+
+[[package]]
+name = "prost-types"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
+dependencies = [
+ "prost",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2915,6 +2934,7 @@ dependencies = [
  "stats_alloc",
  "thiserror 2.0.21",
  "trogon_object_id_derive",
+ "trogon_uuid",
  "uuid",
 ]
 
@@ -2935,6 +2955,20 @@ dependencies = [
  "sha1_smol",
  "stats_alloc",
  "uuid",
+]
+
+[[package]]
+name = "trogon_uuid_build"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "quote",
+ "syn 2.0.117",
+ "thiserror 2.0.21",
+ "trogon_uuid",
 ]
 
 [[package]]
@@ -3021,6 +3055,15 @@ checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
 dependencies = [
  "outref",
  "vsimd",
+]
+
+[[package]]
+name = "uuid_identity_example"
+version = "0.1.0"
+dependencies = [
+ "trogon_object_id",
+ "trogon_uuid",
+ "trogon_uuid_build",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/trg", "crates/trogon_object_id", "crates/trogon_object_id_derive", "crates/trogon_uuid"]
+members = ["crates/trg", "crates/trogon_object_id", "crates/trogon_object_id_derive", "crates/trogon_uuid", "crates/trogon_uuid_build", "examples/uuid_identity"]
 resolver = "2"
 
 [workspace.package]
