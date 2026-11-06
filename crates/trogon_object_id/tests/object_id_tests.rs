@@ -152,3 +152,15 @@ fn union_dispatches_without_losing_the_discriminator() {
         "empty known member is invalid"
     );
 }
+
+#[test]
+fn enforces_utf8_byte_limits_without_losing_boundary_values() {
+    let boundary = "🦀".repeat(256);
+    let id = UserId::try_from_raw(&boundary).expect("exactly 1024 UTF-8 bytes");
+    assert_eq!(id.as_raw(), boundary, "valid boundary is preserved");
+    assert_eq!(
+        UserId::try_from_raw(&"🦀".repeat(257)),
+        Err(ParseError::ValueTooLong),
+        "limit counts bytes rather than characters"
+    );
+}

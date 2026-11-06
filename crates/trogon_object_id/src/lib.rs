@@ -176,7 +176,6 @@ impl<D: Domain> fmt::Display for ObjectId<D> {
     }
 }
 
-/// Access to the validated raw storage form of a concrete domain identifier.
 /// A trusted source of raw values for one validator type.
 pub trait Generator {
     type Validator: Validator;
@@ -211,6 +210,7 @@ impl Generator for Uuid7 {
     }
 }
 
+/// Access to the validated raw storage form of a concrete domain identifier.
 pub trait Identifier: Sized {
     fn try_from_raw(value: &str) -> Result<Self, ParseError>;
     fn as_raw(&self) -> &str;
@@ -259,7 +259,14 @@ const fn prefix_byte(definition: Definition, index: usize) -> u8 {
 /// object_id! { /// A conditional domain.
 ///     #[cfg(any())] pub struct DocumentedId("disabled");
 /// }
+/// object_id! { #[cfg_attr(all(), cfg(any()), doc = "disabled")] pub struct ConditionalId("disabled"); }
+/// object_id! { #[cfg_attr(any(), cfg(any()))] pub struct EnabledId("enabled"); }
 /// union_object_id! { #[cfg(any())] pub enum DisabledUnion { Missing(MissingId) } }
+/// union_object_id! { #[cfg_attr(all(), cfg(any()))] pub enum ConditionalUnion { Missing(MissingId) } }
+/// union_object_id! { #[cfg(all())] pub enum EnabledUnion { Enabled(EnabledId) } }
+/// let enabled = EnabledId::try_from_raw("123")?;
+/// assert_eq!(EnabledUnion::from(enabled).to_string(), "enabled_123");
+/// # Ok::<(), trogon_object_id::ParseError>(())
 /// ```
 ///
 /// ```compile_fail
@@ -296,18 +303,44 @@ const fn prefix_byte(definition: Definition, index: usize) -> u8 {
 /// ```
 #[macro_export]
 macro_rules! object_id {
-    ($(#[$attr:meta])* $vis:vis struct $name:ident($kind:literal);) => {
-        $crate::object_id! { $(#[$attr])* $vis struct $name($kind, separator = "_", validator = $crate::validators::Any); }
+    (@attrs [$($kept:tt)*] #[cfg($($condition:tt)*)] $($rest:tt)*) => {
+        #[cfg($($condition)*)]
+        $crate::object_id! { @attrs [$($kept)*] $($rest)* }
     };
-    ($(#[$attr:meta])* $vis:vis struct $name:ident($kind:literal, separator = $sep:literal);) => {
-        $crate::object_id! { $(#[$attr])* $vis struct $name($kind, separator = $sep, validator = $crate::validators::Any); }
+    (@attrs [$($kept:tt)*] #[cfg_attr($condition:meta, $($attribute:tt)*)] $($rest:tt)*) => {
+        #[cfg($condition)]
+        $crate::object_id! { @split_attrs [$($kept)*] [$($rest)*] [] [] $($attribute)* }
+        #[cfg(not($condition))]
+        $crate::object_id! { @attrs [$($kept)*] $($rest)* }
     };
-    ($(#[$attr:meta])* $vis:vis struct $name:ident($kind:literal, validator = $validator:ty);) => {
-        $crate::object_id! { $(#[$attr])* $vis struct $name($kind, separator = "_", validator = $validator); }
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [] ) => {
+        $crate::object_id! { @attrs [$($kept)*] $($attrs)* $($rest)* }
     };
-    ($(#[$attr:meta])* $vis:vis struct $name:ident($kind:literal, separator = $sep:literal, validator = $validator:ty);) => {
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] ) => {
+        $crate::object_id! { @attrs [$($kept)*] $($attrs)* #[$($current)+] $($rest)* }
+    };
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] , $($tail:tt)*) => {
+        $crate::object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)* #[$($current)+]] [] $($tail)* }
+    };
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)*] $next:tt $($tail:tt)*) => {
+        $crate::object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)*] [$($current)* $next] $($tail)* }
+    };
+    (@attrs [$($kept:tt)*] #[$attr:meta] $($rest:tt)*) => {
+        $crate::object_id! { @attrs [$($kept)* #[$attr]] $($rest)* }
+    };
+
+    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal);) => {
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", validator = $crate::validators::Any); }
+    };
+    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal);) => {
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = $sep, validator = $crate::validators::Any); }
+    };
+    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, validator = $validator:ty);) => {
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", validator = $validator); }
+    };
+    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal, validator = $validator:ty);) => {
         const _: $crate::Definition = $crate::Definition::new($kind, $sep);
-        $(#[$attr])*
+        $($attr)*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         $vis struct $name($crate::ObjectId<Self>);
         impl $crate::Domain for $name {
@@ -342,6 +375,12 @@ macro_rules! object_id {
         }
         $crate::__impl_serde!($name);
     };
+    (@attrs $($invalid:tt)*) => {
+        ::core::compile_error!("invalid object_id declaration");
+    };
+    ($($input:tt)*) => {
+        $crate::object_id! { @attrs [] $($input)* }
+    };
 }
 
 /// Declare an exhaustive union with non-overlapping complete prefixes.
@@ -374,9 +413,35 @@ macro_rules! object_id {
 /// ```
 #[macro_export]
 macro_rules! union_object_id {
-    ($(#[$attr:meta])* $vis:vis enum $name:ident { $($variant:ident($member:ty)),+ $(,)? }) => {
+    (@attrs [$($kept:tt)*] #[cfg($($condition:tt)*)] $($rest:tt)*) => {
+        #[cfg($($condition)*)]
+        $crate::union_object_id! { @attrs [$($kept)*] $($rest)* }
+    };
+    (@attrs [$($kept:tt)*] #[cfg_attr($condition:meta, $($attribute:tt)*)] $($rest:tt)*) => {
+        #[cfg($condition)]
+        $crate::union_object_id! { @split_attrs [$($kept)*] [$($rest)*] [] [] $($attribute)* }
+        #[cfg(not($condition))]
+        $crate::union_object_id! { @attrs [$($kept)*] $($rest)* }
+    };
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [] ) => {
+        $crate::union_object_id! { @attrs [$($kept)*] $($attrs)* $($rest)* }
+    };
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] ) => {
+        $crate::union_object_id! { @attrs [$($kept)*] $($attrs)* #[$($current)+] $($rest)* }
+    };
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] , $($tail:tt)*) => {
+        $crate::union_object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)* #[$($current)+]] [] $($tail)* }
+    };
+    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)*] $next:tt $($tail:tt)*) => {
+        $crate::union_object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)*] [$($current)* $next] $($tail)* }
+    };
+    (@attrs [$($kept:tt)*] #[$attr:meta] $($rest:tt)*) => {
+        $crate::union_object_id! { @attrs [$($kept)* #[$attr]] $($rest)* }
+    };
+
+    (@attrs [$($attr:tt)*] $vis:vis enum $name:ident { $($variant:ident($member:ty)),+ $(,)? }) => {
         const _: () = $crate::assert_disjoint(&[$(<$member as $crate::Domain>::DEFINITION),+]);
-        $(#[$attr])*
+        $($attr)*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         $vis enum $name { $($variant($member)),+ }
         $(impl ::core::convert::From<$member> for $name {
@@ -401,6 +466,12 @@ macro_rules! union_object_id {
             }
         }
         $crate::__impl_serde!($name);
+    };
+    (@attrs $($invalid:tt)*) => {
+        ::core::compile_error!("invalid union_object_id declaration");
+    };
+    ($($input:tt)*) => {
+        $crate::union_object_id! { @attrs [] $($input)* }
     };
 }
 
