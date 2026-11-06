@@ -4,22 +4,22 @@
 use std::sync::Arc;
 
 use trogon_claims::{
-    principal_kind, AnyBinding, AnyDelegation, AuthenticatedPrincipal, AuthenticationType, Binding, BindingError,
-    BindingMethod, Classified, CurrentPrincipal, Delegated, Dpop, DynamicClaims, Identity, IngestProfile, Ingested,
-    Kind, MutualTls, NameClaimType, Principal, PrincipalKind, RawClaims, Refined, Refinement, RefinementError,
-    RoleClaimType, SenderConstrained, Unclassified, WellKnownClaim,
+    AnyBinding, AnyDelegation, AuthenticatedPrincipal, AuthenticationType, Binding, BindingError, BindingMethod,
+    Classified, CurrentPrincipal, Delegated, Dpop, DynamicClaims, Identity, IngestProfile, Ingested, Kind, MutualTls,
+    NameClaimType, Principal, PrincipalKind, RawClaims, Refined, Refinement, RefinementError, RoleClaimType,
+    SenderConstrained, Unclassified, WellKnownClaim,
 };
 
 struct Person;
 
 impl Kind for Person {
-    const KIND: &'static PrincipalKind = &principal_kind!("person");
+    const KIND: &'static PrincipalKind = &PrincipalKind::from_static_unchecked("person");
 }
 
 struct Service;
 
 impl Kind for Service {
-    const KIND: &'static PrincipalKind = &principal_kind!("service");
+    const KIND: &'static PrincipalKind = &PrincipalKind::from_static_unchecked("service");
 }
 
 fn ingest(body: &str) -> Ingested<DynamicClaims> {

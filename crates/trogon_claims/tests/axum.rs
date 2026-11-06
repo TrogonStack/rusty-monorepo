@@ -18,21 +18,21 @@ use trogon_claims::axum::{
     PresentedProof, PrincipalOrNotFound, RejectReason, StepUpRequirement, StepUpRequirementError,
 };
 use trogon_claims::{
-    principal_kind, AuthenticatedPrincipal, AuthenticationContext, AuthenticationType, ClaimText, CurrentPrincipal,
-    Delegated, Dpop, DynamicClaims, Identity, IngestProfile, Kind, NameClaimType, NumericDate, Principal,
-    PrincipalKind, RawClaims, Refined, RoleClaimType, SenderConstrained, Unclassified, WellKnownClaim,
+    AuthenticatedPrincipal, AuthenticationContext, AuthenticationType, ClaimText, CurrentPrincipal, Delegated, Dpop,
+    DynamicClaims, Identity, IngestProfile, Kind, NameClaimType, NumericDate, Principal, PrincipalKind, RawClaims,
+    Refined, RoleClaimType, SenderConstrained, Unclassified, WellKnownClaim,
 };
 
 struct Person;
 
 impl Kind for Person {
-    const KIND: &'static PrincipalKind = &principal_kind!("person");
+    const KIND: &'static PrincipalKind = &PrincipalKind::from_static_unchecked("person");
 }
 
 struct Service;
 
 impl Kind for Service {
-    const KIND: &'static PrincipalKind = &principal_kind!("service");
+    const KIND: &'static PrincipalKind = &PrincipalKind::from_static_unchecked("service");
 }
 
 const PLAIN: &str = r#"{"iss":"https://issuer.example.com","sub":"user-1"}"#;

@@ -1,0 +1,15 @@
+[package]
+name = "claims-feature-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+dependency-default = ["trogon_claims/default"]
+macros = ["trogon_claims/macros"]
+spicedb = ["trogon_claims/spicedb"]
+
+[dependencies]
+trogon_claims = { path = "../..", default-features = false }

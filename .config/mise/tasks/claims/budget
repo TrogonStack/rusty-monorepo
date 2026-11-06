@@ -4,15 +4,21 @@ set -euo pipefail
 
 cd "${MISE_PROJECT_ROOT:?}"
 
-base="thiserror trogon_claims_macros trogon_claims_syntax zeroize"
+base="thiserror trogon_claims_syntax zeroize"
 
 allowed() {
-  case "$1" in
-    "") echo "$base" ;;
-    serde) echo "$base serde" ;;
-    json) echo "$base serde_json" ;;
-    spicedb) echo "$base prost prost-types" ;;
-    axum) echo "$base axum-core http" ;;
+  local feature="$1" dependencies="$base"
+  case "$feature" in
+    macros) dependencies="$dependencies trogon_claims_macros"; feature="" ;;
+    *,macros) dependencies="$dependencies trogon_claims_macros"; feature="${feature%,macros}" ;;
+  esac
+  case "$feature" in
+    "") echo "$dependencies" ;;
+    serde) echo "$dependencies serde" ;;
+    json) echo "$dependencies serde_json" ;;
+    spicedb) echo "$dependencies prost prost-types" ;;
+    axum) echo "$dependencies axum-core http" ;;
+    *) echo "unknown claims budget feature '$feature'" >&2; return 1 ;;
   esac
 }
 
@@ -23,7 +29,7 @@ direct_dependencies() {
 }
 
 status=0
-for feature in "" serde json spicedb axum; do
+for feature in "" macros serde serde,macros json json,macros spicedb spicedb,macros axum axum,macros; do
   actual="$(direct_dependencies "$feature")"
   expected="$(allowed "$feature" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
   if [ "$actual" != "$expected" ]; then
@@ -35,7 +41,8 @@ for feature in "" serde json spicedb axum; do
 done
 
 all_features="$(cargo tree --locked -p trogon_claims --all-features -e no-dev --prefix none)"
-if printf '%s\n' "$all_features" | awk '{print $1}' | grep -qx secrecy; then
+all_names="$(awk '{print $1}' <<< "$all_features")"
+if grep -qx secrecy <<< "$all_names"; then
   echo "secrecy must not appear in the trogon_claims dependency tree" >&2
   status=1
 fi

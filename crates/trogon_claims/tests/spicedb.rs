@@ -9,10 +9,10 @@ use prost::Message;
 use prost_types::value::Kind;
 use prost_types::Struct;
 use trogon_claims::{
-    object_id, object_type, param_name, relation_name, ActorIssuer, ActorKey, Base64UrlUnpadded, CaveatContext,
-    CaveatContextError, CheckContext, CheckOutcome, CheckRequest, ClaimPropertyKey, ClaimValue, CurrentActor,
-    LookupOutcome, ObjectId, ObjectReference, OutcomeError, ParamDeclaration, ParamName, ReferenceParseError,
-    RelationName, SubjectId, SubjectReference, SubjectSet, Timestamp, Unsigned63, UtcOffset, ValueKind, WriteContext,
+    ActorIssuer, ActorKey, Base64UrlUnpadded, CaveatContext, CaveatContextError, CheckContext, CheckOutcome,
+    CheckRequest, ClaimPropertyKey, ClaimValue, CurrentActor, LookupOutcome, ObjectId, ObjectReference, ObjectType,
+    OutcomeError, ParamDeclaration, ParamName, ReferenceParseError, RelationName, SubjectId, SubjectReference,
+    SubjectSet, Timestamp, Unsigned63, UtcOffset, ValueKind, WriteContext,
 };
 
 fn declaration(names: &[&'static str]) -> ParamDeclaration {
@@ -88,10 +88,10 @@ fn relation_and_param_names_validate() {
     assert!(RelationName::try_new("view").is_ok());
     assert!(RelationName::try_new("v").is_err());
     assert!(RelationName::try_new("View").is_err());
-    assert_eq!(relation_name!("can_edit").as_str(), "can_edit");
+    assert_eq!(RelationName::try_new("can_edit").unwrap().as_str(), "can_edit");
     assert!(ParamName::try_new("user_ip").is_ok());
     assert!(ParamName::try_new("user-ip").is_err());
-    assert_eq!(param_name!("user_ip").as_str(), "user_ip");
+    assert_eq!(ParamName::try_new("user_ip").unwrap().as_str(), "user_ip");
 }
 
 #[test]
@@ -101,7 +101,10 @@ fn the_check_outcome_has_three_arms_and_unspecified_is_a_protocol_error() {
     assert_eq!(
         CheckOutcome::try_from_wire(3, ["user_ip", "tenant"]).unwrap(),
         CheckOutcome::Conditional {
-            missing: vec![param_name!("user_ip"), param_name!("tenant")]
+            missing: vec![
+                ParamName::try_new("user_ip").unwrap(),
+                ParamName::try_new("tenant").unwrap()
+            ]
         }
     );
     assert_eq!(
@@ -127,7 +130,7 @@ fn the_lookup_outcome_has_no_denial_arm() {
     assert_eq!(
         LookupOutcome::try_from_wire(2, ["tenant"]).unwrap(),
         LookupOutcome::Conditional {
-            missing: vec![param_name!("tenant")]
+            missing: vec![ParamName::try_new("tenant").unwrap()]
         }
     );
     assert_eq!(
@@ -145,16 +148,20 @@ fn undeclared_and_duplicate_parameters_are_refused() {
     let declared = declaration(&["tenant"]);
     let mut builder = CheckContext::builder(&declared);
     assert_eq!(
-        builder.insert(param_name!("tennant"), true).unwrap_err(),
+        builder
+            .insert(ParamName::try_new("tennant").unwrap(), true)
+            .unwrap_err(),
         CaveatContextError::Undeclared {
-            parameter: param_name!("tennant")
+            parameter: ParamName::try_new("tennant").unwrap()
         }
     );
-    builder.insert(param_name!("tenant"), true).unwrap();
+    builder.insert(ParamName::try_new("tenant").unwrap(), true).unwrap();
     assert_eq!(
-        builder.insert(param_name!("tenant"), false).unwrap_err(),
+        builder
+            .insert(ParamName::try_new("tenant").unwrap(), false)
+            .unwrap_err(),
         CaveatContextError::Duplicate {
-            parameter: param_name!("tenant")
+            parameter: ParamName::try_new("tenant").unwrap()
         }
     );
 }
@@ -182,7 +189,7 @@ fn a_nested_integer_above_two_to_the_fifty_third_is_unrepresentable() {
     assert_eq!(
         project(&single("ids", over)).unwrap_err(),
         CaveatContextError::NestedIntegerPrecision {
-            parameter: param_name!("ids")
+            parameter: ParamName::try_new("ids").unwrap()
         }
     );
 
@@ -247,7 +254,7 @@ fn a_non_finite_double_is_refused() {
     assert_eq!(
         project(&single("ratio", ClaimValue::Double(f64::NAN))).unwrap_err(),
         CaveatContextError::NonFiniteDouble {
-            parameter: param_name!("ratio")
+            parameter: ParamName::try_new("ratio").unwrap()
         }
     );
 }
@@ -257,14 +264,16 @@ fn the_budget_is_measured_in_encoded_protobuf_size() {
     let text = ClaimValue::Text("x".repeat(100).into());
     let declared = declaration(&["note"]);
     let mut builder = CheckContext::builder(&declared);
-    builder.insert(param_name!("note"), text.clone()).unwrap();
+    builder
+        .insert(ParamName::try_new("note").unwrap(), text.clone())
+        .unwrap();
     let context = builder.build();
     let projected = project(&context).unwrap();
     let encoded = projected.encoded_len();
     assert!(encoded > 100);
 
     let mut tight = CheckContext::builder(&declared).with_budget(encoded - 1);
-    tight.insert(param_name!("note"), text.clone()).unwrap();
+    tight.insert(ParamName::try_new("note").unwrap(), text.clone()).unwrap();
     assert_eq!(
         project(&tight.build()).unwrap_err(),
         CaveatContextError::OverBudget {
@@ -274,7 +283,7 @@ fn the_budget_is_measured_in_encoded_protobuf_size() {
     );
 
     let mut exact = CheckContext::builder(&declared).with_budget(encoded);
-    exact.insert(param_name!("note"), text).unwrap();
+    exact.insert(ParamName::try_new("note").unwrap(), text).unwrap();
     assert!(project(&exact.build()).is_ok());
 }
 
@@ -284,7 +293,10 @@ fn the_default_budget_is_four_kibibytes() {
     assert_eq!(CheckContext::builder(&declared).build().budget(), 4096);
     let mut builder = CheckContext::builder(&declared);
     builder
-        .insert(param_name!("note"), ClaimValue::Text("x".repeat(5000).into()))
+        .insert(
+            ParamName::try_new("note").unwrap(),
+            ClaimValue::Text("x".repeat(5000).into()),
+        )
         .unwrap();
     assert!(matches!(
         project(&builder.build()).unwrap_err(),
@@ -297,7 +309,7 @@ fn write_time_context_projects_through_the_same_conversion() {
     let declared = declaration(&["tenant"]);
     let mut builder = WriteContext::builder(&declared);
     builder
-        .insert(param_name!("tenant"), ClaimValue::Text("acme".into()))
+        .insert(ParamName::try_new("tenant").unwrap(), ClaimValue::Text("acme".into()))
         .unwrap();
     let projected = Struct::try_from(&builder.build()).unwrap();
     assert_eq!(kind_of(&projected, "tenant"), Kind::StringValue("acme".to_owned()));
@@ -307,7 +319,7 @@ fn write_time_context_projects_through_the_same_conversion() {
 fn a_check_request_takes_the_subject_reference_and_the_current_actor_path() {
     let resource: ObjectReference = "document:readme".parse().unwrap();
     let subject: SubjectReference = "user:alice".parse().unwrap();
-    let request = CheckRequest::new(resource, relation_name!("view"), &subject, None);
+    let request = CheckRequest::new(resource, RelationName::try_new("view").unwrap(), &subject, None);
     assert_eq!(request.subject(), &subject);
     assert_eq!(request.permission().as_str(), "view");
     assert!(request.context().is_none());
@@ -322,9 +334,10 @@ fn a_check_request_takes_the_subject_reference_and_the_current_actor_path() {
     )
     .unwrap();
     let derived =
-        SubjectReference::try_from_current_actor::<Base64UrlUnpadded>(&actor, object_type!("service")).unwrap();
+        SubjectReference::try_from_current_actor::<Base64UrlUnpadded>(&actor, ObjectType::try_new("service").unwrap())
+            .unwrap();
     assert_eq!(derived.object_type().as_str(), "service");
-    assert_eq!(derived.object_id(), &object_id!("Ym9i"));
+    assert_eq!(derived.object_id(), &ObjectId::try_new("Ym9i").unwrap());
 
     let client = CurrentActor::try_new(
         ActorKey::Client {
@@ -335,5 +348,9 @@ fn a_check_request_takes_the_subject_reference_and_the_current_actor_path() {
         None,
     )
     .unwrap();
-    assert!(SubjectReference::try_from_current_actor::<Base64UrlUnpadded>(&client, object_type!("service")).is_err());
+    assert!(SubjectReference::try_from_current_actor::<Base64UrlUnpadded>(
+        &client,
+        ObjectType::try_new("service").unwrap()
+    )
+    .is_err());
 }

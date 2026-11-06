@@ -1,10 +1,8 @@
 error[E0277]: the trait bound `PriorActor: AuthorizationSubject` is not satisfied
- --> tests/ui_spicedb/fail/prior_actor_check_request.rs:4:65
+ --> tests/ui_spicedb/fail/prior_actor_check_request.rs:4:81
   |
-4 |     let _ = CheckRequest::new(resource, relation_name!("view"), &prior, None);
-  |             -----------------                                   ^^^^^^ the trait `AuthorizationSubject` is not implemented for `PriorActor`
-  |             |
-  |             required by a bound introduced by this call
+4 |     let _ = CheckRequest::new(resource, RelationName::try_new("view").unwrap(), &prior, None);
+  |             ----------------- required by a bound introduced by this call       ^^^^^^ the trait `AuthorizationSubject` is not implemented for `PriorActor`
   |
 help: the following other types implement trait `AuthorizationSubject`
  --> src/authorization_subject.rs

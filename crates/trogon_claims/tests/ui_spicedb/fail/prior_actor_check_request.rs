@@ -1,7 +1,7 @@
-use trogon_claims::{relation_name, CheckRequest, ObjectReference, PriorActor};
+use trogon_claims::{RelationName, CheckRequest, ObjectReference, PriorActor};
 
 fn reject(resource: ObjectReference, prior: PriorActor) {
-    let _ = CheckRequest::new(resource, relation_name!("view"), &prior, None);
+    let _ = CheckRequest::new(resource, RelationName::try_new("view").unwrap(), &prior, None);
 }
 
 fn main() {}

@@ -2,9 +2,12 @@
 
 use std::collections::HashSet;
 
+#[cfg(feature = "macros")]
+use trogon_claims::{object_id, object_type};
+
 use trogon_claims::{
-    object_id, object_type, Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId,
-    Issuer, ObjectId, ObjectType, RoleName, SubjectId, Unsigned63, ValueKind, WellKnownClaim,
+    Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId, Issuer, ObjectId,
+    ObjectType, RoleName, SubjectId, Unsigned63, ValueKind, WellKnownClaim,
 };
 
 #[test]
@@ -69,6 +72,7 @@ fn object_type_follows_the_definition_name_grammar() {
     assert!(ObjectType::try_new("ab").is_err());
 }
 
+#[cfg(feature = "macros")]
 #[test]
 fn literal_macros_build_the_newtypes() {
     let id: ObjectId = object_id!("readme");

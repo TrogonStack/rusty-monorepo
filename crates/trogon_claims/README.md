@@ -178,11 +178,17 @@ authorization decisions.
 
 | Feature | Adds | Extra dependencies |
 |---|---|---|
-| none | Value objects, claims, identities, principals, refinements, literal macros | `thiserror`, `zeroize` and the sibling crates |
+| none | Value objects, claims, identities, principals, refinements and runtime validation | `thiserror`, `zeroize`, `trogon_claims_syntax` |
+| `macros` | Compile-time literal constructors; relation and parameter macros also require `spicedb` | `trogon_claims_macros` |
 | `json` | `ingest`: JWT payload and introspection to identity | `serde_json` |
 | `serde` | Reserved for session serialization; no code yet | `serde` |
 | `spicedb` | Object, subject and subject-set references, check requests, caveat context conversion, tri-state outcomes | `prost`, `prost-types` |
 | `axum` | `trogon_claims::axum`: extractors, challenges, step-up responses | `axum-core`, `http` |
+
+The default feature set is empty. Enable `macros` explicitly to use `object_id!`,
+`object_type!` and `principal_kind!`. `relation_name!` and `param_name!` require
+both `macros` and `spicedb`. The runtime constructors and their validation remain
+available without `macros`.
 
 `.config/mise/tasks/claims/budget` fails CI when a feature pulls in a dependency
 outside this table.
@@ -216,16 +222,37 @@ configuration. Depend on them by git revision and pin the commit:
 
 ```toml
 [dependencies]
-trogon_claims = { git = "https://github.com/TrogonStack/rusty-monorepo", rev = "<commit>", features = ["json"] }
+trogon_claims = { git = "https://github.com/TrogonStack/rusty-monorepo", rev = "<commit>", default-features = false, features = ["json"] }
 ```
 
-`trogon_claims_syntax` and `trogon_claims_macros` come along as path dependencies
-of that revision. Moving to a registry later is a change to the `publish` setting
-and the release configuration, not to the API.
+`trogon_claims_syntax` comes along as a core path dependency of that revision.
+Enable `macros` to activate the optional `trogon_claims_macros` dependency:
+
+```toml
+[dependencies]
+trogon_claims = { git = "https://github.com/TrogonStack/rusty-monorepo", rev = "<commit>", default-features = false, features = ["macros"] }
+```
+
+```rust
+use trogon_claims::object_id;
+
+let id = object_id!("user-1");
+```
+
+For the SpiceDB literal helpers, select `features = ["macros", "spicedb"]`.
+Macro availability is an optional capability following
+[ADR 7592933658](https://github.com/straw-hat-team/adr/blob/main/src/adrs/7592933658/README.md);
+it does not change the validation required by runtime constructors. Moving to a
+registry later is a change to the `publish` setting and release configuration,
+not to the API.
 
 ## Verify
 
 ```bash
-cargo test -p trogon_claims --all-features
 mise run claims:check
 ```
+
+This checks dependency budgets, isolated consumer feature boundaries, the feature
+matrix, strict Clippy, tests and documentation. `mise run claims:features` runs
+the feature matrix and isolated consumer checks on their own, so a workspace build
+cannot hide a missing feature gate through feature unification.

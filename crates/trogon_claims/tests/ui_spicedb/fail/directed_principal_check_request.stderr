@@ -1,10 +1,8 @@
 error[E0277]: the trait bound `UnverifiedDirectedPrincipal: AuthorizationSubject` is not satisfied
- --> tests/ui_spicedb/fail/directed_principal_check_request.rs:4:65
+ --> tests/ui_spicedb/fail/directed_principal_check_request.rs:4:81
   |
-4 |     let _ = CheckRequest::new(resource, relation_name!("view"), &hint, None);
-  |             -----------------                                   ^^^^^ the trait `AuthorizationSubject` is not implemented for `UnverifiedDirectedPrincipal`
-  |             |
-  |             required by a bound introduced by this call
+4 |     let _ = CheckRequest::new(resource, RelationName::try_new("view").unwrap(), &hint, None);
+  |             ----------------- required by a bound introduced by this call       ^^^^^ the trait `AuthorizationSubject` is not implemented for `UnverifiedDirectedPrincipal`
   |
 help: the following other types implement trait `AuthorizationSubject`
  --> src/authorization_subject.rs

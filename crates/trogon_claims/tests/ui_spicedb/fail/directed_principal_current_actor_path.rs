@@ -1,7 +1,7 @@
-use trogon_claims::{object_type, Base64UrlUnpadded, SubjectReference, UnverifiedDirectedPrincipal};
+use trogon_claims::{ObjectType, Base64UrlUnpadded, SubjectReference, UnverifiedDirectedPrincipal};
 
 fn reject(hint: UnverifiedDirectedPrincipal) {
-    let _ = SubjectReference::try_from_current_actor::<Base64UrlUnpadded>(&hint, object_type!("service"));
+    let _ = SubjectReference::try_from_current_actor::<Base64UrlUnpadded>(&hint, ObjectType::try_new("service").unwrap());
 }
 
 fn main() {}

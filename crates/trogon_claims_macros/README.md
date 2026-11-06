@@ -14,11 +14,20 @@ The `*_impl` macros take the path of the calling crate as their first argument a
 are meant to be reached through the declarative macros that
 [`trogon_claims`](../trogon_claims/README.md) exports. Call those instead:
 
+```toml
+[dependencies]
+trogon_claims = { git = "https://github.com/TrogonStack/rusty-monorepo", rev = "<commit>", default-features = false, features = ["macros"] }
+```
+
 ```rust
 use trogon_claims::object_id;
 
 let id = object_id!("user-1");
 ```
+
+`macros` is disabled by default in `trogon_claims`. Enable both `macros` and
+`spicedb` for `relation_name!` and `param_name!`. Runtime types and their validated
+constructors remain available without the literal-macro APIs.
 
 ## Reference
 
@@ -29,6 +38,6 @@ let id = object_id!("user-1");
 
 ## Consuming
 
-The crate is not published to crates.io. It is built as a dependency of
-`trogon_claims`; see the
+The crate is not published to crates.io. It is an optional dependency of
+`trogon_claims`, activated by that crate's `macros` feature; see the
 [consumption notes](../trogon_claims/README.md#consuming-the-crates).

@@ -3,8 +3,8 @@
 
 use trogon_claims::ingest::IngestClaims;
 use trogon_claims::{
-    object_type, AuthenticationType, ClaimSet, HasSubject, Identity, IngestError, IngestProfile, NameClaimType,
-    ObjectId, ObjectType, PrincipalKey, RawClaims, RoleClaimType, SubjectMapping, SubjectRef, Verbatim, WellKnownClaim,
+    AuthenticationType, ClaimSet, HasSubject, Identity, IngestError, IngestProfile, NameClaimType, ObjectId,
+    ObjectType, PrincipalKey, RawClaims, RoleClaimType, SubjectMapping, SubjectRef, Verbatim, WellKnownClaim,
 };
 
 struct UserClaims {
@@ -14,7 +14,7 @@ struct UserClaims {
 impl ClaimSet for UserClaims {}
 
 impl HasSubject for UserClaims {
-    const SUBJECT_TYPE: ObjectType = object_type!("user");
+    const SUBJECT_TYPE: ObjectType = ObjectType::from_static_unchecked("user");
     type Mapping = Verbatim;
 
     fn subject(&self) -> SubjectRef<'_> {

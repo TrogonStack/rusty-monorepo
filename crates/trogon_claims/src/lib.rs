@@ -42,7 +42,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! With the `json` feature, [`ingest`] turns a verified token payload into the
+//! With the `json` feature, the `ingest` module turns a verified token payload into the
 //! same types in one step. Parsing raw JSON does not establish credential trust.
 //! Manual construction requires singular textual `iss` and `sub` claims; an
 //! explicit `with_default_issuer` supplies an issuer only when `iss` is absent.
@@ -154,14 +154,18 @@
 //!
 //! | Feature | Adds | Extra dependencies |
 //! |---|---|---|
-//! | none | Value objects, claims, identities, principals, refinements, literal macros | `thiserror`, `zeroize` and the two sibling crates |
-//! | `json` | [`ingest`], `RawClaims`, `RawJson`, `IngestProfile`-driven identity construction | `serde_json` |
+//! | none | Value objects, claims, identities, principals and refinements | `thiserror`, `zeroize`, `trogon_claims_syntax` |
+//! | `macros` | Compile-time literal constructors, including SpiceDB literals when `spicedb` is also enabled | `trogon_claims_macros` |
+//! | `json` | `ingest`, `RawClaims`, `RawJson`, `IngestProfile`-driven identity construction | `serde_json` |
 //! | `serde` | Reserved for session serialization. It carries no code yet | `serde` |
 //! | `spicedb` | `ObjectReference`, `SubjectReference`, `SubjectSet`, `CheckRequest`, caveat context conversion to `prost_types::Struct`, tri-state outcomes | `prost`, `prost-types` |
 //! | `axum` | The `axum` module: extractors, `WWW-Authenticate` challenges, step-up responses | `axum-core`, `http` |
 //!
 //! The dependency budget for each feature is enforced in CI by
 //! `.config/mise/tasks/claims/budget`.
+//! No optional feature is enabled by default. Without `macros`, validated
+//! runtime and const constructors remain available; public literal macros and
+//! their procedural-macro dependency are absent.
 //!
 //! # Consuming this crate
 //!
@@ -242,6 +246,7 @@ mod ingested;
 mod issuer;
 mod jwk;
 mod kind;
+#[cfg(feature = "macros")]
 mod macros;
 #[cfg(feature = "axum")]
 mod masked;
@@ -308,6 +313,7 @@ mod web_extractors;
 mod well_known_claim;
 
 #[doc(hidden)]
+#[cfg(feature = "macros")]
 pub mod __private;
 
 pub use actor_error::ActorError;

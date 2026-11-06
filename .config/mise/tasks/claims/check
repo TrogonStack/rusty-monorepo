@@ -3,7 +3,8 @@
 #MISE depends = ["check:format", "claims:budget"]
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
-cargo check --locked -p trogon_claims --no-default-features --all-targets
+mise run claims:features
 cargo clippy --locked -p trogon_claims_syntax -p trogon_claims_macros -p trogon_claims --all-targets --all-features -- -D warnings
 cargo test --locked -p trogon_claims_syntax -p trogon_claims_macros -p trogon_claims --all-features
+RUSTDOCFLAGS="${RUSTDOCFLAGS:+$RUSTDOCFLAGS }-D warnings" cargo doc --locked -p trogon_claims --no-default-features --no-deps
 RUSTDOCFLAGS="${RUSTDOCFLAGS:+$RUSTDOCFLAGS }-D warnings" cargo doc --locked -p trogon_claims --all-features --no-deps

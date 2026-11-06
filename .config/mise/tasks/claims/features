@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#MISE description = "Verify the claims feature matrix and isolated consumer macro boundaries"
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:?}"
+cargo check --locked -p trogon_claims --all-targets
+cargo test --locked -p trogon_claims --no-default-features
+cargo test --locked -p trogon_claims --no-default-features --features macros
+for feature in serde json spicedb axum; do
+  cargo check --locked -p trogon_claims --no-default-features --features "$feature" --all-targets
+done
+
+mise run claims:consumers

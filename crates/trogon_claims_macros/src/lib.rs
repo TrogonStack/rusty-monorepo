@@ -12,6 +12,10 @@
 //! literals are accepted; literals with escape sequences are refused, because no
 //! valid value needs one.
 //!
+//! Consumers enable `trogon_claims`'s opt-in `macros` feature to use these public
+//! helpers. `relation_name!` and `param_name!` additionally require `spicedb`.
+//! Runtime types and validated constructors do not require the `macros` feature.
+//!
 //! The crate is not published to crates.io.
 
 mod constants;
