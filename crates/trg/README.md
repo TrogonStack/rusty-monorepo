@@ -25,14 +25,10 @@ Then verify the installation:
 trg --version
 ```
 
-## Verifying a download
+## Security
 
-Every release tarball and `sha256sums.txt` carries a signed build provenance attestation. Pin both the repository and the signing workflow, otherwise the check only proves that some GitHub workflow built the file:
+How to verify a release download and how to report a vulnerability: see [SECURITY.md](SECURITY.md).
 
-```sh trg-example=skip
-gh attestation verify trg-<version>-<target>.tar.gz \
-  --repo TrogonStack/rusty-monorepo \
-  --signer-workflow TrogonStack/rusty-monorepo/.github/workflows/release-artifacts.yml
-```
+## Documentation
 
-Each release also ships `packslip.sigstore.json`, a signed manifest of every artifact, which `packslip install` and mise can verify.
+See the [documentation index](docs/README.md).
