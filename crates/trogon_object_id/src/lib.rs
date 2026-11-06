@@ -5,8 +5,137 @@ use std::fmt;
 
 extern crate self as trogon_object_id;
 
+/// Derive a domain definition for an ordinary unit struct.
+///
+/// ```
+/// use trogon_object_id::{ObjectId, ObjectIdDomain};
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user")]
+/// struct UserDomain;
+/// let user = ObjectId::<UserDomain>::try_from_raw("abc")?;
+/// assert_eq!(user.to_string(), "user_abc");
+/// # Ok::<(), trogon_object_id::ParseError>(())
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user")]
+/// enum WrongShape { User }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user")]
+/// struct StatefulDomain { value: String }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user")]
+/// struct GenericDomain<T>(T);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// struct MissingPrefix;
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user", invalid = true)]
+/// struct UnknownOption;
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user", prefix = "order")]
+/// struct DuplicateOption;
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "")]
+/// struct InvalidUnusedDomain;
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdDomain;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user", separator = "")]
+/// struct InvalidUnusedSeparator;
+/// ```
 #[cfg(feature = "derive")]
-pub use trogon_object_id_derive::{ObjectIdDomain, ObjectIdUnion};
+pub use trogon_object_id_derive::ObjectIdDomain;
+
+/// Derive parsing, formatting, conversions, and prefix checks for an ordinary enum.
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdUnion;
+/// #[derive(ObjectIdUnion)]
+/// enum Empty {}
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdUnion;
+/// #[derive(ObjectIdUnion)]
+/// enum UnitVariant { Empty }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectIdUnion, ObjectId, Domain, Definition, Text};
+/// struct UserDomain;
+/// impl Domain for UserDomain {
+///     const DEFINITION: Definition = Definition::new("user", "_");
+///     type Payload = Text;
+/// }
+/// #[derive(ObjectIdUnion)]
+/// enum NamedVariant { User { value: ObjectId<UserDomain> } }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdUnion;
+/// #[derive(ObjectIdUnion)]
+/// enum MultipleFields { Pair(String, String) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectIdUnion;
+/// #[derive(ObjectIdUnion)]
+/// enum GenericUnion<T> { Value(T) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user")]
+/// struct First;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "user")]
+/// struct Second;
+/// #[derive(ObjectIdUnion)]
+/// enum Duplicate { First(ObjectId<First>), Second(ObjectId<Second>) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "app")]
+/// struct App;
+/// #[derive(ObjectIdDomain)]
+/// #[object_id(prefix = "app_admin")]
+/// struct Admin;
+/// #[derive(ObjectIdUnion)]
+/// enum Overlap { App(ObjectId<App>), Admin(ObjectId<Admin>) }
+/// ```
+#[cfg(feature = "derive")]
+pub use trogon_object_id_derive::ObjectIdUnion;
 
 pub const MAX_VALUE_BYTES: usize = 1024;
 
@@ -168,9 +297,13 @@ pub trait Generator {
 /// Generates UUID version 4 values using the `uuid` crate's system randomness.
 ///
 /// ```compile_fail
-/// use trogon_object_id::{object_id, validators::Integer, Uuid4};
-/// object_id! { struct InvoiceId("invoice", validator = Integer); }
-/// let invalid = InvoiceId::generate::<Uuid4>();
+/// use trogon_object_id::{validators::Integer, Definition, Domain, ObjectId, Text, Uuid4};
+/// struct InvoiceDomain;
+/// impl Domain for InvoiceDomain {
+///     const DEFINITION: Definition = Definition::new("invoice", "_");
+///     type Payload = Text<Integer>;
+/// }
+/// let invalid = ObjectId::<InvoiceDomain>::generate::<Uuid4>();
 /// ```
 #[cfg(feature = "uuid")]
 pub struct Uuid4;
@@ -234,264 +367,6 @@ const fn prefix_byte(definition: Definition, index: usize) -> u8 {
     } else {
         definition.separator.as_bytes()[index - definition.object_type.len()]
     }
-}
-
-/// Declare a distinct identifier type with a compile-time checked prefix.
-///
-/// ```
-/// use trogon_object_id::{object_id, union_object_id};
-/// object_id! { #[cfg(any())] pub struct DisabledId("disabled"); }
-/// object_id! { /// A conditional domain.
-///     #[cfg(any())] pub struct DocumentedId("disabled");
-/// }
-/// object_id! { #[cfg_attr(all(), cfg(any()), doc = "disabled")] pub struct ConditionalId("disabled"); }
-/// object_id! { #[cfg_attr(any(), cfg(any()))] pub struct EnabledId("enabled"); }
-/// union_object_id! { #[cfg(any())] pub enum DisabledUnion { Missing(MissingId) } }
-/// union_object_id! { #[cfg_attr(all(), cfg(any()))] pub enum ConditionalUnion { Missing(MissingId) } }
-/// union_object_id! { #[cfg(all())] pub enum EnabledUnion { Enabled(EnabledId) } }
-/// let enabled = EnabledId::try_from_raw("123")?;
-/// assert_eq!(EnabledUnion::from(enabled).to_string(), "enabled_123");
-/// # Ok::<(), trogon_object_id::ParseError>(())
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::object_id;
-/// object_id! { struct UserId("user"); }
-/// object_id! { struct OrderId("order"); }
-/// let user: UserId = OrderId::try_from_raw("123").unwrap();
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::object_id;
-/// object_id! { struct EmptyId(""); }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::object_id;
-/// object_id! { struct InvalidId("bad prefix"); }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::object_id;
-/// object_id! { struct EmptySeparator("user", separator = ""); }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::object_id;
-/// object_id! { struct InvalidSeparator("user", separator = "a"); }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::object_id;
-/// mod domain { trogon_object_id::object_id! { pub struct UserId("user"); } }
-/// let forged = domain::UserId("unvalidated".to_owned());
-/// ```
-#[macro_export]
-macro_rules! object_id {
-    (@attrs [$($kept:tt)*] #[cfg($($condition:tt)*)] $($rest:tt)*) => {
-        #[cfg($($condition)*)]
-        $crate::object_id! { @attrs [$($kept)*] $($rest)* }
-    };
-    (@attrs [$($kept:tt)*] #[cfg_attr($condition:meta, $($attribute:tt)*)] $($rest:tt)*) => {
-        #[cfg($condition)]
-        $crate::object_id! { @split_attrs [$($kept)*] [$($rest)*] [] [] $($attribute)* }
-        #[cfg(not($condition))]
-        $crate::object_id! { @attrs [$($kept)*] $($rest)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [] ) => {
-        $crate::object_id! { @attrs [$($kept)*] $($attrs)* $($rest)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] ) => {
-        $crate::object_id! { @attrs [$($kept)*] $($attrs)* #[$($current)+] $($rest)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] , $($tail:tt)*) => {
-        $crate::object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)* #[$($current)+]] [] $($tail)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)*] $next:tt $($tail:tt)*) => {
-        $crate::object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)*] [$($current)* $next] $($tail)* }
-    };
-    (@attrs [$($kept:tt)*] #[$attr:meta] $($rest:tt)*) => {
-        $crate::object_id! { @attrs [$($kept)* #[$attr]] $($rest)* }
-    };
-
-    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", payload = $crate::Text); }
-    };
-    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = $sep, payload = $crate::Text); }
-    };
-    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, validator = $validator:ty);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", payload = $crate::Text<$validator>); }
-    };
-    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, payload = $payload:ty);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", payload = $payload); }
-    };
-    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal, validator = $validator:ty);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = $sep, payload = $crate::Text<$validator>); }
-    };
-    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal, payload = $payload:ty);) => {
-        const _: $crate::Definition = $crate::Definition::new($kind, $sep);
-        $($attr)*
-        #[repr(transparent)]
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        $vis struct $name($crate::ObjectId<Self>);
-        impl $crate::Domain for $name {
-            const DEFINITION: $crate::Definition = $crate::Definition::new($kind, $sep);
-            type Payload = $payload;
-        }
-        impl $name {
-            pub fn try_from_raw(value: &str) -> ::core::result::Result<Self, $crate::ParseError> {
-                $crate::ObjectId::try_from_raw(value).map(Self)
-            }
-            pub fn try_from_owned(value: ::std::string::String) -> ::core::result::Result<Self, $crate::ParseError> {
-                $crate::ObjectId::try_from_owned(value).map(Self)
-            }
-            pub fn try_from_payload(value: $payload) -> ::core::result::Result<Self, $crate::ParseError> {
-                $crate::ObjectId::try_from_payload(value).map(Self)
-            }
-            pub fn payload(&self) -> &$payload { self.0.payload() }
-            pub fn into_payload(self) -> $payload { self.0.into_payload() }
-            pub fn as_raw(&self) -> &<$payload as $crate::Payload>::Raw { self.0.as_raw() }
-            pub fn generate<G>() -> ::core::result::Result<Self, $crate::ParseError>
-            where G: $crate::Generator<Payload = $payload> {
-                $crate::ObjectId::generate::<G>().map(Self)
-            }
-        }
-        impl $crate::Identifier for $name {
-            const DEFINITION: $crate::Definition = <Self as $crate::Domain>::DEFINITION;
-            type Raw = <$payload as $crate::Payload>::Raw;
-            fn try_from_raw(value: &str) -> ::core::result::Result<Self, $crate::ParseError> { Self::try_from_raw(value) }
-            fn try_from_owned(value: ::std::string::String) -> ::core::result::Result<Self, $crate::ParseError> { Self::try_from_owned(value) }
-            fn as_raw(&self) -> &Self::Raw { self.as_raw() }
-        }
-        impl ::core::str::FromStr for $name {
-            type Err = $crate::ParseError;
-            fn from_str(value: &str) -> ::core::result::Result<Self, Self::Err> { value.parse().map(Self) }
-        }
-        impl ::core::convert::TryFrom<&str> for $name {
-            type Error = $crate::ParseError;
-            fn try_from(value: &str) -> ::core::result::Result<Self, Self::Error> { value.parse() }
-        }
-        impl ::core::convert::TryFrom<::std::string::String> for $name {
-            type Error = $crate::ParseError;
-            fn try_from(value: ::std::string::String) -> ::core::result::Result<Self, Self::Error> {
-                $crate::ObjectId::<Self>::try_from(value).map(Self)
-            }
-        }
-        impl ::core::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Display::fmt(&self.0, formatter) }
-        }
-        $crate::__impl_serde!($name);
-    };
-    (@attrs $($invalid:tt)*) => {
-        ::core::compile_error!("invalid object_id declaration");
-    };
-    ($($input:tt)*) => {
-        $crate::object_id! { @attrs [] $($input)* }
-    };
-}
-
-/// Declare an exhaustive union with non-overlapping complete prefixes.
-///
-/// ```compile_fail
-/// use trogon_object_id::{object_id, union_object_id};
-/// object_id! { struct First("user"); }
-/// object_id! { struct Second("user"); }
-/// union_object_id! { enum Duplicate { First(First), Second(Second) } }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::{object_id, union_object_id};
-/// object_id! { struct First("app"); }
-/// object_id! { struct Second("app_admin"); }
-/// union_object_id! { enum Overlap { First(First), Second(Second) } }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::union_object_id;
-/// union_object_id! { enum Empty {} }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::{object_id, union_object_id};
-/// object_id! { struct User("user"); }
-/// object_id! { struct Order("order"); }
-/// union_object_id! { enum Principal { User(User) } }
-/// let invalid = Principal::from(Order::try_from_raw("123").unwrap());
-/// ```
-#[macro_export]
-macro_rules! union_object_id {
-    (@attrs [$($kept:tt)*] #[cfg($($condition:tt)*)] $($rest:tt)*) => {
-        #[cfg($($condition)*)]
-        $crate::union_object_id! { @attrs [$($kept)*] $($rest)* }
-    };
-    (@attrs [$($kept:tt)*] #[cfg_attr($condition:meta, $($attribute:tt)*)] $($rest:tt)*) => {
-        #[cfg($condition)]
-        $crate::union_object_id! { @split_attrs [$($kept)*] [$($rest)*] [] [] $($attribute)* }
-        #[cfg(not($condition))]
-        $crate::union_object_id! { @attrs [$($kept)*] $($rest)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [] ) => {
-        $crate::union_object_id! { @attrs [$($kept)*] $($attrs)* $($rest)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] ) => {
-        $crate::union_object_id! { @attrs [$($kept)*] $($attrs)* #[$($current)+] $($rest)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)+] , $($tail:tt)*) => {
-        $crate::union_object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)* #[$($current)+]] [] $($tail)* }
-    };
-    (@split_attrs [$($kept:tt)*] [$($rest:tt)*] [$($attrs:tt)*] [$($current:tt)*] $next:tt $($tail:tt)*) => {
-        $crate::union_object_id! { @split_attrs [$($kept)*] [$($rest)*] [$($attrs)*] [$($current)* $next] $($tail)* }
-    };
-    (@attrs [$($kept:tt)*] #[$attr:meta] $($rest:tt)*) => {
-        $crate::union_object_id! { @attrs [$($kept)* #[$attr]] $($rest)* }
-    };
-
-    (@attrs [$($attr:tt)*] $vis:vis enum $name:ident { $($variant:ident($member:ty)),+ $(,)? }) => {
-        const _: () = $crate::assert_disjoint(&[$(<$member as $crate::Identifier>::DEFINITION),+]);
-        $($attr)*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        $vis enum $name { $($variant($member)),+ }
-        $(impl ::core::convert::From<$member> for $name {
-            fn from(value: $member) -> Self { Self::$variant(value) }
-        })+
-        impl ::core::str::FromStr for $name {
-            type Err = $crate::ParseError;
-            fn from_str(value: &str) -> ::core::result::Result<Self, Self::Err> {
-                $(if <$member as $crate::Identifier>::DEFINITION.strip_prefix(value).is_some() {
-                    return value.parse::<$member>().map(Self::$variant);
-                })+
-                Err($crate::ParseError::UnknownPrefix)
-            }
-        }
-        impl ::core::convert::TryFrom<&str> for $name {
-            type Error = $crate::ParseError;
-            fn try_from(value: &str) -> ::core::result::Result<Self, Self::Error> { value.parse() }
-        }
-        impl ::core::convert::TryFrom<::std::string::String> for $name {
-            type Error = $crate::ParseError;
-            fn try_from(mut value: ::std::string::String) -> ::core::result::Result<Self, Self::Error> {
-                $(if let ::core::option::Option::Some(raw) = <$member as $crate::Identifier>::DEFINITION.strip_prefix(&value) {
-                    let prefix_len = value.len() - raw.len();
-                    value.drain(..prefix_len);
-                    return <$member as $crate::Identifier>::try_from_owned(value).map(Self::$variant);
-                })+
-                Err($crate::ParseError::UnknownPrefix)
-            }
-        }
-        impl ::core::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                match self { $(Self::$variant(value) => ::core::fmt::Display::fmt(value, formatter)),+ }
-            }
-        }
-        $crate::__impl_serde!($name);
-    };
-    (@attrs $($invalid:tt)*) => {
-        ::core::compile_error!("invalid union_object_id declaration");
-    };
-    ($($input:tt)*) => {
-        $crate::union_object_id! { @attrs [] $($input)* }
-    };
 }
 
 #[cfg(feature = "serde")]
