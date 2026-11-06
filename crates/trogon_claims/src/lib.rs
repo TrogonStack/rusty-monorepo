@@ -161,7 +161,7 @@
 //! | `axum` | The `axum` module: extractors, `WWW-Authenticate` challenges, step-up responses | `axum-core`, `http` |
 //!
 //! The dependency budget for each feature is enforced in CI by
-//! `scripts/check-trogon-claims.sh`.
+//! `.config/mise/tasks/claims/budget`.
 //!
 //! # Consuming this crate
 //!

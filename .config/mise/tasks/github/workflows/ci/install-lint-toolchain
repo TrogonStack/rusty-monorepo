@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Install the policy lint toolchain"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+mise run lints:toolchain

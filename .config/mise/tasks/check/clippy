@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Lint every workspace target with strict warnings"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+cargo clippy --workspace --all-targets -- -D warnings

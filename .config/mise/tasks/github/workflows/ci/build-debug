@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Build the workspace in debug mode"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+mise run build:debug

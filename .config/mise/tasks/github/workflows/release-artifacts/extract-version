@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Extract the release version from its tag"
+set -euo pipefail
+printf 'tag=%s\n' "${TAG:?}" >> "${GITHUB_OUTPUT:?}"
+printf 'version=%s\n' "${TAG#trg@v}" >> "$GITHUB_OUTPUT"

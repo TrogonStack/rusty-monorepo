@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Generate release artifact checksums"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}/artifacts"
+sha256sum trg-* > sha256sums.txt

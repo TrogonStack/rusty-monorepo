@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description = "Install the nightly toolchain pinned by trogon_dylint_lints"
+set -euo pipefail
+source "${MISE_PROJECT_ROOT:?}/.config/mise/lib/lints.sh"
+channel="$(lints_toolchain)"
+rustup toolchain install "$channel" --profile minimal --component rustc-dev --component rust-src --component llvm-tools-preview

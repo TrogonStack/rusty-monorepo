@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Check workspace formatting"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+mise run check:format

@@ -182,7 +182,7 @@ authorization decisions.
 | `spicedb` | Object, subject and subject-set references, check requests, caveat context conversion, tri-state outcomes | `prost`, `prost-types` |
 | `axum` | `trogon_claims::axum`: extractors, challenges, step-up responses | `axum-core`, `http` |
 
-`scripts/check-trogon-claims.sh` fails CI when a feature pulls in a dependency
+`.config/mise/tasks/claims/budget` fails CI when a feature pulls in a dependency
 outside this table.
 
 ## Challenges

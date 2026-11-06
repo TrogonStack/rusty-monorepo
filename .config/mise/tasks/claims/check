@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description = "Verify the claims contract, feature boundaries, lint, tests and documentation"
+#MISE depends = ["check:format", "claims:budget"]
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+cargo check -p trogon_claims --no-default-features --all-targets
+cargo clippy -p trogon_claims_syntax -p trogon_claims_macros -p trogon_claims --all-targets --all-features -- -D warnings
+cargo test -p trogon_claims_syntax -p trogon_claims_macros -p trogon_claims --all-features
+RUSTDOCFLAGS="${RUSTDOCFLAGS:+$RUSTDOCFLAGS }-D warnings" cargo doc -p trogon_claims --all-features --no-deps

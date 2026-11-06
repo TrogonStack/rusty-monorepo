@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description = "Regenerate trg semantic conventions with the pinned Weaver registry"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+mise exec github:open-telemetry/weaver@0.26.1 -- weaver registry generate --registry 'https://github.com/open-telemetry/semantic-conventions-genai.git@06ec68e722c45a7218e23ea1bc1339fe4e21ecae[model]' --skip-policies -t crates/trg/templates/registry rust crates/trg/src/telemetry/semconv/generated
+rustfmt --edition 2021 crates/trg/src/telemetry/semconv/generated/*.rs

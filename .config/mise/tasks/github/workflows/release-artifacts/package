@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#MISE description = "Package the requested release source"
+set -euo pipefail
+cd "${RELEASE_SOURCE_ROOT:?}"
+staging="trg-${RELEASE_VERSION:?}-${RELEASE_TARGET:?}"
+mkdir -p "$staging"
+cp "target/$RELEASE_TARGET/release/trg" "$staging/"
+cp LICENSE "$staging/"
+cp crates/trg/README.md "$staging/"
+tar czf "$staging.tar.gz" "$staging"
+printf 'ASSET=%s/%s.tar.gz\n' "$PWD" "$staging" >> "${GITHUB_ENV:?}"
