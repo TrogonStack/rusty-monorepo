@@ -74,6 +74,105 @@ extern crate self as trogon_object_id;
 #[cfg(feature = "derive")]
 pub use trogon_object_id_derive::ObjectIdDomain;
 
+/// Derive checked identifier behavior for a private, transparent payload newtype.
+///
+/// ```
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct ItemId(Text);
+/// let id = ItemId::try_from_raw("abc")?;
+/// assert_eq!(id.to_string(), "item_abc");
+/// # Ok::<(), trogon_object_id::ParseError>(())
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Empty;
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Named { payload: Text }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Pair(Text, Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct PublicPayload(pub Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// struct MissingLayout(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item", payload = Text)]
+/// #[repr(transparent)]
+/// struct RepeatedPayload(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct Generic<T>(T);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "")]
+/// #[repr(transparent)]
+/// struct InvalidPrefix(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "item")]
+/// #[repr(transparent)]
+/// struct ItemId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "order")]
+/// #[repr(transparent)]
+/// struct OrderId(Text);
+/// let _: ItemId = OrderId::try_from_raw("abc").unwrap();
+/// ```
+///
+/// ```compile_fail
+/// mod domain {
+///     use trogon_object_id::{ObjectId, Text};
+///     #[derive(ObjectId)]
+///     #[object_id(prefix = "item")]
+///     #[repr(transparent)]
+///     pub struct ItemId(Text);
+/// }
+/// let forged = domain::ItemId(trogon_object_id::Text::try_from_raw("abc").unwrap());
+/// ```
 #[cfg(feature = "derive")]
 pub use trogon_object_id_derive::ObjectId;
 
@@ -289,6 +388,45 @@ pub use uuid::Uuid;
 pub trait Domain {
     const DEFINITION: Definition;
     type Payload: Payload;
+}
+
+/// A UUID domain bound to one statically selected identity recipe.
+#[cfg(feature = "template")]
+pub trait TemplateDomain: Domain<Payload = Uuid> {
+    type Template: UuidTemplate;
+}
+
+#[cfg(feature = "template")]
+pub use trogon_uuid::UuidTemplate;
+
+#[cfg(feature = "template")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_template_domain {
+    ($name:ident, $template:ty, domain) => {
+        impl $crate::TemplateDomain for $name {
+            type Template = $template;
+        }
+    };
+    ($name:ident, $template:ty, direct) => {
+        $crate::__impl_template_domain!($name, $template, domain);
+        impl $name {
+            pub fn from_identity(
+                input: <<Self as $crate::TemplateDomain>::Template as $crate::UuidTemplate>::Input<'_>,
+            ) -> ::core::result::Result<Self, $crate::ParseError> {
+                $crate::ObjectId::<Self>::from_identity(input).map(|value| Self(value.into_payload()))
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "template"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_template_domain {
+    ($($input:tt)*) => {
+        ::core::compile_error!("object_id template binding requires the `template` feature on trogon_object_id");
+    };
 }
 
 /// A trusted source of typed payloads. Generated values still pass `Payload::validate`.

@@ -125,7 +125,7 @@ fn expand_object_id(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     let payload = &field.ty;
     let template = options
         .template
-        .map(|template| quote!(#path::__impl_template_domain!(#name, #template);));
+        .map(|template| quote!(#path::__impl_template_domain!(#name, #template, direct);));
     Ok(quote! {
         const _: #path::Definition = #path::Definition::new(#prefix, #separator);
         impl #path::Domain for #name {
@@ -214,7 +214,7 @@ fn expand_domain(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
     let template = options
         .template
-        .map(|template| quote!(#path::__impl_template_domain!(#name, #template);));
+        .map(|template| quote!(#path::__impl_template_domain!(#name, #template, domain);));
     Ok(quote! {
         const _: #path::Definition = #path::Definition::new(#prefix, #separator);
         impl #path::Domain for #name {

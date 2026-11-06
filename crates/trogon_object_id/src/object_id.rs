@@ -58,6 +58,15 @@ impl<D: Domain> ObjectId<D> {
     }
 }
 
+#[cfg(feature = "template")]
+impl<D: crate::TemplateDomain> ObjectId<D> {
+    pub fn from_identity(
+        _input: <<D as crate::TemplateDomain>::Template as crate::UuidTemplate>::Input<'_>,
+    ) -> Result<Self, ParseError> {
+        Self::try_from_payload(crate::Uuid::nil())
+    }
+}
+
 impl<D: Domain> FromStr for ObjectId<D> {
     type Err = ParseError;
     fn from_str(value: &str) -> Result<Self, ParseError> {
