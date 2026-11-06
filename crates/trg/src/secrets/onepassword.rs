@@ -105,6 +105,7 @@ const OP_NO_CACHE: &str = "--cache=false";
 #[derive(Debug, Clone, Copy)]
 enum OpCommand {
     ItemGet,
+    Read,
     AccountList,
     AccountGet,
 }
@@ -113,16 +114,18 @@ impl OpCommand {
     fn as_str(self) -> &'static str {
         match self {
             Self::ItemGet => "item get",
+            Self::Read => "read",
             Self::AccountList => "account list",
             Self::AccountGet => "account get",
         }
     }
 
-    fn words(self) -> [&'static str; 2] {
+    fn words(self) -> &'static [&'static str] {
         match self {
-            Self::ItemGet => ["item", "get"],
-            Self::AccountList => ["account", "list"],
-            Self::AccountGet => ["account", "get"],
+            Self::ItemGet => &["item", "get"],
+            Self::Read => &["read"],
+            Self::AccountList => &["account", "list"],
+            Self::AccountGet => &["account", "get"],
         }
     }
 }
@@ -147,8 +150,13 @@ pub enum OpReferenceError {
 
     /// Silently ignoring the query would hand back the field's plain value
     /// while the config says it asked for something else, which is a wrong
-    /// answer rather than a missing feature.
-    #[error("1Password secret reference `{reference}` carries `?{query}`, which is not supported by this backend")]
+    /// answer rather than a missing feature. So only the parameters
+    /// 1Password documents for `op read` are accepted, and anything else is
+    /// refused by name.
+    #[error(
+        "1Password secret reference `{reference}` carries `?{query}`, which is not a query `op read` documents; \
+         use one of `attribute=<{ATTRIBUTES}>` (or `attr=`), or `ssh-format=openssh`"
+    )]
     Query { reference: String, query: String },
 
     /// The vault and the item/title are handed to `op` as argv (see
@@ -264,12 +272,115 @@ impl fmt::Debug for OnePasswordItem {
     }
 }
 
-/// A 1Password secret reference: `op://<vault>/<item>[/<section>]/<field>`.
+/// The spelling of the `attribute` query key: 1Password documents `attr` as
+/// an alias, and a reference must render back the way it was written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OpAttributeKey {
+    Attribute,
+    Attr,
+}
+
+impl OpAttributeKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attribute => "attribute",
+            Self::Attr => "attr",
+        }
+    }
+}
+
+const ATTRIBUTES: &str = "type|value|id|purpose|otp|content|size|name";
+
+/// What `?attribute=` asks `op read` for in place of the field's value, across
+/// the attributes 1Password documents for fields and for file attachments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OpAttribute {
+    Type,
+    Value,
+    Id,
+    Purpose,
+    Otp,
+    Content,
+    Size,
+    Name,
+}
+
+impl OpAttribute {
+    fn parse(raw: &str) -> Option<Self> {
+        Some(match raw {
+            "type" => Self::Type,
+            "value" => Self::Value,
+            "id" => Self::Id,
+            "purpose" => Self::Purpose,
+            "otp" => Self::Otp,
+            "content" => Self::Content,
+            "size" => Self::Size,
+            "name" => Self::Name,
+            _ => return None,
+        })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Type => "type",
+            Self::Value => "value",
+            Self::Id => "id",
+            Self::Purpose => "purpose",
+            Self::Otp => "otp",
+            Self::Content => "content",
+            Self::Size => "size",
+            Self::Name => "name",
+        }
+    }
+}
+
+/// The one query parameter a reference may carry. 1Password documents no
+/// combination of them, so a second parameter is refused rather than guessed
+/// at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OpQuery {
+    Attribute {
+        key: OpAttributeKey,
+        attribute: OpAttribute,
+    },
+    SshFormatOpenssh,
+}
+
+impl OpQuery {
+    fn parse(raw: &str) -> Option<Self> {
+        let (key, value) = raw.split_once('=')?;
+        match key {
+            "attribute" | "attr" => Some(Self::Attribute {
+                key: if key == "attr" {
+                    OpAttributeKey::Attr
+                } else {
+                    OpAttributeKey::Attribute
+                },
+                attribute: OpAttribute::parse(value)?,
+            }),
+            "ssh-format" if value == "openssh" => Some(Self::SshFormatOpenssh),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for OpQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Attribute { key, attribute } => write!(f, "{}={}", key.as_str(), attribute.as_str()),
+            Self::SshFormatOpenssh => f.write_str("ssh-format=openssh"),
+        }
+    }
+}
+
+/// A 1Password secret reference:
+/// `op://<vault>/<item>[/<section>]/<field>[?<query>]`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OnePasswordReference {
     item: OnePasswordItem,
     section: Option<OpSegment>,
     field: OpSegment,
+    query: Option<OpQuery>,
 }
 
 impl OnePasswordReference {
@@ -280,15 +391,16 @@ impl OnePasswordReference {
             .strip_prefix(Self::SCHEME)
             .ok_or_else(|| OpReferenceError::Scheme(raw.to_string()))?;
 
-        // Before splitting, because `?attribute=otp` and `?ssh-format=openssh`
-        // change what a reference resolves to, and this backend reads the
-        // field's value and nothing else.
-        if let Some((_, query)) = rest.split_once('?') {
-            return Err(OpReferenceError::Query {
-                reference: raw.to_string(),
-                query: query.to_string(),
-            });
-        }
+        let (rest, query) = match rest.split_once('?') {
+            None => (rest, None),
+            Some((rest, query)) => {
+                let parsed = OpQuery::parse(query).ok_or_else(|| OpReferenceError::Query {
+                    reference: raw.to_string(),
+                    query: query.to_string(),
+                })?;
+                (rest, Some(parsed))
+            }
+        };
 
         let segments: Vec<&str> = rest.split('/').collect();
         let (vault, title, section, field) = match segments.as_slice() {
@@ -309,6 +421,7 @@ impl OnePasswordReference {
             ),
             section,
             field: OpSegment::parse(field, raw)?,
+            query,
         })
     }
 
@@ -331,6 +444,12 @@ impl OnePasswordReference {
     pub fn field(&self) -> &OpSegment {
         &self.field
     }
+
+    /// Set when the value is derived at read time, which only `op read` can
+    /// answer: `op item get` returns the stored fields and nothing derived.
+    pub fn query(&self) -> Option<&OpQuery> {
+        self.query.as_ref()
+    }
 }
 
 impl fmt::Display for OnePasswordReference {
@@ -339,7 +458,11 @@ impl fmt::Display for OnePasswordReference {
         if let Some(section) = &self.section {
             write!(f, "/{section}")?;
         }
-        write!(f, "/{}", self.field)
+        write!(f, "/{}", self.field)?;
+        if let Some(query) = &self.query {
+            write!(f, "?{query}")?;
+        }
+        Ok(())
     }
 }
 
@@ -713,6 +836,18 @@ pub struct OnePasswordBackend {
     timeout: Duration,
 }
 
+/// What `op read` answered for one reference.
+///
+/// The two misses stay apart because the remedies differ: an item that is not
+/// there is created, while a field that is not on an item that is there is a
+/// typo in the reference.
+#[derive(Debug)]
+pub enum OpRead {
+    Value(SecretString),
+    MissingItem,
+    MissingField,
+}
+
 impl OnePasswordBackend {
     pub fn new(account: OpAccount) -> Self {
         Self {
@@ -775,20 +910,60 @@ impl OnePasswordBackend {
             if stderr.contains("isn't an item in the") {
                 return Ok(None);
             }
-            // `op` names neither the account it used nor the vaults that
-            // account does have, so an address aimed at the wrong one of
-            // several signed-in accounts otherwise reads as the vault having
-            // vanished.
-            let hint = if stderr.contains("isn't a vault in this account") {
-                format!(" (account `{}`)", self.account)
-            } else {
-                String::new()
-            };
-            return Err(SecretsError::Unavailable(format!("op item get failed: {stderr}{hint}")));
+            return Err(self.failed(OpCommand::ItemGet, stderr));
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
         OnePasswordItemFields::parse(item, &stdout).map(Some)
+    }
+
+    /// Read one reference with `op read`, for a reference whose value `op`
+    /// derives (`?attribute=otp`, `?ssh-format=openssh`) and so is not among
+    /// the fields `op item get` lists.
+    ///
+    /// One call per reference, because there is no item to share between
+    /// them: each answer is computed by `op` for that reference alone.
+    pub async fn read(&self, reference: &OnePasswordReference) -> Result<OpRead, SecretsError> {
+        let out = self
+            .run(
+                OpCommand::Read,
+                &[
+                    &reference.to_string(),
+                    "--no-newline",
+                    "--account",
+                    self.account.as_str(),
+                ],
+            )
+            .await?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.trim();
+            if stderr.contains("isn't an item in the") {
+                return Ok(OpRead::MissingItem);
+            }
+            if stderr.contains("does not have a field") {
+                return Ok(OpRead::MissingField);
+            }
+            return Err(self.failed(OpCommand::Read, stderr));
+        }
+
+        Ok(OpRead::Value(SecretString::from(
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )))
+    }
+
+    fn failed(&self, command: OpCommand, stderr: &str) -> SecretsError {
+        // `op` names neither the account it used nor the vaults that
+        // account does have, so an address aimed at the wrong one of
+        // several signed-in accounts otherwise reads as the vault having
+        // vanished.
+        let hint = if stderr.contains("isn't a vault in this account") {
+            format!(" (account `{}`)", self.account)
+        } else {
+            String::new()
+        };
+        SecretsError::Unavailable(format!("op {} failed: {stderr}{hint}", command.as_str()))
     }
 
     /// Every account `op` on this machine can reach, for `trg doctor` to
@@ -1148,18 +1323,45 @@ mod tests {
         ));
     }
 
-    /// `?attribute=otp` and `?ssh-format=openssh` change what a reference
-    /// resolves to, and this backend reads the stored value and nothing else.
-    /// Ignoring the query would hand back a plausible wrong secret.
     #[test]
-    fn a_reference_carrying_a_query_is_refused_rather_than_stripped() {
+    fn a_documented_query_renders_back_exactly_as_it_was_written() {
         for raw in [
             "op://Ops/deploy-keys/one-time password?attribute=otp",
+            "op://Ops/deploy-keys/one-time password?attr=otp",
             "op://Ops/deploy-keys/private key?ssh-format=openssh",
+            "op://Ops/deploy-keys/ssh/private key?ssh-format=openssh",
+            "op://Ops/deploy-keys/file.pem?attribute=content",
+        ] {
+            let parsed = reference(raw);
+            assert!(parsed.query().is_some(), "{raw}");
+            assert_eq!(parsed.to_string(), raw);
+        }
+        assert!(reference("op://Ops/deploy-keys/TOKEN").query().is_none());
+    }
+
+    #[test]
+    fn the_query_does_not_change_which_field_a_reference_names() {
+        let parsed = reference("op://Ops/deploy-keys/private key?ssh-format=openssh");
+        assert_eq!(parsed.field().as_str(), "private key");
+        assert_eq!(parsed.item(), reference("op://Ops/deploy-keys/x").item());
+    }
+
+    /// Ignoring a query would hand back a plausible wrong secret, so what 1Password
+    /// does not document is refused by name rather than stripped.
+    #[test]
+    fn an_undocumented_query_is_refused_rather_than_stripped() {
+        for raw in [
+            "op://Ops/deploy-keys/key?ssh-format=pem",
+            "op://Ops/deploy-keys/key?attribute=title",
+            "op://Ops/deploy-keys/key?attribute=",
+            "op://Ops/deploy-keys/key?ssh-format",
+            "op://Ops/deploy-keys/key?shape=round",
+            "op://Ops/deploy-keys/key?",
+            "op://Ops/deploy-keys/key?attribute=otp&ssh-format=openssh",
         ] {
             let err = OnePasswordReference::parse(raw).expect_err(raw);
-            assert!(matches!(err, OpReferenceError::Query { .. }), "{err}");
-            assert!(err.to_string().contains("not supported by this backend"), "{err}");
+            assert!(matches!(err, OpReferenceError::Query { .. }), "{raw}: {err}");
+            assert!(err.to_string().contains("ssh-format=openssh"), "{err}");
         }
     }
 
@@ -1583,6 +1785,90 @@ mod tests {
                 "--account",
                 ACCOUNT
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_query_reference_is_read_with_op_read_and_carries_the_account() {
+        let stub = StubOp::ok("-----BEGIN OPENSSH PRIVATE KEY-----");
+        let value = stub
+            .backend()
+            .read(&reference("op://Ops/deploy-keys/private key?ssh-format=openssh"))
+            .await
+            .expect("read");
+        let OpRead::Value(value) = value else {
+            panic!("a value expected: {value:?}")
+        };
+
+        assert_eq!(value.expose_secret(), "-----BEGIN OPENSSH PRIVATE KEY-----");
+        assert_eq!(
+            stub.argv(),
+            [
+                "read",
+                "--cache=false",
+                "op://Ops/deploy-keys/private key?ssh-format=openssh",
+                "--no-newline",
+                "--account",
+                ACCOUNT
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_op_read_of_a_missing_item_is_a_miss_not_an_error() {
+        let stub = StubOp::answering(1, "", NOT_AN_ITEM);
+        assert!(matches!(
+            stub.backend()
+                .read(&reference("op://Ops/missing/key?ssh-format=openssh"))
+                .await
+                .expect("read"),
+            OpRead::MissingItem
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_op_read_of_a_missing_item_is_a_missing_item_with_the_message_op_gives() {
+        let stub = StubOp::answering(
+            1,
+            "",
+            "[ERROR] 2026/10/28 17:13:42 could not read secret 'op://Ops/missing/password': could not get item Ops/missing: \"missing\" isn't an item in the \"Ops\" vault. Specify the item with its UUID, name, or domain.",
+        );
+        assert!(matches!(
+            stub.backend()
+                .read(&reference("op://Ops/missing/password"))
+                .await
+                .expect("read"),
+            OpRead::MissingItem
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_op_read_of_a_missing_field_is_a_missing_field_with_the_message_op_gives() {
+        let stub = StubOp::answering(
+            1,
+            "",
+            "[ERROR] 2026/10/28 17:13:43 could not read secret 'op://Ops/deploy-keys/nope?ssh-format=openssh': item 'Ops/deploy-keys' does not have a field 'nope'",
+        );
+        assert!(matches!(
+            stub.backend()
+                .read(&reference("op://Ops/deploy-keys/nope?ssh-format=openssh"))
+                .await
+                .expect("read"),
+            OpRead::MissingField
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_op_read_is_unavailable_and_names_the_command() {
+        let stub = StubOp::answering(1, "", "[ERROR] session expired");
+        let err = stub
+            .backend()
+            .read(&reference("op://Ops/deploy-keys/key?attribute=otp"))
+            .await
+            .expect_err("read");
+        assert!(
+            err.to_string().contains("op read failed: [ERROR] session expired"),
+            "{err}"
         );
     }
 

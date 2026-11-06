@@ -34,10 +34,10 @@ If any case uses an `llm` grader, label a sample of its verdicts and check
 agreement before a round's recommendation rides on it:
 
 ```shell
-$ trg ai skills eval feedback label ./artifacts/my-skill/<report-id> \
+$ trg ai skills eval feedback label --report-dir ./artifacts/my-skill/<report-id> \
     --run run-001 --assertion case-a:g0 --verdict fail
 
-$ trg ai skills eval grader-agreement ./artifacts/my-skill/<report-id> --min-agreement 0.9
+$ trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/<report-id> --min-agreement 0.9
 ```
 
 `--min-agreement` checks the `llm` bucket's Wilson lower bound and fails
@@ -66,7 +66,7 @@ $ trg ai skills eval run \
 
 Leave `--split` at its default of `all` and `--iteration` unset, for the
 whole suite in one report bundle. `--iteration` auto-detects the next number
-for this skill's `--out-dir`, and every later `--previous` or `--from`
+for this skill's `--out-dir`, and every later `--previous-report-dir` or `--report-dir`
 auto-detects the sibling bundle one number back. Splitting a round into a
 `--split train` run and a `--split test` run would give both bundles the
 same iteration number and break that auto-detection on the next round.
@@ -74,7 +74,7 @@ same iteration number and break that auto-detection on the next round.
 ## 4. Read the train split while you decide
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
     --withhold-test-detail
 ```
 
@@ -101,11 +101,11 @@ and [Reference: headroom warning](../reference/ai-skills-eval.md#headroom-warnin
 ## 6. Get the verdict
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
     --withhold-test-detail
 ```
 
-Once a previous round exists, `--previous` auto-detects it and the output
+Once a previous round exists, `--previous-report-dir` auto-detects it and the output
 carries `keep_or_revert.recommendation`:
 
 | `recommendation` | Meaning | Action |
@@ -120,6 +120,10 @@ verdict](../reference/ai-skills-eval.md#keep-or-revert-verdict). Add
 `--fail-on revert,overfitting` to turn this into an exit code in a script or
 CI job; see [Keep-or-revert gate](run-in-ci.md#keep-or-revert-gate).
 
+The recommendation does not read cost or latency. A `keep` that costs more
+per run shows as `costlier` under `keep_or_revert.efficiency`; see [Gate a
+change on cost and latency](gate-a-change-on-cost-and-latency.md).
+
 ## 7. Act, then build the next bundle
 
 On `keep`, leave the change in place. On anything else, put the skill's
@@ -128,7 +132,7 @@ it is file or version-control management. Either way, build the next
 round's improvement bundle:
 
 ```shell
-$ trg ai skills eval next-iteration --from ./artifacts/my-skill/<report-id>
+$ trg ai skills eval next-iteration --report-dir ./artifacts/my-skill/<report-id>
 ```
 
 Read `improvement.md` and `improvement.json` for the next candidate change.
@@ -141,7 +145,7 @@ Then return to step 2.
 ## Optional: catch ambiguous cases
 
 ```shell
-$ trg ai skills eval scaling ./report-weaker ./report-stronger
+$ trg ai skills eval scaling --report-dir ./report-weaker --report-dir ./report-stronger
 ```
 
 Compares the same keep-or-revert verdict across configurations instead of

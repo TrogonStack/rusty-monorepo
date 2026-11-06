@@ -224,6 +224,10 @@ impl OperatorEnvironment {
     const SECRET: &'static str = "operator-secret";
 
     fn visible_to_this_process() -> Self {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the lock guards no data, only whose turn it is, so a test that panicked holding it left nothing half-written"
+        )]
         let turn = OPERATOR_ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var(LEAK_VAR, Self::SECRET);
         Self { _turn: turn }

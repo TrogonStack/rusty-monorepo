@@ -11,7 +11,7 @@ use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 /// The two-sided normal deviate for 95% coverage.
-const DEVIATE: f64 = 1.959_963_985;
+pub(crate) const DEVIATE: f64 = 1.959_963_985;
 
 /// A rate together with the draws it was measured from.
 ///

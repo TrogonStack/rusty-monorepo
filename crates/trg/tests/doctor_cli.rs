@@ -4,6 +4,11 @@
 //! macOS user had before backends existed and the one most likely to be run
 //! against by someone who has not configured anything yet.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test is test code end to end, so a failed setup step should fail the test"
+)]
+
 use std::fs;
 
 use assert_cmd::Command;

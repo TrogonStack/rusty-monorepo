@@ -29,11 +29,11 @@ pub use secrecy::SecretString;
 use serde::Deserialize;
 use tracing::field::Empty;
 pub use var::{
-    EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretVar, SecretVarError, Segment, VarRef,
-    VarResolveError, VarSite, VarSource, VarTemplate,
+    EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretRead, SecretVar, SecretVarError, Segment,
+    VarRef, VarResolveError, VarSite, VarSource, VarTemplate, WithFallbacks,
 };
 
-use crate::secrets::SecretsSection;
+use crate::secrets::{MirrorConfigError, SecretsSection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -75,6 +75,9 @@ pub enum ConfigError {
 
     #[error("{0}")]
     SecretVar(#[from] SecretVarError),
+
+    #[error("{0}")]
+    Mirror(#[from] MirrorConfigError),
 }
 
 impl ConfigError {
@@ -94,6 +97,7 @@ impl ConfigError {
             Self::NoExecEntries => "no_exec_entries",
             Self::UnknownExecEntry { .. } => "unknown_exec_entry",
             Self::SecretVar(_) => "secret_var",
+            Self::Mirror(_) => "mirror",
         }
     }
 }
@@ -292,11 +296,11 @@ impl PendingMcp {
     ///
     /// Deduplicated, because two vars pointing at the same coordinates are one
     /// read, and sorted so the order a caller sees does not depend on hashing.
-    pub fn secret_vars(&self) -> Vec<SecretVar> {
+    pub fn secret_vars(&self) -> Vec<SecretRead> {
         let Some(vars) = &self.entry.vars else {
             return Vec::new();
         };
-        sorted_distinct(vars.values().filter_map(VarSource::secret).cloned())
+        sorted_distinct(vars.values().filter_map(VarSource::secret_read))
     }
 
     pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedMcp, ConfigError> {
@@ -326,8 +330,8 @@ pub struct PendingExec {
 impl PendingExec {
     /// Every distinct secret this entry's `env` names, deduplicated and
     /// sorted for the same reason [`PendingMcp::secret_vars`] is.
-    pub fn secret_vars(&self) -> Vec<SecretVar> {
-        sorted_distinct(self.entry.env.values().flat_map(EnvValue::secrets).cloned())
+    pub fn secret_vars(&self) -> Vec<SecretRead> {
+        sorted_distinct(self.entry.env.values().flat_map(EnvValue::secret_reads))
     }
 
     pub fn finish(self, fetched: &FetchedSecrets) -> Result<LoadedExec, ConfigError> {
@@ -341,9 +345,9 @@ impl PendingExec {
 /// Ordered on the rendered form rather than on the address itself: an address
 /// is not comparable across backend kinds, and what this is for is a stable
 /// sequence rather than a meaningful one.
-fn sorted_distinct(vars: impl Iterator<Item = SecretVar>) -> Vec<SecretVar> {
-    let mut out: Vec<SecretVar> = vars.collect();
-    out.sort_by_cached_key(|v| (v.backend().to_string(), v.address().to_string()));
+fn sorted_distinct(vars: impl Iterator<Item = SecretRead>) -> Vec<SecretRead> {
+    let mut out: Vec<SecretRead> = vars.collect();
+    out.sort_by_cached_key(|v| (v.primary().backend().to_string(), v.to_string()));
     out.dedup();
     out
 }
@@ -388,7 +392,10 @@ pub fn load_secrets() -> Result<SecretsSection, ConfigError> {
 fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|e| read_error(path, &e))?;
     let root: FileRoot = toml::from_str(&text)?;
-    Ok(root.secrets.unwrap_or_default())
+    let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
+    secrets.check_named()?;
+    Ok(secrets)
 }
 
 /// A config that exists but cannot be read is a different problem from one that
@@ -435,6 +442,8 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigErr
 
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
+    secrets.check_named()?;
     let mut servers = root
         .mcp
         .and_then(|m| (!m.servers.is_empty()).then_some(m.servers))
@@ -462,6 +471,8 @@ fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
 
     let root: FileRoot = toml::from_str(&text)?;
     let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
+    secrets.check_named()?;
     let mut entries = root
         .exec
         .and_then(|e| (!e.is_empty()).then_some(e))
@@ -694,7 +705,7 @@ mod tests {
         let pending = load_mcp_at(&path, "s1").expect("parses without reaching anything");
         assert_eq!(
             pending.secret_vars(),
-            vec![keychain_var("homelab", "agentgateway", "token")]
+            vec![keychain_var("homelab", "agentgateway", "token").into()]
         );
 
         let mut fetched = FetchedSecrets::new();
@@ -788,10 +799,13 @@ mod tests {
         );
         assert_eq!(
             wanted[0],
-            keychain_var("homelab", "agentgateway", "principal"),
+            SecretRead::from(keychain_var("homelab", "agentgateway", "principal")),
             "sorted, so the order does not depend on hashing"
         );
-        assert_eq!(wanted[1], keychain_var("homelab", "agentgateway", "token"));
+        assert_eq!(
+            wanted[1],
+            SecretRead::from(keychain_var("homelab", "agentgateway", "token"))
+        );
     }
 
     #[test]
@@ -826,6 +840,65 @@ mod tests {
 
         let loaded = load_mcp_at(&path, "s1").unwrap();
         assert!(loaded.secrets.backends.is_empty());
+    }
+
+    #[test]
+    fn a_mirror_that_could_never_apply_is_a_config_error_for_every_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [secrets.backends.op]
+            kind = "onepassword"
+            account = "my.1password.com"
+
+            [secrets.mirrors.signing-key]
+            source = { backend = "op", ref = "op://Engineering/deploy-key/token" }
+            targets = [{ backend = "op", ref = "op://Engineering/other-key/token" }]
+
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+            "#,
+        );
+
+        for err in [
+            load_mcp_at(&path, "s1").err().unwrap(),
+            load_secrets_at(&path).err().unwrap(),
+        ] {
+            assert!(matches!(err, ConfigError::Mirror(_)), "{err}");
+            assert!(err.to_string().contains("[secrets.mirrors.signing-key]"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_named_secret_that_could_never_be_read_is_a_config_error_for_every_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_secure_config(
+            &path,
+            r#"
+            [secrets.backends.op]
+            kind = "onepassword"
+            account = "my.1password.com"
+
+            [secrets.vars.signing-key]
+            backend = "ghost"
+            path = "git/signing"
+            key = "KEY"
+
+            [mcp.servers.s1]
+            url = "https://example.com/mcp"
+            "#,
+        );
+
+        for err in [
+            load_mcp_at(&path, "s1").err().unwrap(),
+            load_secrets_at(&path).err().unwrap(),
+        ] {
+            assert!(matches!(err, ConfigError::SecretVar(_)), "{err}");
+            assert!(err.to_string().contains("[secrets.vars.signing-key]"), "{err}");
+        }
     }
 
     #[test]

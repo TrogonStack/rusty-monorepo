@@ -1,6 +1,6 @@
 # Launch a coding agent with `trg exec`
 
-`trg exec run <name>` execs into whatever command a `[exec.<name>]` entry
+`trg exec run --name <name>` execs into whatever command a `[exec.<name>]` entry
 names, with its environment resolved the same way an MCP server's `vars` are.
 This guide covers declaring an entry, listing what's declared, and running
 one.
@@ -14,7 +14,7 @@ args    = ["--dangerously-skip-permissions"]
 ```
 
 `command` is looked up on `PATH` the same as a shell would. `args` is
-optional and comes before anything typed after `<name>` on the command line.
+optional and comes before anything typed after `--` on the command line.
 
 ## 2. See what's declared
 
@@ -22,15 +22,14 @@ optional and comes before anything typed after `<name>` on the command line.
 trg exec list
 ```
 
-Prints one name per line — `claude`, here. `list` sits beside `run` rather
-than being folded into `trg exec <name>` directly, so an entry can be named
-anything (including, one day, `run` or `list` itself) without colliding with
-the verb that lists it.
+Prints one name per line, `claude` here. `run` takes the entry through
+`--name` rather than as a bare word, so an entry can be named anything
+(including, one day, `run` or `list` itself) without colliding with a verb.
 
 ## 3. Run it
 
 ```sh
-trg exec run claude
+trg exec run --name claude
 ```
 
 This replaces the `trg` process (`exec(2)`): same pid, no `trg` left running
@@ -38,7 +37,7 @@ underneath once the command starts. Anything meant for the launched command
 goes after `--`, and is appended after the entry's own `args`:
 
 ```sh
-trg exec run claude -- --resume
+trg exec run --name claude -- --resume
 ```
 
 The `--` is required, not optional. Without it, there is no way to tell a
@@ -94,7 +93,7 @@ itself.
 applied after the entry's own `unset`/`env`:
 
 ```sh
-trg exec run claude --env DEBUG=1 --unset SOME_STALE_VAR
+trg exec run --name claude --env DEBUG=1 --unset SOME_STALE_VAR
 ```
 
 `--env` is for a literal like `DEBUG=1`, never a secret: like every other

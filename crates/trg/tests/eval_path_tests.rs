@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test is test code end to end, so a failed setup step should fail the test"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

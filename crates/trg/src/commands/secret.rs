@@ -1,4 +1,4 @@
-//! `trg secret get` and `trg secret put`.
+//! `trg secret get`, `trg secret put` and `trg secret mirror`.
 //!
 //! A secret has an identity of its own rather than one borrowed from whichever
 //! MCP server happens to read it, so the arguments here are the inline table
@@ -15,11 +15,17 @@ use serde_json::{json, Value};
 use tracing::field::Empty;
 use tracing::Instrument;
 
-use crate::config::{RawSecretVar, SecretVar, VarSite};
+use crate::config::{RawSecretVar, SecretRead, SecretVar, VarSite};
+use crate::exit_code::ExitCode;
 use crate::output::{print_json, OutputFormat};
-use crate::secrets::onepassword::OnePasswordReference;
+use crate::secrets::mirror as secrets_mirror;
+use crate::secrets::onepassword::{OnePasswordReference, OpRead};
 use crate::secrets::telemetry::record_error;
-use crate::secrets::{Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretPath};
+use crate::secrets::{
+    vars, Backend, BackendKind, Registry, SecretAddress, SecretKey, SecretMap, SecretName, SecretPath,
+};
+use crate::secrets::{Mirror, MirrorError, MirrorOutcome, TargetOutcomes};
+use crate::telemetry::semconv::trg::SECRETS_MIRROR_NAME;
 use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_BACKEND_NAME};
 
 /// `error.type` for a failure this command only has as a message to print,
@@ -32,6 +38,8 @@ pub enum SecretCommands {
     Get(GetArgs),
     /// Write one value into a secrets backend, reading it from stdin
     Put(PutArgs),
+    /// Copy values from their source into the targets `[secrets.mirrors.<name>]` declares
+    Mirror(MirrorArgs),
 }
 
 /// What every subcommand needs whatever it addresses.
@@ -58,34 +66,68 @@ pub struct CommonArgs {
 /// [`SecretVar::resolve_at`] settles that, which is the same call config load
 /// makes, so the two surfaces cannot drift on what they accept.
 #[derive(Args)]
-#[group(required = true, multiple = true)]
 pub struct AddressArgs {
     /// The entry within that backend, relative to its configured prefix
-    #[arg(long, requires = "key", conflicts_with = "reference")]
+    #[arg(
+        long,
+        requires = "key",
+        conflicts_with_all = ["reference", "name"],
+        required_unless_present_any = ["reference", "name"]
+    )]
     pub path: Option<String>,
 
     /// The field within that entry
-    #[arg(long, requires = "path", conflicts_with = "reference")]
+    #[arg(long, requires = "path", conflicts_with_all = ["reference", "name"])]
     pub key: Option<String>,
 
     /// A 1Password secret reference, as `Copy Secret Reference` yields it
-    #[arg(long = "ref", value_name = "op://...")]
+    #[arg(long = "ref", value_name = "op://...", conflicts_with = "name")]
     pub reference: Option<String>,
 }
 
 #[derive(Args)]
 pub struct GetArgs {
-    #[command(flatten)]
-    pub common: CommonArgs,
+    /// A secret declared under `[secrets.vars.<name>]`, read with the address
+    /// and fallbacks it declares. Takes the place of every address flag
+    #[arg(long, value_name = "NAME", value_parser = SecretName::parse)]
+    pub name: Option<SecretName>,
+
+    /// The `[secrets.backends.<name>]` entry to address
+    #[arg(long, required_unless_present = "name", conflicts_with = "name")]
+    pub backend: Option<String>,
+
+    /// Output format. `json` carries the value in the document exactly as
+    /// `text` writes it to stdout; neither is the safer one to log.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
 
     #[command(flatten)]
     pub address: AddressArgs,
+
+    /// Another address to read when this one cannot answer, written as the
+    /// inline table a config holds, for example `'{ backend = "op", ref =
+    /// "op://<vault>/<item>/<field>" }'`. Repeat to add more, tried in order.
+    /// Which backend answered is reported on stderr, never on stdout.
+    #[arg(long = "fallback", value_name = "TABLE", value_parser = parse_fallback, conflicts_with = "name")]
+    pub fallbacks: Vec<RawSecretVar>,
+}
+
+/// One `--fallback`, read the way a config would read the same table, so the
+/// flag cannot accept an address the config would refuse.
+fn parse_fallback(text: &str) -> Result<RawSecretVar, String> {
+    #[derive(serde::Deserialize)]
+    struct Fallback {
+        fallback: RawSecretVar,
+    }
+    toml::from_str::<Fallback>(&format!("fallback = {text}"))
+        .map(|parsed| parsed.fallback)
+        .map_err(|e| e.message().to_string())
 }
 
 impl GetArgs {
     fn raw(&self) -> RawSecretVar {
         RawSecretVar {
-            backend: self.common.backend.clone(),
+            backend: self.backend.clone().unwrap_or_default(),
             path: self.address.path.clone(),
             key: self.address.key.clone(),
             reference: self.address.reference.clone(),
@@ -120,12 +162,57 @@ impl PutArgs {
     }
 }
 
+/// A mirror writes only when asked to, because the targets it overwrites are
+/// the ones other things already read from. Without `apply` nothing is written
+/// and each target reports what it would do.
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct MirrorArgs {
+    #[command(subcommand)]
+    pub action: Option<MirrorAction>,
+
+    #[command(flatten)]
+    pub selection: MirrorSelection,
+}
+
+#[derive(Subcommand)]
+pub enum MirrorAction {
+    /// Write the targets
+    Apply(MirrorSelection),
+}
+
+#[derive(Args)]
+pub struct MirrorSelection {
+    /// A mirror to run, by the name it is declared under. Repeat to run more.
+    /// All of them when none is given
+    #[arg(long = "name", value_name = "NAME")]
+    pub names: Vec<String>,
+
+    /// Output format. Neither carries a value, only what each target did
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub output_format: OutputFormat,
+}
+
+impl MirrorArgs {
+    fn apply(&self) -> bool {
+        matches!(self.action, Some(MirrorAction::Apply(_)))
+    }
+
+    fn selection(&self) -> &MirrorSelection {
+        match &self.action {
+            Some(MirrorAction::Apply(selection)) => selection,
+            None => &self.selection,
+        }
+    }
+}
+
 impl SecretCommands {
-    pub async fn handle(self, registry: &Registry) -> i32 {
+    pub async fn handle(self, registry: &Registry) -> ExitCode {
         let span = self.span();
         let result = match self {
             SecretCommands::Get(args) => get(registry, &args).instrument(span.clone()).await,
             SecretCommands::Put(args) => put(registry, &args).instrument(span.clone()).await,
+            SecretCommands::Mirror(args) => mirror_all(registry, &args).instrument(span.clone()).await,
         };
 
         match result {
@@ -133,7 +220,7 @@ impl SecretCommands {
             Err(message) => {
                 record_error(&span, OTHER_ERROR);
                 eprintln!("{message}");
-                1
+                ExitCode::Failed
             }
         }
     }
@@ -144,7 +231,7 @@ impl SecretCommands {
         match self {
             SecretCommands::Get(args) => tracing::info_span!(
                 "secret get",
-                { SECRETS_BACKEND_NAME } = args.common.backend.as_str(),
+                { SECRETS_BACKEND_NAME } = args.backend.as_deref(),
                 { SECRETS_BACKEND_KIND } = Empty,
                 "error.type" = Empty,
                 "otel.status_code" = Empty,
@@ -156,6 +243,9 @@ impl SecretCommands {
                 "error.type" = Empty,
                 "otel.status_code" = Empty,
             ),
+            SecretCommands::Mirror(_) => {
+                tracing::info_span!("secret mirror", "error.type" = Empty, "otel.status_code" = Empty)
+            }
         }
     }
 }
@@ -165,8 +255,14 @@ fn record_kind(backend: &Backend) {
     tracing::Span::current().record(SECRETS_BACKEND_KIND, backend.kind());
 }
 
-async fn get(registry: &Registry, args: &GetArgs) -> Result<i32, String> {
+async fn get(registry: &Registry, args: &GetArgs) -> Result<ExitCode, String> {
+    if let Some(name) = &args.name {
+        return get_named(registry, args, name).await;
+    }
     let raw = args.raw();
+    if !args.fallbacks.is_empty() {
+        return get_with_fallbacks(registry, args, &raw).await;
+    }
     let backend = registry.resolve(&raw.backend).map_err(|e| e.to_string())?;
     record_kind(&backend);
     let var =
@@ -174,15 +270,85 @@ async fn get(registry: &Registry, args: &GetArgs) -> Result<i32, String> {
 
     let value = read(&backend, &var).await?;
 
-    if args.common.output_format.is_json() {
-        return Ok(print_json(&document(&raw, &value), 0));
+    if args.output_format.is_json() {
+        return Ok(print_json(&document(&raw, &value), ExitCode::Success));
     }
 
     write_value(&value)?;
-    Ok(0)
+    Ok(ExitCode::Success)
 }
 
-async fn put(registry: &Registry, args: &PutArgs) -> Result<i32, String> {
+/// A read that opted in to more than one address goes through the same fetch
+/// a config var does, so what counts as unable to answer, what is reported and
+/// what is recorded cannot differ between the two.
+///
+/// The first backend is not built up front: one that cannot be built on this
+/// machine is exactly the case a fallback is for.
+async fn get_with_fallbacks(registry: &Registry, args: &GetArgs, raw: &RawSecretVar) -> Result<ExitCode, String> {
+    let primary =
+        SecretVar::resolve_at(kind_of(registry, &raw.backend)?, raw, VarSite::Flags).map_err(|e| e.to_string())?;
+    let mut addresses = vec![primary];
+    for (i, fallback) in args.fallbacks.iter().enumerate() {
+        addresses.push(
+            SecretVar::resolve_at(
+                kind_of(registry, &fallback.backend)?,
+                fallback,
+                VarSite::fallback_flag(i + 1),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+    }
+    let read = SecretRead::from_addresses(addresses).ok_or("no address to read")?;
+
+    let fetched = vars::fetch(registry, std::slice::from_ref(&read))
+        .await
+        .map_err(|e| e.to_string())?;
+    let value = fetched.get(&read).ok_or("the read answered nothing")?;
+
+    if args.output_format.is_json() {
+        let mut out = document(raw, value);
+        if let (Some(answered_by), Some(map)) = (fetched.answered_by(&read), out.as_object_mut()) {
+            map.insert("answered_by".to_string(), json!(answered_by));
+        }
+        return Ok(print_json(&out, ExitCode::Success));
+    }
+
+    write_value(value)?;
+    Ok(ExitCode::Success)
+}
+
+/// A secret read by the name it is declared under goes through the same fetch
+/// as a config var, so what falls through, what is reported and what is
+/// recorded is the same as for `--fallback`.
+async fn get_named(registry: &Registry, args: &GetArgs, name: &SecretName) -> Result<ExitCode, String> {
+    let read = registry.named_read(name).map_err(|e| e.to_string())?;
+    let fetched = vars::fetch(registry, std::slice::from_ref(&read))
+        .await
+        .map_err(|e| e.to_string())?;
+    let value = fetched.get(&read).ok_or("the read answered nothing")?;
+
+    if args.output_format.is_json() {
+        let mut map = serde_json::Map::new();
+        map.insert("name".to_string(), serde_json::Value::String(name.as_str().to_string()));
+        map.insert(
+            "value".to_string(),
+            serde_json::Value::String(value.expose_secret().to_string()),
+        );
+        if let Some(answered_by) = fetched.answered_by(&read) {
+            map.insert(
+                "answered_by".to_string(),
+                serde_json::Value::String(answered_by.to_string()),
+            );
+        }
+        let out = serde_json::Value::Object(map);
+        return Ok(print_json(&out, ExitCode::Success));
+    }
+
+    write_value(value)?;
+    Ok(ExitCode::Success)
+}
+
+async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
     let backend = registry.resolve(&args.common.backend).map_err(|e| e.to_string())?;
     record_kind(&backend);
 
@@ -215,13 +381,163 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<i32, String> {
             "replaced": existed,
             "declaration": args.raw().declaration(),
         });
-        return Ok(print_json(&document, 0));
+        return Ok(print_json(&document, ExitCode::Success));
     }
 
     let verb = if existed { "replaced" } else { "wrote" };
     eprintln!("{verb} `{}` at `{}` in `{}`", args.key, args.path, args.common.backend);
     eprintln!("declare it with: {}", args.raw().declaration());
-    Ok(0)
+    Ok(ExitCode::Success)
+}
+
+/// The declared mirrors, in name order, or only the named ones.
+///
+/// A mirror that fails does not stop the ones after it, and a target that
+/// fails does not stop the others of its mirror: they are independent, so one
+/// unreachable backend should not hide that the rest are already in sync or
+/// still drifted. The exit code still reports the failure.
+async fn mirror_all(registry: &Registry, mirror_args: &MirrorArgs) -> Result<ExitCode, String> {
+    let apply = mirror_args.apply();
+    let args = mirror_args.selection();
+    let declared = registry.mirrors().map_err(|e| e.to_string())?;
+    if declared.is_empty() {
+        return Err("no `[secrets.mirrors.<name>]` tables are declared".to_string());
+    }
+    let mirrors = select_mirrors(declared, &args.names)?;
+
+    let resolve = |name: &str| registry.resolve(name);
+    let mut runs = Vec::with_capacity(mirrors.len());
+    for entry in &mirrors {
+        let span = tracing::info_span!(
+            "mirror secret",
+            { SECRETS_MIRROR_NAME } = entry.name().as_str(),
+            "error.type" = Empty,
+            "otel.status_code" = Empty,
+        );
+        let run = secrets_mirror::mirror(&resolve, entry, apply)
+            .instrument(span.clone())
+            .await;
+        match &run {
+            Err(e) => record_error(&span, e.error_type()),
+            Ok(targets) if targets.iter().any(Result::is_err) => record_error(&span, "mirror_failed"),
+            Ok(_) => {}
+        }
+        runs.push(run);
+    }
+
+    let results: Vec<Vec<TargetResult>> = mirrors
+        .iter()
+        .zip(&runs)
+        .map(|(entry, run)| target_results(entry, run))
+        .collect();
+    let failed = results.iter().flatten().filter(|r| r.is_err()).count();
+    if failed > 0 {
+        record_error(&tracing::Span::current(), "mirror_failed");
+    }
+    let code = if failed > 0 {
+        ExitCode::Failed
+    } else {
+        ExitCode::Success
+    };
+
+    if args.output_format.is_json() {
+        let entries: Vec<Value> = mirrors
+            .iter()
+            .zip(&results)
+            .map(|(entry, results)| {
+                let targets: Vec<Value> = entry
+                    .targets()
+                    .iter()
+                    .zip(results)
+                    .map(|(target, result)| {
+                        let mut out = serde_json::Map::new();
+                        out.insert("target".to_string(), json!(target.var().to_string()));
+                        match result {
+                            Ok(outcome) => out.insert("status".to_string(), json!(outcome.label())),
+                            Err(e) => {
+                                out.insert("error".to_string(), json!(e.to_string()));
+                                out.insert("status".to_string(), json!("failed"))
+                            }
+                        };
+                        Value::Object(out)
+                    })
+                    .collect();
+                json!({
+                    "name": entry.name().as_str(),
+                    "source": entry.source().to_string(),
+                    "targets": targets,
+                })
+            })
+            .collect();
+        return Ok(print_json(&json!({ "applied": apply, "entries": entries }), code));
+    }
+
+    for (entry, results) in mirrors.iter().zip(&results) {
+        for (target, result) in entry.targets().iter().zip(results) {
+            let label = result.as_ref().map_or("failed", |outcome| outcome.label());
+            println!("{label:<13} {} -> {}", entry.name(), target.describe());
+            if let Err(e) = result {
+                eprintln!("  {e}");
+            }
+        }
+    }
+    println!("{}", mirror_summary(&results, apply));
+
+    Ok(code)
+}
+
+type TargetResult<'a> = Result<MirrorOutcome, &'a MirrorError>;
+
+/// One result per target, so a source that could not be read reads as every
+/// one of its targets failing.
+fn target_results<'a>(entry: &Mirror, run: &'a Result<TargetOutcomes, MirrorError>) -> Vec<TargetResult<'a>> {
+    match run {
+        Ok(targets) => targets.iter().map(|r| r.as_ref().map(|o| *o)).collect(),
+        Err(e) => entry.targets().iter().map(|_| Err(e)).collect(),
+    }
+}
+
+fn select_mirrors(declared: Vec<Mirror>, names: &[String]) -> Result<Vec<Mirror>, String> {
+    if names.is_empty() {
+        return Ok(declared);
+    }
+    let known = || {
+        declared
+            .iter()
+            .map(|m| format!("`{}`", m.name()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    for name in names {
+        if !declared.iter().any(|m| m.name().as_str() == name) {
+            return Err(format!("`{name}` is not a declared mirror; declared: {}", known()));
+        }
+    }
+    Ok(declared
+        .into_iter()
+        .filter(|m| names.iter().any(|n| n == m.name().as_str()))
+        .collect())
+}
+
+fn mirror_summary(results: &[Vec<TargetResult<'_>>], apply: bool) -> String {
+    let all: Vec<&TargetResult<'_>> = results.iter().flatten().collect();
+    let count = |wanted: MirrorOutcome| all.iter().filter(|r| matches!(r, Ok(o) if *o == wanted)).count();
+    let failed = all.iter().filter(|r| r.is_err()).count();
+    let mut parts = vec![format!("{} up to date", count(MirrorOutcome::UpToDate))];
+    if apply {
+        parts.push(format!("{} created", count(MirrorOutcome::Created)));
+        parts.push(format!("{} updated", count(MirrorOutcome::Updated)));
+    } else {
+        parts.push(format!("{} would create", count(MirrorOutcome::WouldCreate)));
+        parts.push(format!("{} would update", count(MirrorOutcome::WouldUpdate)));
+    }
+    parts.push(format!("{failed} failed"));
+    let noun = if all.len() == 1 { "target" } else { "targets" };
+    let mut line = format!("{} {noun}: {}", all.len(), parts.join(", "));
+    if !apply && all.iter().any(|r| matches!(r, Ok(o) if o.is_drift())) {
+        line.push_str("; run `trg secret mirror apply` to write");
+    }
+    line
 }
 
 /// The declared kind of a backend that has already resolved.
@@ -281,12 +597,23 @@ async fn read_key(backend: &Backend, path: &SecretPath, key: &SecretKey, name: &
     })
 }
 
-/// A 1Password read answers with the whole item, so the field is selected out
+/// A plain 1Password read answers with the whole item, so the field is selected out
 /// of that here rather than asked for by itself. Several references into one
 /// item therefore still cost one `op item get`, the same way several keys at
 /// one path cost one round trip.
 async fn read_field(backend: &Backend, reference: &OnePasswordReference, name: &str) -> Result<SecretString, String> {
     let item = reference.item();
+    if reference.query().is_some() {
+        return match backend
+            .read(reference)
+            .await
+            .map_err(|e| format!("could not read `{reference}` from `{name}`: {e}"))?
+        {
+            OpRead::Value(value) => Ok(value),
+            OpRead::MissingItem => Err(format!("no item `{item}` in `{name}`")),
+            OpRead::MissingField => Err(format!("no field at `{reference}` on item `{item}` in `{name}`")),
+        };
+    }
     let fields = backend
         .get_item(item)
         .await
@@ -445,6 +772,96 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    fn get_args(argv: &[&str]) -> Result<GetArgs, clap::Error> {
+        let mut full = vec![
+            "get",
+            "--backend",
+            "homelab",
+            "--path",
+            "exec/github",
+            "--key",
+            "GH_TOKEN",
+        ];
+        full.extend_from_slice(argv);
+        match parse(&full)? {
+            SecretCommands::Get(args) => Ok(args),
+            _ => panic!("expected get"),
+        }
+    }
+
+    #[test]
+    fn get_takes_no_fallback_unless_asked_to() {
+        assert!(get_args(&[]).unwrap().fallbacks.is_empty());
+    }
+
+    #[test]
+    fn get_takes_fallbacks_in_the_order_given() {
+        let args = get_args(&[
+            "--fallback",
+            r#"{ backend = "op", ref = "op://Ops/github/GH_TOKEN" }"#,
+            "--fallback",
+            r#"{ backend = "other", path = "exec/github", key = "GH_TOKEN" }"#,
+        ])
+        .unwrap();
+
+        assert_eq!(args.fallbacks.len(), 2);
+        assert_eq!(args.fallbacks[0].backend, "op");
+        assert_eq!(args.fallbacks[1].backend, "other");
+    }
+
+    #[test]
+    fn a_fallback_that_is_not_an_address_table_is_refused_at_parse_time() {
+        assert!(get_args(&["--fallback", "not a table"]).is_err());
+        assert!(get_args(&["--fallback", r#"{ backend = "op", typo = true }"#]).is_err());
+    }
+
+    #[test]
+    fn get_reads_a_secret_by_name_alone() {
+        let SecretCommands::Get(args) = parse(&["get", "--name", "git-signing-key"]).unwrap() else {
+            panic!("expected get");
+        };
+        assert_eq!(args.name.as_ref().map(SecretName::as_str), Some("git-signing-key"));
+        assert!(args.backend.is_none());
+    }
+
+    #[test]
+    fn a_name_cannot_be_combined_with_any_address_flag() {
+        for extra in [
+            &["--backend", "b"][..],
+            &["--path", "p", "--key", "k"][..],
+            &["--ref", "op://v/i/f"][..],
+            &["--fallback", r#"{ backend = "op", ref = "op://v/i/f" }"#][..],
+        ] {
+            let mut argv = vec!["get", "--name", "n"];
+            argv.extend_from_slice(extra);
+            let err = parse(&argv).err().expect("refused");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict, "{extra:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_secret_name_is_refused_by_clap() {
+        let err = parse(&["get", "--name", "bad name!"]).err().expect("refused");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{err}");
+        assert!(err.to_string().contains("secret name"), "{err}");
+    }
+
+    #[test]
+    fn get_needs_a_name_or_an_address() {
+        assert!(parse(&["get"]).is_err());
+        assert!(parse(&["get", "--backend", "b"]).is_err());
+    }
+
+    #[test]
+    fn put_has_no_name_flag() {
+        assert!(parse(&["put", "--backend", "b", "--path", "p", "--key", "k", "--name", "n"]).is_err());
+    }
+
+    #[test]
+    fn put_has_no_fallback_flag() {
+        assert!(parse(&["put", "--backend", "b", "--path", "p", "--key", "k", "--fallback", "{}"]).is_err());
+    }
+
     #[tokio::test]
     async fn a_first_write_reports_that_nothing_was_there() {
         let backend = Backend::Fake(FakeBackend::new());
@@ -489,6 +906,34 @@ mod tests {
         assert!(err.contains("token"), "{err}");
         assert!(!err.contains("super-secret"), "{err}");
         assert!(!err.contains("also-secret"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_query_reference_tells_a_missing_field_apart_from_a_missing_item() {
+        let backend = Backend::Fake(FakeBackend::new());
+        let mut map = SecretMap::new();
+        map.insert(key("TOKEN"), SecretString::from("super-secret".to_string()));
+        backend
+            .set(&SecretPath::parse("Ops/deploy-keys").expect("path"), &map)
+            .await
+            .expect("seed");
+        let var = |raw: &str| {
+            SecretVar::new(
+                "fake".to_string(),
+                SecretAddress::OnePassword(Box::new(OnePasswordReference::parse(raw).expect("reference"))),
+            )
+        };
+
+        let field = read(&backend, &var("op://Ops/deploy-keys/nope?ssh-format=openssh"))
+            .await
+            .expect_err("no field");
+        assert!(field.contains("no field at"), "{field}");
+        assert!(!field.contains("no item"), "{field}");
+
+        let item = read(&backend, &var("op://Ops/absent/TOKEN?ssh-format=openssh"))
+            .await
+            .expect_err("no item");
+        assert!(item.contains("no item `"), "{item}");
     }
 
     /// A 1Password item answers with every field at once, so a reference that
@@ -600,6 +1045,135 @@ mod tests {
     }
 
     #[test]
+    fn a_mirror_is_a_dry_run_unless_it_is_told_to_apply() {
+        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror"]) else {
+            panic!("`mirror` should parse")
+        };
+        assert!(!dry.apply(), "nothing is written by default");
+
+        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "apply"]) else {
+            panic!("`mirror apply` should parse")
+        };
+        assert!(applied.apply(), "apply is what writes");
+    }
+
+    #[test]
+    fn the_apply_flag_is_not_accepted() {
+        assert!(parse(&["mirror", "--apply"]).is_err());
+    }
+
+    #[test]
+    fn a_mirror_can_be_picked_by_name() {
+        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror", "--name", "a", "--name", "b"]) else {
+            panic!("names should parse")
+        };
+        assert!(!dry.apply());
+        assert_eq!(dry.selection().names, ["a", "b"]);
+
+        let Ok(SecretCommands::Mirror(applied)) = parse(&["mirror", "apply", "--name", "a", "--name", "b"]) else {
+            panic!("names should parse after apply")
+        };
+        assert!(applied.apply());
+        assert_eq!(applied.selection().names, ["a", "b"]);
+    }
+
+    /// A name is a flag value, so a mirror declared as `apply` is picked for a
+    /// preview rather than read as the subcommand that writes.
+    #[test]
+    fn a_mirror_named_like_a_subcommand_is_still_only_previewed() {
+        let Ok(SecretCommands::Mirror(dry)) = parse(&["mirror", "--name", "apply"]) else {
+            panic!("`--name apply` should parse")
+        };
+        assert!(!dry.apply());
+        assert_eq!(dry.selection().names, ["apply"]);
+    }
+
+    #[test]
+    fn a_name_is_not_taken_positionally() {
+        assert!(parse(&["mirror", "a"]).is_err());
+    }
+
+    fn declared() -> Vec<Mirror> {
+        let section: crate::secrets::SecretsSection = toml::from_str(
+            r#"
+            [backends.src]
+            kind = "keychain"
+
+            [backends.dst]
+            kind = "keychain"
+
+            [mirrors.zeta]
+            source = { backend = "src", path = "a", key = "k" }
+            targets = [{ backend = "dst", path = "z", key = "k" }]
+
+            [mirrors.alpha]
+            source = { backend = "src", path = "a", key = "k" }
+            targets = [{ backend = "dst", path = "al", key = "k" }]
+
+            [mirrors.mid]
+            source = { backend = "src", path = "a", key = "k" }
+            targets = [{ backend = "dst", path = "m", key = "k" }]
+            "#,
+        )
+        .expect("section");
+        section.resolve_mirrors().expect("mirrors")
+    }
+
+    fn names(mirrors: &[Mirror]) -> Vec<String> {
+        mirrors.iter().map(|m| m.name().to_string()).collect()
+    }
+
+    #[test]
+    fn no_names_selects_every_mirror_in_sorted_order() {
+        let picked = select_mirrors(declared(), &[]).unwrap();
+        assert_eq!(names(&picked), ["alpha", "mid", "zeta"]);
+    }
+
+    #[test]
+    fn a_subset_keeps_sorted_order_whatever_order_it_was_named_in() {
+        let picked = select_mirrors(declared(), &["zeta".to_string(), "alpha".to_string()]).unwrap();
+        assert_eq!(names(&picked), ["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn a_name_given_twice_runs_its_mirror_once() {
+        let picked = select_mirrors(declared(), &["mid".to_string(), "mid".to_string()]).unwrap();
+        assert_eq!(names(&picked), ["mid"]);
+    }
+
+    #[test]
+    fn an_unknown_name_is_an_error_that_lists_the_declared_names() {
+        let err = select_mirrors(declared(), &["alpha".to_string(), "ghost".to_string()]).unwrap_err();
+        assert!(err.contains("`ghost`"), "{err}");
+        assert!(err.contains("`alpha`, `mid`, `zeta`"), "{err}");
+    }
+
+    #[test]
+    fn the_summary_counts_what_each_target_did_and_points_at_apply_only_when_it_would_help() {
+        let broken = MirrorError::EmptySource;
+        let results = vec![
+            vec![Ok(MirrorOutcome::UpToDate), Ok(MirrorOutcome::WouldCreate)],
+            vec![Ok(MirrorOutcome::WouldUpdate), Err(&broken)],
+        ];
+        assert_eq!(
+            mirror_summary(&results, false),
+            "4 targets: 1 up to date, 1 would create, 1 would update, 1 failed; run `trg secret mirror apply` to write"
+        );
+
+        let applied = vec![vec![Ok(MirrorOutcome::Created), Ok(MirrorOutcome::Updated)]];
+        assert_eq!(
+            mirror_summary(&applied, true),
+            "2 targets: 0 up to date, 1 created, 1 updated, 0 failed"
+        );
+
+        let settled = vec![vec![Ok(MirrorOutcome::UpToDate)]];
+        assert_eq!(
+            mirror_summary(&settled, false),
+            "1 target: 1 up to date, 0 would create, 0 would update, 0 failed"
+        );
+    }
+
+    #[test]
     fn one_line_ending_comes_off_and_no_more() {
         assert_eq!(strip_one_line_ending("secret\n"), "secret");
         assert_eq!(strip_one_line_ending("secret\r\n"), "secret");
@@ -642,7 +1216,7 @@ mod tests {
         let command = parse(&["get", "--backend", "work", "--path", "deploy-keys", "--key", "token"]).expect("parse");
 
         let (code, trace) = crate::telemetry::testing::capture(|| current_thread(command.handle(&registry)));
-        assert_eq!(code, 1, "nothing listens there");
+        assert_eq!(code, ExitCode::Failed, "nothing listens there");
 
         let span = trace.span("secret get").expect("the command span");
         assert!(matches!(span.status, Status::Error { .. }));

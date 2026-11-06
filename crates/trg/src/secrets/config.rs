@@ -4,23 +4,32 @@
 //! backend and that is the one used; there is no ordered list, no probing, and
 //! no fallback to a second backend when the first fails.
 //!
+//! The one exception is a config *value* that opts in with `fallbacks = [...]`,
+//! a list of full addresses read in order after its own. It is a property of that one
+//! read, spelled out where the value is declared, and it exists only on values
+//! `trg` reads. What `trg` writes, the OAuth credentials a server's `secrets`
+//! names, is a bare backend name and has no such form. See
+//! [`crate::secrets::vars`].
+//!
 //! Backend declarations resolve through [`RawVarSource`] only, so a backend can
 //! read `{ env = "BAO_ADDR" }` but cannot read `{ secret = "..." }`. That keeps
 //! bootstrap acyclic: nothing needed to reach a secret store may itself live in
 //! a secret store.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use super::keychain::{KeychainBackend, DEFAULT_SERVICE};
+use super::mirror::{self, Mirror, MirrorConfig, MirrorConfigError, MirrorName};
+use super::named::{NamedSecretConfig, NamedSecretError, SecretName};
 use super::onepassword::{OnePasswordBackend, OpAccount};
 use super::openbao::{
     expand_tilde, OpenBaoBackend, OpenBaoBuildError, OpenBaoSettings, TokenSource, DEFAULT_TIMEOUT_MS,
 };
 use super::{Backend, BackendKind};
-use crate::config::{FetchedSecrets, RawVarSource, VarResolveError};
+use crate::config::{FetchedSecrets, RawVarSource, SecretRead, SecretVarError, VarResolveError, VarSite};
 
 /// The `[secrets]` table.
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -28,6 +37,10 @@ use crate::config::{FetchedSecrets, RawVarSource, VarResolveError};
 pub struct SecretsSection {
     #[serde(default)]
     pub backends: HashMap<String, BackendConfig>,
+    #[serde(default)]
+    pub mirrors: BTreeMap<MirrorName, MirrorConfig>,
+    #[serde(default)]
+    pub vars: BTreeMap<SecretName, NamedSecretConfig>,
 }
 
 impl SecretsSection {
@@ -43,6 +56,55 @@ impl SecretsSection {
         let mut names: Vec<&str> = self.backends.keys().map(String::as_str).collect();
         names.sort_unstable();
         names
+    }
+
+    /// The declared mirrors, checked against the declared backends.
+    ///
+    /// Run at config load as well as by `trg secret mirror`, so a mirror that
+    /// could never apply is a config error wherever the file is read, not a
+    /// surprise the first time someone mirrors.
+    pub fn resolve_mirrors(&self) -> Result<Vec<Mirror>, MirrorConfigError> {
+        mirror::resolve_all(self)
+    }
+
+    /// Every declared named secret, in name order, against the declared
+    /// backends.
+    ///
+    /// Run at config load for the same reason as the mirrors: a secret that
+    /// could never be read is a config error wherever the file is read.
+    pub fn resolve_named_all(&self) -> Result<BTreeMap<SecretName, SecretRead>, SecretVarError> {
+        self.vars
+            .iter()
+            .map(|(name, config)| self.resolve_named_one(name, config).map(|read| (name.clone(), read)))
+            .collect()
+    }
+
+    /// The load-time check alone, for callers that do not want the reads.
+    pub fn check_named(&self) -> Result<(), SecretVarError> {
+        self.resolve_named_all().map(drop)
+    }
+
+    /// The one secret a caller asked for by name.
+    pub fn resolve_named(&self, name: &SecretName) -> Result<SecretRead, NamedSecretError> {
+        let Some(config) = self.vars.get(name) else {
+            return Err(if self.vars.is_empty() {
+                NamedSecretError::NoneDeclared { name: name.clone() }
+            } else {
+                NamedSecretError::Unknown {
+                    name: name.clone(),
+                    declared: self.vars.keys().map(SecretName::as_str).collect::<Vec<_>>().join(", "),
+                }
+            });
+        };
+        Ok(self.resolve_named_one(name, config)?)
+    }
+
+    fn resolve_named_one(&self, name: &SecretName, config: &NamedSecretConfig) -> Result<SecretRead, SecretVarError> {
+        let resolved = config
+            .clone()
+            .into_source()
+            .into_resolved(self, || VarSite::named_secret(name.as_str()))?;
+        Ok(resolved.secret_read().expect("a secret table always reads a secret"))
     }
 }
 
@@ -154,6 +216,27 @@ pub enum BackendError {
     },
 }
 
+impl BackendError {
+    /// Whether a backend that could not be built may be skipped by an opted-in
+    /// fallback list.
+    ///
+    /// A failure qualifies when it is a property of the machine: a field that
+    /// failed to resolve, such as `{ env = "BAO_ADDR" }` on a machine that does
+    /// not set it, or a `ca_cert_file` this host cannot open. The next address
+    /// is what the list is for. Every other variant is the config being wrong,
+    /// and is wrong on every machine, so skipping it would hide a mistake
+    /// behind a working fallback.
+    pub fn allows_fallback(&self) -> bool {
+        match self {
+            Self::Resolve { .. } => true,
+            Self::Unknown { .. } | Self::NoneDeclared { .. } | Self::TokenSource { .. } | Self::SecretVar { .. } => {
+                false
+            }
+            Self::Build { cause, .. } => cause.is_machine_local(),
+        }
+    }
+}
+
 /// The declared backends, resolved by name on demand.
 ///
 /// Resolution is lazy on purpose: a machine that has `BAO_ADDR` unset should
@@ -163,13 +246,35 @@ pub enum BackendError {
 #[derive(Debug, Default, Clone)]
 pub struct Registry {
     declared: HashMap<String, BackendConfig>,
+    mirrors: BTreeMap<MirrorName, MirrorConfig>,
+    named: BTreeMap<SecretName, NamedSecretConfig>,
 }
 
 impl Registry {
     pub fn new(section: SecretsSection) -> Self {
         Self {
             declared: section.backends,
+            mirrors: section.mirrors,
+            named: section.vars,
         }
+    }
+
+    fn section(&self) -> SecretsSection {
+        SecretsSection {
+            backends: self.declared.clone(),
+            mirrors: self.mirrors.clone(),
+            vars: self.named.clone(),
+        }
+    }
+
+    /// The declared mirrors, checked against the declared backends.
+    pub fn mirrors(&self) -> Result<Vec<Mirror>, MirrorConfigError> {
+        self.section().resolve_mirrors()
+    }
+
+    /// What a `[secrets.vars.<name>]` table asks to be read.
+    pub fn named_read(&self, name: &SecretName) -> Result<SecretRead, NamedSecretError> {
+        self.section().resolve_named(name)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -256,7 +361,7 @@ fn build(name: &str, config: &BackendConfig) -> Result<Backend, BackendError> {
                 timeout_ms,
             } = openbao.as_ref();
             for (field, source) in [("addr", Some(addr)), ("token", token.as_ref())] {
-                if source.is_some_and(|s| s.secret().is_some()) {
+                if source.is_some_and(|s| s.reads_secret()) {
                     return Err(BackendError::SecretVar {
                         name: name.to_string(),
                         field,
@@ -348,6 +453,119 @@ mod tests {
 
         let err = Registry::new(section).resolve("homelab").unwrap_err();
         assert!(matches!(err, BackendError::SecretVar { field: "addr", .. }), "{err}");
+    }
+
+    /// A secret with fallbacks reads a secret just as one address does, so it is no
+    /// more able to say how to reach a backend than a single address is.
+    #[test]
+    fn a_backend_cannot_take_its_address_or_token_from_fallbacks() {
+        let list = r#"{ backend = "homelab", path = "self", key = "v", fallbacks = [ { backend = "homelab", path = "self", key = "v" } ] }"#;
+        for (field, addr, token) in [
+            ("addr", list, r#""t""#),
+            ("token", r#""https://bao.example.com""#, list),
+        ] {
+            let section: SecretsSection = toml::from_str(&format!(
+                r#"
+                [backends.homelab]
+                kind = "openbao"
+                addr = {addr}
+                mount = "kv"
+                path_prefix = "trg"
+                owner = "me"
+                token = {token}
+                "#
+            ))
+            .unwrap();
+
+            let err = Registry::new(section).resolve("homelab").unwrap_err();
+            assert!(
+                matches!(err, BackendError::SecretVar { field: f, .. } if f == field),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_backend_that_cannot_be_resolved_here_lets_a_read_fall_through() {
+        let section: SecretsSection = toml::from_str(
+            r#"
+            [backends.homelab]
+            kind = "openbao"
+            addr = { env = "TRG_TEST_UNSET_BAO_ADDR_9f1" }
+            mount = "kv"
+            path_prefix = "trg"
+            owner = "me"
+            token_file = "~/.t"
+            "#,
+        )
+        .unwrap();
+        let registry = Registry::new(section);
+
+        assert!(registry.resolve("homelab").unwrap_err().allows_fallback());
+        assert!(!registry.resolve("typo").unwrap_err().allows_fallback());
+    }
+
+    fn openbao_with(addr: &str, extra: &str) -> Registry {
+        let section: SecretsSection = toml::from_str(&format!(
+            r#"
+            [backends.homelab]
+            kind = "openbao"
+            addr = "{addr}"
+            mount = "kv"
+            path_prefix = "trg"
+            owner = "me"
+            token_file = "~/.t"
+            {extra}
+            "#
+        ))
+        .unwrap();
+        Registry::new(section)
+    }
+
+    #[test]
+    fn a_ca_cert_file_this_machine_cannot_open_lets_a_read_fall_through() {
+        let err = openbao_with(
+            "https://bao.example.com",
+            r#"ca_cert_file = "/nonexistent/trg-test-ca.pem""#,
+        )
+        .resolve("homelab")
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BackendError::Build {
+                    cause: OpenBaoBuildError::CaCertRead { .. },
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(err.allows_fallback());
+    }
+
+    #[test]
+    fn a_malformed_backend_config_still_stops_a_read() {
+        let err = openbao_with("ftp://bao.example.com", "")
+            .resolve("homelab")
+            .unwrap_err();
+        assert!(matches!(err, BackendError::Build { .. }), "{err}");
+        assert!(!err.allows_fallback(), "{err}");
+    }
+
+    #[test]
+    fn a_ca_cert_file_that_is_not_a_certificate_still_stops_a_read() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("trg-test-not-a-cert-{}.pem", std::process::id()));
+        std::fs::write(&path, "not a certificate").unwrap();
+        let err = openbao_with(
+            "https://bao.example.com",
+            &format!("ca_cert_file = {:?}", path.display().to_string()),
+        )
+        .resolve("homelab")
+        .unwrap_err();
+        std::fs::remove_file(&path).ok();
+        assert!(matches!(err, BackendError::Build { .. }), "{err}");
+        assert!(!err.allows_fallback(), "{err}");
     }
 
     #[test]

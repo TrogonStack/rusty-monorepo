@@ -5,11 +5,17 @@ use std::sync::LazyLock;
 
 const REDACTED: &str = "<redacted>";
 
-static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._\-]{16,}").unwrap());
-static AWS_ACCESS_KEY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"AKIA[0-9A-Z]{16}").unwrap());
-static GITHUB_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"ghp_[A-Za-z0-9]{36}").unwrap());
-static JWT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}").unwrap());
+static BEARER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._\-]{16,}").expect("the bearer token pattern is a valid regex")
+});
+static AWS_ACCESS_KEY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"AKIA[0-9A-Z]{16}").expect("the AWS access key pattern is a valid regex"));
+static GITHUB_TOKEN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"ghp_[A-Za-z0-9]{36}").expect("the GitHub token pattern is a valid regex"));
+static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+        .expect("the JWT pattern is a valid regex")
+});
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedTranscript(pub String);

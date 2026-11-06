@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#MISE description="Package a built trg binary into a release tarball and print its path"
+set -euo pipefail
+
+version="${1:?usage: release:package <version> <target> [source-dir]}"
+target="${2:?usage: release:package <version> <target> [source-dir]}"
+source_dir="${3:-.}"
+
+cd "${MISE_PROJECT_ROOT:-$(git rev-parse --show-toplevel)}"
+
+staging="trg-$version-$target"
+mkdir -p "$staging"
+cp "$source_dir/target/$target/release/trg" "$staging/"
+cp "$source_dir/LICENSE" "$staging/"
+tar czf "$staging.tar.gz" "$staging"
+
+echo "$staging.tar.gz"

@@ -1,5 +1,94 @@
 # Changelog
 
+## [0.14.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.1...trg@v0.14.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **release:** Drop the SLSA generator the org's action policy rejects ([#329](https://github.com/TrogonStack/rusty-monorepo/issues/329)) ([a074512](https://github.com/TrogonStack/rusty-monorepo/commit/a074512097c59e4ee8e67dc5c49539c8f1c81f04))
+
+## [0.14.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.0...trg@v0.14.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* **release:** Harden trg release signing and publish packslip and SLSA provenance ([#326](https://github.com/TrogonStack/rusty-monorepo/issues/326)) ([23f7c95](https://github.com/TrogonStack/rusty-monorepo/commit/23f7c95f039639f83238e71b8cd61270ad5eb90e))
+
+## [0.14.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.13.1...trg@v0.14.0) (2026-10-29)
+
+
+### Features
+
+* **trg:** Read a declared secret by name ([#295](https://github.com/TrogonStack/rusty-monorepo/issues/295)) ([bd4e60a](https://github.com/TrogonStack/rusty-monorepo/commit/bd4e60a6a2d782163dec227e434bfd88b32256bf))
+
+
+### Bug Fixes
+
+* **trg:** Give next-iteration a single way to name the prior report so there is one spelling to learn ([#310](https://github.com/TrogonStack/rusty-monorepo/issues/310)) ([7c2fe37](https://github.com/TrogonStack/rusty-monorepo/commit/7c2fe377894342d4ef5f3a22a80c62d49bbea769))
+* **trg:** Name each report bundle in the scaling order so the order is never positional guesswork ([#308](https://github.com/TrogonStack/rusty-monorepo/issues/308)) ([ae08421](https://github.com/TrogonStack/rusty-monorepo/commit/ae0842160de732cb919334abb34c9c9a74015497))
+* **trg:** Name each skill fed to the prompt by whether it is a directory or a file so a path is never mistaken for a command ([#300](https://github.com/TrogonStack/rusty-monorepo/issues/300)) ([f38545a](https://github.com/TrogonStack/rusty-monorepo/commit/f38545ab165b1ee5c2fb4e4a2cdda027a3bcde9d))
+* **trg:** Name the baseline of the regression gates as a report directory so the value is never mistaken for a file ([#319](https://github.com/TrogonStack/rusty-monorepo/issues/319)) ([ad8047a](https://github.com/TrogonStack/rusty-monorepo/commit/ad8047ae492c88574d1d180bbce10a7f784d9595))
+* **trg:** Name the exec entry explicitly so it never reads as a subcommand ([#297](https://github.com/TrogonStack/rusty-monorepo/issues/297)) ([f26796a](https://github.com/TrogonStack/rusty-monorepo/commit/f26796aa9d7949388400c422f86b30955de36cc4))
+* **trg:** Name the mock server inputs as a directory and a file so each value says what it is ([#320](https://github.com/TrogonStack/rusty-monorepo/issues/320)) ([3300ff0](https://github.com/TrogonStack/rusty-monorepo/commit/3300ff0d2efb6d6b1dd0c60b2d9b030b215a48ca))
+* **trg:** Name the prior report of benchmark as a directory so the value is never mistaken for a file ([#317](https://github.com/TrogonStack/rusty-monorepo/issues/317)) ([3cc0165](https://github.com/TrogonStack/rusty-monorepo/commit/3cc01656381002d70e6f748f5055cadf71580270))
+* **trg:** Name the prior report of compare as a directory so the value is never mistaken for a file ([#318](https://github.com/TrogonStack/rusty-monorepo/issues/318)) ([860533e](https://github.com/TrogonStack/rusty-monorepo/commit/860533e2f0a13ce98a38854e2229dd93e8fc2183))
+* **trg:** Name the prior report of iteration-summary as a directory so the value is never mistaken for a file ([#316](https://github.com/TrogonStack/rusty-monorepo/issues/316)) ([65df4f6](https://github.com/TrogonStack/rusty-monorepo/commit/65df4f61ac3c87ea741cf4076cbcbb323dfbb75c))
+* **trg:** Name the report bundle a human verdict is recorded against so a stage never guesses its input ([#314](https://github.com/TrogonStack/rusty-monorepo/issues/314)) ([0f37bda](https://github.com/TrogonStack/rusty-monorepo/commit/0f37bdaee19cbe5bebf2abd493dfb89b16bb0327))
+* **trg:** Name the report bundle that feedback is started for so a stage never guesses its input ([#311](https://github.com/TrogonStack/rusty-monorepo/issues/311)) ([236b035](https://github.com/TrogonStack/rusty-monorepo/commit/236b035df4b124a4212f68c70f76c19b371de77f))
+* **trg:** Name the report bundle to benchmark so a stage never guesses its input ([#302](https://github.com/TrogonStack/rusty-monorepo/issues/302)) ([ce8264f](https://github.com/TrogonStack/rusty-monorepo/commit/ce8264f4646a5b03a02e2e5f3f53ccb6fab23c97))
+* **trg:** Name the report bundle to compare so a stage never guesses its input ([#305](https://github.com/TrogonStack/rusty-monorepo/issues/305)) ([ff5e697](https://github.com/TrogonStack/rusty-monorepo/commit/ff5e6971b2bf394afd58ee7644da9b9540b8c454))
+* **trg:** Name the report bundle to export so a stage never guesses its input ([#307](https://github.com/TrogonStack/rusty-monorepo/issues/307)) ([caafa36](https://github.com/TrogonStack/rusty-monorepo/commit/caafa367d87aafdf9ba89daf2cb329fcb4a0fee0))
+* **trg:** Name the report bundle to grade so a stage never guesses its input ([#301](https://github.com/TrogonStack/rusty-monorepo/issues/301)) ([1302379](https://github.com/TrogonStack/rusty-monorepo/commit/1302379b4c151701033aa9aef240809488e13509))
+* **trg:** Name the report bundle to render so a stage never guesses its input ([#306](https://github.com/TrogonStack/rusty-monorepo/issues/306)) ([1bd964c](https://github.com/TrogonStack/rusty-monorepo/commit/1bd964c6b8eaed48b669703e34e9d19b533a9649))
+* **trg:** Name the report bundle to summarize so a stage never guesses its input ([#303](https://github.com/TrogonStack/rusty-monorepo/issues/303)) ([7f77676](https://github.com/TrogonStack/rusty-monorepo/commit/7f7767624c22fccf2b2db016fa4a53f9b99d9a19))
+* **trg:** Name the report bundle whose feedback is listed so a stage never guesses its input ([#312](https://github.com/TrogonStack/rusty-monorepo/issues/312)) ([d866d20](https://github.com/TrogonStack/rusty-monorepo/commit/d866d20badf20f4a7308442c2dc7ac6e4acffb33))
+* **trg:** Name the report bundle whose feedback is validated so a stage never guesses its input ([#313](https://github.com/TrogonStack/rusty-monorepo/issues/313)) ([ab97547](https://github.com/TrogonStack/rusty-monorepo/commit/ab9754742a6e3b7450887ed2495df8ca65f25f3a))
+* **trg:** Name the report bundle whose graders are checked so a stage never guesses its input ([#304](https://github.com/TrogonStack/rusty-monorepo/issues/304)) ([56a4e66](https://github.com/TrogonStack/rusty-monorepo/commit/56a4e666b086d255f06bf50d8d17d1472448269f))
+* **trg:** Name the skill to validate by whether it is a directory or a file so every skills command reads the same way ([#298](https://github.com/TrogonStack/rusty-monorepo/issues/298)) ([385269f](https://github.com/TrogonStack/rusty-monorepo/commit/385269f6f2c5f8ba63784ff54269af837bac7878))
+* **trg:** Name the skill whose properties are read by whether it is a directory or a file so every skills command reads the same way ([#299](https://github.com/TrogonStack/rusty-monorepo/issues/299)) ([7ce8842](https://github.com/TrogonStack/rusty-monorepo/commit/7ce8842759ea28e64bb94ab74fd270623b4c6fd3))
+* **trg:** Name the workspace to verify so it is never confused with the skill directory option ([#309](https://github.com/TrogonStack/rusty-monorepo/issues/309)) ([404bca2](https://github.com/TrogonStack/rusty-monorepo/commit/404bca28353d60c0f16b313831b1a1f0eb3ccac5))
+
+## [0.13.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.13.0...trg@v0.13.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **trg:** Make writing a mirror a subcommand instead of a flag ([#293](https://github.com/TrogonStack/rusty-monorepo/issues/293)) ([26818cc](https://github.com/TrogonStack/rusty-monorepo/commit/26818cc3ec60f3e11231e4335bb643bb9927c05d))
+
+## [0.13.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.12.0...trg@v0.13.0) (2026-10-29)
+
+
+### Features
+
+* **trg:** Keep a secret's copies in sync from one source of truth ([#286](https://github.com/TrogonStack/rusty-monorepo/issues/286)) ([fe9791e](https://github.com/TrogonStack/rusty-monorepo/commit/fe9791e840a4b5801ec4e12a7fcc83dd93a1faa0))
+* **trg:** Let a secret read opt in to an ordered list of backends ([#287](https://github.com/TrogonStack/rusty-monorepo/issues/287)) ([3dcc34c](https://github.com/TrogonStack/rusty-monorepo/commit/3dcc34c230bae6c7323cdb055b502ed9448877dc))
+
+## [0.12.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.11.0...trg@v0.12.0) (2026-10-27)
+
+
+### Features
+
+* **trg:** Export OpenTelemetry traces, metrics and logs over OTLP ([#238](https://github.com/TrogonStack/rusty-monorepo/issues/238)) ([79bb3ce](https://github.com/TrogonStack/rusty-monorepo/commit/79bb3cec4de930df2d660706fd57ad7902d1cf48))
+* **trg:** Harden eval grading and surface run efficiency ([#250](https://github.com/TrogonStack/rusty-monorepo/issues/250)) ([30b203e](https://github.com/TrogonStack/rusty-monorepo/commit/30b203e86f877afd24aa69580bdf72e81126cad8))
+* **trg:** Replay eval report bundles as OTel traces ([#246](https://github.com/TrogonStack/rusty-monorepo/issues/246)) ([85ec0ab](https://github.com/TrogonStack/rusty-monorepo/commit/85ec0ab3e7122a687add8f697ca184c4771b6f30))
+* **trg:** Stop a change that costs more per run from passing as a keep ([#268](https://github.com/TrogonStack/rusty-monorepo/issues/268)) ([e9772bb](https://github.com/TrogonStack/rusty-monorepo/commit/e9772bb51ed3f078783411bdc2526fd44ebeab16))
+* **trg:** Tell trg mcp proxy metrics apart by server ([#271](https://github.com/TrogonStack/rusty-monorepo/issues/271)) ([6cc7db9](https://github.com/TrogonStack/rusty-monorepo/commit/6cc7db91abeb5c880b1ff92679ae841704ebfb5f))
+* **trg:** Trace grading, judge ballots, comparisons and MCP recording ([#242](https://github.com/TrogonStack/rusty-monorepo/issues/242)) ([c415438](https://github.com/TrogonStack/rusty-monorepo/commit/c415438020671ec8504d1557af8942aeab8ce31c))
+* **trg:** Trace secrets backends, exec env merge and doctor ([#239](https://github.com/TrogonStack/rusty-monorepo/issues/239)) ([62630d9](https://github.com/TrogonStack/rusty-monorepo/commit/62630d945b73a744c8593ac2b608ad8a60e34d0f))
+* **trg:** Trace skill eval runs and the harnesses they drive ([#241](https://github.com/TrogonStack/rusty-monorepo/issues/241)) ([509c06f](https://github.com/TrogonStack/rusty-monorepo/commit/509c06f4bc5cbee8121ac5bbff03d7c449bba07e))
+* **trg:** Trace the MCP proxy session and OAuth flow ([#240](https://github.com/TrogonStack/rusty-monorepo/issues/240)) ([02d00ad](https://github.com/TrogonStack/rusty-monorepo/commit/02d00adfc158951536ef2bfd512315e065c9d7c6))
+
+
+### Bug Fixes
+
+* **trg:** Bound the remote close on host EOF so an idle proxy exits ([#273](https://github.com/TrogonStack/rusty-monorepo/issues/273)) ([3bc2532](https://github.com/TrogonStack/rusty-monorepo/commit/3bc2532cb6179c0ae7591e5106ec2d7679130fbb))
+* **trg:** Correct telemetry gaps found while documenting it ([#245](https://github.com/TrogonStack/rusty-monorepo/issues/245)) ([e6428ac](https://github.com/TrogonStack/rusty-monorepo/commit/e6428acb297c704547b84187aa6e276f0c486939))
+* **trg:** Keep cargo test from exporting telemetry to the shell's collector ([#272](https://github.com/TrogonStack/rusty-monorepo/issues/272)) ([ce48997](https://github.com/TrogonStack/rusty-monorepo/commit/ce48997334a15b91b54ffe38565b76eb36c5f1c5))
+* **trg:** Keep MCP proxy stdio off the blocking thread pool ([#274](https://github.com/TrogonStack/rusty-monorepo/issues/274)) ([d688536](https://github.com/TrogonStack/rusty-monorepo/commit/d688536ce264db50d32a452757b8f95195ddee37))
+* **trg:** Keep op from answering reads out of its daemon cache ([#254](https://github.com/TrogonStack/rusty-monorepo/issues/254)) ([1c54b95](https://github.com/TrogonStack/rusty-monorepo/commit/1c54b954bb74abd32796797f5a9a9ea4de34f5df))
+* **trg:** Make rebuilt harness spans reflect what actually ran ([#244](https://github.com/TrogonStack/rusty-monorepo/issues/244)) ([c05ba53](https://github.com/TrogonStack/rusty-monorepo/commit/c05ba5340444bf12309b7f957b8123abe2c52af4))
+* **trg:** Stop each MCP proxy from holding a worker thread per core ([#270](https://github.com/TrogonStack/rusty-monorepo/issues/270)) ([95f47f7](https://github.com/TrogonStack/rusty-monorepo/commit/95f47f76ddc197c39d215b510f7defc7f73ea445))
+
 ## [0.11.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.10.0...trg@v0.11.0) (2026-09-29)
 
 

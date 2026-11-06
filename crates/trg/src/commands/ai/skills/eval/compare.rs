@@ -8,9 +8,9 @@ use crate::agentskills::eval_suite_drift::{
     detect_eval_suite_drift_snapshots, load_report_drift_snapshot, maybe_emit_eval_suite_drift_warning,
     EvalSuiteDriftWarning,
 };
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::iteration_summary::detect_previous_report_dir;
 use crate::agentskills::judge::JudgeProvider;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 
@@ -43,24 +43,24 @@ pub struct CompareJsonOutput {
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval compare ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval compare --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval compare ./report --pair with_skill:without_skill --judge none
+  $ trg ai skills eval compare --report-dir ./report --pair with_skill:without_skill --judge none
 
-  $ trg ai skills eval compare ./report --pair with_skill:old_skill --emit-comparison-json
+  $ trg ai skills eval compare --report-dir ./report --pair with_skill:old_skill --emit-comparison-json
 
-  $ trg ai skills eval compare ./report --previous ./artifacts/my-skill/prior-report --output-format json
+  $ trg ai skills eval compare --report-dir ./report --previous-report-dir ./artifacts/my-skill/prior-report --output-format json
 ")]
 pub struct CompareArgs {
-    #[arg(help = "Path to a generated eval report directory containing report.json")]
+    #[arg(long, help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(
         long,
-        value_name = "DIR",
+        value_name = "REPORT_DIR",
         help = "Previous iteration report directory for cross-iteration drift detection (auto-detected when omitted)"
     )]
-    pub previous: Option<PathBuf>,
+    pub previous_report_dir: Option<PathBuf>,
 
     #[arg(
         long,
@@ -129,7 +129,7 @@ impl CompareArgs {
 
         let warnings = match collect_eval_suite_drift_warnings(
             &self.report_dir,
-            self.previous.as_deref(),
+            self.previous_report_dir.as_deref(),
             self.allow_eval_suite_drift,
         ) {
             Ok(warnings) => warnings,
@@ -272,8 +272,9 @@ mod tests {
                 "skills",
                 "eval",
                 "compare",
+                "--report-dir",
                 current.to_str().unwrap(),
-                "--previous",
+                "--previous-report-dir",
                 previous.to_str().unwrap(),
             ])
             .output()
@@ -302,8 +303,9 @@ mod tests {
                 "skills",
                 "eval",
                 "compare",
+                "--report-dir",
                 current.to_str().unwrap(),
-                "--previous",
+                "--previous-report-dir",
                 previous.to_str().unwrap(),
                 "--allow-eval-suite-drift",
                 "--output-format",

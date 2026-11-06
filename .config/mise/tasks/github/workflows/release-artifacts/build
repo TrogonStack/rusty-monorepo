@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "${RELEASE_SOURCE_ROOT:?}"
 if [[ "${USE_CROSS:?}" == "true" ]]; then
-  cross build --release --target "${RELEASE_TARGET:?}" --package trg
+  cross build --locked --release --target "${RELEASE_TARGET:?}" --package trg
 else
-  cargo build --release --target "${RELEASE_TARGET:?}" --package trg
+  cargo build --locked --release --target "${RELEASE_TARGET:?}" --package trg
 fi

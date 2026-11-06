@@ -2,4 +2,4 @@
 #MISE description = "Generate workspace test coverage"
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
-cargo tarpaulin --workspace --out Xml --timeout 300
+cargo tarpaulin --locked --workspace --out Xml --timeout 300

@@ -97,7 +97,7 @@ When grading artifacts exist under the workspace:
 
 ```shell
 $ trg ai skills eval verify \
-    ./artifacts/csv-analyzer/20260526T144501Z-c8d9e0f1/runs/run-001/workspace
+    --workspace-dir ./artifacts/csv-analyzer/20260526T144501Z-c8d9e0f1/runs/run-001/workspace
 Bundle verified
   grading files: 1
   timing files: 0

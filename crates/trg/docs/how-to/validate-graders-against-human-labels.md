@@ -14,7 +14,7 @@ Find it in `grading.json` or `report.json` under `dimensions.assertions`, then
 record your verdict:
 
 ```shell
-trg ai skills eval feedback label ./artifacts/my-skill/20260526T120000Z-abc \
+trg ai skills eval feedback label --report-dir ./artifacts/my-skill/20260526T120000Z-abc \
   --run run-001 --assertion case-a:g0 --verdict fail \
   --rationale 'evidence quoted the wrong file'
 ```
@@ -29,7 +29,7 @@ gets corrected is safe.
 ## Check agreement
 
 ```shell
-trg ai skills eval grader-agreement ./artifacts/my-skill/20260526T120000Z-abc
+trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 ```
 
 This joins every scored assertion across the bundle's runs against the
@@ -46,7 +46,7 @@ reviewer would look at directly.
 ## Gate on it
 
 ```shell
-trg ai skills eval grader-agreement ./artifacts/my-skill/20260526T120000Z-abc --min-agreement 0.9
+trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/20260526T120000Z-abc --min-agreement 0.9
 ```
 
 `--min-agreement` fails the command when the `llm` bucket's confidence

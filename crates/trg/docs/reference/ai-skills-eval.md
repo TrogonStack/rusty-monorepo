@@ -135,19 +135,14 @@ Report directories are named `<timestamp>-<random-hex>`. Re-running without
 Grade a completed eval report bundle, writing `grading.json` per run.
 
 ```text
-trg ai skills eval grade <REPORT_DIR> [OPTIONS]
+trg ai skills eval grade --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a report bundle directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a report bundle directory containing `report.json` |
 | `--grader` | enum | `auto` | Grading strategy. Values: `auto`, `none`, `llm`, `script` |
 | `--grader-provider` | enum | `openai` | Judge backend for LLM grading. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
 | `--grader-model` | string | *(unset)* | Model identifier for LLM grading. Falls back to `TRG_JUDGE_MODEL` |
@@ -166,7 +161,7 @@ trg ai skills eval grade <REPORT_DIR> [OPTIONS]
 ### Example
 
 ```shell
-$ trg ai skills eval grade ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+$ trg ai skills eval grade --report-dir ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 Graded 1 run(s)
   assertions: 1/1 passed
@@ -179,14 +174,8 @@ Graded 1 run(s)
 Verify grading and timing artifacts under a workspace directory.
 
 ```text
-trg ai skills eval verify <WORKSPACE> [OPTIONS]
+trg ai skills eval verify --workspace-dir <WORKSPACE_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `WORKSPACE` | Root directory to scan recursively for `grading.json` and `timing.json` |
 
 `eval grade` writes `grading.json` into the run directory, beside `workspace/`
 rather than inside it. A path whose last component is `workspace` therefore
@@ -197,6 +186,7 @@ the grading for that run.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--workspace-dir` | path | *(unset)* | Root directory to scan recursively for `grading.json` and `timing.json`. Required unless `--skill-dir` is given |
 | `--mode` | enum | `lenient` | `lenient`: tolerate missing grading files and failed assertions; `strict`: hold every artifact against its schema, require at least one `grading.json`, and fail on failed assertions. Refused outright on a build compiled without the `schema-validation` feature. See [What strict mode needs from the build](#what-strict-mode-needs-from-the-build) |
 | `--require-graders` | bool | `false` | Fail when an eval case declares no grader |
 | `--skill-dir` | path | *(unset)* | Also validate `evals/evals.json` under this skill directory |
@@ -204,7 +194,7 @@ the grading for that run.
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
 
 `verify` also accepts the threshold and regression flags (`--min-pass-rate`,
-`--max-tokens`, `--baseline`, `--strict-ci`, and the `--fail-on-*` family). See
+`--max-tokens`, `--baseline-report-dir`, `--strict-ci`, and the `--fail-on-*` family). See
 [Pass-rate thresholds](../how-to/run-in-ci.md#pass-rate-thresholds).
 
 ### What strict mode needs from the build
@@ -223,7 +213,7 @@ unaffected. If you see the refusal, rebuild with the feature; do not reach for
 ### Example (text)
 
 ```shell
-$ trg ai skills eval verify ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
+$ trg ai skills eval verify --workspace-dir ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
 ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 assertions: 3/3 passed (100.00%)
 ci checks: passed
@@ -235,7 +225,7 @@ workspace: ./artifacts/my-skill/20260526T120000Z-a1b2c3d4/runs/run-001/workspace
 ### Example (JSON)
 
 ```shell
-$ trg ai skills eval verify ./report/runs/run-001/workspace --output-format json
+$ trg ai skills eval verify --workspace-dir ./report/runs/run-001/workspace --output-format json
 {
   "report_dir": "./report",
   "exit_code": 0,
@@ -307,20 +297,15 @@ Aggregate a report bundle's grading and timing artifacts into `benchmark.json`,
 written both at the report root and under its iteration layout directory.
 
 ```text
-trg ai skills eval benchmark <REPORT_DIR> [OPTIONS]
+trg ai skills eval benchmark --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
+| `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
+| `--previous-report-dir` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket` (report failed runs as a separate bucket, apart from completed runs), `exclude` (drop failed and timed-out runs from aggregation), `zero` (fold them into the completed bucket, scored as zero) |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the eval suite hash differs from the previous iteration report |
 | `--output-format` | enum | `text` | `text` prints the report directory path; `json` prints the `benchmark.json` document on stdout |
@@ -362,7 +347,7 @@ exit code: a saturated suite is a measurement limit, not a failed gate.
 ### Example
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval benchmark --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 ./artifacts/my-skill/20260526T120000Z-abc
 ```
 
@@ -374,23 +359,21 @@ Summarize assertion stability, skill impact, flakiness, and metric outliers for
 a report bundle, writing `iteration-summary.json`.
 
 ```text
-trg ai skills eval iteration-summary <REPORT_DIR> [OPTIONS]
+trg ai skills eval iteration-summary --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
+| `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
+| `--previous-report-dir` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration comparison |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates. Values: `bucket`, `exclude`, `zero`. See [`eval benchmark`](#eval-benchmark) |
 | `--output-format` | enum | `text` | `text` prints a human-readable table; `json` prints the `iteration-summary.json` document on stdout |
-| `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these. Comma-separated. Values: `revert`, `overfitting`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
+| `--fail-on` | enum list | *(none)* | Exit `1` when the keep-or-revert recommendation matches one of these, or when a named efficiency metric regressed on any split. Comma-separated. Values: `revert`, `overfitting`, `cost_regression`, `latency_regression`, `token_regression`. See [Exit codes](#exit-codes-2) and [Gating a hillclimb in CI](../how-to/run-in-ci.md) |
+| `--max-cost-increase` | proportion | `0` | The increase in cost per run, as a proportion of the previous median, that is not a `costlier` verdict. See [Efficiency verdicts](#efficiency-verdicts) |
+| `--max-duration-increase` | proportion | `0` | The same allowance for duration per run, against a `slower` verdict |
+| `--max-token-increase` | proportion | `0` | The same allowance for total tokens per run, against a `more_tokens` verdict |
 | `--headroom-threshold` | proportion | `0.9` | The `with_skill` arm's Wilson lower bound is reported as saturated (see [Headroom warning](#headroom-warning)) at or above this proportion in `(0, 1]` |
 | `--withhold-test-detail` | flag | off | Drop test-split eval case ids and assertion text from the document, keeping only its aggregate counts, deltas, and intervals |
 
@@ -416,7 +399,7 @@ left out, and `tool_usage` is absent when none was measured.
 
 ### Keep-or-revert verdict
 
-When `--previous` resolves to a prior iteration, `iteration-summary.json` carries a
+When `--previous-report-dir` resolves to a prior iteration, `iteration-summary.json` carries a
 `keep_or_revert` section built from the same 95% intervals `benchmark` reports, turned
 into a verdict rather than left for the reader to eyeball:
 
@@ -448,23 +431,113 @@ into a verdict rather than left for the reader to eyeball:
   could not have read `improved` here no matter what the change did. See [Headroom
   warning](#headroom-warning).
 
+- `efficiency` carries the cost, duration, and token verdicts described in [Efficiency
+  verdicts](#efficiency-verdicts). It never changes `recommendation`. A document written
+  before this field existed has no `efficiency`, and it still conforms to the schema.
+
 Absent entirely on a first iteration, since there is no previous run to compare against.
+
+### Efficiency verdicts
+
+`keep_or_revert.efficiency` compares the per-run cost, duration, and total tokens of this
+iteration's completed `with_skill` runs with those of the previous iteration, split by
+split:
+
+```json
+{
+  "tolerances": { "cost": 0.1, "duration": 0.25, "tokens": 0.0 },
+  "by_split": {
+    "test": {
+      "cost": {
+        "status": "costlier",
+        "shift": { "estimate": 0.09, "interval": { "low": 0.06, "high": 0.12 } },
+        "previous_median": 0.145,
+        "current_runs": 6,
+        "previous_runs": 6
+      },
+      "duration": { "status": "unmeasured", "reason": "too_few_readings" },
+      "tokens": { "status": "no_runs" }
+    }
+  }
+}
+```
+
+| `status` | Meaning |
+| -------- | ------- |
+| `costlier`, `slower`, `more_tokens` | The low end of the 95% interval of the shift sits above the tolerance times `previous_median`. This is a regression |
+| `within_tolerance` | The low end of the interval sits above zero, and the high end does not sit above the tolerance times `previous_median`. The increase is real, and the runs show that it stays inside the tolerance. Only a tolerance above zero can produce it, and it never trips `--fail-on` |
+| `increased` | The low end of the interval sits above zero but not above the tolerance times `previous_median`, and the high end sits above it. The increase is real, but the runs cannot say whether it passes the tolerance. Only a tolerance above zero can produce it, and it never trips `--fail-on` |
+| `cheaper`, `faster`, `fewer_tokens` | The high end of the interval sits below zero |
+| `indistinguishable` | The interval reaches zero, so the runs cannot tell the sides apart |
+| `unmeasured` | Both sides have completed runs, but no interval exists. `reason` is `too_few_readings` when a side has fewer than four runs that reported the metric, or `not_every_run_priced` when a run on either side carried no price |
+| `no_runs` | One side has no completed `with_skill` run on this split |
+
+`shift` is the current run minus the previous run, in the unit of the metric: USD for
+cost, milliseconds for duration, and tokens for tokens. `tolerances` echoes the
+`--max-*-increase` flags, so a reader can check a verdict without the command line.
+
+The method:
+
+- The estimate is the Hodges-Lehmann shift, the median of every difference between a
+  current run and a previous run. The interval is the Moses interval around it, which
+  reads its endpoints off the same sorted differences at ranks taken from the exact
+  Mann-Whitney null distribution. Both assume only that the two sides have the same
+  shape. One slow run cannot drag the estimate, and the same runs always give the same
+  answer, with no seed.
+- The exact distribution is used while the two sides make 10,000 pairs or fewer. Above
+  that, the ranks come from the normal approximation, which is then within one rank of
+  the exact count.
+- Each side needs four runs that reported the metric. At four runs per side, the
+  interval is the full range of the differences, with 97.1% coverage. Below four, no
+  interval reaches 95%.
+- The sides are not paired by case and attempt. Pairing drops each run whose partner
+  failed or was not selected, which shrinks and biases the side that failed more. The
+  unpaired interval keeps every measured run, and is wider because case-to-case
+  variation stays in it.
+- No tie correction is applied. The interval is closed, so a tied endpoint makes it
+  wider, not narrower.
+- Only completed runs count. A failed or timed-out run says nothing about what a
+  successful run costs.
+- `tokens` reads total tokens per run, input and output together.
+- A cost verdict needs a price on every run on both sides, for the same reason a
+  bucket's `cost_usd` does. Unpriced runs are not read as free.
+
+`by_split` is empty when `suites` is `different_suites`, for the same reason the pass-rate
+verdicts are. `--withhold-test-detail` leaves `efficiency` unchanged, because it carries
+no case ids and no assertion text.
+
+The efficiency gates in `--fail-on` fire when the named metric regressed on any split.
+A `within_tolerance` or `increased` verdict does not count as a regression.
+Each split is its own comparison, so a gate on any of them is the stricter reading. The
+tolerances are what an operator uses to absorb increases they accept.
+
+These verdicts differ from the `--fail-on-token-regression` and
+`--fail-on-duration-regression` flags of `eval run` and `eval verify`. Those flags
+compare one total or one maximum with a baseline, and any increase fails them, however
+noisy. The efficiency verdicts fail only an increase that the runs can tell apart from
+noise and that exceeds the tolerance.
 
 ### Exit codes
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | Success, or `--fail-on` was not asked to gate on the recommendation this iteration produced |
-| `1` | `--fail-on` named a recommendation, and the keep-or-revert verdict matched it |
+| `0` | Success, or nothing that `--fail-on` named matched this iteration |
+| `1` | `--fail-on` named a recommendation that the keep-or-revert verdict matched, or named an efficiency metric that regressed on at least one split |
+| `2` | A flag was refused, for example a negative `--max-cost-increase` |
 | `3` | The report could not be read, the previous report resolved but could not be read, or the document could not be written or serialized |
 
 ### Example
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-$ trg ai skills eval iteration-summary ./report --previous ./prior-report --fail-on revert,overfitting
+$ trg ai skills eval iteration-summary --report-dir ./report --previous-report-dir ./prior-report --fail-on revert,overfitting
+
+$ trg ai skills eval iteration-summary --report-dir ./report --previous-report-dir ./prior-report \
+    --max-duration-increase 0.25 --fail-on cost_regression,latency_regression
 ```
+
+See [Gate a change on cost and latency](../how-to/gate-a-change-on-cost-and-latency.md).
 
 ---
 
@@ -484,26 +557,21 @@ report bundle that does not already have one, then sync the feedback summary
 into `report.json`.
 
 ```text
-trg ai skills eval feedback init <REPORT_DIR> [OPTIONS]
+trg ai skills eval feedback init --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--reviewer` | string | *(defaults to `git config user.email`)* | Reviewer identity recorded in `feedback.json`. The command fails if this is unset and git has no `user.email` configured |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints a machine-readable document |
 
 #### Example
 
 ```shell
-$ trg ai skills eval feedback init ./artifacts/my-skill/20260526T120000Z-abc --reviewer reviewer@example.com
+$ trg ai skills eval feedback init --report-dir ./artifacts/my-skill/20260526T120000Z-abc --reviewer reviewer@example.com
 Initialized feedback for 1 run(s) (0 already existed)
 ```
 
@@ -513,19 +581,14 @@ List runs in a report bundle that still need human review, meaning they have
 no `feedback.json` yet.
 
 ```text
-trg ai skills eval feedback list <REPORT_DIR> [OPTIONS]
+trg ai skills eval feedback list --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--output-format` | enum | `text` | `text` prints the run IDs pending review, or a message that none are pending; `json` prints a machine-readable document |
 
 #### Exit codes
@@ -537,7 +600,7 @@ json`, not by the exit code.
 #### Example
 
 ```shell
-$ trg ai skills eval feedback list ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval feedback list --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 Runs needing review:
   run-001
 ```
@@ -548,19 +611,14 @@ Schema-validate every `feedback.json` file in a report bundle, then sync the
 feedback summary into `report.json` when validation passes.
 
 ```text
-trg ai skills eval feedback validate <REPORT_DIR> [OPTIONS]
+trg ai skills eval feedback validate --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--output-format` | enum | `text` | `text` prints a human summary or the validation errors; `json` prints a machine-readable document. Under `json`, the verdict rides in the document (`validated`, `errors`) rather than on stderr |
 
 #### Exit codes
@@ -573,7 +631,7 @@ trg ai skills eval feedback validate <REPORT_DIR> [OPTIONS]
 #### Example
 
 ```shell
-$ trg ai skills eval feedback validate ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval feedback validate --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 Validated 1 feedback file(s)
 ```
 
@@ -586,19 +644,14 @@ summary into `report.json`. Writing idempotently: labelling the same
 assertion again replaces the prior verdict rather than duplicating it.
 
 ```text
-trg ai skills eval feedback label <REPORT_DIR> --run <RUN_ID> --assertion <ASSERTION_ID> --verdict <pass|fail> [OPTIONS]
+trg ai skills eval feedback label --report-dir <REPORT_DIR> --run <RUN_ID> --assertion <ASSERTION_ID> --verdict <pass|fail> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--run` | string | *(required)* | The run whose `grading.json` the assertion was scored in |
 | `--assertion` | string | *(required)* | The stable assertion id (`<eval-case-id>:g<index>`) to label |
 | `--verdict` | enum | *(required)* | The human reviewer's verdict: `pass` or `fail` |
@@ -616,7 +669,7 @@ trg ai skills eval feedback label <REPORT_DIR> --run <RUN_ID> --assertion <ASSER
 #### Example
 
 ```shell
-$ trg ai skills eval feedback label ./artifacts/my-skill/20260526T120000Z-abc \
+$ trg ai skills eval feedback label --report-dir ./artifacts/my-skill/20260526T120000Z-abc \
     --run run-001 --assertion case-a:g0 --verdict fail \
     --rationale 'evidence quoted the wrong file'
 Recorded verdict 'fail' for case-a:g0 in run run-001
@@ -638,19 +691,14 @@ per grader kind (`mechanical`, `declarative`, `script`, `llm`), with a Wilson
 95% confidence interval around each agreement rate.
 
 ```text
-trg ai skills eval grader-agreement <REPORT_DIR> [OPTIONS]
+trg ai skills eval grader-agreement --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
-#### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
-
-#### Flags
+##### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
 | `--min-agreement` | proportion | *(unset)* | Fail when the `llm` bucket's agreement interval's Wilson lower bound is below this proportion in `(0, 1]`. Checks the `llm` bucket specifically, not the overall rate, since an LLM judge is the one grader kind whose verdicts are not already deterministic given its inputs. A threshold nobody's labels can answer yet, because no llm-graded assertion has a human verdict, is reported as a gate failure rather than a silent pass |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints the `grader-agreement.json` document on stdout |
 
@@ -665,7 +713,7 @@ trg ai skills eval grader-agreement <REPORT_DIR> [OPTIONS]
 #### Example
 
 ```shell
-$ trg ai skills eval grader-agreement ./artifacts/my-skill/20260526T120000Z-abc --min-agreement 0.9
+$ trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/20260526T120000Z-abc --min-agreement 0.9
 Grader agreement:
   overall: 8/10 agree, 95% CI [0.552, 0.962]
   mechanical: no labelled assertions
@@ -689,20 +737,15 @@ in `report.json` (and `comparison.json` under iteration layout directories,
 with `--emit-comparison-json`).
 
 ```text
-trg ai skills eval compare <REPORT_DIR> [OPTIONS]
+trg ai skills eval compare --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a generated eval report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--previous` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
+| `--report-dir` | path | *(required)* | Path to a generated eval report directory containing `report.json` |
+| `--previous-report-dir` | path | *(auto-detected)* | Previous iteration report directory for cross-iteration drift detection |
 | `--pair` | string | *(unset)* | Scenario pair to compare, as `<A>:<B>`. Repeatable. Each side is `with_skill`, `without_skill`, or `old_skill`, and the two sides must differ |
 | `--judge` | enum | `none` | Judge used to decide each pair. Values: `none`, `llm`, `script`. With `none`, or with no `--pair` given, the command runs no comparisons |
 | `--judge-provider` | enum | `openai` | Judge backend for `--judge llm`. Values: `openai`, `anthropic`, `compatible`. `compatible` addresses any OpenAI-compatible endpoint through `TRG_JUDGE_BASE_URL` and `TRG_JUDGE_API_KEY` |
@@ -715,7 +758,7 @@ trg ai skills eval compare <REPORT_DIR> [OPTIONS]
 ### Example
 
 ```shell
-$ trg ai skills eval compare ./report --pair with_skill:without_skill --judge none
+$ trg ai skills eval compare --report-dir ./report --pair with_skill:without_skill --judge none
 Comparison skipped
 ```
 
@@ -727,20 +770,14 @@ Build an improvement bundle from a prior iteration's report bundle, for skill
 revision.
 
 ```text
-trg ai skills eval next-iteration [REPORT_DIR] [OPTIONS]
+trg ai skills eval next-iteration --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the previous iteration report directory containing `report.json`. Optional; `--from` is an alternative to it, and one of the two is required |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
-| `--from` | path | *(unset)* | Previous iteration report directory, as an alternative to the positional `REPORT_DIR` |
+| `--report-dir` | path | *(required)* | Path to the previous iteration report directory containing `report.json` |
 | `--skill-dir` | path | *(defaults to `skill_path` from `report.json`)* | Skill directory used to detect eval suite drift |
 | `--eval-dir` | name | `evals` | Directory under `--skill-dir` the current suite is resolved from, for drift detection |
 | `--allow-eval-suite-drift` | bool | `false` | Suppress the warning when the current `evals/evals.json` hash differs from the prior iteration |
@@ -751,12 +788,12 @@ trg ai skills eval next-iteration [REPORT_DIR] [OPTIONS]
 | Code | Meaning |
 | ---- | ------- |
 | `0` | Bundle written |
-| `1` | Neither `REPORT_DIR` nor `--from` was given, or building the bundle failed |
+| `1` | Building the bundle failed |
 
 ### Example
 
 ```shell
-$ trg ai skills eval next-iteration --from ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval next-iteration --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 Improvement bundle written to ./artifacts/my-skill/next-iteration
   ./artifacts/my-skill/next-iteration/improvement.md
   ./artifacts/my-skill/next-iteration/improvement.json
@@ -793,7 +830,7 @@ server's `command`, one invocation per mocked server. See [How a run drives a
 mock](#how-a-run-drives-a-mock).
 
 It is hidden from `--help`: `eval run` is the only thing that generates the
-`--mocks`, `--server`, and `--calls` arguments it needs, so it exists for a
+`--mocks-dir`, `--server`, and `--calls-file` arguments it needs, so it exists for a
 harness to invoke on the operator's behalf rather than for an operator to
 type by hand.
 
@@ -869,25 +906,20 @@ hand, the same as any other mock.
 Render a local-only, self-contained HTML report over a report bundle.
 
 ```text
-trg ai skills eval html-report <REPORT_DIR> [OPTIONS]
+trg ai skills eval html-report --report-dir <REPORT_DIR> [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to the report directory containing `report.json` |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to the report directory containing `report.json` |
 | `--output-format` | enum | `text` | `text` prints the report directory path and the HTML file path; `json` prints a machine-readable document |
 
 ### Example
 
 ```shell
-$ trg ai skills eval html-report ./artifacts/my-skill/20260526T120000Z-abc
+$ trg ai skills eval html-report --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 ./artifacts/my-skill/20260526T120000Z-abc
 html report: ./artifacts/my-skill/20260526T120000Z-abc/report.html
 ```
@@ -901,7 +933,7 @@ would have exported, for a pass that ran with tracing off or whose trace the
 backend no longer holds. `report.json` is read and never modified.
 
 ```text
-trg ai skills eval export <REPORT_DIR> [OPTIONS]
+trg ai skills eval export --report-dir <REPORT_DIR> [OPTIONS]
 ```
 
 Nothing is sent unless a trace exporter is configured through the standard
@@ -909,16 +941,11 @@ Nothing is sent unless a trace exporter is configured through the standard
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`). Without one the command says nothing
 was exported and exits `0`.
 
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR` | Path to a report bundle directory containing `report.json` |
-
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path | *(required)* | Path to a report bundle directory containing `report.json` |
 | `--include-traced` | bool | `false` | Also replay runs and grades whose `trace` or `grade_trace` field shows they were already traced live, linking each replayed span to its live span |
 | `--output-format` | enum | `text` | `text` prints the replayed trace id and how many runs were replayed or skipped; `json` prints a machine-readable document |
 
@@ -1053,7 +1080,7 @@ run's `trace` field.
 
 ```shell
 $ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-    trg ai skills eval export ./artifacts/my-skill/20260526T120000Z-abc
+    trg ai skills eval export --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 replayed trace: 4bf92f3577b34da6a3ce929d0e0e4736
 runs replayed: 2
 ```
@@ -1081,19 +1108,14 @@ overall rate can, but a case that moves backward is worth an author's look
 regardless.
 
 ```text
-trg ai skills eval scaling <REPORT_DIR> <REPORT_DIR>... [OPTIONS]
+trg ai skills eval scaling --report-dir <REPORT_DIR> --report-dir <REPORT_DIR>... [OPTIONS]
 ```
-
-### Positional argument
-
-| Argument | Description |
-| -------- | ----------- |
-| `REPORT_DIR`... | Two or more report bundle directories, ordered weakest to strongest configuration |
 
 ### Flags
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--report-dir` | path, repeatable | *(required)* | A report bundle directory. Repeat the flag for each bundle, two or more, ordered weakest to strongest configuration |
 | `--failed-runs` | enum | `bucket` | How to treat runner failures when aggregating pass rates, same as `eval benchmark` |
 | `--output-format` | enum | `text` | `text` prints a human summary; `json` prints the `scaling.json` document on stdout |
 | `--fail-on-regression` | flag | off | Exit with the gate-failed code when any step, on any split, or the end-to-end comparison regressed |
@@ -1112,7 +1134,7 @@ list, alongside that bundle's own `report.json`.
 ### Example
 
 ```shell
-$ trg ai skills eval scaling ./report-small-model ./report-large-model --fail-on-regression
+$ trg ai skills eval scaling --report-dir ./report-small-model --report-dir ./report-large-model --fail-on-regression
 Model scaling across 2 bundles:
   small-run -> large-run: improved (0.500 -> 1.000)
     train: improved (0.500 -> 1.000)
@@ -2339,6 +2361,21 @@ next to them, so a difference drawn from a handful of runs is not read as a
 finding. See
 [How many times a cell is drawn](#how-many-times-a-cell-is-drawn).
 
+Each scenario delta, in `deltas` and in `iteration_comparison`, also says how far
+the runs of its left arm sit from those of its right arm, per run:
+
+| Field | Unit | Present when |
+| ----- | ---- | ------------ |
+| `duration_ms_shift` | milliseconds | Both arms have at least four completed runs with a `timing.json` |
+| `input_tokens_per_run_shift` | tokens | The same floor, counted over runs that reported input tokens |
+| `total_tokens_per_run_shift` | tokens | The same floor, counted over runs that reported total tokens |
+| `cost_usd_per_run_shift` | USD | The same floor, and both arms have a `whole` cost |
+
+Each is `{ "estimate": …, "interval": { "low": …, "high": … } }`: the left run minus
+the right run, with its 95% interval. A field is absent, not zero and not null,
+when an arm falls below the floor. The estimate and the interval come from the
+same method as the [efficiency verdicts](#efficiency-verdicts).
+
 ---
 
 ## Artifact: `feedback.json`
@@ -2425,7 +2462,7 @@ scenarios recorded separately in the same record.
 alongside `report.json`.
 
 ```text
-trg ai skills eval html-report <REPORT_DIR>
+trg ai skills eval html-report --report-dir <REPORT_DIR>
 ```
 
 `REPORT_DIR` is the directory containing `report.json`, the same directory
@@ -3178,7 +3215,7 @@ twice, so a single run of a case is one draw from a distribution rather than a
 measurement of the skill. With one draw per cell, `benchmark.json` reports a
 spread of zero because none was measured, a pass rate that moved between two
 passes cannot be told apart from the agent's own variance, and a regression
-flagged against `--baseline` is as likely to be noise as it is to be the skill.
+flagged against `--baseline-report-dir` is as likely to be noise as it is to be the skill.
 
 Three is the smallest count that answers the question. One reports no spread,
 two cannot say which of the pair was the outlier, and three shows that a cell is
@@ -3207,6 +3244,11 @@ because an arm that passed everything or failed everything is an ordinary
 result here and is exactly where the normal approximation reports a width of
 zero. Either field is absent when its side scored nothing, since a difference
 against no draws has no width to report rather than an infinite one.
+
+Cost, duration, and tokens get the same treatment through the per-run shifts on
+each `ScenarioDelta`, described under [`benchmark.json`](#artifact-benchmarkjson).
+Those need four runs an arm, not three, because three draws cannot place a 95%
+interval around a shift at all. See [Efficiency verdicts](#efficiency-verdicts).
 
 `--attempts 1` asks for a single draw, which is the right choice while writing a
 case and reading its transcript. `--attempts 0` is refused, because a cell

@@ -156,14 +156,24 @@ impl SessionIdSlot {
 }
 
 /// What a request span knows about the connection it travels over.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct Connection {
+    server_name: String,
     endpoint: Option<Endpoint>,
     protocol_version: Option<String>,
     session_id: SessionIdSlot,
 }
 
 impl Connection {
+    pub(super) fn new(server_name: &str, endpoint: Option<Endpoint>) -> Self {
+        Self {
+            server_name: server_name.to_string(),
+            endpoint,
+            protocol_version: None,
+            session_id: SessionIdSlot::default(),
+        }
+    }
+
     fn record_on(&self, span: &Span) {
         if let Some(endpoint) = &self.endpoint {
             span.record(NETWORK_TRANSPORT, TCP);
@@ -379,6 +389,7 @@ impl RequestSpan {
 }
 
 fn session_attributes(connection: &Connection, attributes: &mut Vec<KeyValue>) {
+    attributes.push(KeyValue::new(MCP_SERVER_NAME, connection.server_name.clone()));
     if let Some(version) = &connection.protocol_version {
         attributes.push(KeyValue::new(MCP_PROTOCOL_VERSION, version.clone()));
     }
@@ -449,10 +460,7 @@ impl Session {
             { SERVER_PORT } = Empty,
             { ERROR_TYPE } = Empty,
         );
-        let connection = Connection {
-            endpoint,
-            ..Connection::default()
-        };
+        let connection = Connection::new(server_name, endpoint);
         connection.record_on(&span);
         Self {
             span,
@@ -1098,7 +1106,7 @@ mod tests {
 
         let (((), trace), points) = capture_metrics(|meter| {
             capture(|| {
-                let connection = Connection::default();
+                let connection = Connection::new("weather", None);
                 RequestSpan::open(
                     &request.request,
                     &request.id,
@@ -1123,6 +1131,7 @@ mod tests {
         assert_eq!(point.attribute(ERROR_TYPE).as_deref(), Some(code.as_str()));
         assert_eq!(point.attribute(MCP_METHOD_NAME).as_deref(), Some("tools/call"));
         assert_eq!(point.attribute(GEN_AI_TOOL_NAME).as_deref(), Some("get_weather"));
+        assert_eq!(point.attribute(MCP_SERVER_NAME).as_deref(), Some("weather"));
     }
 
     #[test]

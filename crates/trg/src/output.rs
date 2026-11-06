@@ -9,6 +9,8 @@
 use clap::ValueEnum;
 use serde::Serialize;
 
+use crate::exit_code::ExitCode;
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     /// A summary meant to be read.
@@ -35,7 +37,7 @@ impl OutputFormat {
 /// Under either format the result goes to stdout and everything that stopped
 /// the command from producing one goes to stderr, so `--output-format json` piped
 /// into a parser never has prose in front of it.
-pub fn print_json<T: Serialize>(value: &T, code: i32) -> i32 {
+pub fn print_json<T: Serialize>(value: &T, code: ExitCode) -> ExitCode {
     match serde_json::to_string_pretty(value) {
         Ok(rendered) => {
             println!("{rendered}");
@@ -43,7 +45,7 @@ pub fn print_json<T: Serialize>(value: &T, code: i32) -> i32 {
         }
         Err(e) => {
             eprintln!("could not render the result as json: {e}");
-            1
+            ExitCode::Failed
         }
     }
 }

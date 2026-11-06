@@ -10,6 +10,7 @@ string_value_object!(ObjectId, ValueKind::ObjectId, validate_object_id);
 impl ObjectId {
     #[doc(hidden)]
     pub const fn from_static_unchecked(value: &'static str) -> Self {
+        assert!(validate_object_id(value).is_ok(), "invalid object id literal");
         Self(Cow::Borrowed(value))
     }
 }

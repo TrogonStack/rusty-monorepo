@@ -27,7 +27,6 @@ use crate::agentskills::evals::{
     effective_model, effective_model_source, effective_timeout_secs, missing_expected_output_warnings, EvalCase,
     EvalCheckOptions, EvalDirName, EvalSuite,
 };
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::layout::detect_next_iteration;
 use crate::agentskills::mocks::{
     materialize_mock_set, resolve_mock_set, MaterializedMcpConfig, MockCallLogEntry, MockServerBinary, MockServerEnv,
@@ -51,6 +50,7 @@ use crate::agentskills::scenario_selection::ScenarioSelection;
 use crate::agentskills::span_reference::SpanReference;
 use crate::agentskills::tool_grant::{effective_tool_grant, ToolGrant};
 use crate::agentskills::workspace_scaffold::ScaffoldPermission;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use crate::telemetry::propagation::LaneParent;
@@ -906,6 +906,10 @@ impl RunExecution<'_> {
                     scope.spawn(move || {
                         adopt_lane_context(lane_context);
                         parent.in_scope(|| loop {
+                            #[expect(
+                                clippy::disallowed_methods,
+                                reason = "the lock is only ever held across `pop_front`, which cannot leave the queue half-written"
+                            )]
                             let next = queue
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2222,7 +2226,7 @@ mod tests {
                 max_input_tokens: None,
                 max_output_tokens: None,
                 max_duration_ms: None,
-                baseline: None,
+                baseline_report_dir: None,
             },
         }
         .handle(&crate::fs::RealFS);

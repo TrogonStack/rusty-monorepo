@@ -1,0 +1,35 @@
+error: options struct `ConnectOptions` does not implement `Default`
+  --> $DIR/options_struct_without_default.rs:5:12
+   |
+LL | pub struct ConnectOptions {
+   |            ^^^^^^^^^^^^^^
+   |
+   = help: derive or implement `Default` so callers can set one field and take the rest with `..Default::default()`
+   = note: `#[deny(options_struct_without_default)]` on by default
+
+error: options struct `WriteOptions` does not implement `Default`
+  --> $DIR/options_struct_without_default.rs:11:12
+   |
+LL | pub struct WriteOptions {
+   |            ^^^^^^^^^^^^
+   |
+   = help: derive or implement `Default` so callers can set one field and take the rest with `..Default::default()`
+
+error: options struct `FlushOptions` does not implement `Default`
+  --> $DIR/options_struct_without_default.rs:19:16
+   |
+LL |     pub struct FlushOptions {
+   |                ^^^^^^^^^^^^
+   |
+   = help: derive or implement `Default` so callers can set one field and take the rest with `..Default::default()`
+
+error: options struct `ReadOptions` does not implement `Default`
+  --> $DIR/options_struct_without_default.rs:26:12
+   |
+LL | pub struct ReadOptions<'a> {
+   |            ^^^^^^^^^^^
+   |
+   = help: derive or implement `Default` so callers can set one field and take the rest with `..Default::default()`
+
+error: aborting due to 4 previous errors
+

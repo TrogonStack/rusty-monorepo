@@ -15,7 +15,7 @@ use axum::Router;
 use tower::ServiceExt;
 use trogon_claims::axum::{
     insert_credential_outcome, insert_presented_proof, insert_shared_principal, CredentialOutcome, Masked,
-    PresentedProof, PrincipalOrNotFound, RejectReason, StepUpRequirement,
+    PresentedProof, PrincipalOrNotFound, RejectReason, StepUpRequirement, StepUpRequirementError,
 };
 use trogon_claims::{
     principal_kind, AuthenticatedPrincipal, AuthenticationContext, AuthenticationType, ClaimText, CurrentPrincipal,
@@ -332,5 +332,84 @@ fn step_up_requirements_reject_empty_and_unsafe_values() {
     assert!(StepUpRequirement::try_new(Vec::new(), None).is_err());
     for bad in ["", "a b", "a\"b", "a\\b", "caf\u{e9}"] {
         assert!(StepUpRequirement::try_new(vec![ClaimText::from(bad.to_owned())], None).is_err());
+    }
+}
+
+fn authentication_at(value: &str) -> AuthenticationContext {
+    AuthenticationContext::new(None, Vec::new(), Some(NumericDate::try_from_lexical(value).unwrap()))
+}
+
+#[test]
+fn step_up_age_preserves_subsecond_boundaries_before_and_after_epoch() {
+    for (authenticated, now, limit, accepted) in [
+        ("100.5", "160.5", 60, true),
+        ("100.5", "160.500000001", 60, false),
+        ("-100.5", "-40.5", 60, true),
+        ("-100.5", "-40.499999999", 60, false),
+        ("-0.000000001", "0.999999999", 1, true),
+        ("-0.000000001", "1", 1, false),
+        ("100.1", "100.1", 0, true),
+        ("100.1", "100.100000001", 0, false),
+    ] {
+        let requirement = StepUpRequirement::try_new(Vec::new(), Some(Duration::from_secs(limit))).unwrap();
+        assert_eq!(
+            requirement
+                .check(
+                    &authentication_at(authenticated),
+                    NumericDate::try_from_lexical(now).unwrap()
+                )
+                .is_ok(),
+            accepted,
+            "authentication={authenticated}, now={now}, max_age={limit}",
+        );
+    }
+}
+
+#[test]
+fn step_up_age_rejects_future_authentication_without_implicit_clock_skew() {
+    for (authenticated, now) in [("100.000000001", "100"), ("101", "100"), ("-0.1", "-0.2")] {
+        for limit in [0, 60, u64::MAX] {
+            let requirement = StepUpRequirement::try_new(Vec::new(), Some(Duration::from_secs(limit))).unwrap();
+            assert!(requirement
+                .check(
+                    &authentication_at(authenticated),
+                    NumericDate::try_from_lexical(now).unwrap()
+                )
+                .is_err());
+        }
+    }
+}
+
+#[test]
+fn step_up_age_compares_the_full_supported_timestamp_range_without_overflow() {
+    let context = authentication_at("-62167219200");
+    let now = NumericDate::try_from_lexical("253402300799.999999999").unwrap();
+    let within = StepUpRequirement::try_new(Vec::new(), Some(Duration::from_secs(u64::MAX))).unwrap();
+    assert!(within.check(&context, now).is_ok());
+    let outside = StepUpRequirement::try_new(Vec::new(), Some(Duration::from_secs(315_569_519_999))).unwrap();
+    assert!(outside.check(&context, now).is_err());
+}
+
+#[test]
+fn step_up_requirements_reject_fractional_max_age_instead_of_truncating() {
+    for duration in [Duration::from_nanos(1), Duration::new(60, 1), Duration::MAX] {
+        assert_eq!(
+            StepUpRequirement::try_new(Vec::new(), Some(duration)),
+            Err(StepUpRequirementError::FractionalMaxAge),
+        );
+    }
+}
+
+#[test]
+fn step_up_challenges_preserve_whole_second_max_age() {
+    for seconds in [0, 60, u64::MAX] {
+        let requirement = StepUpRequirement::try_new(Vec::new(), Some(Duration::from_secs(seconds))).unwrap();
+        let response = requirement
+            .check(&AuthenticationContext::default(), NumericDate::try_new(0, 0).unwrap())
+            .unwrap_err()
+            .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let value = challenge(response.headers());
+        assert!(value.contains(&format!("max_age=\"{seconds}\"")));
     }
 }

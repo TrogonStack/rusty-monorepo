@@ -11,14 +11,20 @@ mod acyclic_modules;
 mod assertions_on_fixed_literals;
 mod constant_outside_constants_module;
 mod debug_remnants;
+mod discarded_error_source;
+mod doc_hidden_access;
 mod error_string_comparison;
 mod error_type_naming;
 mod fallible_new;
 mod function_local_macro_rules;
 mod function_local_use;
 mod inline_module_block;
+mod iterator_chain_in_for_header;
+mod literal_template_replace;
 mod manual_error_impl;
+mod multi_module_use;
 mod new_instead_of_from;
+mod options_struct_without_default;
 mod redundant_module_path;
 mod serde_json_macro;
 mod serde_json_macro_allow_without_reason;
@@ -38,7 +44,7 @@ mod weakened_write_precondition;
 
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::FnKind;
-use rustc_hir::{AmbigArg, Body, Expr, FnDecl, ImplItem, Item, LetStmt, Stmt, Ty};
+use rustc_hir::{AmbigArg, Body, Expr, FnDecl, HirId, ImplItem, Item, LetStmt, Stmt, Ty};
 use rustc_lint::{LateContext, LateLintPass, LintStore};
 use rustc_span::Span;
 
@@ -52,14 +58,20 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         ASSERTIONS_ON_FIXED_LITERALS,
         CONSTANT_OUTSIDE_CONSTANTS_MODULE,
         DEBUG_REMNANTS,
+        DISCARDED_ERROR_SOURCE,
+        DOC_HIDDEN_ACCESS,
         ERROR_STRING_COMPARISON,
         ERROR_TYPE_NAMING,
         FALLIBLE_NEW,
         FUNCTION_LOCAL_MACRO_RULES,
         FUNCTION_LOCAL_USE,
         INLINE_MODULE_BLOCK,
+        ITERATOR_CHAIN_IN_FOR_HEADER,
+        LITERAL_TEMPLATE_REPLACE,
         MANUAL_ERROR_IMPL,
+        MULTI_MODULE_USE,
         NEW_INSTEAD_OF_FROM,
+        OPTIONS_STRUCT_WITHOUT_DEFAULT,
         REDUNDANT_MODULE_PATH,
         SERDE_JSON_MACRO,
         SERDE_JSON_MACRO_ALLOW_WITHOUT_REASON,
@@ -75,6 +87,7 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore)
         WEAKENED_WRITE_PRECONDITION,
     ]);
     lint_store.register_late_pass(|_| Box::<TrogonLints>::default());
+    lint_store.register_early_pass(|| Box::new(multi_module_use::MultiModuleUse));
     lint_store.register_early_pass(|| Box::new(redundant_module_path::RedundantModulePath));
     lint_store
         .register_early_pass(|| Box::new(serde_json_macro_allow_without_reason::SerdeJsonMacroAllowWithoutReason));
@@ -268,6 +281,109 @@ rustc_session::declare_lint! {
 rustc_session::declare_lint! {
     /// ### What it does
     ///
+    /// Detects code that replaces a `Result`'s error without reading it:
+    /// `map_err` with a closure whose parameter is `_` or a binding the body
+    /// never uses, and `.ok()` fed straight into `ok_or` / `ok_or_else`.
+    ///
+    /// Out of scope: an error type of `()`, `!`, or `Infallible`, since there
+    /// is nothing to lose, and fallbacks such as `unwrap_or_else(|_| ...)`
+    /// and `or_else`.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// The original error says why the operation failed. Replacing it with a
+    /// bare variant leaves `Error::source` empty, so logs and error reports
+    /// stop at the wrapper and the cause is unrecoverable. Carrying the error
+    /// as a `#[source]` field keeps the chain intact at no cost to the caller.
+    /// A deliberate drop is stated at the site with
+    /// `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// #[derive(Debug, thiserror::Error)]
+    /// enum CredentialsError {
+    ///     #[error("invalid JSON")]
+    ///     InvalidJson,
+    /// }
+    ///
+    /// fn parse(document: &str) -> Result<serde_json::Value, CredentialsError> {
+    ///     serde_json::from_str(document).map_err(|_| CredentialsError::InvalidJson)
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// #[derive(Debug, thiserror::Error)]
+    /// enum CredentialsError {
+    ///     #[error("invalid JSON")]
+    ///     InvalidJson(#[source] serde_json::Error),
+    /// }
+    ///
+    /// fn parse(document: &str) -> Result<serde_json::Value, CredentialsError> {
+    ///     serde_json::from_str(document).map_err(CredentialsError::InvalidJson)
+    /// }
+    /// ```
+    pub DISCARDED_ERROR_SOURCE,
+    Warn,
+    "the original error should be carried as a source, not discarded",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects a reference to an item of another crate that is marked
+    /// `#[doc(hidden)]`: a path in an expression, type, pattern, or `use` item
+    /// that names a hidden item or goes through a hidden crate or module, or a
+    /// method call to a hidden method or a method of a hidden impl or trait.
+    /// Where an item is defined does not matter, only the path written to it,
+    /// since a hidden module's item re-exported publicly is public API. Code produced by a macro expansion is
+    /// not reported, since a macro reaching into its own crate's hidden items
+    /// is the reason they are hidden.
+    ///
+    /// Crates you own may be listed in a `dylint.toml` in the target
+    /// workspace's root, and their hidden items are allowed:
+    ///
+    /// ```toml
+    /// [doc_hidden_access]
+    /// owned_crates = ["my_macros_runtime"]
+    /// ```
+    ///
+    /// ### Why is this bad?
+    ///
+    /// Hidden items are a crate's internals, exposed only so its own macros
+    /// can expand into other crates. They are not part of the public API and
+    /// carry no stability promise, so a patch release can rename or remove
+    /// them and break the caller.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// use some_crate::__private::Helper;
+    ///
+    /// fn run() {
+    ///     some_crate::__private::register();
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// use some_crate::Helper;
+    ///
+    /// fn run() {
+    ///     some_crate::register();
+    /// }
+    /// ```
+    pub DOC_HIDDEN_ACCESS,
+    Deny,
+    "an item that another crate marks `#[doc(hidden)]` should not be accessed",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
     /// Detects equality checks and string probes that are driven by
     /// `std::error::Error` display text.
     ///
@@ -439,6 +555,77 @@ rustc_session::declare_lint! {
 rustc_session::declare_lint! {
     /// ### What it does
     ///
+    /// Detects a `for` loop whose iterated expression is a method chain in
+    /// which at least one call takes a closure, such as
+    /// `for x in items.iter().filter(|x| x.ready())`. Adapters that take no
+    /// closure, such as `enumerate`, `rev`, `zip` and `lines`, are left alone.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// The closures in a chain are the logic that decides what the loop
+    /// visits, and the loop header gives them no name. Assigning the chain to
+    /// a variable documents what it selects, and keeps the header down to the
+    /// one thing it should say: what is iterated.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// for bug in descriptions.iter().filter_map(|d| parse(d).ok()).filter(|b| b.priority <= P1) {
+    ///     assign(bug);
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// let urgent_bugs = descriptions
+    ///     .iter()
+    ///     .filter_map(|d| parse(d).ok())
+    ///     .filter(|b| b.priority <= P1);
+    /// for bug in urgent_bugs {
+    ///     assign(bug);
+    /// }
+    /// ```
+    pub ITERATOR_CHAIN_IN_FOR_HEADER,
+    Deny,
+    "name an iterator chain that uses closures with a variable instead of building it in a `for` header",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects `str::replace` or `str::replacen` called on a string literal, or
+    /// on a `const` or `static` `&str`, to fill in placeholders. A receiver that
+    /// is a runtime value, such as a variable, a field, or a `String`, is out of
+    /// scope: replacing inside data is not templating.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// A literal with placeholders replaced at runtime is a template with a
+    /// hand-rolled syntax. The compiler cannot check that the placeholder names
+    /// match the substitutions, and a misspelled one is left in the output
+    /// silently. A standard format string is checked at compile time and
+    /// everyone already reads it.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// let greeting = "Hello, {name}!".replace("{name}", name);
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// let greeting = format!("Hello, {name}!");
+    /// ```
+    pub LITERAL_TEMPLATE_REPLACE,
+    Deny,
+    "fill in a literal template with `format!`, not `str::replace`",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
     /// Detects hand-written `impl std::error::Error` blocks.
     ///
     /// ### Why is this bad?
@@ -472,6 +659,38 @@ rustc_session::declare_lint! {
     pub MANUAL_ERROR_IMPL,
     Deny,
     "implement `std::error::Error` with the thiserror derive, not by hand",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects a `use` statement whose braces reach into another module: an
+    /// entry inside `{..}` that contains `::`, such as `use foo::{Foo, bar::Bar};`.
+    /// This is the shape rustfmt produces with `imports_granularity = "Module"`.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// When one statement spans several modules, the module an item comes
+    /// from is buried inside a tree, and a one-line change reflows the whole
+    /// tree. One statement per module keeps every import findable by its
+    /// module path and keeps diffs to the line that changed. Stable rustfmt
+    /// cannot enforce this granularity, so the lint does.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// use foo::{Foo, bar::{Bar, Baz}};
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// use foo::Foo;
+    /// use foo::bar::{Bar, Baz};
+    /// ```
+    pub MULTI_MODULE_USE,
+    Deny,
+    "a `use` statement should import items from one module",
 }
 
 rustc_session::declare_lint! {
@@ -534,6 +753,52 @@ rustc_session::declare_lint! {
     pub NEW_INSTEAD_OF_FROM,
     Warn,
     "a single-field wrapper's `new` that only wraps its argument should be `From` instead",
+}
+
+rustc_session::declare_lint! {
+    /// ### What it does
+    ///
+    /// Detects a struct with named fields whose name ends in `Options` and
+    /// whose fields are all public (`pub`, `pub(crate)`, or `pub(super)`)
+    /// when the type does not implement `Default`, whether derived or
+    /// written by hand.
+    ///
+    /// Out of scope: tuple and unit structs, structs without fields, structs
+    /// with any private field, and structs with type or const generic
+    /// parameters, because whether they implement `Default` depends on the
+    /// arguments chosen at each use.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// A struct of public fields that bundles the options of a function is
+    /// filled in by the caller. Without `Default`, the caller has to name
+    /// every field, and adding a field breaks every call site. With it, the
+    /// caller writes only what differs and takes the rest with struct update
+    /// syntax.
+    ///
+    /// ### Example
+    ///
+    /// ```rust,ignore
+    /// pub struct ConnectOptions {
+    ///     pub retries: u32,
+    ///     pub verbose: bool,
+    /// }
+    /// ```
+    ///
+    /// Use instead:
+    ///
+    /// ```rust,ignore
+    /// #[derive(Default)]
+    /// pub struct ConnectOptions {
+    ///     pub retries: u32,
+    ///     pub verbose: bool,
+    /// }
+    ///
+    /// let options = ConnectOptions { retries: 3, ..Default::default() };
+    /// ```
+    pub OPTIONS_STRUCT_WITHOUT_DEFAULT,
+    Deny,
+    "an options struct with all public fields should implement `Default`",
 }
 
 rustc_session::declare_lint! {
@@ -1203,6 +1468,7 @@ rustc_session::declare_lint! {
 struct TrogonLints {
     acyclic_modules: acyclic_modules::AcyclicModules,
     debug_remnants: debug_remnants::DebugRemnants,
+    doc_hidden_access: doc_hidden_access::DocHiddenAccess,
     error_string_comparison: error_string_comparison::ErrorStringComparison,
     function_local_use: function_local_use::FunctionLocalUse,
     new_instead_of_from: new_instead_of_from::NewInsteadOfFrom,
@@ -1227,9 +1493,13 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         assertions_on_fixed_literals::check_expr(cx, expr);
+        discarded_error_source::check_expr(cx, expr);
+        iterator_chain_in_for_header::check_expr(cx, expr);
+        literal_template_replace::check_expr(cx, expr);
         unbounded_channel::check_expr(cx, expr);
         self.acyclic_modules.check_expr(cx, expr);
         self.debug_remnants.check_expr(cx, expr);
+        self.doc_hidden_access.check_expr(cx, expr);
         self.error_string_comparison.check_expr(cx, expr);
         self.serde_json_macro.check_expr(cx, expr);
         self.std_env_access.check_expr(cx, expr);
@@ -1259,6 +1529,10 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
         self.function_local_use.check_stmt(cx, stmt);
     }
 
+    fn check_path(&mut self, cx: &LateContext<'tcx>, path: &rustc_hir::Path<'tcx>, hir_id: HirId) {
+        self.doc_hidden_access.check_path(cx, path, hir_id);
+    }
+
     fn check_ty(&mut self, cx: &LateContext<'tcx>, ty: &'tcx Ty<'tcx, AmbigArg>) {
         self.acyclic_modules.check_ty(cx, ty);
     }
@@ -1269,6 +1543,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
         error_type_naming::check_item(cx, item);
         inline_module_block::check_item(cx, item);
         manual_error_impl::check_item(cx, item);
+        options_struct_without_default::check_item(cx, item);
         test_module_naming::check_item(cx, item);
     }
 
@@ -1287,14 +1562,19 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     ASSERTIONS_ON_FIXED_LITERALS,
     CONSTANT_OUTSIDE_CONSTANTS_MODULE,
     DEBUG_REMNANTS,
+    DISCARDED_ERROR_SOURCE,
+    DOC_HIDDEN_ACCESS,
     ERROR_STRING_COMPARISON,
     ERROR_TYPE_NAMING,
     FALLIBLE_NEW,
     FUNCTION_LOCAL_MACRO_RULES,
     FUNCTION_LOCAL_USE,
     INLINE_MODULE_BLOCK,
+    ITERATOR_CHAIN_IN_FOR_HEADER,
+    LITERAL_TEMPLATE_REPLACE,
     MANUAL_ERROR_IMPL,
     NEW_INSTEAD_OF_FROM,
+    OPTIONS_STRUCT_WITHOUT_DEFAULT,
     SERDE_JSON_MACRO,
     STD_ENV_ACCESS,
     TELEMETRY_ATTRIBUTE_LITERAL,
@@ -1307,6 +1587,8 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     UNSTRUCTURED_LOG_FIELDS,
     WEAKENED_WRITE_PRECONDITION,
 ]);
+
+rustc_session::impl_lint_pass!(multi_module_use::MultiModuleUse => [MULTI_MODULE_USE]);
 
 rustc_session::impl_lint_pass!(redundant_module_path::RedundantModulePath => [REDUNDANT_MODULE_PATH]);
 
@@ -1325,6 +1607,13 @@ fn ui() {
 fn ui_new_instead_of_from_without_exported_guard() {
     dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_new_instead_of_from_config")
         .dylint_toml("[new_instead_of_from]\navoid_breaking_exported_api = false\n")
+        .run();
+}
+
+#[test]
+fn ui_doc_hidden_access_owned_crates() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_doc_hidden_access_config")
+        .dylint_toml("[doc_hidden_access]\nowned_crates = [\"std\", \"core\"]\n")
         .run();
 }
 

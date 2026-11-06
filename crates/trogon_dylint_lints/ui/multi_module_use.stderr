@@ -1,0 +1,56 @@
+error: `use` statement imports items from more than one module
+  --> $DIR/multi_module_use.rs:13:1
+   |
+LL | use std::collections::{HashSet, hash_set::Iter};
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------^^
+   |                                 |
+   |                                 reaches into another module
+   |
+   = help: split it into one `use` per module, with no `::` inside the braces
+   = note: `#[deny(multi_module_use)]` on by default
+
+error: `use` statement imports items from more than one module
+  --> $DIR/multi_module_use.rs:16:1
+   |
+LL | use std::collections::{btree_set::{IntoIter, Range}};
+   | ^^^^^^^^^^^^^^^^^^^^^^^----------------------------^^
+   |                        |
+   |                        reaches into another module
+   |
+   = help: split it into one `use` per module, with no `::` inside the braces
+
+error: `use` statement imports items from more than one module
+  --> $DIR/multi_module_use.rs:19:1
+   |
+LL | use std::collections::{vec_deque::*};
+   | ^^^^^^^^^^^^^^^^^^^^^^^------------^^
+   |                        |
+   |                        reaches into another module
+   |
+   = help: split it into one `use` per module, with no `::` inside the braces
+
+error: `use` statement imports items from more than one module
+  --> $DIR/multi_module_use.rs:22:1
+   |
+LL | use {std::rc::Rc, std::sync::Arc};
+   | ^^^^^-----------^^--------------^^
+   |      |            |
+   |      |            reaches into another module
+   |      reaches into another module
+   |
+   = help: split it into one `use` per module, with no `::` inside the braces
+
+error: `use` statement imports items from more than one module
+  --> $DIR/multi_module_use.rs:25:1
+   |
+LL | use std::{cell::{Cell, RefCell}, convert::Infallible, time::{Duration, Instant}};
+   | ^^^^^^^^^^---------------------^^-------------------^^-------------------------^^
+   |           |                      |                    |
+   |           |                      |                    reaches into another module
+   |           |                      reaches into another module
+   |           reaches into another module
+   |
+   = help: split it into one `use` per module, with no `::` inside the braces
+
+error: aborting due to 5 previous errors
+

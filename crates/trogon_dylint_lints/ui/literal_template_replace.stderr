@@ -1,0 +1,43 @@
+error: a literal template is filled in with `str::replace`
+  --> $DIR/literal_template_replace.rs:23:13
+   |
+LL |     let _ = "Hello, {name}!".replace("{name}", name);
+   |             ----------------^^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             used as a template
+   |
+   = help: use `format!` (or `write!` to write into a buffer) with a standard format string instead of inventing a templating syntax
+   = note: `#[deny(literal_template_replace)]` on by default
+
+error: a literal template is filled in with `str::replacen`
+  --> $DIR/literal_template_replace.rs:26:13
+   |
+LL |     let _ = "{a} and {a}".replacen("{a}", name, 1);
+   |             -------------^^^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             used as a template
+   |
+   = help: use `format!` (or `write!` to write into a buffer) with a standard format string instead of inventing a templating syntax
+
+error: a literal template is filled in with `str::replace`
+  --> $DIR/literal_template_replace.rs:29:13
+   |
+LL |     let _ = TEMPLATE.replace("$USER", name);
+   |             --------^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             used as a template
+   |
+   = help: use `format!` (or `write!` to write into a buffer) with a standard format string instead of inventing a templating syntax
+
+error: a literal template is filled in with `str::replace`
+  --> $DIR/literal_template_replace.rs:32:13
+   |
+LL |     let _ = BANNER.replace("{title}", name);
+   |             ------^^^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             used as a template
+   |
+   = help: use `format!` (or `write!` to write into a buffer) with a standard format string instead of inventing a templating syntax
+
+error: aborting due to 4 previous errors
+

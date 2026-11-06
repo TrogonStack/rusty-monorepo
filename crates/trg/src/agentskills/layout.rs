@@ -346,7 +346,9 @@ fn write_scenario_mirror(
     if scenario_dir.exists() {
         remove_path(&scenario_dir)?;
     }
-    std::fs::create_dir_all(scenario_dir.parent().unwrap())?;
+    if let Some(parent) = scenario_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     let canonical_workspace = report_dir.join(&run.paths.workspace);
     link_to_workspace(&scenario_dir, report_dir, &canonical_workspace);
@@ -371,7 +373,14 @@ fn link_to_workspace(link_path: &Path, report_dir: &Path, workspace: &Path) {
         }
     };
 
-    let relative_link = relative_path_from(link_path.parent().unwrap(), report_dir, &relative);
+    let Some(link_dir) = link_path.parent() else {
+        eprintln!(
+            "docs mirror: link path {} has no parent directory; skipping symlink",
+            link_path.display()
+        );
+        return;
+    };
+    let relative_link = relative_path_from(link_dir, report_dir, &relative);
     if let Err(error) = std::os::unix::fs::symlink(&relative_link, link_path) {
         eprintln!(
             "docs mirror: symlink {} -> {} failed ({error}); writing .workspace-ref fallback",

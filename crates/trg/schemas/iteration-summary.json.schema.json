@@ -31,6 +31,124 @@
       ],
       "type": "object"
     },
+    "CostVerdict": {
+      "description": "Each verdict below reads the same way: the regressing status means the whole interval\nsits above the tolerance, `within_tolerance` means it sits above zero and wholly inside\nthe tolerance, `increased` means it sits above zero but reaches past the tolerance, so\nthe runs cannot say which side of it the increase falls, the improving status means it\nsits entirely below zero, and `indistinguishable` means it reaches zero.",
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "cheaper",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "costlier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "within_tolerance",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "increased",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "indistinguishable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/UnmeasuredReason"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "no_runs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "CrossIterationDelta": {
       "enum": [
         "new",
@@ -81,6 +199,168 @@
         "no_longer_always_pass",
         "newly_always_fail",
         "no_longer_always_fail"
+      ],
+      "type": "object"
+    },
+    "DurationVerdict": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "faster",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "slower",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "within_tolerance",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "increased",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "indistinguishable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/UnmeasuredReason"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "no_runs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "EfficiencySection": {
+      "properties": {
+        "by_split": {
+          "additionalProperties": false,
+          "description": "Empty when the suites differ, for the same reason the pass-rate verdicts are.",
+          "properties": {
+            "test": {
+              "$ref": "#/$defs/SplitEfficiency"
+            },
+            "train": {
+              "$ref": "#/$defs/SplitEfficiency"
+            }
+          },
+          "type": "object"
+        },
+        "tolerances": {
+          "$ref": "#/$defs/EfficiencyTolerances"
+        }
+      },
+      "required": [
+        "tolerances",
+        "by_split"
+      ],
+      "type": "object"
+    },
+    "EfficiencyTolerances": {
+      "description": "The tolerance each metric was judged against, published so a verdict can be read\nwithout knowing which flags produced it.",
+      "properties": {
+        "cost": {
+          "$ref": "#/$defs/IncreaseTolerance"
+        },
+        "duration": {
+          "$ref": "#/$defs/IncreaseTolerance"
+        },
+        "tokens": {
+          "$ref": "#/$defs/IncreaseTolerance"
+        }
+      },
+      "required": [
+        "cost",
+        "duration",
+        "tokens"
       ],
       "type": "object"
     },
@@ -209,6 +489,11 @@
       ],
       "type": "object"
     },
+    "IncreaseTolerance": {
+      "description": "The allowed per-run increase over the previous iteration's median, as a proportion of that median. Zero or more.",
+      "minimum": 0.0,
+      "type": "number"
+    },
     "Interval": {
       "description": "The range a measurement is consistent with.",
       "properties": {
@@ -252,6 +537,17 @@
             }
           ],
           "description": "Set when the test split's `with_skill` arm has no headroom left, so `recommendation`\nis not misread as an ordinary `inconclusive` or a clean `keep`: the split it depends\non most could not have shown `improved` here no matter what the change did."
+        },
+        "efficiency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EfficiencySection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Whether this iteration's `with_skill` runs cost more, ran longer or spent more\ntokens than the previous iteration's. Kept apart from `recommendation`, which reads\npass rates only. Absent from a document written before these verdicts existed."
         },
         "recommendation": {
           "$ref": "#/$defs/Recommendation"
@@ -357,6 +653,58 @@
       ],
       "type": "object"
     },
+    "Shift": {
+      "description": "The shift between two arms of per-run readings: `estimate` is how far the left arm\nsits from the right one, and `interval` is the 95% range the runs leave around it.",
+      "properties": {
+        "estimate": {
+          "format": "double",
+          "type": "number"
+        },
+        "interval": {
+          "$ref": "#/$defs/Interval"
+        }
+      },
+      "required": [
+        "estimate",
+        "interval"
+      ],
+      "type": "object"
+    },
+    "ShiftComparison": {
+      "description": "One metric's per-run shift from the previous iteration's with_skill runs to this\none's, and the previous median the tolerance was scaled by.",
+      "properties": {
+        "current_runs": {
+          "description": "Runs on each side that reported this metric.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previous_median": {
+          "format": "double",
+          "type": "number"
+        },
+        "previous_runs": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shift": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/Shift"
+            }
+          ],
+          "description": "The current run minus the previous run, in the metric's own unit, with its 95%\ninterval."
+        }
+      },
+      "required": [
+        "shift",
+        "previous_median",
+        "current_runs",
+        "previous_runs"
+      ],
+      "type": "object"
+    },
     "SplitDelta": {
       "description": "The `with_skill` assertion and run pass-rate change between this iteration and the\nprevious one, and the 95% intervals around each. The assertion pass rate drives the\nverdict this rides alongside: it pools every scored assertion rather than collapsing a\ncase with three assertions and one with one assertion to the same single vote a run\npass rate would give them, so it moves on the same evidence the reviewer's bundle does.",
       "properties": {
@@ -424,6 +772,26 @@
       "required": [
         "assertion_pass_rate_delta",
         "assertion_pass_rate_delta_interval"
+      ],
+      "type": "object"
+    },
+    "SplitEfficiency": {
+      "description": "One split's efficiency verdicts. `tokens` reads total tokens per run.",
+      "properties": {
+        "cost": {
+          "$ref": "#/$defs/CostVerdict"
+        },
+        "duration": {
+          "$ref": "#/$defs/DurationVerdict"
+        },
+        "tokens": {
+          "$ref": "#/$defs/TokenVerdict"
+        }
+      },
+      "required": [
+        "cost",
+        "duration",
+        "tokens"
       ],
       "type": "object"
     },
@@ -649,6 +1017,123 @@
       ],
       "type": "object"
     },
+    "TokenVerdict": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "fewer_tokens",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "more_tokens",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "within_tolerance",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "increased",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShiftComparison"
+            }
+          ],
+          "properties": {
+            "status": {
+              "const": "indistinguishable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/UnmeasuredReason"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "no_runs",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ToolCallCount": {
       "description": "How many tool calls a run, or one tool within it, made.",
       "format": "uint64",
@@ -693,6 +1178,21 @@
         "repeated_calls"
       ],
       "type": "object"
+    },
+    "UnmeasuredReason": {
+      "description": "Why a metric with runs behind it on both sides still has no verdict.",
+      "oneOf": [
+        {
+          "const": "too_few_readings",
+          "description": "One side reported this metric on fewer runs than the per-run shift needs.",
+          "type": "string"
+        },
+        {
+          "const": "not_every_run_priced",
+          "description": "At least one run on one side carried no price, so its arm has no per-run cost to\ncompare without reading the unpriced runs as free.",
+          "type": "string"
+        }
+      ]
     }
   },
   "$id": "https://trogonstack.dev/schemas/trg/iteration-summary.json.schema.json",

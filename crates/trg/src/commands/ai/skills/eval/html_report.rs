@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::html_report::write_html_report;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
@@ -13,12 +13,12 @@ use super::{print_json, print_report_dir};
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval html-report ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval html-report --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval html-report /absolute/path/to/report --output-format json
+  $ trg ai skills eval html-report --report-dir /absolute/path/to/report --output-format json
 ")]
 pub struct HtmlReportArgs {
-    #[arg(help = "Path to the report directory containing report.json")]
+    #[arg(long, help = "Path to the report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

@@ -2,4 +2,4 @@
 #MISE description = "Generate JSON schemas from the trg Rust structs"
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
-cargo run -p trg --bin generate-schemas
+cargo run --locked -p trg --bin generate-schemas

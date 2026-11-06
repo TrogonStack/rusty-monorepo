@@ -136,7 +136,7 @@ you re-run within the same second with identical entropy.
 No `grading.json` found under the workspace.
 
 ```shell
-$ trg ai skills eval verify ./runs/run-001/workspace
+$ trg ai skills eval verify --workspace-dir ./runs/run-001/workspace
 Bundle verified
   grading files: 0
   timing files: 1
@@ -145,7 +145,7 @@ Bundle verified
 
 **Fix:**
 
-- Grade the bundle: `trg ai skills eval grade <report-dir>`, or add `--grade` to
+- Grade the bundle: `trg ai skills eval grade --report-dir <report-dir>`, or add `--grade` to
   `eval run` so grading happens in the same invocation.
 - If the suite declares no graders, nothing can be graded. Add at least
   one grader to each eval case.
@@ -160,7 +160,7 @@ against a missing output fails. That looks the same as a skill that ran and got
 every answer wrong, so `grade` names the run dispositions behind the tally:
 
 ```shell
-$ trg ai skills eval grade ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
+$ trg ai skills eval grade --report-dir ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 ./artifacts/my-skill/20260526T120000Z-a1b2c3d4
 Graded 2 run(s)
   assertions: 0/4 passed
@@ -175,7 +175,7 @@ skill.
 ### `must contain at least one grading.json` (strict mode)
 
 ```shell
-$ trg ai skills eval verify ./workspace --mode strict
+$ trg ai skills eval verify --workspace-dir ./workspace --mode strict
 Bundle verification failed: workspace '...' must contain at least one grading.json
 ```
 

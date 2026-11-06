@@ -6,6 +6,7 @@ use trg::commands::exec::{ExecCommands, PreparedLaunch};
 use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
+use trg::exit_code::ExitCode;
 use trg::secrets::{vars, CredentialPathError, Registry, ServerBackendError, VarFetchError};
 
 #[derive(Debug, thiserror::Error)]
@@ -88,13 +89,33 @@ async fn wire_exec(name: &str) -> Result<config::LoadedExec, Box<WireError>> {
 /// `trg exec run` replaces the process, which can only happen once the root
 /// span has ended and been exported.
 enum Outcome {
-    Exit(i32),
+    Exit(ExitCode),
     Exec(PreparedLaunch),
 }
 
-#[tokio::main]
-async fn main() {
+/// A proxy forwards one stdio session for as long as its host keeps it open,
+/// so a worker per core would sit idle for the life of every MCP server an
+/// editor starts.
+fn runtime_for(command: &Commands) -> tokio::runtime::Builder {
+    match command {
+        Commands::Mcp {
+            command: McpCommands::Proxy(_),
+        } => tokio::runtime::Builder::new_current_thread(),
+        _ => tokio::runtime::Builder::new_multi_thread(),
+    }
+}
+
+fn main() -> std::process::ExitCode {
     let (cli, command_identity) = Cli::parse_with_command_identity();
+    let runtime = runtime_for(&cli.command).enable_all().build().expect("a tokio runtime");
+    let code = runtime.block_on(run(cli, command_identity));
+    // A blocking task still parked on I/O, such as an OAuth callback listener,
+    // would keep a plain drop of the runtime waiting forever.
+    runtime.shutdown_background();
+    code.into()
+}
+
+async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> ExitCode {
     let telemetry = trg::telemetry::init(command_identity);
     let root_span = telemetry.root_span();
 
@@ -113,14 +134,14 @@ async fn main() {
                 Ok(registry) => command.handle(&registry).await,
                 Err(e) => {
                     eprintln!("{e}");
-                    1
+                    ExitCode::Failed
                 }
             }),
             Commands::Doctor(args) => Outcome::Exit(match wire_secrets() {
                 Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
                 Err(e) => {
                     eprintln!("{e}");
-                    1
+                    ExitCode::Failed
                 }
             }),
             Commands::Exec { command } => match command {
@@ -128,7 +149,7 @@ async fn main() {
                     Ok(loaded) => Outcome::Exec(trg::commands::exec::run(loaded, &args)),
                     Err(e) => {
                         eprintln!("{e}");
-                        Outcome::Exit(1)
+                        Outcome::Exit(ExitCode::Failed)
                     }
                 },
                 ExecCommands::List(args) => Outcome::Exit(trg::commands::exec::list(&args)),
@@ -139,12 +160,11 @@ async fn main() {
     .await;
 
     trg::agentskills::runner::group::yield_to_termination();
-    let exit_code = match outcome {
+    match outcome {
         Outcome::Exit(code) => {
             telemetry.shutdown(code);
             code
         }
         Outcome::Exec(launch) => launch.exec(telemetry),
-    };
-    std::process::exit(exit_code);
+    }
 }

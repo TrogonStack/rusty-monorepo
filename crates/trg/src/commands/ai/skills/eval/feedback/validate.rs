@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::feedback::validate_feedback;
 use crate::agentskills::report::sync_human_feedback;
 use crate::commands::ai::skills::eval::print_json;
+use crate::exit_code::ExitCode;
 use crate::output::OutputFormat;
 use clap::Args;
 use serde_json::json;
@@ -12,12 +12,12 @@ use serde_json::json;
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval feedback validate ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval feedback validate --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval feedback validate ./report
+  $ trg ai skills eval feedback validate --report-dir ./report
 ")]
 pub struct FeedbackValidateArgs {
-    #[arg(help = "Path to a generated eval report directory containing report.json")]
+    #[arg(long, help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

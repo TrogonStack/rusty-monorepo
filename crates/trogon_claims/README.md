@@ -65,7 +65,9 @@ and `RoleClaimType::new(WellKnownClaim::Roles.into())`. A service using the .NET
 vocabulary can explicitly choose `WsName` and `WsRole`. Each selector chooses
 one claim type: selecting `PreferredUsername` does not fall back to `Sub`, and
 selecting `Roles` does not also use `Groups`. A missing or non-text selected name
-returns `None`; only textual selected role assertions can match a role query.
+returns `None`. Selected role assertions can be repeated non-empty text or one
+flat list of non-empty text. Malformed or partially projected collections never
+match a role query.
 Neither query falls back to another claim type. The authentication
 key remains issuer plus subject, independently of the selected principal name.
 

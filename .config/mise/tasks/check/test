@@ -2,5 +2,5 @@
 #MISE description = "Run workspace unit, integration and documentation tests"
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
-cargo test --workspace --lib --tests
-cargo test --workspace --doc
+cargo test --locked --workspace --lib --tests
+cargo test --locked --workspace --doc

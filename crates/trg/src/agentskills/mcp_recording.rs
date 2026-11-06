@@ -969,10 +969,11 @@ done
             format!(
                 "#!/bin/sh
 sleep 100 &
-echo $! > {}
+echo $! > {pidfile}.tmp
+mv {pidfile}.tmp {pidfile}
 wait
 ",
-                pidfile.display()
+                pidfile = pidfile.display()
             ),
         )
         .unwrap();

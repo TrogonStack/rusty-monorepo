@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::agentskills::evals::{check_eval_suite, write_eval_manifest_scaffold, EvalCheckOptions, EvalDirName};
-use crate::agentskills::exit_code::ExitCode;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(init_status, ExitCode::Success);
 
         let verify_status = VerifyArgs {
-            workspace: None,
+            workspace_dir: None,
             skill_dir: Some(skill_dir),
             eval_dir: None,
             mode: VerifyMode::Strict,

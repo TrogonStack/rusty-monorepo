@@ -582,11 +582,11 @@ pub fn materialize_mock_set(
                     "skills".to_string(),
                     "eval".to_string(),
                     "mock-server".to_string(),
-                    "--mocks".to_string(),
+                    "--mocks-dir".to_string(),
                     server_dir.to_string_lossy().into_owned(),
                     "--server".to_string(),
                     server.to_string(),
-                    "--calls".to_string(),
+                    "--calls-file".to_string(),
                     calls_path.to_string_lossy().into_owned(),
                 ],
                 env: BTreeMap::new(),
@@ -1579,7 +1579,7 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        for flag in ["--mocks", "--calls"] {
+        for flag in ["--mocks-dir", "--calls-file"] {
             let position = args.iter().position(|arg| arg == flag).expect("the flag is written");
             let value = Path::new(&args[position + 1]);
             assert!(
@@ -1691,11 +1691,11 @@ mod tests {
                 "skills",
                 "eval",
                 "mock-server",
-                "--mocks",
+                "--mocks-dir",
                 run_dir.join("mcp-mocks/github").to_string_lossy().as_ref(),
                 "--server",
                 "github",
-                "--calls",
+                "--calls-file",
                 run_dir.join(MOCK_CALLS_LOG_NAME).to_string_lossy().as_ref(),
             ]
         );
@@ -1796,7 +1796,7 @@ mod tests {
             .iter()
             .map(|arg| arg.as_str().unwrap())
             .collect();
-        let mocks_position = args.iter().position(|arg| *arg == "--mocks").unwrap();
+        let mocks_position = args.iter().position(|arg| *arg == "--mocks-dir").unwrap();
         assert_eq!(
             Path::new(args[mocks_position + 1]),
             run_dir.canonicalize().unwrap().join("mcp-mocks/github")

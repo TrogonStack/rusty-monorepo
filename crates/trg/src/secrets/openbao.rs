@@ -261,6 +261,27 @@ pub enum OpenBaoBuildError {
     Segment { field: &'static str, value: String },
 }
 
+impl OpenBaoBuildError {
+    /// Whether the failure comes from this machine rather than from the
+    /// config, so that another machine with the same config would build.
+    ///
+    /// A `ca_cert_file` this host cannot open is the one such case. A file
+    /// that was read but is not a usable certificate is wrong wherever it is
+    /// read, and so is every malformed or unsafe value. A client that cannot be
+    /// constructed is left as a stop because nothing says it is host-specific.
+    pub fn is_machine_local(&self) -> bool {
+        match self {
+            Self::CaCertRead { .. } => true,
+            Self::Scheme(_)
+            | Self::Insecure(_)
+            | Self::CaCertParse { .. }
+            | Self::CaCertEmpty { .. }
+            | Self::Client(_)
+            | Self::Segment { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct OpenBaoBackend {
     client: reqwest::Client,

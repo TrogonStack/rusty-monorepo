@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::grader_agreement::{
     build_grader_agreement_document, write_grader_agreement, AgreementBucket, AgreementThreshold,
     GraderAgreementDocument,
 };
 use crate::agentskills::grading::telemetry::{phase_span, record_error};
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
@@ -19,14 +19,14 @@ const GATE_FAILED: &str = "gate_failed";
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval grader-agreement ./report
+  $ trg ai skills eval grader-agreement --report-dir ./report
 
-  $ trg ai skills eval grader-agreement ./report --output-format json
+  $ trg ai skills eval grader-agreement --report-dir ./report --output-format json
 
-  $ trg ai skills eval grader-agreement ./report --min-agreement 0.9
+  $ trg ai skills eval grader-agreement --report-dir ./report --min-agreement 0.9
 ")]
 pub struct GraderAgreementArgs {
-    #[arg(help = "Path to a generated eval report directory containing report.json")]
+    #[arg(long, help = "Path to a generated eval report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

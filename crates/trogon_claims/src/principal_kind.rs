@@ -10,6 +10,7 @@ string_value_object!(PrincipalKind, ValueKind::PrincipalKind, validate_principal
 impl PrincipalKind {
     #[doc(hidden)]
     pub const fn from_static_unchecked(value: &'static str) -> Self {
+        assert!(validate_principal_kind(value).is_ok(), "invalid principal kind literal");
         Self(Cow::Borrowed(value))
     }
 }

@@ -189,7 +189,7 @@ not the skill.
 For per-assertion rates with the attempt counts behind them:
 
 ```shell
-$ trg ai skills eval iteration-summary ./artifacts/my-skill/20260914T120000Z-abcd1234
+$ trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/20260914T120000Z-abcd1234
 ```
 
 ## 9. Repair what measured nothing

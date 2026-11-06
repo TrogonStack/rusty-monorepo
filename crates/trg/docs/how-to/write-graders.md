@@ -107,7 +107,7 @@ time.
 
 ## How grading consumes graders
 
-`trg ai skills eval grade <report-dir>` (or `eval run --grade`) writes one
+`trg ai skills eval grade --report-dir <report-dir>` (or `eval run --grade`) writes one
 `grading.json` per run, with one entry per grader:
 
 ```json
@@ -126,7 +126,7 @@ result.
 Verify a graded bundle with:
 
 ```shell
-trg ai skills eval verify ./runs/run-001/workspace --mode strict
+trg ai skills eval verify --workspace-dir ./runs/run-001/workspace --mode strict
 ```
 
 ## Validation rules

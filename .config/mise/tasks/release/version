@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Validate a trg release tag and print its version"
+set -euo pipefail
+
+tag="${1:?usage: release:version <trg@vX.Y.Z>}"
+
+if ! [[ "$tag" =~ ^trg@v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+  echo "not a trg release tag: $tag" >&2
+  exit 1
+fi
+
+echo "${tag#trg@v}"

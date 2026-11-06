@@ -6,6 +6,11 @@
 //! scaffold the checker rejects, or a bundle no schema describes, would otherwise
 //! only be found by whoever ran a real suite next.
 
+#![expect(
+    clippy::unwrap_used,
+    reason = "an integration test is test code end to end, so a failed setup step should fail the test"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -95,7 +100,7 @@ fn a_pass_with_no_runner_still_writes_a_bundle_verify_can_read() {
     assert!(report_dir.join("report.json").is_file());
 
     trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .assert()
         .success();
@@ -120,7 +125,7 @@ fn exporting_a_bundle_with_no_trace_exporter_sends_nothing_and_says_so() {
         export.env_remove(var);
     }
     let output = export
-        .args(["ai", "skills", "eval", "export"])
+        .args(["ai", "skills", "eval", "export", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -152,7 +157,7 @@ fn a_bundle_that_no_schema_describes_is_reported_even_when_the_suite_scored_noth
     fs::write(&report_path, serde_json::to_string(&report).unwrap()).unwrap();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .args(["--mode", "strict"])
         .output()
@@ -180,7 +185,7 @@ fn a_bundle_that_was_never_graded_is_told_that_and_not_something_else() {
     let report_dir = scaffold_bundle(&skill_dir, &temp.path().join("artifacts"));
 
     let output = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .args(["--mode", "strict"])
         .output()
@@ -236,17 +241,17 @@ fn a_stage_handed_a_bundle_that_does_not_exist_reports_a_broken_tool_and_not_a_f
     let missing = temp.path().join("no-such-bundle");
 
     for stage in [
-        vec!["verify"],
-        vec!["grade"],
-        vec!["benchmark"],
-        vec!["iteration-summary"],
-        vec!["compare"],
-        vec!["next-iteration"],
-        vec!["html-report"],
-        vec!["export"],
-        vec!["feedback", "init"],
-        vec!["feedback", "list"],
-        vec!["feedback", "validate"],
+        vec!["verify", "--workspace-dir"],
+        vec!["grade", "--report-dir"],
+        vec!["benchmark", "--report-dir"],
+        vec!["iteration-summary", "--report-dir"],
+        vec!["compare", "--report-dir"],
+        vec!["next-iteration", "--report-dir"],
+        vec!["html-report", "--report-dir"],
+        vec!["export", "--report-dir"],
+        vec!["feedback", "init", "--report-dir"],
+        vec!["feedback", "list", "--report-dir"],
+        vec!["feedback", "validate", "--report-dir"],
     ] {
         let output = trg()
             .args(["ai", "skills", "eval"])
@@ -327,7 +332,7 @@ fn a_failed_gate_and_a_broken_tool_do_not_share_a_code() {
         .unwrap();
 
     let broken = trg()
-        .args(["ai", "skills", "eval", "grade"])
+        .args(["ai", "skills", "eval", "grade", "--report-dir"])
         .arg(temp.path().join("no-such-bundle"))
         .output()
         .unwrap();
@@ -351,7 +356,7 @@ fn a_workspace_that_is_not_a_directory_reports_a_broken_tool_and_says_which_reas
     let a_file = temp.path().join("report.json");
     fs::write(&a_file, "{}").unwrap();
     let on_a_file = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&a_file)
         .output()
         .unwrap();
@@ -364,7 +369,7 @@ fn a_workspace_that_is_not_a_directory_reports_a_broken_tool_and_says_which_reas
     );
 
     let missing = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(temp.path().join("no-such-bundle"))
         .output()
         .unwrap();
@@ -390,7 +395,7 @@ fn a_grading_artifact_that_cannot_be_parsed_reports_a_broken_tool_and_not_a_fail
     fs::write(report_dir.join("grading.json"), "not json at all").unwrap();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "verify"])
+        .args(["ai", "skills", "eval", "verify", "--workspace-dir"])
         .arg(&report_dir)
         .output()
         .unwrap();
@@ -484,9 +489,9 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
 
     let ungated = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&previous_dir)
         .output()
         .unwrap();
@@ -498,9 +503,9 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     );
 
     let gated = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&previous_dir)
         .args(["--fail-on", "revert"])
         .output()
@@ -513,9 +518,9 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     );
 
     let gated_on_the_other_condition = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&previous_dir)
         .args(["--fail-on", "overfitting"])
         .output()
@@ -528,10 +533,145 @@ fn fail_on_revert_gates_iteration_summary_on_a_regressed_test_split() {
     );
 }
 
-/// A `--previous` the caller named but that cannot be read is a broken tool invocation, not
+fn write_priced_timings(report_dir: &Path, runs: &[(String, &str, &str, bool)], duration_ms: u64, usd: f64) {
+    for (index, (id, _, _, _)) in runs.iter().enumerate() {
+        fs::write(
+            report_dir.join(format!("runs/{id}/timing.json")),
+            format!(
+                r#"{{"duration_ms":{},"total_tokens":1000,"cost":{{"kind":"priced","usd":{usd}}}}}"#,
+                duration_ms + index as u64 * 10
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// A change that holds its pass rate but costs three times as much per run is a `keep` by
+/// every pass-rate rule, so only the efficiency gates can stop it, and only when asked to
+/// or when the increase is past what the operator said they would pay.
+#[test]
+fn fail_on_cost_and_latency_regressions_gates_a_change_that_holds_its_pass_rate() {
+    let temp = tempfile::tempdir().unwrap();
+    let previous_dir = temp.path().join("report-iter-1");
+    let current_dir = temp.path().join("report-iter-2");
+
+    let previous_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("prev-{i}"), "case-a", "test", true)).collect();
+    let current_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("cur-{i}"), "case-a", "test", true)).collect();
+
+    write_iteration_report(&previous_dir, 1, "report-iter-1", &previous_runs);
+    write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
+    write_priced_timings(&previous_dir, &previous_runs, 1000, 0.10);
+    write_priced_timings(&current_dir, &current_runs, 1000, 0.30);
+
+    let summarize = |extra: &[&str]| {
+        trg()
+            .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
+            .arg(&current_dir)
+            .arg("--previous-report-dir")
+            .arg(&previous_dir)
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let ungated = summarize(&[]);
+    assert_eq!(ungated.status.code(), Some(0), "got {}", stderr_of(&ungated));
+
+    let cost_gated = summarize(&["--fail-on", "cost_regression"]);
+    assert_eq!(cost_gated.status.code(), Some(1), "got {}", stderr_of(&cost_gated));
+    assert!(
+        stderr_of(&cost_gated).contains("cost regressed on the test split"),
+        "expected the gate to name the metric and split, got {}",
+        stderr_of(&cost_gated)
+    );
+
+    let latency_gated = summarize(&["--fail-on", "latency_regression,token_regression"]);
+    assert_eq!(
+        latency_gated.status.code(),
+        Some(0),
+        "the runs took as long and spent as many tokens as before, got {}",
+        stderr_of(&latency_gated)
+    );
+
+    let tolerated = summarize(&[
+        "--fail-on",
+        "cost_regression",
+        "--max-cost-increase",
+        "3",
+        "--output-format",
+        "json",
+    ]);
+    assert_eq!(
+        tolerated.status.code(),
+        Some(0),
+        "a 200% increase is inside a 300% allowance, got {}",
+        stderr_of(&tolerated)
+    );
+    let document: serde_json::Value = serde_json::from_slice(&tolerated.stdout).unwrap();
+    assert_eq!(
+        document["keep_or_revert"]["efficiency"]["by_split"]["test"]["cost"]["status"], "within_tolerance",
+        "the increase is real and its whole interval sits inside the allowance, so it is named as one even though it does not gate"
+    );
+
+    let refused = summarize(&["--max-cost-increase", "-0.1"]);
+    assert_eq!(refused.status.code(), Some(2), "got {}", stderr_of(&refused));
+}
+
+/// An increase the runs cannot place on either side of the allowance is named, so a reader
+/// knows to draw more runs, but only an increase shown to pass the allowance gates.
+#[test]
+fn an_increase_that_may_pass_the_allowance_is_named_without_gating() {
+    let temp = tempfile::tempdir().unwrap();
+    let previous_dir = temp.path().join("report-iter-1");
+    let current_dir = temp.path().join("report-iter-2");
+
+    let previous_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("prev-{i}"), "case-a", "test", true)).collect();
+    let current_runs: Vec<(String, &str, &str, bool)> =
+        (0..6).map(|i| (format!("cur-{i}"), "case-a", "test", true)).collect();
+
+    write_iteration_report(&previous_dir, 1, "report-iter-1", &previous_runs);
+    write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
+    write_priced_timings(&previous_dir, &previous_runs, 1000, 0.10);
+    for (index, (id, _, _, _)) in current_runs.iter().enumerate() {
+        let usd = 0.11 + index as f64 / 100.0;
+        fs::write(
+            current_dir.join(format!("runs/{id}/timing.json")),
+            format!(r#"{{"duration_ms":1000,"total_tokens":1000,"cost":{{"kind":"priced","usd":{usd}}}}}"#),
+        )
+        .unwrap();
+    }
+
+    let summarize = |extra: &[&str]| {
+        trg()
+            .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
+            .arg(&current_dir)
+            .arg("--previous-report-dir")
+            .arg(&previous_dir)
+            .args(["--fail-on", "cost_regression", "--output-format", "json"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let strict = summarize(&[]);
+    assert_eq!(strict.status.code(), Some(1), "got {}", stderr_of(&strict));
+
+    let unplaced = summarize(&["--max-cost-increase", "0.3"]);
+    assert_eq!(unplaced.status.code(), Some(0), "got {}", stderr_of(&unplaced));
+    let document: serde_json::Value = serde_json::from_slice(&unplaced.stdout).unwrap();
+    let cost = &document["keep_or_revert"]["efficiency"]["by_split"]["test"]["cost"];
+    assert_eq!(cost["status"], "increased", "{cost}");
+    assert!(cost["shift"]["interval"]["low"].as_f64().unwrap() > 0.0, "{cost}");
+    assert!(cost["shift"]["interval"]["high"].as_f64().unwrap() > 0.03, "{cost}");
+}
+
+/// A `--previous-report-dir` the caller named but that cannot be read is a broken tool invocation, not
 /// silence about there being nothing to compare against: it has to fail closed at the same
 /// exit code every other unreadable-bundle path in this walk reports, not the clean exit a
-/// first iteration with no `--previous` at all gets.
+/// first iteration with no `--previous-report-dir` at all gets.
 #[test]
 fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     let temp = tempfile::tempdir().unwrap();
@@ -543,29 +683,29 @@ fn an_unreadable_previous_report_fails_closed_instead_of_gating_on_nothing() {
     write_iteration_report(&current_dir, 2, "report-iter-2", &current_runs);
 
     let named_but_unreadable = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
-        .arg("--previous")
+        .arg("--previous-report-dir")
         .arg(&missing_previous)
         .output()
         .unwrap();
     assert_eq!(
         named_but_unreadable.status.code(),
         Some(3),
-        "a named --previous that cannot be read must fail closed, got {:?} and {}",
+        "a named --previous-report-dir that cannot be read must fail closed, got {:?} and {}",
         named_but_unreadable.status.code(),
         stderr_of(&named_but_unreadable)
     );
 
     let none_named = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&current_dir)
         .output()
         .unwrap();
     assert_eq!(
         none_named.status.code(),
         Some(0),
-        "no --previous at all has nothing to compare against, and that is fine, got {}",
+        "no --previous-report-dir at all has nothing to compare against, and that is fine, got {}",
         stderr_of(&none_named)
     );
 }
@@ -587,7 +727,7 @@ fn withhold_test_detail_removes_the_held_out_case_id_from_the_json_output() {
     write_iteration_report(&report_dir, 1, "report-iter-1", &runs);
 
     let leaky = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -600,7 +740,7 @@ fn withhold_test_detail_removes_the_held_out_case_id_from_the_json_output() {
     );
 
     let withheld = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .arg("--withhold-test-detail")
@@ -630,7 +770,7 @@ fn next_iteration_reports_no_test_cases_and_nudges_toward_declaring_one() {
     let report_dir = scaffold_bundle(&skill_dir, &temp.path().join("artifacts"));
 
     let output = trg()
-        .args(["ai", "skills", "eval", "next-iteration"])
+        .args(["ai", "skills", "eval", "next-iteration", "--report-dir"])
         .arg(&report_dir)
         .args(["--skill-dir"])
         .arg(&skill_dir)
@@ -660,7 +800,7 @@ fn benchmark_and_iteration_summary_warn_when_the_with_skill_arm_has_no_headroom_
     write_iteration_report(&report_dir, 1, "report-a", &runs);
 
     let benchmark_text = trg()
-        .args(["ai", "skills", "eval", "benchmark"])
+        .args(["ai", "skills", "eval", "benchmark", "--report-dir"])
         .arg(&report_dir)
         .output()
         .unwrap();
@@ -677,7 +817,7 @@ fn benchmark_and_iteration_summary_warn_when_the_with_skill_arm_has_no_headroom_
     );
 
     let benchmark_json = trg()
-        .args(["ai", "skills", "eval", "benchmark"])
+        .args(["ai", "skills", "eval", "benchmark", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -696,7 +836,7 @@ fn benchmark_and_iteration_summary_warn_when_the_with_skill_arm_has_no_headroom_
     );
 
     let summary_text = trg()
-        .args(["ai", "skills", "eval", "iteration-summary"])
+        .args(["ai", "skills", "eval", "iteration-summary", "--report-dir"])
         .arg(&report_dir)
         .output()
         .unwrap();
@@ -718,7 +858,7 @@ fn headroom_threshold_is_configurable_from_the_command_line() {
     write_iteration_report(&report_dir, 1, "report-a", &runs);
 
     let output = trg()
-        .args(["ai", "skills", "eval", "benchmark"])
+        .args(["ai", "skills", "eval", "benchmark", "--report-dir"])
         .arg(&report_dir)
         .args(["--headroom-threshold", "0.999", "--output-format", "json"])
         .output()
@@ -825,7 +965,7 @@ fn feedback_label_then_grader_agreement_walk_the_real_binary() {
     write_agreement_report(&report_dir, "run-001", true);
 
     trg()
-        .args(["ai", "skills", "eval", "feedback", "label"])
+        .args(["ai", "skills", "eval", "feedback", "label", "--report-dir"])
         .arg(&report_dir)
         .args(["--run", "run-001", "--assertion", "case-a:g0"])
         .args(["--verdict", "pass", "--reviewer", "reviewer@example.com"])
@@ -833,7 +973,7 @@ fn feedback_label_then_grader_agreement_walk_the_real_binary() {
         .success();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "grader-agreement"])
+        .args(["ai", "skills", "eval", "grader-agreement", "--report-dir"])
         .arg(&report_dir)
         .args(["--output-format", "json"])
         .output()
@@ -856,7 +996,7 @@ fn a_confidently_wrong_judge_fails_the_min_agreement_gate() {
     write_agreement_report(&report_dir, "run-001", true);
 
     trg()
-        .args(["ai", "skills", "eval", "feedback", "label"])
+        .args(["ai", "skills", "eval", "feedback", "label", "--report-dir"])
         .arg(&report_dir)
         .args(["--run", "run-001", "--assertion", "case-a:g0"])
         .args(["--verdict", "fail", "--reviewer", "reviewer@example.com"])
@@ -864,7 +1004,7 @@ fn a_confidently_wrong_judge_fails_the_min_agreement_gate() {
         .success();
 
     let output = trg()
-        .args(["ai", "skills", "eval", "grader-agreement"])
+        .args(["ai", "skills", "eval", "grader-agreement", "--report-dir"])
         .arg(&report_dir)
         .args(["--min-agreement", "0.5"])
         .output()
@@ -971,8 +1111,9 @@ fn scaling_reads_a_cleared_gain_as_improved_and_gates_on_a_reversed_order() {
     write_scaling_report(&stronger_dir, "report-large-model", "large-model", &stronger_runs);
 
     let ungated = trg()
-        .args(["ai", "skills", "eval", "scaling"])
+        .args(["ai", "skills", "eval", "scaling", "--report-dir"])
         .arg(&weaker_dir)
+        .arg("--report-dir")
         .arg(&stronger_dir)
         .args(["--output-format", "json"])
         .output()
@@ -985,8 +1126,9 @@ fn scaling_reads_a_cleared_gain_as_improved_and_gates_on_a_reversed_order() {
     assert!(stronger_dir.join("scaling.json").is_file());
 
     let ungated_reversed = trg()
-        .args(["ai", "skills", "eval", "scaling"])
+        .args(["ai", "skills", "eval", "scaling", "--report-dir"])
         .arg(&stronger_dir)
+        .arg("--report-dir")
         .arg(&weaker_dir)
         .output()
         .unwrap();
@@ -998,8 +1140,9 @@ fn scaling_reads_a_cleared_gain_as_improved_and_gates_on_a_reversed_order() {
     );
 
     let gated_reversed = trg()
-        .args(["ai", "skills", "eval", "scaling"])
+        .args(["ai", "skills", "eval", "scaling", "--report-dir"])
         .arg(&stronger_dir)
+        .arg("--report-dir")
         .arg(&weaker_dir)
         .arg("--fail-on-regression")
         .output()

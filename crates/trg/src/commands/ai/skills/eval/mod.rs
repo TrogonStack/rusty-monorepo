@@ -26,7 +26,7 @@ use crate::agentskills::ci::{
 };
 use crate::agentskills::eval_telemetry::{record_failure, step_span};
 use crate::agentskills::evals::WorkspaceCheckReport;
-use crate::agentskills::exit_code::ExitCode;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::{Args, Subcommand};
@@ -241,7 +241,7 @@ mod help_tests {
     fn eval_iteration_summary_help_includes_examples() {
         let help = long_help::<IterationSummaryArgs>("iteration-summary", "Summarize assertion stability and outliers");
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
-        assert!(help.contains("--previous"));
+        assert!(help.contains("--previous-report-dir"));
         assert!(help.contains("--output-format"));
     }
 
@@ -323,7 +323,7 @@ mod help_tests {
             "Build an improvement bundle from a prior iteration for skill revision",
         );
         assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
-        assert!(help.contains("--from"));
+        assert!(help.contains("--report-dir"));
         assert!(help.contains("--allow-eval-suite-drift"));
     }
 

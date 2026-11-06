@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use trogon_claims::{
-    AuthenticationType, Claim, ClaimText, ClaimValue, Identity, IdentityBuilder, Issuer, NameClaimType, RoleClaimType,
-    RoleName, WellKnownClaim,
+    AuthenticationType, Claim, ClaimText, ClaimValue, Identity, IdentityBuilder, Issuer, NameClaimType, Principal,
+    RoleClaimType, RoleName, WellKnownClaim,
 };
 
 fn builder(name: WellKnownClaim, role: WellKnownClaim, username: Option<&'static str>) -> IdentityBuilder {
@@ -108,6 +108,107 @@ fn non_text_selected_claims_do_not_trigger_name_or_role_fallback() {
         .as_authenticated()
         .unwrap()
         .is_in_role(&RoleName::try_new("admin").unwrap()));
+}
+
+fn role_identity(selected: WellKnownClaim, values: Vec<ClaimValue>) -> Identity {
+    let mut builder = IdentityBuilder::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::Sub.into()),
+        RoleClaimType::new(selected.into()),
+    )
+    .push(Claim::builder(WellKnownClaim::Iss.into(), ClaimValue::Text(ClaimText::from("issuer"))).build())
+    .push(Claim::builder(WellKnownClaim::Sub.into(), ClaimValue::Text(ClaimText::from("subject"))).build());
+    for value in values {
+        builder = builder.push(Claim::builder(selected.into(), value).build());
+    }
+    builder.try_build().unwrap()
+}
+
+fn text(value: &'static str) -> ClaimValue {
+    ClaimValue::Text(ClaimText::from(value))
+}
+
+fn assert_role_membership(identity: &Identity, role: &str, expected: bool) {
+    let role = RoleName::try_new(role.to_owned()).unwrap();
+    assert_eq!(identity.as_authenticated().unwrap().is_in_role(&role), expected);
+    assert_eq!(Principal::new(identity.clone()).is_in_role(&role), expected);
+}
+
+#[test]
+fn selected_role_lists_match_flat_claims_in_identity_and_principal_queries() {
+    for selected in [WellKnownClaim::Roles, WellKnownClaim::Groups, WellKnownClaim::WsRole] {
+        for values in [
+            vec![text("reader"), text("admin")],
+            vec![ClaimValue::List(vec![text("reader"), text("admin")])],
+        ] {
+            let identity = role_identity(selected, values);
+            assert_role_membership(&identity, "reader", true);
+            assert_role_membership(&identity, "admin", true);
+            assert_role_membership(&identity, "operator", false);
+        }
+    }
+}
+
+#[test]
+fn malformed_role_collections_do_not_grant_partial_membership() {
+    for values in [
+        vec![ClaimValue::List(vec![text("admin"), ClaimValue::Boolean(true)])],
+        vec![ClaimValue::List(vec![text("admin"), text("")])],
+        vec![ClaimValue::List(vec![ClaimValue::List(vec![text("admin")])])],
+        vec![ClaimValue::List(vec![text("admin")]), text("operator")],
+        vec![text("admin"), ClaimValue::Boolean(true)],
+        vec![text("admin"), ClaimValue::List(vec![text("operator")])],
+        vec![text("admin"), text("")],
+        vec![ClaimValue::List(vec![])],
+        vec![],
+    ] {
+        let identity = role_identity(WellKnownClaim::Roles, values);
+        assert_role_membership(&identity, "admin", false);
+        assert_role_membership(&identity, "operator", false);
+    }
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn manually_constructed_role_lists_match_json_ingest_queries() {
+    let manual = role_identity(WellKnownClaim::Roles, vec![ClaimValue::List(vec![text("jwt-admin")])]);
+    let ingested = ingest(WellKnownClaim::Sub, WellKnownClaim::Roles, None);
+    for identity in [manual, ingested] {
+        let roles = identity.as_authenticated().unwrap().claims().standard().roles();
+        assert_eq!(roles.unwrap().unwrap(), vec![RoleName::try_new("jwt-admin").unwrap()]);
+        assert_role_membership(&identity, "jwt-admin", true);
+        assert_role_membership(&identity, "group-admin", false);
+    }
+}
+
+#[cfg(feature = "json")]
+#[test]
+fn malformed_json_role_arrays_do_not_grant_partial_membership() {
+    use trogon_claims::{IngestProfile, RawClaims};
+
+    let profile = IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::Sub.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
+    );
+    for body in [
+        r#"{"iss":"issuer","sub":"subject","roles":["admin",null]}"#,
+        r#"{"iss":"issuer","sub":"subject","roles":["admin",{}]}"#,
+        r#"{"iss":"issuer","sub":"subject","roles":["admin",["admin"]]}"#,
+        r#"{"iss":"issuer","sub":"subject","roles":["admin",true]}"#,
+        r#"{"iss":"issuer","sub":"subject","roles":["admin",""]}"#,
+    ] {
+        let raw = RawClaims::from_slice(body.as_bytes()).unwrap();
+        let identity: Identity = Identity::ingest(&raw, &profile).unwrap().into_identity();
+        assert!(identity
+            .as_authenticated()
+            .unwrap()
+            .claims()
+            .standard()
+            .roles()
+            .is_err());
+        assert_role_membership(&identity, "admin", false);
+    }
 }
 
 #[cfg(feature = "json")]

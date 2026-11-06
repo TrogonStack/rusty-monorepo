@@ -39,14 +39,20 @@ per-invocation flags.
 | `assertions_on_fixed_literals` | deny | compile-time assertions to express more than an obvious property of a fixed literal |
 | `constant_outside_constants_module` | deny | module-level constants to be declared in a `constants` module |
 | `debug_remnants` | deny | diagnostics to be recorded as `tracing` events, not writes to stdout or stderr |
+| `discarded_error_source` | warn | a `Result`'s error to be carried as a source, not replaced without being read |
+| `doc_hidden_access` | deny | another crate's `#[doc(hidden)]` items not to be accessed, unless the crate is listed in `owned_crates` |
 | `error_string_comparison` | deny | error display strings not to drive behavior |
 | `error_type_naming` | deny | types implementing `std::error::Error` to carry an `Error` suffix |
 | `fallible_new` | deny | a constructor named `new` not to panic; return `Result` or rename it `try_new` |
 | `function_local_macro_rules` | deny | `macro_rules!` definitions to live at module scope |
 | `function_local_use` | deny | `use` imports to be declared at module level, not inside a function body |
 | `inline_module_block` | deny | modules to be declared in their own file with `mod foo;` |
+| `iterator_chain_in_for_header` | deny | a `for` loop to iterate a named variable, not a method chain that takes closures |
+| `literal_template_replace` | deny | a literal template to be filled in with `format!`, not `str::replace` |
 | `manual_error_impl` | deny | `std::error::Error` to be implemented with the thiserror derive, not by hand |
+| `multi_module_use` | deny | a `use` statement to import items from one module, with no `::` inside its braces |
 | `new_instead_of_from` | warn | a single-field wrapper's `new` that only wraps its argument to be `From` instead |
+| `options_struct_without_default` | deny | a struct of public fields named `...Options` to implement `Default` |
 | `redundant_module_path` | deny | `#[path]` to be dropped when `mod foo;` already resolves to the same file |
 | `serde_json_macro` | deny | JSON payloads to be built from a `Serialize` type, not an ad-hoc `json!` literal |
 | `serde_json_macro_allow_without_reason` | deny | a technical reason to be stated when suppressing `serde_json_macro` |

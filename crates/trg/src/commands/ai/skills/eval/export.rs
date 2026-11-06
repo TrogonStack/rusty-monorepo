@@ -6,9 +6,9 @@ use serde::Serialize;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::agentskills::eval_suite_drift::load_report_document;
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::replay::{replay, Replay, ReplayOptions, TracedRuns};
 use crate::agentskills::span_reference::SpanReference;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use crate::telemetry::ContentCapture;
@@ -19,12 +19,12 @@ use super::print_json;
 #[command(after_help = "\
 Examples:
 
-  $ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 trg ai skills eval export ./artifacts/my-skill/20260526T120000Z-abc
+  $ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 trg ai skills eval export --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval export ./report --include-traced --output-format json
+  $ trg ai skills eval export --report-dir ./report --include-traced --output-format json
 ")]
 pub struct ExportArgs {
-    #[arg(help = "Path to a report bundle directory containing report.json")]
+    #[arg(long, help = "Path to a report bundle directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(

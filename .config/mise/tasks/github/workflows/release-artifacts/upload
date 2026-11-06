@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description = "Upload release artifacts to GitHub"
+#MISE description = "Upload release artifacts without replacing published assets"
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
-gh release upload "${TAG:?}" artifacts/* --clobber
+gh release upload "${TAG:?}" artifacts/*

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::agentskills::exit_code::ExitCode;
+use crate::exit_code::ExitCode;
 
 pub fn print_report_dir(dir: &Path) {
     println!("{}", dir.display());

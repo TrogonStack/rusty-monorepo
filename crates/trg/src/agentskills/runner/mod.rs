@@ -1290,7 +1290,8 @@ pub fn write_timing_file(timing_path: &Path, outcome: &EvalRunOutcome) -> std::i
         cached_tokens: outcome.tokens.cached_tokens(),
         cost: outcome.cost.clone(),
     };
-    std::fs::write(timing_path, serde_json::to_string_pretty(&body).unwrap())
+    let json = serde_json::to_string_pretty(&body).map_err(std::io::Error::other)?;
+    std::fs::write(timing_path, json)
 }
 
 pub type SkillDigest = BTreeMap<String, String>;

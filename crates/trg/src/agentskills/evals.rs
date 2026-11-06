@@ -1,6 +1,5 @@
 use super::case_env::CaseEnv;
 use super::companion_skills::CompanionSkill;
-use super::exit_code::ExitCode;
 use super::graders::CaseGrader;
 use super::grading::{self, GradingFile};
 use super::model_name::{ModelName, ModelSource};
@@ -12,6 +11,7 @@ use super::system_prompt_appendix::SystemPromptAppendix;
 use super::tool_grant::ToolGrant;
 use super::validation::{ValidationError, ValidationErrors};
 use super::workspace_scaffold::WorkspaceScaffold;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use regex::Regex;
 use schemars::JsonSchema;

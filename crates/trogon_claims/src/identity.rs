@@ -139,10 +139,36 @@ impl AuthenticatedIdentity<DynamicClaims> {
         }
     }
 
+    /// Queries only the selected role claim type. A collection is repeated
+    /// non-empty text or one flat list of non-empty text. Malformed or
+    /// partially projected collections never match.
     pub fn is_in_role(&self, role: &RoleName) -> bool {
-        self.claims
+        if self.claims.unprojected().contains(self.role_claim_type.claim_type()) {
+            return false;
+        }
+        let mut values = self
+            .claims
             .find_all(self.role_claim_type.claim_type())
-            .any(|claim| matches!(claim.value(), ClaimValue::Text(text) if text.as_str() == role.as_str()))
+            .map(Claim::value);
+        let Some(first) = values.next() else {
+            return false;
+        };
+        let match_role = |found: bool, value: &ClaimValue| match value {
+            ClaimValue::Text(text) if !text.as_str().is_empty() => Some(found || text.as_str() == role.as_str()),
+            _ => None,
+        };
+        match first {
+            ClaimValue::List(items) => {
+                if values.next().is_some() {
+                    return false;
+                }
+                items.iter().try_fold(false, match_role).unwrap_or(false)
+            }
+            _ => std::iter::once(first)
+                .chain(values)
+                .try_fold(false, match_role)
+                .unwrap_or(false),
+        }
     }
 }
 

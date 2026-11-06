@@ -83,7 +83,7 @@ For assertion outcomes, grade the bundle and read `benchmark.json`.
 ## 3. Grade both scenarios
 
 ```shell
-$ trg ai skills eval grade ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
+$ trg ai skills eval grade --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 ```
 
 Or add `--grade` to the `eval run` above to do it in the same invocation. Each
@@ -107,7 +107,7 @@ $ jq '.summary' \
 computes the delta between them:
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
+$ trg ai skills eval benchmark --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd
 $ jq '.deltas.with_skill_vs_without_skill' \
     ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd/benchmark.json
 {
@@ -131,7 +131,7 @@ Pass-rate deltas do not capture output quality. `eval compare` puts the two
 outputs in front of a judge under blind labels:
 
 ```shell
-$ trg ai skills eval compare ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd \
+$ trg ai skills eval compare --report-dir ./artifacts/csv-analyzer/20260526T150000Z-aabbccdd \
     --pair with_skill:without_skill \
     --judge llm \
     --judge-model gpt-4o

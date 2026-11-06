@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::commands::mcp::McpContext;
+use crate::exit_code::ExitCode;
 use crate::oauth::{
     ensure_credentials_for, store::OAuthCredentialStore, telemetry::OAuthHttp, EnsureError, EnsureOutcome,
 };
@@ -179,7 +180,7 @@ impl AuthCommands {
         }
     }
 
-    pub async fn handle(self, ctx: &McpContext) -> i32 {
+    pub async fn handle(self, ctx: &McpContext) -> ExitCode {
         match self {
             AuthCommands::Login(args) => match login(args.output_format, ctx).await {
                 Ok(code) => code,
@@ -197,12 +198,12 @@ impl AuthCommands {
     }
 }
 
-fn emit<E: std::fmt::Display>(e: E) -> i32 {
+fn emit<E: std::fmt::Display>(e: E) -> ExitCode {
     eprintln!("{e}");
-    1
+    ExitCode::Failed
 }
 
-async fn login(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError> {
+async fn login(format: OutputFormat, ctx: &McpContext) -> Result<ExitCode, AuthError> {
     let server = ctx.server_name.as_str();
     let where_stored = ctx.backend.describe();
     // No fallback: an explicit login is re-authorizing this machine, so a
@@ -223,7 +224,7 @@ async fn login(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError>
             "backend": where_stored,
             "path": ctx.cred_path.to_string(),
         });
-        return Ok(print_json(&document, 0));
+        return Ok(print_json(&document, ExitCode::Success));
     }
 
     match outcome {
@@ -251,10 +252,10 @@ async fn login(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError>
             );
         }
     }
-    Ok(0)
+    Ok(ExitCode::Success)
 }
 
-async fn status(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError> {
+async fn status(format: OutputFormat, ctx: &McpContext) -> Result<ExitCode, AuthError> {
     let server = ctx.server_name.as_str();
     let store = OAuthCredentialStore::new(
         ctx.backend.clone(),
@@ -266,10 +267,13 @@ async fn status(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError
 
     let Some(stored) = store.load().await? else {
         if format.is_json() {
-            return Ok(print_json(&json!({ "server": server, "stored": false }), 0));
+            return Ok(print_json(
+                &json!({ "server": server, "stored": false }),
+                ExitCode::Success,
+            ));
         }
         println!("No OAuth credentials stored for `{server}`.");
-        return Ok(0);
+        return Ok(ExitCode::Success);
     };
 
     let summary = stored.token_response.as_ref().map(TokenSummary::from_token);
@@ -278,12 +282,12 @@ async fn status(format: OutputFormat, ctx: &McpContext) -> Result<i32, AuthError
     if format.is_json() {
         return Ok(print_json(
             &StoredCredentialsView::from(&stored, summary.as_ref(), read_from.as_ref()),
-            0,
+            ExitCode::Success,
         ));
     }
 
     print_summary(ctx, &stored, summary.as_ref(), read_from.as_ref());
-    Ok(0)
+    Ok(ExitCode::Success)
 }
 
 fn print_summary(
@@ -411,13 +415,13 @@ async fn logout(ctx: &McpContext) -> Result<Option<SecretPath>, AuthError> {
     Ok(store.fallback_is_reachable().await?)
 }
 
-fn cleared(format: OutputFormat, ctx: &McpContext, still_reachable_via: Option<&SecretPath>) -> i32 {
+fn cleared(format: OutputFormat, ctx: &McpContext, still_reachable_via: Option<&SecretPath>) -> ExitCode {
     let removal_command = still_reachable_via.and_then(|shared| ctx.backend.removal_command(shared));
 
     if format.is_json() {
         return print_json(
             &cleared_document(&ctx.server_name, still_reachable_via, removal_command.as_deref()),
-            0,
+            ExitCode::Success,
         );
     }
 
@@ -425,7 +429,7 @@ fn cleared(format: OutputFormat, ctx: &McpContext, still_reachable_via: Option<&
         "{}",
         cleared_message(&ctx.server_name, still_reachable_via, removal_command.as_deref())
     );
-    0
+    ExitCode::Success
 }
 
 /// The JSON shape for `logout`. `cleared: true` alone would claim this

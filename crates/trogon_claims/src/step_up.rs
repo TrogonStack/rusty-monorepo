@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::authentication_context::AuthenticationContext;
 use crate::claim_text::ClaimText;
-use crate::constants::{CHALLENGE_STEP_UP_ERROR, STEP_UP_ERROR_DESCRIPTION};
+use crate::constants::{CHALLENGE_STEP_UP_ERROR, NANOS_PER_SECOND, STEP_UP_ERROR_DESCRIPTION};
 use crate::numeric_date::NumericDate;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -17,11 +17,15 @@ pub enum StepUpRequirementError {
     Empty,
     #[error("an acr value must be a non-empty run of visible ASCII without quotes, backslashes or spaces")]
     InvalidAcrValue,
+    #[error("max age must be a whole number of seconds")]
+    FractionalMaxAge,
 }
 
 /// Required authentication context for a step-up challenge, following
 /// [RFC 9470 §3](https://www.rfc-editor.org/rfc/rfc9470.html#section-3).
 /// Accepted `acr` values and authentication freshness are caller policy.
+/// `max_age` uses whole seconds to match its challenge representation. Freshness
+/// checks preserve timestamp nanoseconds and do not apply implicit clock skew.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepUpRequirement {
     acr_values: Vec<ClaimText>,
@@ -50,6 +54,9 @@ impl StepUpRequirement {
         }
         if !acr_values.iter().all(|value| is_acr_value(value.as_str())) {
             return Err(StepUpRequirementError::InvalidAcrValue);
+        }
+        if max_age.is_some_and(|duration| duration.subsec_nanos() != 0) {
+            return Err(StepUpRequirementError::FractionalMaxAge);
         }
         Ok(Self { acr_values, max_age })
     }
@@ -85,8 +92,10 @@ impl StepUpRequirement {
         let Some(auth_time) = context.auth_time() else {
             return false;
         };
-        let limit = i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX);
-        now.secs().saturating_sub(auth_time.secs()) <= limit
+        let elapsed_nanos = (i128::from(now.secs()) - i128::from(auth_time.secs())) * i128::from(NANOS_PER_SECOND)
+            + i128::from(now.nanos())
+            - i128::from(auth_time.nanos());
+        u128::try_from(elapsed_nanos).is_ok_and(|elapsed| elapsed <= max_age.as_nanos())
     }
 }
 

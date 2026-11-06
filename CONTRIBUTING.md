@@ -28,6 +28,8 @@ For a focused claims change, run `mise run claims:check`. Task implementations
 live under `.config/mise/tasks/`, following
 [ADR 6647967335](https://github.com/straw-hat-team/adr/blob/af44966a0b1fd8422ab3749013a5e3dcac622e02/src/adrs/6647967335/README.md).
 
+The workspace Clippy policy, split across `Cargo.toml` and `clippy.toml`, mirrors `policies/rust/`, the reference copy shared with other repositories. Change them together.
+
 ## Commit Messages
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):

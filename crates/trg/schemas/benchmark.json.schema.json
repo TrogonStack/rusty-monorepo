@@ -592,9 +592,42 @@
             "null"
           ]
         },
+        "cost_usd_per_run_shift": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Shift"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The same per-run shift in USD, published only when both arms priced every run, for\nthe reason `cost_usd` is."
+        },
         "duration_ms_mean": {
           "format": "double",
           "type": "number"
+        },
+        "duration_ms_shift": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Shift"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How much longer a left run takes than a right run, in milliseconds, with its 95%\ninterval. Absent until both arms have at least four timed runs."
+        },
+        "input_tokens_per_run_shift": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Shift"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How many more input tokens a left run reads than a right run, under the same floor."
         },
         "left": {
           "$ref": "#/$defs/ArmObservations"
@@ -623,6 +656,17 @@
             "integer",
             "null"
           ]
+        },
+        "total_tokens_per_run_shift": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Shift"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How many more tokens in all a left run spends than a right run, under the same floor."
         }
       },
       "required": [
@@ -657,6 +701,23 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "Shift": {
+      "description": "The shift between two arms of per-run readings: `estimate` is how far the left arm\nsits from the right one, and `interval` is the 95% range the runs leave around it.",
+      "properties": {
+        "estimate": {
+          "format": "double",
+          "type": "number"
+        },
+        "interval": {
+          "$ref": "#/$defs/Interval"
+        }
+      },
+      "required": [
+        "estimate",
+        "interval"
+      ],
       "type": "object"
     },
     "SkippedBucket": {

@@ -10,6 +10,7 @@ string_value_object!(RelationName, ValueKind::RelationName, validate_relation_na
 impl RelationName {
     #[doc(hidden)]
     pub const fn from_static_unchecked(value: &'static str) -> Self {
+        assert!(validate_relation_name(value).is_ok(), "invalid relation name literal");
         Self(Cow::Borrowed(value))
     }
 }

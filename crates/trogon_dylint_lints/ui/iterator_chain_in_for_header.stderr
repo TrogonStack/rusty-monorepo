@@ -1,0 +1,31 @@
+error: an iterator chain with a closure sits in the header of a `for` loop
+  --> $DIR/iterator_chain_in_for_header.rs:17:16
+   |
+LL |       for bug in descriptions
+   |  ________________^
+LL | |         .iter()
+LL | |         .filter_map(|description| parse(description).ok())
+LL | |         .filter(|bug| bug.priority <= 1)
+   | |________________________________________^
+   |
+   = help: assign the chain to a variable whose name says what it yields, then loop over that variable
+   = note: `#[deny(iterator_chain_in_for_header)]` on by default
+
+error: an iterator chain with a closure sits in the header of a `for` loop
+  --> $DIR/iterator_chain_in_for_header.rs:27:20
+   |
+LL |     for doubled in values.iter().map(|value| value * 2) {
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: assign the chain to a variable whose name says what it yields, then loop over that variable
+
+error: an iterator chain with a closure sits in the header of a `for` loop
+  --> $DIR/iterator_chain_in_for_header.rs:33:27
+   |
+LL |     for (index, value) in values.iter().filter(|value| **value > 1).enumerate() {
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: assign the chain to a variable whose name says what it yields, then loop over that variable
+
+error: aborting due to 3 previous errors
+

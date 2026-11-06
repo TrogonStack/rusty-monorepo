@@ -3,7 +3,7 @@ mod label;
 mod list;
 mod validate;
 
-use crate::agentskills::exit_code::ExitCode;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use clap::{Args, Subcommand};
 

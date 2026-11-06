@@ -10,7 +10,7 @@ use rmcp::{
     transport::{
         async_rw::AsyncRwTransport,
         auth::AuthClient,
-        stdio,
+        stdio_pipes,
         streamable_http_client::{
             StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
         },
@@ -146,7 +146,7 @@ async fn serve(
         Ok(outcome) => outcome,
         Err(e) => {
             error!(server = server_name, error = %e, "ensure_credentials failed");
-            refuse_over_stdio(&e).await;
+            refuse_over_stdio(server_name, &e).await;
             return Err(e.into());
         }
     };
@@ -211,14 +211,14 @@ fn default_http_client() -> Result<reqwest::Client, TransportBuildError> {
 /// Skipped when stdin is a terminal, where there is no host to answer and
 /// waiting for a request that will never be typed would hang a `trg mcp proxy`
 /// run by hand.
-pub async fn refuse_over_stdio(reason: &dyn Display) {
+pub async fn refuse_over_stdio(server_name: &str, reason: &dyn Display) {
     if std::io::stdin().is_terminal() {
         return;
     }
 
     let reason = reason.to_string();
 
-    let (stdin, stdout) = stdio();
+    let (stdin, stdout) = stdio_pipes();
     let mut local = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
 
     while let Some(msg) = local.receive().await {
@@ -228,7 +228,7 @@ pub async fn refuse_over_stdio(reason: &dyn Display) {
             continue;
         };
 
-        if let Err(e) = local.send(refusal(&request, &reason)).await {
+        if let Err(e) = local.send(refusal(server_name, &request, &reason)).await {
             warn!(error = %e, "refusal: local send failed");
             break;
         }
@@ -239,9 +239,9 @@ pub async fn refuse_over_stdio(reason: &dyn Display) {
 
 /// The error answering `request`, recorded as a failed request span under
 /// whatever span is current.
-fn refusal(request: &JsonRpcRequest<ClientRequest>, reason: &str) -> TxJsonRpcMessage<RoleServer> {
+fn refusal(server_name: &str, request: &JsonRpcRequest<ClientRequest>, reason: &str) -> TxJsonRpcMessage<RoleServer> {
     let error = ErrorData::new(ErrorCode::INTERNAL_ERROR, reason.to_string(), None);
-    let connection = Connection::default();
+    let connection = Connection::new(server_name, None);
     RequestSpan::open(
         &request.request,
         &request.id,
@@ -261,7 +261,7 @@ async fn bridge_stdio_to_remote<C>(mut remote: StreamableHttpClientTransport<C>,
 where
     C: StreamableHttpClient + Send + Sync + 'static,
 {
-    let (stdin, stdout) = stdio();
+    let (stdin, stdout) = stdio_pipes();
     let mut local = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
     debug!("bridge: entering loop");
 
@@ -270,7 +270,7 @@ where
             host_msg = local.receive() => {
                 let Some(msg) = host_msg else {
                     debug!("bridge: host stdin closed (EOF)");
-                    let _ = remote.close().await;
+                    close_remote(&mut remote, WORKER_SHUTDOWN_GRACE).await;
                     let _ = local.close().await;
                     return BridgeExit::HostEof;
                 };
@@ -307,8 +307,19 @@ where
 
     // The transport worker holds the session span through its client, and a
     // worker merely dropped can outlive the telemetry flush at exit.
-    let _ = tokio::time::timeout(WORKER_SHUTDOWN_GRACE, remote.close()).await;
+    close_remote(&mut remote, WORKER_SHUTDOWN_GRACE).await;
     exit
+}
+
+/// Closes the remote transport, giving up after `grace`.
+///
+/// rmcp's worker only watches for cancellation between messages, so one that
+/// is still waiting on its first request or on the `initialized` notification
+/// never ends, and awaiting its close without a bound kept the proxy alive
+/// after the host had gone. Giving up drops the transport, which closes the
+/// channels the worker waits on.
+async fn close_remote<T: Transport<RoleClient>>(remote: &mut T, grace: Duration) {
+    let _ = tokio::time::timeout(grace, remote.close()).await;
 }
 
 fn host_receive_to_remote_send(msg: RxJsonRpcMessage<RoleServer>) -> TxJsonRpcMessage<RoleClient> {
@@ -362,7 +373,7 @@ mod tests {
 
         let (answer, trace) = capture(|| {
             let root = tracing::info_span!("trg");
-            root.in_scope(|| refusal(&request, "OAuth: not a terminal"))
+            root.in_scope(|| refusal("weather", &request, "OAuth: not a terminal"))
         });
 
         trace.assert_child_of("initialize", "trg");
@@ -385,5 +396,37 @@ mod tests {
             serde_json::to_value(&answer).expect("serializable")["error"]["message"],
             json!("OAuth: not a terminal")
         );
+    }
+
+    struct NeverCloses;
+
+    impl Transport<RoleClient> for NeverCloses {
+        type Error = std::convert::Infallible;
+
+        fn send(
+            &mut self,
+            _item: TxJsonRpcMessage<RoleClient>,
+        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+            std::future::ready(Ok(()))
+        }
+
+        async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
+            None
+        }
+
+        async fn close(&mut self) -> Result<(), Self::Error> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_that_never_closes_does_not_hold_the_proxy_open() {
+        let closed = tokio::time::timeout(
+            Duration::from_secs(5),
+            close_remote(&mut NeverCloses, Duration::from_millis(20)),
+        )
+        .await;
+
+        assert!(closed.is_ok(), "close_remote must return once the grace has passed");
     }
 }

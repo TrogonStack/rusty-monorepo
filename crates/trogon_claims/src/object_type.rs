@@ -10,6 +10,7 @@ string_value_object!(ObjectType, ValueKind::ObjectType, validate_object_type);
 impl ObjectType {
     #[doc(hidden)]
     pub const fn from_static_unchecked(value: &'static str) -> Self {
+        assert!(validate_object_type(value).is_ok(), "invalid object type literal");
         Self(Cow::Borrowed(value))
     }
 }

@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::grading::{grade_report_bundle, GradeOptions, GradeReport, GraderMode};
 use crate::agentskills::judge::JudgeProvider;
 use crate::agentskills::judge_votes::JudgeVotes;
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
@@ -15,14 +15,14 @@ use super::{print_json, print_report_dir};
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval grade ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval grade --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval grade ./report --grader auto --strict
+  $ trg ai skills eval grade --report-dir ./report --grader auto --strict
 
-  $ trg ai skills eval grade /absolute/path/to/report --grader script --grader-command ./grade.sh
+  $ trg ai skills eval grade --report-dir /absolute/path/to/report --grader script --grader-command ./grade.sh
 ")]
 pub struct GradeArgs {
-    #[arg(help = "Path to a report bundle directory containing report.json")]
+    #[arg(long, help = "Path to a report bundle directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(long, value_enum, default_value_t = GraderMode::Auto, help = "Grading strategy")]

@@ -2,4 +2,4 @@
 #MISE description = "Build every workspace crate in release mode"
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
-cargo build --workspace --release
+cargo build --locked --workspace --release

@@ -18,7 +18,7 @@ allowed() {
 
 direct_dependencies() {
   local tree
-  tree="$(cargo tree -p trogon_claims -e no-dev --depth 1 --prefix none --no-default-features ${1:+--features "$1"})" || return
+  tree="$(cargo tree --locked -p trogon_claims -e no-dev --depth 1 --prefix none --no-default-features ${1:+--features "$1"})" || return
   printf '%s\n' "$tree" | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' '
 }
 
@@ -34,13 +34,13 @@ for feature in "" serde json spicedb axum; do
   fi
 done
 
-all_features="$(cargo tree -p trogon_claims --all-features -e no-dev --prefix none)"
+all_features="$(cargo tree --locked -p trogon_claims --all-features -e no-dev --prefix none)"
 if printf '%s\n' "$all_features" | awk '{print $1}' | grep -qx secrecy; then
   echo "secrecy must not appear in the trogon_claims dependency tree" >&2
   status=1
 fi
 
-syntax_tree="$(cargo tree -p trogon_claims_syntax -e no-dev --depth 1 --prefix none)"
+syntax_tree="$(cargo tree --locked -p trogon_claims_syntax -e no-dev --depth 1 --prefix none)"
 syntax_deps="$(printf '%s\n' "$syntax_tree" | tail -n +2 | wc -l | tr -d ' ')"
 if [ "$syntax_deps" != "0" ]; then
   echo "trogon_claims_syntax must have no dependencies" >&2

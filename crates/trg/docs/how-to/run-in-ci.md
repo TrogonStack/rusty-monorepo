@@ -16,9 +16,9 @@ skill regressions on every pull request.
 | Aggregate `benchmark.json` | yes | `eval benchmark`, or `eval run --benchmark` |
 | Fail on assertion pass rate | yes | `--min-pass-rate`, or `--mode strict` on `verify`. Also fails when nothing was scored |
 | Fail on one case's own score | yes | `--min-case-score`, gates each case independently of the bundle average |
-| Fail on regression against a baseline | yes | `--baseline` plus the `--fail-on-*` flags |
+| Fail on regression against a baseline | yes | `--baseline-report-dir` plus the `--fail-on-*` flags |
 | Compare scenarios qualitatively | yes | `eval compare --judge llm` or `--judge script` |
-| Fail on a held-out regression or suspected overfitting | yes | `eval iteration-summary --previous --fail-on` |
+| Fail on a held-out regression or suspected overfitting | yes | `eval iteration-summary --previous-report-dir --fail-on` |
 
 ## Minimal CI job (validation only)
 
@@ -103,7 +103,7 @@ jobs:
         run: |
           for ws in "$REPORT_DIR"/runs/*/workspace; do
             ./skills/csv-analyzer/evals/grade.sh "$ws" "$(basename "$(dirname "$ws")")"
-            trg ai skills eval verify "$ws" --mode strict
+            trg ai skills eval verify --workspace-dir "$ws" --mode strict
           done
 
       - name: Upload report
@@ -124,7 +124,7 @@ jobs:
 Use `--mode strict` once every run in the bundle is graded:
 
 ```shell
-$ trg ai skills eval verify ./runs/run-001/workspace --mode strict
+$ trg ai skills eval verify --workspace-dir ./runs/run-001/workspace --mode strict
 # exits 1 if the bundle does not conform to the schemas, if any assertion
 # failed, or if grading.json is missing
 ```
@@ -140,7 +140,7 @@ suite did.
 does not need to post-process JSON:
 
 ```shell
-$ trg ai skills eval verify ./runs/run-001/workspace \
+$ trg ai skills eval verify --workspace-dir ./runs/run-001/workspace \
     --min-pass-rate 0.9 \
     --max-tokens 500000 \
     --max-duration-ms 600000
@@ -154,7 +154,7 @@ $ trg ai skills eval verify ./runs/run-001/workspace \
 | `--max-input-tokens N` | input tokens across all runs exceed `N` |
 | `--max-output-tokens N` | output tokens across all runs exceed `N` |
 | `--max-duration-ms MS` | any single run takes longer than `MS` |
-| `--baseline REPORT_DIR` | regression flags below have something to compare against |
+| `--baseline-report-dir REPORT_DIR` | regression flags below have something to compare against |
 
 Regression gates compare the current bundle to a baseline report directory:
 
@@ -192,7 +192,7 @@ output:
 ```yaml
 - name: Read pass rate
   run: |
-    trg ai skills eval verify "$WS" --output-format json \
+    trg ai skills eval verify --workspace-dir "$WS" --output-format json \
       | jq '.check.metrics.pass_rate'
 ```
 
@@ -202,7 +202,7 @@ output:
 it with `eval run --benchmark`, or aggregate an existing bundle afterwards:
 
 ```shell
-$ trg ai skills eval benchmark ./artifacts/csv-analyzer/2026-01-15/report-001
+$ trg ai skills eval benchmark --report-dir ./artifacts/csv-analyzer/2026-01-15/report-001
 ```
 
 ## Keep-or-revert gate
@@ -214,16 +214,22 @@ hillclimb round on whether the change generalized rather than reading the interv
 ```yaml
 - name: Gate on the previous iteration
   run: |
-    trg ai skills eval iteration-summary "$REPORT_DIR" \
-      --previous "$PREVIOUS_REPORT_DIR" \
+    trg ai skills eval iteration-summary --report-dir "$REPORT_DIR" \
+      --previous-report-dir "$PREVIOUS_REPORT_DIR" \
       --fail-on revert,overfitting
 ```
 
 `--fail-on` takes a comma-separated list of recommendations to fail on: `revert` (the test
 split regressed) and `overfitting` (train improved while test did not). It is opt-in and
-gates on nothing by itself, so a first iteration with no `--previous` to compare against
+gates on nothing by itself, so a first iteration with no `--previous-report-dir` to compare against
 always exits `0`. See [Keep-or-revert verdict](../reference/ai-skills-eval.md#keep-or-revert-verdict)
 for the exact rule each recommendation follows.
+
+The recommendation reads pass rates only. To also fail a change that costs more, runs
+longer, or spends more tokens per run than the previous iteration, add
+`cost_regression`, `latency_regression`, or `token_regression`, and set the increase you
+accept with `--max-cost-increase`, `--max-duration-increase`, or `--max-token-increase`.
+See [Gate a change on cost and latency](gate-a-change-on-cost-and-latency.md).
 
 ## Tips
 

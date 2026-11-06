@@ -4,9 +4,9 @@ use crate::agentskills::benchmark::{
     build_benchmark, write_benchmark, BenchmarkDocument, BenchmarkOptions, FailedRunsMode,
 };
 use crate::agentskills::evals::EvalSplit;
-use crate::agentskills::exit_code::ExitCode;
 use crate::agentskills::grading::telemetry::{eval_error_type, phase_span, record_error};
 use crate::agentskills::headroom::{describe_headroom_warning, HeadroomThreshold};
+use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
@@ -17,24 +17,24 @@ use super::print_report_dir;
 #[command(after_help = "\
 Examples:
 
-  $ trg ai skills eval benchmark ./artifacts/my-skill/20260526T120000Z-abc
+  $ trg ai skills eval benchmark --report-dir ./artifacts/my-skill/20260526T120000Z-abc
 
-  $ trg ai skills eval benchmark ./report --failed-runs exclude
+  $ trg ai skills eval benchmark --report-dir ./report --failed-runs exclude
 
-  $ trg ai skills eval benchmark ./report --previous ./artifacts/my-skill/prior-report --output-format json
+  $ trg ai skills eval benchmark --report-dir ./report --previous-report-dir ./artifacts/my-skill/prior-report --output-format json
 
-  $ trg ai skills eval benchmark /absolute/path/to/report
+  $ trg ai skills eval benchmark --report-dir /absolute/path/to/report
 ")]
 pub struct BenchmarkArgs {
-    #[arg(help = "Path to the report directory containing report.json")]
+    #[arg(long, help = "Path to the report directory containing report.json")]
     pub report_dir: PathBuf,
 
     #[arg(
         long,
-        value_name = "DIR",
+        value_name = "REPORT_DIR",
         help = "Previous iteration report directory for cross-iteration drift detection (auto-detected when omitted)"
     )]
-    pub previous: Option<PathBuf>,
+    pub previous_report_dir: Option<PathBuf>,
 
     #[arg(
         long,
@@ -72,7 +72,7 @@ impl BenchmarkArgs {
         let options = BenchmarkOptions {
             failed_runs: self.failed_runs,
             allow_eval_suite_drift: self.allow_eval_suite_drift,
-            previous_report_dir: self.previous,
+            previous_report_dir: self.previous_report_dir,
             headroom_threshold: self.headroom_threshold,
         };
 
@@ -207,8 +207,9 @@ mod tests {
                 "skills",
                 "eval",
                 "benchmark",
+                "--report-dir",
                 current.to_str().unwrap(),
-                "--previous",
+                "--previous-report-dir",
                 previous.to_str().unwrap(),
             ])
             .output()
@@ -236,8 +237,9 @@ mod tests {
                 "skills",
                 "eval",
                 "benchmark",
+                "--report-dir",
                 current.to_str().unwrap(),
-                "--previous",
+                "--previous-report-dir",
                 previous.to_str().unwrap(),
                 "--allow-eval-suite-drift",
                 "--output-format",

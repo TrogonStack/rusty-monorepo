@@ -27,7 +27,7 @@ Point the standard variables at your collector and pass the bundle directory:
 
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-  trg ai skills eval export ./artifacts/csv-analyzer/20260526T120000Z-abc
+  trg ai skills eval export --report-dir ./artifacts/csv-analyzer/20260526T120000Z-abc
 ```
 
 `trg` prints the id of the new trace and how many runs it replayed:
@@ -47,7 +47,7 @@ For a step in a script, ask for JSON and read the span references from it:
 
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-  trg ai skills eval export ./artifacts/csv-analyzer/20260526T120000Z-abc --output-format json
+  trg ai skills eval export --report-dir ./artifacts/csv-analyzer/20260526T120000Z-abc --output-format json
 ```
 
 `outcome` is `exported`, `nothing_to_replay`, or `tracing_off`. The
@@ -93,7 +93,7 @@ duplicates:
 
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
-  trg ai skills eval export ./artifacts/csv-analyzer/20260526T120000Z-abc --include-traced
+  trg ai skills eval export --report-dir ./artifacts/csv-analyzer/20260526T120000Z-abc --include-traced
 ```
 
 If every run and every grade was already traced live and you leave out

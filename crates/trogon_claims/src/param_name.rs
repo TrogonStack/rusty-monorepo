@@ -10,6 +10,7 @@ string_value_object!(ParamName, ValueKind::ParamName, validate_param_name);
 impl ParamName {
     #[doc(hidden)]
     pub const fn from_static_unchecked(value: &'static str) -> Self {
+        assert!(validate_param_name(value).is_ok(), "invalid parameter name literal");
         Self(Cow::Borrowed(value))
     }
 }

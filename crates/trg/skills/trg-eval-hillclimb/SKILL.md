@@ -16,7 +16,7 @@ measured against a suite that cannot discriminate is not measuring anything.
 **Change exactly one thing per round. Keep it only when the test split's
 verdict says `keep`.**
 
-`eval iteration-summary --previous` reports `keep_or_revert.recommendation`:
+`eval iteration-summary --previous-report-dir` reports `keep_or_revert.recommendation`:
 
 | `recommendation` | What it means | What to do |
 | ----------------- | -------------- | ---------- |
@@ -37,11 +37,11 @@ or `script`, none of which are ever gated this way. If any case uses an
 before trusting a single round's recommendation to it:
 
 ```shell
-trg ai skills eval feedback label ./artifacts/my-skill/<report-id> \
+trg ai skills eval feedback label --report-dir ./artifacts/my-skill/<report-id> \
   --run run-001 --assertion case-a:g0 --verdict fail \
   --rationale 'evidence quoted the wrong file'
 
-trg ai skills eval grader-agreement ./artifacts/my-skill/<report-id> --min-agreement 0.9
+trg ai skills eval grader-agreement --report-dir ./artifacts/my-skill/<report-id> --min-agreement 0.9
 ```
 
 `--min-agreement` checks the `llm` bucket's Wilson 95% lower bound
@@ -68,8 +68,8 @@ trg ai skills eval run --skill-dir ./skills/my-skill --out-dir ./artifacts \
 
 Leave `--split` at its default of `all` and `--iteration` unset. A round
 covers the whole suite in a single report bundle: `--iteration` auto-detects
-the next number for that skill's `--out-dir`, and both `--previous` on later
-commands and `--from` on `next-iteration` auto-detect the sibling report
+the next number for that skill's `--out-dir`, and both `--previous-report-dir` on later
+commands and `--report-dir` on `next-iteration` auto-detect the sibling report
 bundle one iteration back by matching that number. Running the train and
 test splits as two separate invocations would give both bundles the same
 iteration number and break that auto-detection for every round after.
@@ -81,7 +81,7 @@ a reason to run it twice.
 ## Step 4: read the train split, and only the train split, while you are still deciding
 
 ```shell
-trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
   --withhold-test-detail
 ```
 
@@ -122,11 +122,11 @@ Continuing to tune the skill against a saturated test split only produces
 ## Step 6: get the verdict
 
 ```shell
-trg ai skills eval iteration-summary ./artifacts/my-skill/<report-id> \
+trg ai skills eval iteration-summary --report-dir ./artifacts/my-skill/<report-id> \
   --withhold-test-detail
 ```
 
-Once there is a previous round to compare against, `--previous` auto-detects
+Once there is a previous round to compare against, `--previous-report-dir` auto-detects
 it and the output carries a `keep_or_revert` section:
 
 ```json
@@ -171,7 +171,7 @@ Either way, build the next round's improvement bundle from this round's
 report before starting the next one:
 
 ```shell
-trg ai skills eval next-iteration --from ./artifacts/my-skill/<report-id>
+trg ai skills eval next-iteration --report-dir ./artifacts/my-skill/<report-id>
 ```
 
 Read `improvement.md` and `improvement.json` for the next candidate change.
@@ -190,7 +190,7 @@ weakest-to-strongest comparison across a few report bundles sharing the same
 suite:
 
 ```shell
-trg ai skills eval scaling ./report-weaker ./report-stronger
+trg ai skills eval scaling --report-dir ./report-weaker --report-dir ./report-stronger
 ```
 
 This is the same keep-or-revert comparison this loop runs, but across
