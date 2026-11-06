@@ -22,7 +22,16 @@
         }
       ]
     },
-    "crates/trogon_dylint_lints": {}
+    "crates/trogon_dylint_lints": {},
+    "crates/trogon_object_id": {
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='trogon_object_id')].version"
+        }
+      ]
+    }
   },
   "plugins": [
     {

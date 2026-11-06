@@ -1,4 +1,5 @@
 {
   "crates/trg": "0.14.2",
-  "crates/trogon_dylint_lints": "0.3.1"
+  "crates/trogon_dylint_lints": "0.3.1",
+  "crates/trogon_object_id": "0.1.0"
 }

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description = "Test object IDs with independent and combined optional features"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+for feature in serde uuid; do
+  cargo test --locked -p trogon_object_id --no-default-features --features "$feature"
+done
+cargo test --locked -p trogon_object_id --all-features
