@@ -49,6 +49,15 @@
           "jsonpath": "$.package[?(@.name.value==='trogon_uuid')].version"
         }
       ]
+    },
+    "crates/trogon_uuid_build": {
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='trogon_uuid_build')].version"
+        }
+      ]
     }
   },
   "plugins": [
