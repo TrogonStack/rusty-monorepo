@@ -2,62 +2,60 @@
 
 Domain-specific prefixed identifiers for Rust, inspired by
 [`trogon_object_id` for Elixir](https://hex.pm/packages/trogon_object_id/0.3.0).
-`ObjectId<UserDomain>` and `ObjectId<OrderDomain>` are distinct types. Declare
-ordinary Rust domain structs and union enums, then derive their supporting
-implementations. The typed core also supports handwritten trait implementations.
+Declare ordinary Rust newtypes and union enums, then derive their supporting
+implementations. Payloads remain actual Rust types: UUID identifiers store a
+`Uuid`, while text identifiers store validated `Text<V>`. The typed core also
+supports domain markers and handwritten trait implementations.
 
 ## Quick start
 
-Enable the `derive` and `uuid` features for derived domains with compact UUID
-payloads:
+Enable the `derive` and `uuid` features for a compact UUID identifier:
 
 ```rust
 # #[cfg(all(feature = "derive", feature = "uuid"))]
 # {
-use trogon_object_id::{ObjectId, ObjectIdDomain, Uuid, Uuid7};
+use trogon_object_id::{ObjectId, Uuid, Uuid7};
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "user", payload = Uuid)]
-pub struct UserDomain;
-
-pub type UserId = ObjectId<UserDomain>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ObjectId)]
+#[object_id(prefix = "user")]
+#[repr(transparent)]
+pub struct UserId(Uuid);
 
 let user = UserId::generate::<Uuid7>()?;
 let encoded = user.to_string();
 let restored: UserId = encoded.parse()?;
 assert_eq!(restored, user);
-let copied = user;
-assert_eq!(copied, user);
 assert_eq!(std::mem::size_of::<UserId>(), 16);
 # }
 # Ok::<(), trogon_object_id::ParseError>(())
 ```
 
-`ObjectIdDomain` implements `Domain` for the unit struct. Its helper attribute
-`#[object_id(...)]` supplies the prefix, separator, and payload type. `prefix`
-excludes the separator, which defaults to `_`; the payload defaults to `Text`.
-The domain struct remains a zero-sized marker. `Clone`, `Copy`, `Debug`, equality,
-ordering, and hashing on an ID depend only on its payload's traits. UUID IDs
-store a `uuid::Uuid` directly and are `Copy`.
+`ObjectId` adds checked constructors, parsing, formatting, payload access and
+optional Serde implementations. The payload field is private, and
+`#[repr(transparent)]` makes its layout explicit. Standard value derives such
+as `Debug`, `Clone`, `Copy`, equality and hashing remain ordinary Rust derives.
 
-For spelling-preserving text, choose `Text` or `Text<Validator>`:
+The helper attribute `#[object_id(...)]` supplies the prefix and optional
+separator. `prefix` excludes the separator, which defaults to `_`. The payload
+type is inferred from the tuple field, so it is not repeated in the attribute.
+
+For spelling-preserving text, use `Text` or `Text<Validator>`:
 
 ```rust
 # #[cfg(feature = "derive")]
 # {
-use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, Text};
+use trogon_object_id::{validators::Integer, ObjectId, Text};
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "invoice", separator = ":", payload = Text<Integer>)]
-struct InvoiceDomain;
-
-type InvoiceId = ObjectId<InvoiceDomain>;
+#[derive(ObjectId)]
+#[object_id(prefix = "invoice", separator = ":")]
+#[repr(transparent)]
+struct InvoiceId(Text<Integer>);
 
 let raw = String::from("+00042");
 let original_buffer = raw.as_ptr();
 let invoice = InvoiceId::try_from_owned(raw)?;
 assert_eq!(invoice.as_raw(), "+00042");
-assert_eq!(invoice.as_str().as_ptr(), original_buffer);
+assert_eq!(invoice.as_raw().as_ptr(), original_buffer);
 assert_eq!(invoice.to_string(), "invoice:+00042");
 # }
 # Ok::<(), trogon_object_id::ParseError>(())
@@ -73,18 +71,17 @@ explicit on the enum:
 ```rust
 # #[cfg(feature = "derive")]
 # {
-use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
+use trogon_object_id::{ObjectId, ObjectIdUnion, Text};
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "user")]
-struct UserDomain;
+#[repr(transparent)]
+struct UserId(Text);
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "service")]
-struct ServiceDomain;
-
-type UserId = ObjectId<UserDomain>;
-type ServiceId = ObjectId<ServiceDomain>;
+#[repr(transparent)]
+struct ServiceId(Text);
 
 #[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
 enum PrincipalId {
@@ -108,7 +105,7 @@ retained.
 
 Domain definitions require an ASCII letter followed by ASCII letters, digits,
 `_`, or `-`, with at most 64 bytes in the prefix. Separators contain between 1
-and 4 ASCII punctuation characters. `ObjectIdDomain` checks these constraints
+and 4 ASCII punctuation characters. Both identifier derives check these constraints
 during compilation, even when the domain is unused.
 
 `ObjectIdUnion` rejects duplicate or overlapping complete prefixes during
@@ -164,8 +161,8 @@ Errors describe the failed constraint without retaining or displaying the input.
 
 ## JSON
 
-Enable `serde` to serialize and deserialize generic IDs and derived unions as
-full strings. Decoding uses the same checked parser. The `serde_raw` field
+Enable `serde` to serialize and deserialize direct IDs, generic IDs and derived
+unions as full strings. Decoding uses the same checked parser. The `serde_raw` field
 adapter explicitly drops the prefix for a field whose type establishes its
 domain; it validates on deserialization and cannot be used with a union.
 
@@ -192,6 +189,10 @@ shared generation API returns `Result` for fallible custom generators. UUID
 version 7 exposes a timestamp. Identifiers do not establish authorization.
 
 ## Using the core without derives
+
+`ObjectIdDomain` remains available when an application prefers a zero-sized
+marker plus `ObjectId<Marker>` alias. It accepts `payload = Type` because the
+marker has no payload field.
 
 The `derive` feature is optional. An ordinary `Domain` implementation provides
 the same ID behavior without a procedural macro:
@@ -228,13 +229,14 @@ acquisition, formatting work and enum discriminators still have real costs.
 This crate preserves the upstream prefixed wire format, configurable separators,
 text validation and typed unions. It strengthens raw-value bounds,
 control-character handling, declaration validation and union collision checks.
-Compact UUIDs canonicalize text. Ecto, Phoenix and protobuf annotations are
-specific to the Elixir environment and are not included.
+Compact UUIDs canonicalize text. Ecto and Phoenix integrations remain specific
+to Elixir. This runtime has no protobuf dependency; `trogon_uuid_build` reads
+UUID options from protobuf descriptors during code generation.
 
-The default build has no optional features. `derive` enables `ObjectIdDomain`
-and `ObjectIdUnion`. `serde` enables JSON-compatible traits and raw field
-adapters. `uuid` enables compact UUID payloads and generation. The implementation
-forbids unsafe Rust.
+The default build has no optional features. `derive` enables `ObjectId`,
+`ObjectIdDomain` and `ObjectIdUnion`. `serde` enables JSON-compatible traits and
+raw field adapters. `uuid` enables compact UUID payloads and generation.
+The implementation forbids unsafe Rust.
 
 ## License
 
