@@ -1,13 +1,45 @@
-use std::collections::HashSet;
-use trogon_object_id::{object_id, union_object_id, validators::Integer, ParseError, Validator};
+#![cfg(feature = "derive")]
 
-object_id! { pub struct UserId("user"); }
-object_id! { pub struct ServiceId("service"); }
-object_id! { pub struct InvoiceId("invoice", separator = ":", validator = Integer); }
-object_id! { pub struct AppId("app"); }
-object_id! { pub struct AppleId("apple"); }
-union_object_id! { pub enum PrincipalId { User(UserId), Service(ServiceId), Invoice(InvoiceId) } }
-union_object_id! { pub enum AdjacentId { App(AppId), Apple(AppleId) } }
+use std::collections::HashSet;
+use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ObjectIdUnion, ParseError, Text, Validator};
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "user")]
+pub struct UserDomain;
+pub type UserId = ObjectId<UserDomain>;
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "service")]
+pub struct ServiceDomain;
+pub type ServiceId = ObjectId<ServiceDomain>;
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "invoice", separator = ":", payload = Text<Integer>)]
+pub struct InvoiceDomain;
+pub type InvoiceId = ObjectId<InvoiceDomain>;
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "app")]
+pub struct AppDomain;
+pub type AppId = ObjectId<AppDomain>;
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "apple")]
+pub struct AppleDomain;
+pub type AppleId = ObjectId<AppleDomain>;
+
+#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+pub enum PrincipalId {
+    User(UserId),
+    Service(ServiceId),
+    Invoice(InvoiceId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+pub enum AdjacentId {
+    App(AppId),
+    Apple(AppleId),
+}
 
 pub struct AsciiToken;
 impl Validator for AsciiToken {
@@ -19,7 +51,11 @@ impl Validator for AsciiToken {
         }
     }
 }
-object_id! { pub struct TokenId("token", validator = AsciiToken); }
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "token", payload = Text<AsciiToken>)]
+pub struct TokenDomain;
+pub type TokenId = ObjectId<TokenDomain>;
 
 #[test]
 fn accepts_a_nonempty_raw_identifier() {
@@ -162,5 +198,63 @@ fn enforces_utf8_byte_limits_without_losing_boundary_values() {
         UserId::try_from_raw(&"🦀".repeat(257)),
         Err(ParseError::ValueTooLong),
         "limit counts bytes rather than characters"
+    );
+}
+
+#[cfg(any())]
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "", payload = MissingPayload)]
+struct DisabledDomain;
+
+#[cfg_attr(all(), cfg(any()), doc = "disabled")]
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "")]
+struct ConditionalDomain;
+
+#[cfg_attr(any(), cfg(any()))]
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "enabled")]
+struct EnabledDomain;
+type EnabledId = ObjectId<EnabledDomain>;
+
+#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+enum ConditionalPrincipalId {
+    #[cfg(any())]
+    Missing(MissingId),
+    #[cfg_attr(all(), cfg(any()))]
+    AlsoMissing(AlsoMissingId),
+    User(UserId),
+    #[cfg(feature = "derive")]
+    Service(ServiceId),
+    #[cfg_attr(feature = "derive", cfg_attr(feature = "derive", cfg(feature = "derive")))]
+    Enabled(EnabledId),
+}
+
+#[test]
+fn native_conditional_attributes_cover_complete_declarations_and_variants() {
+    assert!(
+        matches!(
+            "user_123".parse::<ConditionalPrincipalId>(),
+            Ok(ConditionalPrincipalId::User(_))
+        ),
+        "an enabled variant remains parsable"
+    );
+    assert!(
+        matches!(
+            "service_123".parse::<ConditionalPrincipalId>(),
+            Ok(ConditionalPrincipalId::Service(_))
+        ),
+        "a cfg-enabled variant remains parsable"
+    );
+    let enabled = EnabledId::try_from_raw("123").expect("active conditional domain");
+    assert_eq!(
+        ConditionalPrincipalId::from(enabled).to_string(),
+        "enabled_123",
+        "active cfg_attr branches retain their implementations"
+    );
+    assert_eq!(
+        "missing_123".parse::<ConditionalPrincipalId>(),
+        Err(ParseError::UnknownPrefix),
+        "inactive variants do not become recognized domains"
     );
 }

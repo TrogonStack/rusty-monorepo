@@ -1,7 +1,13 @@
 #![cfg(feature = "uuid")]
 
-use trogon_object_id::{object_id, ParseError, Uuid, Uuid4, Uuid7};
-object_id! { struct SessionId("session", payload = Uuid); }
+use trogon_object_id::{Definition, Domain, ObjectId, ParseError, Uuid, Uuid4, Uuid7};
+
+struct SessionDomain;
+impl Domain for SessionDomain {
+    const DEFINITION: Definition = Definition::new("session", "_");
+    type Payload = Uuid;
+}
+type SessionId = ObjectId<SessionDomain>;
 
 #[test]
 fn parses_uuid_into_a_canonical_binary_payload() {

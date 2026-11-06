@@ -1,9 +1,22 @@
-#![cfg(feature = "serde")]
+#![cfg(all(feature = "serde", feature = "derive"))]
 
-use trogon_object_id::{object_id, union_object_id, validators::Integer, ParseError};
-object_id! { struct UserId("user"); }
-object_id! { struct InvoiceId("invoice", validator = Integer); }
-union_object_id! { enum PrincipalId { User(UserId), Invoice(InvoiceId) } }
+use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ObjectIdUnion, ParseError, Text};
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "user")]
+struct UserDomain;
+type UserId = ObjectId<UserDomain>;
+
+#[derive(ObjectIdDomain)]
+#[object_id(prefix = "invoice", payload = Text<Integer>)]
+struct InvoiceDomain;
+type InvoiceId = ObjectId<InvoiceDomain>;
+
+#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+enum PrincipalId {
+    User(UserId),
+    Invoice(InvoiceId),
+}
 
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Record {
