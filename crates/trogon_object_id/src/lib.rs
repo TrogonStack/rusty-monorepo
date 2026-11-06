@@ -84,6 +84,16 @@ pub trait Validator {
 }
 
 pub mod validators {
+    #[cfg(feature = "uuid")]
+    pub struct Uuid;
+
+    #[cfg(feature = "uuid")]
+    impl Validator for Uuid {
+        fn validate(_value: &str) -> Result<(), ParseError> {
+            Ok(())
+        }
+    }
+
     use crate::{ParseError, Validator};
 
     /// Accept any value passing the core length and control-character checks.
@@ -163,6 +173,32 @@ impl<D: Domain> fmt::Display for ObjectId<D> {
 }
 
 /// Access to the validated raw storage form of a concrete domain identifier.
+/// A trusted source of raw values for one validator type.
+pub trait Generator {
+    type Validator: Validator;
+    fn generate() -> Result<String, ParseError>;
+}
+
+#[cfg(feature = "uuid")]
+pub struct Uuid4;
+#[cfg(feature = "uuid")]
+impl Generator for Uuid4 {
+    type Validator = validators::Uuid;
+    fn generate() -> Result<String, ParseError> {
+        Err(ParseError::InvalidValue)
+    }
+}
+
+#[cfg(feature = "uuid")]
+pub struct Uuid7;
+#[cfg(feature = "uuid")]
+impl Generator for Uuid7 {
+    type Validator = validators::Uuid;
+    fn generate() -> Result<String, ParseError> {
+        Err(ParseError::InvalidValue)
+    }
+}
+
 pub trait Identifier: Sized {
     fn try_from_raw(value: &str) -> Result<Self, ParseError>;
     fn as_raw(&self) -> &str;
@@ -262,6 +298,11 @@ macro_rules! object_id {
                 $crate::ObjectId::try_from_raw(value).map(Self)
             }
             pub fn as_raw(&self) -> &str { self.0.as_raw() }
+            pub fn generate<G>() -> ::core::result::Result<Self, $crate::ParseError>
+            where G: $crate::Generator<Validator = <Self as $crate::Domain>::Validator> {
+                let raw = G::generate()?;
+                Self::try_from_raw(&raw)
+            }
         }
         impl $crate::Identifier for $name {
             fn try_from_raw(value: &str) -> ::core::result::Result<Self, $crate::ParseError> { Self::try_from_raw(value) }
@@ -278,6 +319,7 @@ macro_rules! object_id {
         impl ::core::fmt::Display for $name {
             fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Display::fmt(&self.0, formatter) }
         }
+        $crate::__impl_serde!($name);
     };
 }
 
@@ -337,5 +379,69 @@ macro_rules! union_object_id {
                 match self { $(Self::$variant(value) => ::core::fmt::Display::fmt(value, formatter)),+ }
             }
         }
+        $crate::__impl_serde!($name);
     };
+}
+
+#[cfg(feature = "serde")]
+#[doc(hidden)]
+pub mod __private {
+    pub use serde;
+    use std::fmt;
+    use std::str::FromStr;
+
+    pub fn serialize<T: fmt::Display, S: serde::Serializer>(_value: &T, _serializer: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("identifier serialization is unavailable"))
+    }
+
+    pub fn deserialize<'de, T: FromStr, D: serde::Deserializer<'de>>(_deserializer: D) -> Result<T, D::Error>
+    where
+        T::Err: fmt::Display,
+    {
+        Err(serde::de::Error::custom("identifier deserialization is unavailable"))
+    }
+}
+
+#[cfg(feature = "serde")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_serde {
+    ($name:ident) => {
+        impl $crate::__private::serde::Serialize for $name {
+            fn serialize<S: $crate::__private::serde::Serializer>(
+                &self,
+                serializer: S,
+            ) -> ::core::result::Result<S::Ok, S::Error> {
+                $crate::__private::serialize(self, serializer)
+            }
+        }
+        impl<'de> $crate::__private::serde::Deserialize<'de> for $name {
+            fn deserialize<D: $crate::__private::serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> ::core::result::Result<Self, D::Error> {
+                $crate::__private::deserialize(deserializer)
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "serde"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_serde {
+    ($name:ident) => {};
+}
+
+/// Explicit raw JSON field encoding for a concrete domain identifier.
+#[cfg(feature = "serde")]
+pub mod serde_raw {
+    use crate::Identifier;
+    pub fn serialize<T: Identifier, S: serde::Serializer>(_value: &T, _serializer: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("raw identifier serialization is unavailable"))
+    }
+    pub fn deserialize<'de, T: Identifier, D: serde::Deserializer<'de>>(_deserializer: D) -> Result<T, D::Error> {
+        Err(serde::de::Error::custom(
+            "raw identifier deserialization is unavailable",
+        ))
+    }
 }

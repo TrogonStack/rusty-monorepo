@@ -12,3 +12,13 @@ workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+uuid = { version = "1.26", features = ["v4", "v7"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+uuid = ["dep:uuid"]
+
+[dev-dependencies]
+serde_json = { workspace = true }
