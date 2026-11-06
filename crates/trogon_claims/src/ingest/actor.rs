@@ -69,7 +69,7 @@ fn parse_one(object: &RawClaims, token_issuer: &Arc<Issuer>, consume_act: bool) 
     }
     let carries_sub = sub.is_some();
     let mut claims = Vec::new();
-    let mut discarded: Vec<ClaimType> = Vec::new();
+    let mut unprojected: Vec<ClaimType> = Vec::new();
     for (name, value) in object.iter() {
         let consumed = match name.well_known() {
             Some(
@@ -84,8 +84,11 @@ fn parse_one(object: &RawClaims, token_issuer: &Arc<Issuer>, consume_act: bool) 
             _ => false,
         };
         if !consumed {
-            project_member(&mut claims, &mut discarded, name, value, token_issuer)?;
+            project_member(&mut claims, &mut unprojected, name, value, token_issuer)?;
         }
+    }
+    if !unprojected.is_empty() {
+        return Err(context(ClaimValueError::UnrepresentableActorClaims, owner));
     }
     Ok(ParsedActor {
         issuer,

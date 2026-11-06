@@ -3,7 +3,7 @@
 
 use trogon_claims::ingest::{introspection, jwt_payload};
 use trogon_claims::{
-    ActorError, ActorIssuer, ActorKey, AuthenticationMethod, AuthenticationType, Binding, ClaimType, ClaimValue,
+    ActorError, ActorIssuer, ActorKey, AuthenticationMethod, AuthenticationType, Binding, Claim, ClaimType, ClaimValue,
     ClaimValueError, ConfirmationError, Delegation, DynamicClaims, Identity, IngestError, IngestProfile, Ingested,
     Issuer, NameClaimType, RawClaims, RawClaimsError, RoleClaimType, RoleName, WellKnownClaim,
 };
@@ -244,6 +244,100 @@ fn an_actor_that_names_a_subject_keeps_its_client_id_claim() {
     let ingested = ingest(r#"{"iss":"i","sub":"u","act":{"sub":"a","client_id":"service-a"}}"#).unwrap();
     let actor = ingested.actor().unwrap();
     assert!(actor.find_first(&ClaimType::from(WellKnownClaim::ClientId)).is_some());
+}
+
+const UNPROJECTABLE_ACTOR_VALUES: &[&str] = &[
+    "null",
+    r#"{"value":"actor-extra-marker"}"#,
+    r#"["admin",null]"#,
+    r#"[null,"admin"]"#,
+    r#"["admin",{"value":"actor-extra-marker"}]"#,
+    r#"["admin",["actor-extra-marker"]]"#,
+    r#"[["actor-extra-marker"]]"#,
+];
+
+fn assert_actor_claims_rejected(json: &str, owner: &str) {
+    let (name, kind) = claim_error(ingest(json));
+    assert_eq!(name.as_str(), owner);
+    assert_eq!(kind, ClaimValueError::UnrepresentableActorClaims);
+    assert!(!format!("{kind:?} {kind}").contains("actor-extra-marker"));
+}
+
+#[test]
+fn current_actor_claims_reject_unrepresentable_values() {
+    for value in UNPROJECTABLE_ACTOR_VALUES {
+        assert_actor_claims_rejected(
+            &format!(r#"{{"iss":"i","sub":"u","act":{{"sub":"a","roles":{value},"scope":"read"}}}}"#),
+            "act",
+        );
+    }
+}
+
+#[test]
+fn prior_actor_claims_reject_unrepresentable_values() {
+    for value in UNPROJECTABLE_ACTOR_VALUES {
+        assert_actor_claims_rejected(
+            &format!(
+                r#"{{"iss":"i","sub":"u","act":{{"sub":"a","act":{{"sub":"prior","roles":{value},"scope":"read"}}}}}}"#
+            ),
+            "act",
+        );
+    }
+}
+
+#[test]
+fn authorized_actor_claims_reject_unrepresentable_values() {
+    for value in UNPROJECTABLE_ACTOR_VALUES {
+        assert_actor_claims_rejected(
+            &format!(r#"{{"iss":"i","sub":"u","may_act":{{"sub":"a","roles":{value},"scope":"read"}}}}"#),
+            "may_act",
+        );
+    }
+}
+
+fn assert_actor_claim_projection(claims: &[Claim]) {
+    let values = |name: &str| {
+        claims
+            .iter()
+            .filter(|claim| claim.claim_type().as_str() == name)
+            .map(|claim| claim.value().clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(claims.len(), 10);
+    assert_eq!(values("scope"), [ClaimValue::Text("read".into())]);
+    assert_eq!(
+        values("roles"),
+        [ClaimValue::Text("reader".into()), ClaimValue::Text("editor".into())]
+    );
+    assert_eq!(values("approved"), [ClaimValue::Boolean(true)]);
+    assert_eq!(values("level"), [ClaimValue::Integer(7)]);
+    assert_eq!(values("weight"), [ClaimValue::Double(1.5)]);
+    assert_eq!(
+        values("mixed"),
+        [
+            ClaimValue::Text("reader".into()),
+            ClaimValue::Boolean(true),
+            ClaimValue::Integer(7),
+            ClaimValue::Double(1.5),
+        ]
+    );
+    assert!(values("empty").is_empty());
+    assert!(claims.iter().all(|claim| claim.issuer().as_str() == "i"));
+}
+
+#[test]
+fn actor_claims_preserve_scalars_and_fully_representable_arrays() {
+    let extras = r#""scope":"read","roles":["reader","editor"],"approved":true,"level":7,"weight":1.5,"mixed":["reader",true,7,1.5],"empty":[]"#;
+    let ingested = ingest(&format!(
+        r#"{{"iss":"i","sub":"u","act":{{"sub":"current",{extras},"act":{{"sub":"prior",{extras}}}}},"may_act":{{"sub":"eligible",{extras}}}}}"#
+    ))
+    .unwrap();
+    let actor = ingested.actor().unwrap();
+    assert_actor_claim_projection(actor.claims());
+    let mut prior = actor.prior_actors();
+    assert_actor_claim_projection(prior.next().unwrap().claims());
+    assert!(prior.next().is_none());
+    assert_actor_claim_projection(ingested.identity().may_act().unwrap().claims());
 }
 
 #[test]

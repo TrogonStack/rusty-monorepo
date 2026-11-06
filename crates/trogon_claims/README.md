@@ -106,6 +106,12 @@ typed setters. Pushing claims named `act`, `cnf`, `may_act` or `acr` does not
 implicitly populate those separate fields. JSON ingest parses those structures
 at its boundary.
 
+Additional claims in current or prior `act` actors and `may_act` support scalars
+and flat arrays of scalars. Objects, nulls and nested arrays that would lose
+claim data cause `UnrepresentableActorClaims` on the enclosing `act` or `may_act`;
+ingest never returns a partially projected actor. Nested `act` chains are parsed
+separately from these additional claims.
+
 Classification uses `Identity::try_with_kind` and rejects anonymous identities.
 Recording binding evidence uses `try_with_verified_binding` and checks that its
 method and thumbprint match the identity's existing assertion. Neither operation

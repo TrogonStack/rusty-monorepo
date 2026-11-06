@@ -38,6 +38,8 @@ pub enum ClaimValueError {
     OutOfRange(#[from] NumericDateError),
     #[error("invalid actor: {0}")]
     InvalidActor(#[from] ActorError),
+    #[error("actor claims cannot be fully represented")]
+    UnrepresentableActorClaims,
     #[error("token has no sub")]
     MissingSubject,
     #[error("token has no iss and the profile names no default issuer")]
