@@ -33,11 +33,45 @@ pub struct Definition {
 
 impl Definition {
     pub const fn new(object_type: &'static str, separator: &'static str) -> Self {
+        assert!(
+            !object_type.is_empty() && object_type.len() <= 64,
+            "object type must contain 1 to 64 bytes"
+        );
+        let kind = object_type.as_bytes();
+        assert!(
+            kind[0].is_ascii_alphabetic(),
+            "object type must start with an ASCII letter"
+        );
+        let mut index = 0;
+        while index < kind.len() {
+            assert!(
+                kind[index].is_ascii_alphanumeric() || kind[index] == b'_' || kind[index] == b'-',
+                "object type contains an invalid character"
+            );
+            index += 1;
+        }
+        assert!(
+            !separator.is_empty() && separator.len() <= 4,
+            "separator must contain 1 to 4 bytes"
+        );
+        let bytes = separator.as_bytes();
+        index = 0;
+        while index < bytes.len() {
+            assert!(
+                bytes[index].is_ascii_punctuation(),
+                "separator must contain ASCII punctuation"
+            );
+            index += 1;
+        }
         Self { object_type, separator }
     }
 
-    pub const fn object_type(self) -> &'static str { self.object_type }
-    pub const fn separator(self) -> &'static str { self.separator }
+    pub const fn object_type(self) -> &'static str {
+        self.object_type
+    }
+    pub const fn separator(self) -> &'static str {
+        self.separator
+    }
 
     pub fn strip_prefix(self, value: &str) -> Option<&str> {
         value.strip_prefix(self.object_type)?.strip_prefix(self.separator)
@@ -55,13 +89,22 @@ pub mod validators {
     /// Accept any value passing the core length and control-character checks.
     pub struct Any;
     impl Validator for Any {
-        fn validate(_value: &str) -> Result<(), ParseError> { Ok(()) }
+        fn validate(_value: &str) -> Result<(), ParseError> {
+            Ok(())
+        }
     }
 
     /// An arbitrarily sized signed ASCII decimal integer, preserving its text.
     pub struct Integer;
     impl Validator for Integer {
-        fn validate(_value: &str) -> Result<(), ParseError> { Ok(()) }
+        fn validate(value: &str) -> Result<(), ParseError> {
+            let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                Ok(())
+            } else {
+                Err(ParseError::InvalidValue)
+            }
+        }
     }
 }
 
@@ -80,23 +123,43 @@ pub struct ObjectId<D: Domain> {
 
 impl<D: Domain> ObjectId<D> {
     pub fn try_from_raw(value: &str) -> Result<Self, ParseError> {
-        if value.is_empty() { return Err(ParseError::EmptyValue); }
-        if value.len() > MAX_VALUE_BYTES { return Err(ParseError::ValueTooLong); }
-        if value.chars().any(char::is_control) { return Err(ParseError::ControlCharacter); }
+        let _definition = D::DEFINITION;
+        if value.is_empty() {
+            return Err(ParseError::EmptyValue);
+        }
+        if value.len() > MAX_VALUE_BYTES {
+            return Err(ParseError::ValueTooLong);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(ParseError::ControlCharacter);
+        }
         D::Validator::validate(value)?;
-        Ok(Self { value: value.to_owned(), domain: PhantomData })
+        Ok(Self {
+            value: value.to_owned(),
+            domain: PhantomData,
+        })
     }
 
-    pub fn as_raw(&self) -> &str { &self.value }
+    pub fn as_raw(&self) -> &str {
+        &self.value
+    }
 }
 
 impl<D: Domain> FromStr for ObjectId<D> {
     type Err = ParseError;
-    fn from_str(_value: &str) -> Result<Self, Self::Err> { Err(ParseError::InvalidPrefix) }
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let raw = D::DEFINITION.strip_prefix(value).ok_or(ParseError::InvalidPrefix)?;
+        Self::try_from_raw(raw)
+    }
 }
 
 impl<D: Domain> fmt::Display for ObjectId<D> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str("") }
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let definition = D::DEFINITION;
+        formatter.write_str(definition.object_type())?;
+        formatter.write_str(definition.separator())?;
+        formatter.write_str(self.as_raw())
+    }
 }
 
 /// Access to the validated raw storage form of a concrete domain identifier.
@@ -107,7 +170,38 @@ pub trait Identifier: Sized {
 
 /// Validates all complete prefixes before a union can be declared.
 #[doc(hidden)]
-pub const fn assert_disjoint(_definitions: &[Definition]) {}
+pub const fn assert_disjoint(definitions: &[Definition]) {
+    assert!(!definitions.is_empty(), "union must contain a member");
+    let mut left = 0;
+    while left < definitions.len() {
+        let a = definitions[left];
+        let mut right = left + 1;
+        while right < definitions.len() {
+            let b = definitions[right];
+            let a_len = a.object_type.len() + a.separator.len();
+            let b_len = b.object_type.len() + b.separator.len();
+            let common = if a_len < b_len { a_len } else { b_len };
+            let mut index = 0;
+            while index < common {
+                if prefix_byte(a, index) != prefix_byte(b, index) {
+                    break;
+                }
+                index += 1;
+            }
+            assert!(index < common, "union prefixes must not duplicate or overlap");
+            right += 1;
+        }
+        left += 1;
+    }
+}
+
+const fn prefix_byte(definition: Definition, index: usize) -> u8 {
+    if index < definition.object_type.len() {
+        definition.object_type.as_bytes()[index]
+    } else {
+        definition.separator.as_bytes()[index - definition.object_type.len()]
+    }
+}
 
 /// Declare a distinct identifier type with a compile-time checked prefix.
 ///
@@ -227,7 +321,12 @@ macro_rules! union_object_id {
         })+
         impl ::core::str::FromStr for $name {
             type Err = $crate::ParseError;
-            fn from_str(_value: &str) -> ::core::result::Result<Self, Self::Err> { Err($crate::ParseError::UnknownPrefix) }
+            fn from_str(value: &str) -> ::core::result::Result<Self, Self::Err> {
+                $(if <$member as $crate::Domain>::DEFINITION.strip_prefix(value).is_some() {
+                    return value.parse::<$member>().map(Self::$variant);
+                })+
+                Err($crate::ParseError::UnknownPrefix)
+            }
         }
         impl ::core::convert::TryFrom<&str> for $name {
             type Error = $crate::ParseError;

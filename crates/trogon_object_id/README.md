@@ -80,12 +80,15 @@ validates on deserialization. It cannot be used with a union.
 Enable the `uuid` feature for `validators::Uuid` and the `Uuid4` and `Uuid7`
 generators. UUID values must use hyphenated text; accepted case is preserved.
 
-```rust,ignore
+```rust
+# #[cfg(feature = "uuid")]
+# {
 use trogon_object_id::{object_id, validators::Uuid, Uuid4, Uuid7};
 
 object_id! { pub struct SessionId("session", validator = Uuid); }
 let random = SessionId::generate::<Uuid4>()?;
 let ordered = SessionId::generate::<Uuid7>()?;
+# }
 # Ok::<(), trogon_object_id::ParseError>(())
 ```
 
