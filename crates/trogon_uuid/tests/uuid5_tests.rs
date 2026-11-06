@@ -35,6 +35,29 @@ fn ordered_pieces_match_the_standard_contiguous_algorithm() {
 }
 
 #[test]
+fn hashing_preserves_boundaries_at_sha1_block_lengths() {
+    let text = "x".repeat(1024);
+    for boundary in [0, 1, 39, 40, 47, 48, 55, 56, 63, 64, 65, 127, 128, 1024] {
+        let parts = [&text.as_bytes()[..boundary], &text.as_bytes()[boundary..]];
+        assert_eq!(
+            uuid5_parts(&Uuid::NAMESPACE_DNS, parts),
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, text.as_bytes()),
+            "streaming keeps the standard digest across SHA-1 block boundaries"
+        );
+    }
+}
+
+#[test]
+fn byte_names_preserve_nuls_and_non_utf8_data() {
+    let parts: [&[u8]; 3] = [b"\0\xff", b"/", b"\xfe\0"];
+    assert_eq!(
+        uuid5_parts(&Uuid::NAMESPACE_OID, parts),
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, b"\0\xff/\xfe\0"),
+        "UUID names are byte sequences without text conversion"
+    );
+}
+
+#[test]
 fn namespace_resolution_and_version_names_are_exact() {
     let dns = Namespace::Dns("example.com").resolve();
     assert_eq!(
@@ -48,7 +71,11 @@ fn namespace_resolution_and_version_names_are_exact() {
         Uuid::new_v5(&Uuid::NAMESPACE_URL, b"https://example.com/items"),
         "URL namespaces use the exact URL text"
     );
-    assert_eq!(Namespace::Uuid(dns).resolve(), dns, "direct UUID namespaces remain unchanged");
+    assert_eq!(
+        Namespace::Uuid(dns).resolve(),
+        dns,
+        "direct UUID namespaces remain unchanged"
+    );
     let version = Namespace::Uuid(dns).version_namespace("IDENTITY_VERSION_V1");
     assert_eq!(
         version,
