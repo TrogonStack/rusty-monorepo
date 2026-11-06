@@ -253,6 +253,15 @@ const fn prefix_byte(definition: Definition, index: usize) -> u8 {
 
 /// Declare a distinct identifier type with a compile-time checked prefix.
 ///
+/// ```
+/// use trogon_object_id::{object_id, union_object_id};
+/// object_id! { #[cfg(any())] pub struct DisabledId("disabled"); }
+/// object_id! { /// A conditional domain.
+///     #[cfg(any())] pub struct DocumentedId("disabled");
+/// }
+/// union_object_id! { #[cfg(any())] pub enum DisabledUnion { Missing(MissingId) } }
+/// ```
+///
 /// ```compile_fail
 /// use trogon_object_id::object_id;
 /// object_id! { struct UserId("user"); }
