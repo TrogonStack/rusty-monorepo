@@ -89,8 +89,12 @@ pub mod validators {
 
     #[cfg(feature = "uuid")]
     impl Validator for Uuid {
-        fn validate(_value: &str) -> Result<(), ParseError> {
-            Ok(())
+        fn validate(value: &str) -> Result<(), ParseError> {
+            if value.len() == 36 && uuid::Uuid::parse_str(value).is_ok() {
+                Ok(())
+            } else {
+                Err(ParseError::InvalidValue)
+            }
         }
     }
 
@@ -179,23 +183,31 @@ pub trait Generator {
     fn generate() -> Result<String, ParseError>;
 }
 
+/// Generates UUID version 4 values using system randomness.
+///
+/// ```compile_fail
+/// use trogon_object_id::{object_id, validators::Integer, Uuid4};
+/// object_id! { struct InvoiceId("invoice", validator = Integer); }
+/// let invalid = InvoiceId::generate::<Uuid4>();
+/// ```
 #[cfg(feature = "uuid")]
 pub struct Uuid4;
 #[cfg(feature = "uuid")]
 impl Generator for Uuid4 {
     type Validator = validators::Uuid;
     fn generate() -> Result<String, ParseError> {
-        Err(ParseError::InvalidValue)
+        Ok(uuid::Uuid::new_v4().to_string())
     }
 }
 
+/// Generates UUID version 7 values using the current time and system randomness.
 #[cfg(feature = "uuid")]
 pub struct Uuid7;
 #[cfg(feature = "uuid")]
 impl Generator for Uuid7 {
     type Validator = validators::Uuid;
     fn generate() -> Result<String, ParseError> {
-        Err(ParseError::InvalidValue)
+        Ok(uuid::Uuid::now_v7().to_string())
     }
 }
 
@@ -388,17 +400,47 @@ macro_rules! union_object_id {
 pub mod __private {
     pub use serde;
     use std::fmt;
+    use std::marker::PhantomData;
     use std::str::FromStr;
 
-    pub fn serialize<T: fmt::Display, S: serde::Serializer>(_value: &T, _serializer: S) -> Result<S::Ok, S::Error> {
-        Err(serde::ser::Error::custom("identifier serialization is unavailable"))
+    pub fn serialize<T: fmt::Display, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(value)
     }
 
-    pub fn deserialize<'de, T: FromStr, D: serde::Deserializer<'de>>(_deserializer: D) -> Result<T, D::Error>
+    pub fn deserialize<'de, T: FromStr, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error>
     where
         T::Err: fmt::Display,
     {
-        Err(serde::de::Error::custom("identifier deserialization is unavailable"))
+        deserialize_with(deserializer, T::from_str)
+    }
+
+    pub fn deserialize_with<'de, T, E, D, F>(deserializer: D, parse: F) -> Result<T, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        F: Fn(&str) -> Result<T, E>,
+        E: fmt::Display,
+    {
+        struct StringVisitor<T, F> {
+            parse: F,
+            marker: PhantomData<fn() -> T>,
+        }
+        impl<'de, T, E, F> serde::de::Visitor<'de> for StringVisitor<T, F>
+        where
+            F: Fn(&str) -> Result<T, E>,
+            E: fmt::Display,
+        {
+            type Value = T;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a validated identifier string")
+            }
+            fn visit_str<E2: serde::de::Error>(self, value: &str) -> Result<T, E2> {
+                (self.parse)(value).map_err(E2::custom)
+            }
+        }
+        deserializer.deserialize_str(StringVisitor {
+            parse,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -436,12 +478,10 @@ macro_rules! __impl_serde {
 #[cfg(feature = "serde")]
 pub mod serde_raw {
     use crate::Identifier;
-    pub fn serialize<T: Identifier, S: serde::Serializer>(_value: &T, _serializer: S) -> Result<S::Ok, S::Error> {
-        Err(serde::ser::Error::custom("raw identifier serialization is unavailable"))
+    pub fn serialize<T: Identifier, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(value.as_raw())
     }
-    pub fn deserialize<'de, T: Identifier, D: serde::Deserializer<'de>>(_deserializer: D) -> Result<T, D::Error> {
-        Err(serde::de::Error::custom(
-            "raw identifier deserialization is unavailable",
-        ))
+    pub fn deserialize<'de, T: Identifier, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
+        crate::__private::deserialize_with(deserializer, T::try_from_raw)
     }
 }
