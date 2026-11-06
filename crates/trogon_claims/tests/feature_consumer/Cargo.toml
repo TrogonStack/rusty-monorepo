@@ -10,6 +10,7 @@ publish = false
 dependency-default = ["trogon_claims/default"]
 macros = ["trogon_claims/macros"]
 spicedb = ["trogon_claims/spicedb"]
+json = ["trogon_claims/json"]
 
 [dependencies]
 trogon_claims = { path = "../..", default-features = false }

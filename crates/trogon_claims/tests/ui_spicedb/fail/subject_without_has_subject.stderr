@@ -1,5 +1,5 @@
 error[E0599]: the method `subject` exists for struct `AuthenticatedPrincipal<NoSubject>`, but its trait bounds were not satisfied
-  --> tests/ui/fail/subject_without_has_subject.rs:12:25
+  --> tests/ui_spicedb/fail/subject_without_has_subject.rs:12:25
    |
  5 | struct NoSubject;
    | ---------------- doesn't satisfy `NoSubject: HasSubject`

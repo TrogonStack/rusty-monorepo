@@ -20,14 +20,15 @@ trogon_claims = { git = "https://github.com/TrogonStack/rusty-monorepo", rev = "
 ```
 
 ```rust
-use trogon_claims::object_id;
+use trogon_claims::principal_kind;
 
-let id = object_id!("user-1");
+let kind = principal_kind!("person");
 ```
 
-`macros` is disabled by default in `trogon_claims`. Enable both `macros` and
-`spicedb` for `relation_name!` and `param_name!`. Runtime types and their validated
-constructors remain available without the literal-macro APIs.
+`macros` is disabled by default in `trogon_claims`. It enables `principal_kind!`.
+Enable both `macros` and `spicedb` for `object_id!`, `object_type!`,
+`relation_name!` and `param_name!`. Runtime constructors do not require macros;
+backend types and constructors additionally require `spicedb`.
 
 ## Reference
 

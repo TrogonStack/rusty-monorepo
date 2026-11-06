@@ -2,12 +2,15 @@
 
 use std::collections::HashSet;
 
-#[cfg(feature = "macros")]
+#[cfg(feature = "spicedb")]
+use trogon_claims::{ObjectId, ObjectType, ValueKind};
+
+#[cfg(all(feature = "macros", feature = "spicedb"))]
 use trogon_claims::{object_id, object_type};
 
 use trogon_claims::{
-    Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId, Issuer, ObjectId,
-    ObjectType, RoleName, SubjectId, Unsigned63, ValueKind, WellKnownClaim,
+    Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId, Issuer, RoleName,
+    SubjectId, Unsigned63, WellKnownClaim,
 };
 
 #[test]
@@ -52,6 +55,7 @@ fn unsigned63_stops_at_i64_max() {
     assert_eq!(u64::from(Unsigned63::from(7_u32)), 7);
 }
 
+#[cfg(feature = "spicedb")]
 #[test]
 fn object_id_reports_kind_and_position() {
     let err = ObjectId::try_new("a@b").unwrap_err();
@@ -65,6 +69,7 @@ fn object_id_reports_kind_and_position() {
     assert!(ObjectId::try_from(String::from("a b")).is_err());
 }
 
+#[cfg(feature = "spicedb")]
 #[test]
 fn object_type_follows_the_definition_name_grammar() {
     assert!(ObjectType::try_new("myapp/document").is_ok());
@@ -72,7 +77,7 @@ fn object_type_follows_the_definition_name_grammar() {
     assert!(ObjectType::try_new("ab").is_err());
 }
 
-#[cfg(feature = "macros")]
+#[cfg(all(feature = "macros", feature = "spicedb"))]
 #[test]
 fn literal_macros_build_the_newtypes() {
     let id: ObjectId = object_id!("readme");

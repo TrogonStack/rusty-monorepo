@@ -1,6 +1,6 @@
-use trogon_claims::__private::object_id_impl;
+use trogon_claims::__private::principal_kind_impl;
 
 fn main() {
-    let id = object_id_impl!(trogon_claims, "document-1");
-    assert_eq!(id.as_str(), "document-1");
+    let kind = principal_kind_impl!(trogon_claims, "person");
+    assert_eq!(kind.as_str(), "person");
 }

@@ -1,3 +1,4 @@
+#[cfg(feature = "spicedb")]
 #[macro_export]
 macro_rules! object_id {
     ($literal:literal) => {
@@ -5,6 +6,7 @@ macro_rules! object_id {
     };
 }
 
+#[cfg(feature = "spicedb")]
 #[macro_export]
 macro_rules! object_type {
     ($literal:literal) => {

@@ -2,7 +2,8 @@
 //!
 //! Represent claims, identities and principals as immutable Rust values, with
 //! explicit name/role selection, typed claim interpretation and identity
-//! provenance. Authorization subjects use a separate validated mapping.
+//! provenance. Optional SpiceDB authorization subjects use a separate validated
+//! mapping; the core identity key keeps its original issuer and subject.
 //! The caller verifies credentials before constructing authenticated identity
 //! data; this crate checks representation and refinement state, never a token
 //! signature or resource access decision.
@@ -155,10 +156,10 @@
 //! | Feature | Adds | Extra dependencies |
 //! |---|---|---|
 //! | none | Value objects, claims, identities, principals and refinements | `thiserror`, `zeroize`, `trogon_claims_syntax` |
-//! | `macros` | Compile-time literal constructors, including SpiceDB literals when `spicedb` is also enabled | `trogon_claims_macros` |
+//! | `macros` | `principal_kind!`; backend literal constructors also require `spicedb` | `trogon_claims_macros` |
 //! | `json` | `ingest`, `RawClaims`, `RawJson`, `IngestProfile`-driven identity construction | `serde_json` |
 //! | `serde` | Reserved for session serialization. It carries no code yet | `serde` |
-//! | `spicedb` | `ObjectReference`, `SubjectReference`, `SubjectSet`, `CheckRequest`, caveat context conversion to `prost_types::Struct`, tri-state outcomes | `prost`, `prost-types` |
+//! | `spicedb` | `ObjectId`, `ObjectType`, backend subject mapping and accessors, object/subject references, check requests, caveat conversion and tri-state outcomes | `prost`, `prost-types` |
 //! | `axum` | The `axum` module: extractors, `WWW-Authenticate` challenges, step-up responses | `axum-core`, `http` |
 //!
 //! The dependency budget for each feature is enforced in CI by
@@ -203,6 +204,7 @@ mod authorized_actor;
 pub mod axum;
 #[cfg(feature = "spicedb")]
 mod base64_standard;
+#[cfg(any(feature = "json", feature = "spicedb"))]
 mod base64url;
 mod binding;
 mod bootstrap_credential;
@@ -252,9 +254,11 @@ mod macros;
 mod masked;
 mod name_claim_type;
 mod numeric_date;
+#[cfg(feature = "spicedb")]
 mod object_id;
 #[cfg(feature = "spicedb")]
 mod object_reference;
+#[cfg(feature = "spicedb")]
 mod object_type;
 #[cfg(feature = "spicedb")]
 mod outcome_error;
@@ -294,6 +298,7 @@ mod standard_claims;
 #[cfg(feature = "axum")]
 mod step_up;
 mod subject_id;
+#[cfg(feature = "spicedb")]
 mod subject_mapping;
 #[cfg(feature = "spicedb")]
 mod subject_reference;
@@ -345,7 +350,9 @@ pub use check_request::CheckRequest;
 pub use claim::{Claim, ClaimBuilder};
 pub use claim_lookup_error::ClaimLookupError;
 pub use claim_property_key::ClaimPropertyKey;
-pub use claim_set::{ClaimSet, HasRoles, HasSubject, SubjectRef};
+pub use claim_set::{ClaimSet, HasRoles};
+#[cfg(feature = "spicedb")]
+pub use claim_set::{HasSubject, SubjectRef};
 pub use claim_text::ClaimText;
 pub use claim_type::ClaimType;
 pub use claim_value::ClaimValue;
@@ -368,9 +375,11 @@ pub use jwk::Jwk;
 pub use kind::{Classified, Kind, Unclassified};
 pub use name_claim_type::NameClaimType;
 pub use numeric_date::NumericDate;
+#[cfg(feature = "spicedb")]
 pub use object_id::ObjectId;
 #[cfg(feature = "spicedb")]
 pub use object_reference::ObjectReference;
+#[cfg(feature = "spicedb")]
 pub use object_type::ObjectType;
 #[cfg(feature = "spicedb")]
 pub use outcome_error::OutcomeError;
@@ -400,6 +409,7 @@ pub use role_name::RoleName;
 pub use scope::{ScopeName, ScopeNameError, ScopeSet};
 pub use standard_claims::StandardClaims;
 pub use subject_id::SubjectId;
+#[cfg(feature = "spicedb")]
 pub use subject_mapping::{Base64UrlUnpadded, SubjectMapping, SubjectMappingError, Verbatim};
 #[cfg(feature = "spicedb")]
 pub use subject_reference::SubjectReference;

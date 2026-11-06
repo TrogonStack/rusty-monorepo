@@ -3,7 +3,7 @@
 **Claims-based identity with explicit policy and typed boundaries.** Represent
 claims, identities and principals as immutable Rust values. Select name and role
 claims deliberately, retain identity provenance when querying a principal, and
-project authorization subjects through a validated mapping.
+optionally project authorization subjects through a validated SpiceDB mapping.
 
 **It starts where token verification ends.** The calling authentication layer
 verifies credentials and token acceptance policy before constructing an
@@ -89,8 +89,11 @@ to the caller, rather than ambient security-context state.
 
 An authentication key is the issuer plus subject. A principal name is a selected
 claim for display or application lookup; changing that selection does not change
-the key. Authorization subject mapping is another explicit operation and can
-reject a subject that the identity model can represent.
+the key. With `spicedb`, authorization subject mapping is another explicit
+operation and can reject a subject that the identity model can represent.
+Without that feature, identities and typed claim sets retain their original
+`SubjectId` through `PrincipalKey`; they do not require a backend object type
+or object ID.
 
 Identity construction requires a textual subject and issuer. A caller may supply
 an explicit default issuer when the input omits it. An explicitly malformed issuer
@@ -185,16 +188,22 @@ authorization decisions.
 | Feature | Adds | Extra dependencies |
 |---|---|---|
 | none | Value objects, claims, identities, principals, refinements and runtime validation | `thiserror`, `zeroize`, `trogon_claims_syntax` |
-| `macros` | Compile-time literal constructors; relation and parameter macros also require `spicedb` | `trogon_claims_macros` |
+| `macros` | `principal_kind!`; backend literal constructors also require `spicedb` | `trogon_claims_macros` |
 | `json` | `ingest`: JWT payload and introspection to identity | `serde_json` |
 | `serde` | Reserved for session serialization; no code yet | `serde` |
-| `spicedb` | Object, subject and subject-set references, check requests, caveat context conversion, tri-state outcomes | `prost`, `prost-types` |
+| `spicedb` | `ObjectId`, `ObjectType`, subject mapping and `HasSubject`/`SubjectRef`, object/subject references, checks and caveat conversion | `prost`, `prost-types` |
 | `axum` | `trogon_claims::axum`: extractors, challenges, step-up responses | `axum-core`, `http` |
 
-The default feature set is empty. Enable `macros` explicitly to use `object_id!`,
-`object_type!` and `principal_kind!`. `relation_name!` and `param_name!` require
-both `macros` and `spicedb`. The runtime constructors and their validation remain
-available without `macros`.
+The default feature set is empty. Enable `macros` explicitly for
+`principal_kind!`. `object_id!`, `object_type!`, `relation_name!` and `param_name!`
+require both `macros` and `spicedb`. Runtime constructors never require `macros`;
+backend types and their validated constructors require `spicedb`.
+
+`HasSubject`, `SubjectRef`, `SubjectMapping`, `Verbatim` and
+`Base64UrlUnpadded` describe the optional backend projection. Their related
+identity and principal `subject()` accessors are available only with `spicedb`.
+The core identity key, claims, roles, delegation and binding remain available
+without that feature. Enabling it does not choose a mapping implicitly.
 
 `.config/mise/tasks/claims/budget` fails CI when a feature pulls in a dependency
 outside this table.
@@ -240,12 +249,13 @@ trogon_claims = { git = "https://github.com/TrogonStack/rusty-monorepo", rev = "
 ```
 
 ```rust
-use trogon_claims::object_id;
+use trogon_claims::principal_kind;
 
-let id = object_id!("user-1");
+let kind = principal_kind!("person");
 ```
 
-For the SpiceDB literal helpers, select `features = ["macros", "spicedb"]`.
+For `object_id!`, `object_type!`, `relation_name!` and `param_name!`, select
+`features = ["macros", "spicedb"]`.
 Macro availability is an optional capability following
 [ADR 7592933658](https://github.com/straw-hat-team/adr/blob/main/src/adrs/7592933658/README.md);
 it does not change the validation required by runtime constructors. Moving to a

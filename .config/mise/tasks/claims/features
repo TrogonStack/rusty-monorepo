@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description = "Verify the claims feature matrix and isolated consumer macro boundaries"
+#MISE description = "Verify the claims feature matrix and isolated consumer API boundaries"
 set -euo pipefail
 
 cd "${MISE_PROJECT_ROOT:?}"

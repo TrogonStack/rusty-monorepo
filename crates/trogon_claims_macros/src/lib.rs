@@ -13,7 +13,8 @@
 //! valid value needs one.
 //!
 //! Consumers enable `trogon_claims`'s opt-in `macros` feature to use these public
-//! helpers. `relation_name!` and `param_name!` additionally require `spicedb`.
+//! helpers. `object_id!`, `object_type!`, `relation_name!` and `param_name!`
+//! additionally require `spicedb`.
 //! Runtime types and validated constructors do not require the `macros` feature.
 //!
 //! The crate is not published to crates.io.

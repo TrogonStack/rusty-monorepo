@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description = "Verify claims macro API and dependency gates in an isolated consumer"
+#MISE description = "Verify claims core, SpiceDB and macro API gates in an isolated consumer"
 set -euo pipefail
 
 cd "${MISE_PROJECT_ROOT:?}/crates/trogon_claims/tests/feature_consumer"
@@ -36,7 +36,7 @@ expect_missing() {
   codes="$(sed -n 's/^error\[\(E[0-9]*\)\]:.*/\1/p' "$log" | sort -u)"
   if [ "$status" -ne 101 ] || [ "$codes" != "$expected" ]; then
     cat "$log" >&2
-    echo "expected disabled public macro diagnostic $expected, not another Cargo failure" >&2
+    echo "expected disabled public API diagnostic $expected, not another Cargo failure" >&2
     return 1
   fi
   local symbol pattern
@@ -81,19 +81,31 @@ check_dependency_tree() {
 consumer run "" runtime
 consumer run dependency-default runtime
 consumer run macros literals
+consumer run json typed_runtime
+consumer run spicedb spicedb_types
+consumer run spicedb spicedb_metadata
+consumer run macros,spicedb object_literals
 consumer run macros,spicedb spicedb_literals
+consumer run macros,spicedb spicedb_proc_bridge
 
-# Without a macro export, imports resolve to the private value-object module.
-for features in "" dependency-default spicedb; do
+for features in "" dependency-default json; do
   check_dependency_tree "$features" absent
-  expect_missing "$features" literals E0603 object_id object_type principal_kind
+  expect_missing "$features" literals E0603 principal_kind
   expect_missing "$features" proc_bridge E0432 __private
-  if [ "$features" = spicedb ]; then
-    expect_missing "$features" spicedb_literals E0603 relation_name param_name
-  else
-    expect_missing "$features" spicedb_literals E0432 relation_name param_name
-  fi
+  expect_missing "$features" object_literals E0432 object_id object_type
+  expect_missing "$features" spicedb_literals E0432 relation_name param_name
 done
+for features in "" dependency-default macros json; do
+  expect_missing "$features" spicedb_types E0432 Base64UrlUnpadded HasSubject ObjectId ObjectType SubjectMapping SubjectMappingError SubjectRef Verbatim
+  expect_missing "$features" spicedb_metadata E0432 constants::OBJECT_SEPARATOR ValueKind::ObjectId
+done
+expect_missing spicedb literals E0603 principal_kind
+expect_missing spicedb proc_bridge E0432 __private
+expect_missing spicedb object_literals E0603 object_id object_type
+expect_missing spicedb spicedb_literals E0603 relation_name param_name
+expect_missing macros object_literals E0432 object_id object_type
 expect_missing macros spicedb_literals E0432 relation_name param_name
+expect_missing macros spicedb_proc_bridge E0432 __private::object_id_impl __private::object_type_impl __private::param_name_impl __private::relation_name_impl
+check_dependency_tree spicedb absent
 check_dependency_tree macros present
 check_dependency_tree macros,spicedb present

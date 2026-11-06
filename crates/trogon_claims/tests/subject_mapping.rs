@@ -1,3 +1,4 @@
+#![cfg(feature = "spicedb")]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use trogon_claims::{Base64UrlUnpadded, SubjectId, SubjectMapping, SubjectMappingError, Verbatim};
