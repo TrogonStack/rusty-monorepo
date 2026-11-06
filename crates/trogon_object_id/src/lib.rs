@@ -2,8 +2,6 @@
 #![doc = include_str!("../README.md")]
 
 use std::fmt;
-use std::marker::PhantomData;
-use std::str::FromStr;
 
 pub const MAX_VALUE_BYTES: usize = 1024;
 
@@ -78,29 +76,14 @@ impl Definition {
     }
 }
 
-/// Trusted, deterministic application validation after core value checks.
+/// Trusted, deterministic application validation for text payloads.
 pub trait Validator {
     fn validate(value: &str) -> Result<(), ParseError>;
 }
 
 pub mod validators {
-    #[cfg(feature = "uuid")]
-    pub struct Uuid;
-
-    #[cfg(feature = "uuid")]
-    impl Validator for Uuid {
-        fn validate(value: &str) -> Result<(), ParseError> {
-            if value.len() == 36 && uuid::Uuid::parse_str(value).is_ok() {
-                Ok(())
-            } else {
-                Err(ParseError::InvalidValue)
-            }
-        }
-    }
-
     use crate::{ParseError, Validator};
 
-    /// Accept any value passing the core length and control-character checks.
     pub struct Any;
     impl Validator for Any {
         fn validate(_value: &str) -> Result<(), ParseError> {
@@ -108,7 +91,7 @@ pub mod validators {
         }
     }
 
-    /// An arbitrarily sized signed ASCII decimal integer, preserving its text.
+    /// Signed ASCII decimal syntax without a numeric range or normalization.
     pub struct Integer;
     impl Validator for Integer {
         fn validate(value: &str) -> Result<(), ParseError> {
@@ -120,73 +103,64 @@ pub mod validators {
             }
         }
     }
+
+    /// Spelling-preserving UUID validation for a `Text` payload.
+    #[cfg(feature = "uuid")]
+    pub struct Uuid;
+    #[cfg(feature = "uuid")]
+    impl Validator for Uuid {
+        fn validate(value: &str) -> Result<(), ParseError> {
+            <crate::Uuid as crate::Payload>::parse(value).map(|_| ())
+        }
+    }
 }
 
-/// The compile-time definition associated with an identifier's domain.
+mod object_id;
+mod payload;
+
+pub use object_id::ObjectId;
+pub use payload::{Payload, Text};
+#[cfg(feature = "uuid")]
+pub use uuid::Uuid;
+
+/// A domain's immutable prefix and payload representation.
+///
+/// ```compile_fail
+/// use trogon_object_id::{Definition, Domain, ObjectId, Text};
+/// struct User;
+/// impl Domain for User {
+///     const DEFINITION: Definition = Definition::new("user", "_");
+///     type Payload = Text;
+/// }
+/// struct Order;
+/// impl Domain for Order {
+///     const DEFINITION: Definition = Definition::new("order", "_");
+///     type Payload = Text;
+/// }
+/// let user: ObjectId<User> = ObjectId::<Order>::try_from_raw("123").unwrap();
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{Definition, Domain, ObjectId, Text};
+/// struct InvalidDomain;
+/// impl Domain for InvalidDomain {
+///     const DEFINITION: Definition = Definition::new("", "_");
+///     type Payload = Text;
+/// }
+/// let invalid = ObjectId::<InvalidDomain>::try_from_raw("123");
+/// ```
 pub trait Domain {
     const DEFINITION: Definition;
-    type Validator: Validator;
+    type Payload: Payload;
 }
 
-/// A typed identifier whose raw value can only be constructed through validation.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ObjectId<D: Domain> {
-    value: String,
-    domain: PhantomData<fn() -> D>,
-}
-
-impl<D: Domain> ObjectId<D> {
-    pub fn try_from_raw(value: &str) -> Result<Self, ParseError> {
-        let _definition = D::DEFINITION;
-        if value.is_empty() {
-            return Err(ParseError::EmptyValue);
-        }
-        if value.len() > MAX_VALUE_BYTES {
-            return Err(ParseError::ValueTooLong);
-        }
-        if value.chars().any(char::is_control) {
-            return Err(ParseError::ControlCharacter);
-        }
-        D::Validator::validate(value)?;
-        Ok(Self {
-            value: value.to_owned(),
-            domain: PhantomData,
-        })
-    }
-
-    pub fn try_from_owned(value: String) -> Result<Self, ParseError> {
-        Self::try_from_raw(&value)
-    }
-
-    pub fn as_raw(&self) -> &str {
-        &self.value
-    }
-}
-
-impl<D: Domain> FromStr for ObjectId<D> {
-    type Err = ParseError;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let raw = D::DEFINITION.strip_prefix(value).ok_or(ParseError::InvalidPrefix)?;
-        Self::try_from_raw(raw)
-    }
-}
-
-impl<D: Domain> fmt::Display for ObjectId<D> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let definition = D::DEFINITION;
-        formatter.write_str(definition.object_type())?;
-        formatter.write_str(definition.separator())?;
-        formatter.write_str(self.as_raw())
-    }
-}
-
-/// A trusted source of raw values for one validator type.
+/// A trusted source of typed payloads. Generated values still pass `Payload::validate`.
 pub trait Generator {
-    type Validator: Validator;
-    fn generate() -> Result<String, ParseError>;
+    type Payload: Payload;
+    fn generate() -> Result<Self::Payload, ParseError>;
 }
 
-/// Generates UUID version 4 values using system randomness.
+/// Generates UUID version 4 values using the `uuid` crate's system randomness.
 ///
 /// ```compile_fail
 /// use trogon_object_id::{object_id, validators::Integer, Uuid4};
@@ -197,9 +171,9 @@ pub trait Generator {
 pub struct Uuid4;
 #[cfg(feature = "uuid")]
 impl Generator for Uuid4 {
-    type Validator = validators::Uuid;
-    fn generate() -> Result<String, ParseError> {
-        Ok(uuid::Uuid::new_v4().to_string())
+    type Payload = Uuid;
+    fn generate() -> Result<Uuid, ParseError> {
+        Ok(Uuid::new_v4())
     }
 }
 
@@ -208,20 +182,22 @@ impl Generator for Uuid4 {
 pub struct Uuid7;
 #[cfg(feature = "uuid")]
 impl Generator for Uuid7 {
-    type Validator = validators::Uuid;
-    fn generate() -> Result<String, ParseError> {
-        Ok(uuid::Uuid::now_v7().to_string())
+    type Payload = Uuid;
+    fn generate() -> Result<Uuid, ParseError> {
+        Ok(Uuid::now_v7())
     }
 }
 
-/// Access to the validated raw storage form of a concrete domain identifier.
+/// The raw representation of one concrete identifier domain.
 pub trait Identifier: Sized {
+    const DEFINITION: Definition;
+    type Raw: ?Sized + fmt::Display;
     fn try_from_raw(value: &str) -> Result<Self, ParseError>;
-    fn as_raw(&self) -> &str;
+    fn try_from_owned(value: String) -> Result<Self, ParseError>;
+    fn as_raw(&self) -> &Self::Raw;
 }
 
-/// Validates all complete prefixes before a union can be declared.
-#[doc(hidden)]
+/// Rejects duplicate or overlapping complete prefixes. Call in a `const` for a handwritten union.
 pub const fn assert_disjoint(definitions: &[Definition]) {
     assert!(!definitions.is_empty(), "union must contain a member");
     let mut left = 0;
@@ -334,37 +310,54 @@ macro_rules! object_id {
     };
 
     (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", validator = $crate::validators::Any); }
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", payload = $crate::Text); }
     };
     (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = $sep, validator = $crate::validators::Any); }
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = $sep, payload = $crate::Text); }
     };
     (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, validator = $validator:ty);) => {
-        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", validator = $validator); }
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", payload = $crate::Text<$validator>); }
+    };
+    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, payload = $payload:ty);) => {
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = "_", payload = $payload); }
     };
     (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal, validator = $validator:ty);) => {
+        $crate::object_id! { @attrs [$($attr)*] $vis struct $name($kind, separator = $sep, payload = $crate::Text<$validator>); }
+    };
+    (@attrs [$($attr:tt)*] $vis:vis struct $name:ident($kind:literal, separator = $sep:literal, payload = $payload:ty);) => {
         const _: $crate::Definition = $crate::Definition::new($kind, $sep);
         $($attr)*
+        #[repr(transparent)]
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         $vis struct $name($crate::ObjectId<Self>);
         impl $crate::Domain for $name {
             const DEFINITION: $crate::Definition = $crate::Definition::new($kind, $sep);
-            type Validator = $validator;
+            type Payload = $payload;
         }
         impl $name {
             pub fn try_from_raw(value: &str) -> ::core::result::Result<Self, $crate::ParseError> {
                 $crate::ObjectId::try_from_raw(value).map(Self)
             }
-            pub fn as_raw(&self) -> &str { self.0.as_raw() }
+            pub fn try_from_owned(value: ::std::string::String) -> ::core::result::Result<Self, $crate::ParseError> {
+                $crate::ObjectId::try_from_owned(value).map(Self)
+            }
+            pub fn try_from_payload(value: $payload) -> ::core::result::Result<Self, $crate::ParseError> {
+                $crate::ObjectId::try_from_payload(value).map(Self)
+            }
+            pub fn payload(&self) -> &$payload { self.0.payload() }
+            pub fn into_payload(self) -> $payload { self.0.into_payload() }
+            pub fn as_raw(&self) -> &<$payload as $crate::Payload>::Raw { self.0.as_raw() }
             pub fn generate<G>() -> ::core::result::Result<Self, $crate::ParseError>
-            where G: $crate::Generator<Validator = <Self as $crate::Domain>::Validator> {
-                let raw = G::generate()?;
-                Self::try_from_raw(&raw)
+            where G: $crate::Generator<Payload = $payload> {
+                $crate::ObjectId::generate::<G>().map(Self)
             }
         }
         impl $crate::Identifier for $name {
+            const DEFINITION: $crate::Definition = <Self as $crate::Domain>::DEFINITION;
+            type Raw = <$payload as $crate::Payload>::Raw;
             fn try_from_raw(value: &str) -> ::core::result::Result<Self, $crate::ParseError> { Self::try_from_raw(value) }
-            fn as_raw(&self) -> &str { self.as_raw() }
+            fn try_from_owned(value: ::std::string::String) -> ::core::result::Result<Self, $crate::ParseError> { Self::try_from_owned(value) }
+            fn as_raw(&self) -> &Self::Raw { self.as_raw() }
         }
         impl ::core::str::FromStr for $name {
             type Err = $crate::ParseError;
@@ -373,6 +366,12 @@ macro_rules! object_id {
         impl ::core::convert::TryFrom<&str> for $name {
             type Error = $crate::ParseError;
             fn try_from(value: &str) -> ::core::result::Result<Self, Self::Error> { value.parse() }
+        }
+        impl ::core::convert::TryFrom<::std::string::String> for $name {
+            type Error = $crate::ParseError;
+            fn try_from(value: ::std::string::String) -> ::core::result::Result<Self, Self::Error> {
+                $crate::ObjectId::<Self>::try_from(value).map(Self)
+            }
         }
         impl ::core::fmt::Display for $name {
             fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Display::fmt(&self.0, formatter) }
@@ -444,7 +443,7 @@ macro_rules! union_object_id {
     };
 
     (@attrs [$($attr:tt)*] $vis:vis enum $name:ident { $($variant:ident($member:ty)),+ $(,)? }) => {
-        const _: () = $crate::assert_disjoint(&[$(<$member as $crate::Domain>::DEFINITION),+]);
+        const _: () = $crate::assert_disjoint(&[$(<$member as $crate::Identifier>::DEFINITION),+]);
         $($attr)*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         $vis enum $name { $($variant($member)),+ }
@@ -454,7 +453,7 @@ macro_rules! union_object_id {
         impl ::core::str::FromStr for $name {
             type Err = $crate::ParseError;
             fn from_str(value: &str) -> ::core::result::Result<Self, Self::Err> {
-                $(if <$member as $crate::Domain>::DEFINITION.strip_prefix(value).is_some() {
+                $(if <$member as $crate::Identifier>::DEFINITION.strip_prefix(value).is_some() {
                     return value.parse::<$member>().map(Self::$variant);
                 })+
                 Err($crate::ParseError::UnknownPrefix)
@@ -463,6 +462,17 @@ macro_rules! union_object_id {
         impl ::core::convert::TryFrom<&str> for $name {
             type Error = $crate::ParseError;
             fn try_from(value: &str) -> ::core::result::Result<Self, Self::Error> { value.parse() }
+        }
+        impl ::core::convert::TryFrom<::std::string::String> for $name {
+            type Error = $crate::ParseError;
+            fn try_from(mut value: ::std::string::String) -> ::core::result::Result<Self, Self::Error> {
+                $(if let ::core::option::Option::Some(raw) = <$member as $crate::Identifier>::DEFINITION.strip_prefix(&value) {
+                    let prefix_len = value.len() - raw.len();
+                    value.drain(..prefix_len);
+                    return <$member as $crate::Identifier>::try_from_owned(value).map(Self::$variant);
+                })+
+                Err($crate::ParseError::UnknownPrefix)
+            }
         }
         impl ::core::fmt::Display for $name {
             fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
@@ -485,32 +495,27 @@ pub mod __private {
     pub use serde;
     use std::fmt;
     use std::marker::PhantomData;
-    use std::str::FromStr;
 
     pub fn serialize<T: fmt::Display, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(value)
     }
 
-    pub fn deserialize<'de, T: FromStr, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error>
-    where
-        T::Err: fmt::Display,
-    {
-        deserialize_with(deserializer, T::from_str)
-    }
-
-    pub fn deserialize_with<'de, T, E, D, F>(deserializer: D, parse: F) -> Result<T, D::Error>
+    pub fn deserialize_owned<'de, T, E, D, F, O>(deserializer: D, parse: F, parse_owned: O) -> Result<T, D::Error>
     where
         D: serde::Deserializer<'de>,
         F: Fn(&str) -> Result<T, E>,
+        O: Fn(String) -> Result<T, E>,
         E: fmt::Display,
     {
-        struct StringVisitor<T, F> {
+        struct StringVisitor<T, F, O> {
             parse: F,
+            parse_owned: O,
             marker: PhantomData<fn() -> T>,
         }
-        impl<'de, T, E, F> serde::de::Visitor<'de> for StringVisitor<T, F>
+        impl<'de, T, E, F, O> serde::de::Visitor<'de> for StringVisitor<T, F, O>
         where
             F: Fn(&str) -> Result<T, E>,
+            O: Fn(String) -> Result<T, E>,
             E: fmt::Display,
         {
             type Value = T;
@@ -520,9 +525,13 @@ pub mod __private {
             fn visit_str<E2: serde::de::Error>(self, value: &str) -> Result<T, E2> {
                 (self.parse)(value).map_err(E2::custom)
             }
+            fn visit_string<E2: serde::de::Error>(self, value: String) -> Result<T, E2> {
+                (self.parse_owned)(value).map_err(E2::custom)
+            }
         }
         deserializer.deserialize_str(StringVisitor {
             parse,
+            parse_owned,
             marker: PhantomData,
         })
     }
@@ -545,7 +554,11 @@ macro_rules! __impl_serde {
             fn deserialize<D: $crate::__private::serde::Deserializer<'de>>(
                 deserializer: D,
             ) -> ::core::result::Result<Self, D::Error> {
-                $crate::__private::deserialize(deserializer)
+                $crate::__private::deserialize_owned(
+                    deserializer,
+                    <Self as ::core::str::FromStr>::from_str,
+                    <Self as ::core::convert::TryFrom<::std::string::String>>::try_from,
+                )
             }
         }
     };
@@ -563,9 +576,9 @@ macro_rules! __impl_serde {
 pub mod serde_raw {
     use crate::Identifier;
     pub fn serialize<T: Identifier, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(value.as_raw())
+        serializer.collect_str(value.as_raw())
     }
     pub fn deserialize<'de, T: Identifier, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
-        crate::__private::deserialize_with(deserializer, T::try_from_raw)
+        crate::__private::deserialize_owned(deserializer, T::try_from_raw, T::try_from_owned)
     }
 }
