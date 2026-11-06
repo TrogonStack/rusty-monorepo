@@ -146,3 +146,46 @@ fn custom_typed_inputs_and_generators_cannot_skip_payload_validation() {
         "generation invokes validation"
     );
 }
+
+struct CountingValidator;
+static VALIDATION_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+impl trogon_object_id::Validator for CountingValidator {
+    fn validate(_value: &str) -> Result<(), trogon_object_id::ParseError> {
+        VALIDATION_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+struct CountingDomain;
+impl Domain for CountingDomain {
+    const DEFINITION: Definition = Definition::new("counted", "_");
+    type Payload = trogon_object_id::Text<CountingValidator>;
+}
+struct CountingGenerator;
+impl trogon_object_id::Generator for CountingGenerator {
+    type Payload = trogon_object_id::Text<CountingValidator>;
+    fn generate() -> Result<Self::Payload, trogon_object_id::ParseError> {
+        trogon_object_id::Text::try_from_raw("generated")
+    }
+}
+
+#[test]
+fn immutable_text_guarantees_are_established_once() {
+    use std::sync::atomic::Ordering;
+    VALIDATION_CALLS.store(0, Ordering::Relaxed);
+    let payload = trogon_object_id::Text::<CountingValidator>::try_from_raw("valid").expect("validated text");
+    let id = ObjectId::<CountingDomain>::try_from_payload(payload).expect("wrap validated text");
+    assert_eq!(id.as_raw(), "valid", "typed wrapping preserves payload");
+    assert_eq!(
+        VALIDATION_CALLS.load(Ordering::Relaxed),
+        1,
+        "wrapping immutable text should not repeat validation"
+    );
+    VALIDATION_CALLS.store(0, Ordering::Relaxed);
+    let id = ObjectId::<CountingDomain>::generate::<CountingGenerator>().expect("generate validated text");
+    assert_eq!(id.as_raw(), "generated", "typed generation preserves payload");
+    assert_eq!(
+        VALIDATION_CALLS.load(Ordering::Relaxed),
+        1,
+        "typed generation should not repeat validation"
+    );
+}
