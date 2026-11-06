@@ -23,12 +23,14 @@ struct IdOptions {
     prefix: LitStr,
     separator: LitStr,
     payload: Option<Type>,
+    template: Option<Type>,
 }
 
 fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
     let mut prefix = None;
     let mut separator = None;
     let mut payload = None;
+    let mut template = None;
     for attribute in &input.attrs {
         if !attribute.path().is_ident("object_id") {
             continue;
@@ -49,8 +51,13 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
                     return Err(meta.error("duplicate object_id payload"));
                 }
                 payload = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("template") {
+                if template.is_some() {
+                    return Err(meta.error("duplicate object_id template"));
+                }
+                template = Some(meta.value()?.parse()?);
             } else {
-                return Err(meta.error("expected prefix, separator, or payload"));
+                return Err(meta.error("expected prefix, separator, payload, or template"));
             }
             Ok(())
         })?;
@@ -60,6 +67,7 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
             .ok_or_else(|| syn::Error::new_spanned(&input.ident, "missing #[object_id(prefix = \"...\")]"))?,
         separator: separator.unwrap_or_else(|| LitStr::new("_", proc_macro2::Span::call_site())),
         payload,
+        template,
     })
 }
 
@@ -115,6 +123,9 @@ fn expand_object_id(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     let prefix = &options.prefix;
     let separator = &options.separator;
     let payload = &field.ty;
+    let template = options
+        .template
+        .map(|template| quote!(#path::__impl_template_domain!(#name, #template, direct);));
     Ok(quote! {
         const _: #path::Definition = #path::Definition::new(#prefix, #separator);
         impl #path::Domain for #name {
@@ -172,6 +183,7 @@ fn expand_object_id(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
             }
         }
         #path::__impl_serde!(#name);
+        #template
     })
 }
 
@@ -200,12 +212,16 @@ fn expand_domain(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         .map(|ty| quote!(#ty))
         .unwrap_or_else(|| quote!(#path::Text));
     let name = &input.ident;
+    let template = options
+        .template
+        .map(|template| quote!(#path::__impl_template_domain!(#name, #template, domain);));
     Ok(quote! {
         const _: #path::Definition = #path::Definition::new(#prefix, #separator);
         impl #path::Domain for #name {
             const DEFINITION: #path::Definition = #path::Definition::new(#prefix, #separator);
             type Payload = #payload;
         }
+        #template
     })
 }
 

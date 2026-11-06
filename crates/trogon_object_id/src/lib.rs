@@ -390,6 +390,45 @@ pub trait Domain {
     type Payload: Payload;
 }
 
+/// A UUID domain bound to one statically selected identity recipe.
+#[cfg(feature = "template")]
+pub trait TemplateDomain: Domain<Payload = Uuid> {
+    type Template: UuidTemplate;
+}
+
+#[cfg(feature = "template")]
+pub use trogon_uuid::UuidTemplate;
+
+#[cfg(feature = "template")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_template_domain {
+    ($name:ident, $template:ty, domain) => {
+        impl $crate::TemplateDomain for $name {
+            type Template = $template;
+        }
+    };
+    ($name:ident, $template:ty, direct) => {
+        $crate::__impl_template_domain!($name, $template, domain);
+        impl $name {
+            pub fn from_identity(
+                input: <<Self as $crate::TemplateDomain>::Template as $crate::UuidTemplate>::Input<'_>,
+            ) -> ::core::result::Result<Self, $crate::ParseError> {
+                $crate::ObjectId::<Self>::from_identity(input).map(|value| Self(value.into_payload()))
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "template"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_template_domain {
+    ($($input:tt)*) => {
+        ::core::compile_error!("object_id template binding requires the `template` feature on trogon_object_id");
+    };
+}
+
 /// A trusted source of typed payloads. Generated values still pass `Payload::validate`.
 pub trait Generator {
     type Payload: Payload;

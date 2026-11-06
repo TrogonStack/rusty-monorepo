@@ -58,6 +58,16 @@ impl<D: Domain> ObjectId<D> {
     }
 }
 
+#[cfg(feature = "template")]
+impl<D: crate::TemplateDomain> ObjectId<D> {
+    /// Generates the bound recipe's UUID and validates it for this identifier.
+    pub fn from_identity(
+        input: <<D as crate::TemplateDomain>::Template as crate::UuidTemplate>::Input<'_>,
+    ) -> Result<Self, ParseError> {
+        Self::try_from_payload(<D::Template as crate::UuidTemplate>::uuid5(input))
+    }
+}
+
 impl<D: Domain> FromStr for ObjectId<D> {
     type Err = ParseError;
     fn from_str(value: &str) -> Result<Self, ParseError> {
