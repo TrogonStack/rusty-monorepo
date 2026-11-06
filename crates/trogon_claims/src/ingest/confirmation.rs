@@ -24,6 +24,10 @@ fn text_of(raw: &RawJson, member: &'static str) -> Result<ClaimText, Confirmatio
         .ok_or(ConfirmationError::WrongType { member })
 }
 
+fn member_text(raw: &RawJson) -> ClaimText {
+    ClaimText::from(raw.as_string().unwrap_or_else(|| raw.as_str().to_owned()))
+}
+
 fn parse_jwk(raw: &RawJson) -> Result<Jwk, ConfirmationError> {
     let object = object_of(raw, MEMBER_JWK)?;
     let mut kty = None;
@@ -43,10 +47,7 @@ fn parse_jwk(raw: &RawJson) -> Result<Jwk, ConfirmationError> {
             MEMBER_ALG => alg = Some(text_of(value, MEMBER_ALG)?),
             MEMBER_USE => key_use = Some(text_of(value, MEMBER_USE)?),
             MEMBER_CRV => crv = Some(text_of(value, MEMBER_CRV)?),
-            other => members.push((
-                ClaimPropertyKey::try_new(other.to_owned())?,
-                ClaimText::from(value.as_str().to_owned()),
-            )),
+            other => members.push((ClaimPropertyKey::try_new(other.to_owned())?, member_text(value))),
         }
     }
     let kty = kty.ok_or(ConfirmationError::MissingKeyType)?;
@@ -95,10 +96,9 @@ pub(crate) fn parse_confirmation(raw: &RawJson) -> Result<Confirmation, Confirma
             MEMBER_KID => confirmation.kid = Some(text_of(value, MEMBER_KID)?),
             MEMBER_X5T_S256 => confirmation.x5t_s256 = Some(text_of(value, MEMBER_X5T_S256)?),
             MEMBER_JKT => confirmation.jkt = Some(text_of(value, MEMBER_JKT)?),
-            other => confirmation.other.push((
-                ClaimPropertyKey::try_new(other.to_owned())?,
-                ClaimText::from(value.as_str().to_owned()),
-            )),
+            other => confirmation
+                .other
+                .push((ClaimPropertyKey::try_new(other.to_owned())?, member_text(value))),
         }
     }
     if key_members > 1 {

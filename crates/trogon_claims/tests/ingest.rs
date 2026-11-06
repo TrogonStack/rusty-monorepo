@@ -430,6 +430,64 @@ fn confirmation_is_asserted_and_never_exposes_key_material() {
 }
 
 #[test]
+fn jwk_public_key_strings_are_decoded_without_json_quotes() {
+    for (jwk, expected) in [
+        (
+            r#"{"kty":"RSA","n":"\u0061Q","e":"AQAB"}"#,
+            vec![("n", "aQ"), ("e", "AQAB")],
+        ),
+        (
+            r#"{"kty":"EC","crv":"P-256","x":"\u0061Q","y":"b\u0051"}"#,
+            vec![("x", "aQ"), ("y", "bQ")],
+        ),
+    ] {
+        let json = format!(r#"{{"iss":"i","sub":"u","cnf":{{"jwk":{jwk}}}}}"#);
+        let ingested = ingest(&json).unwrap();
+        let Binding::Asserted(confirmation) = ingested.identity().binding() else {
+            panic!("cnf must produce an asserted binding");
+        };
+        let members: Vec<_> = confirmation
+            .jwk()
+            .unwrap()
+            .members()
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(members, expected);
+    }
+}
+
+#[test]
+fn confirmation_extension_strings_decode_once_and_other_json_stays_raw() {
+    let ingested = ingest(
+        r#"{"iss":"i","sub":"u","cnf":{"jwk":{"kty":"RSA","n":"aQ","e":"AQAB","extension":{"a":1}},"text":"quoted \u0022claim\u0022 \\u0041","object":{"a":1},"array":[1,null],"number":1,"boolean":true,"null":null}}"#,
+    )
+    .unwrap();
+    let Binding::Asserted(confirmation) = ingested.identity().binding() else {
+        panic!("cnf must produce an asserted binding");
+    };
+    let members: Vec<_> = confirmation
+        .other_members()
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    assert_eq!(
+        members,
+        vec![
+            ("text", r#"quoted "claim" \u0041"#),
+            ("object", r#"{"a":1}"#),
+            ("array", "[1,null]"),
+            ("number", "1"),
+            ("boolean", "true"),
+            ("null", "null"),
+        ]
+    );
+    let extension = confirmation.jwk().unwrap().members().last().unwrap();
+    assert_eq!(extension.0.as_str(), "extension");
+    assert_eq!(extension.1.as_str(), r#"{"a":1}"#);
+}
+
+#[test]
 fn a_token_without_cnf_is_a_bearer() {
     assert_eq!(ingest(FIGURE_5).unwrap().identity().binding(), &Binding::Bearer);
 }

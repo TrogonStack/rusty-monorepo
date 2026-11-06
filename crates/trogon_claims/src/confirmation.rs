@@ -46,6 +46,8 @@ impl Confirmation {
         self.jwe.is_some()
     }
 
+    /// Extension members, with JSON strings decoded once. Non-string values
+    /// retain their raw JSON representation.
     pub fn other_members(&self) -> &[(ClaimPropertyKey, ClaimText)] {
         &self.other
     }

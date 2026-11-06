@@ -34,6 +34,8 @@ impl Jwk {
         self.crv.as_ref()
     }
 
+    /// Additional key members, with JSON strings decoded once. Non-string
+    /// extension values retain their raw JSON representation.
     pub fn members(&self) -> &[(ClaimPropertyKey, ClaimText)] {
         &self.members
     }
