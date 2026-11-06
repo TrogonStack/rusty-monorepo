@@ -154,6 +154,10 @@ impl<D: Domain> ObjectId<D> {
         })
     }
 
+    pub fn try_from_owned(value: String) -> Result<Self, ParseError> {
+        Self::try_from_raw(&value)
+    }
+
     pub fn as_raw(&self) -> &str {
         &self.value
     }
