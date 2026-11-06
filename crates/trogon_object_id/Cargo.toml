@@ -14,9 +14,11 @@ workspace = true
 thiserror = { workspace = true }
 serde = { workspace = true, optional = true }
 uuid = { version = "1.26", features = ["v4", "v7"], optional = true }
+trogon_object_id_derive = { version = "0.1.0", path = "../trogon_object_id_derive", optional = true }
 
 [features]
 default = []
+derive = ["dep:trogon_object_id_derive"]
 serde = ["dep:serde"]
 uuid = ["dep:uuid"]
 

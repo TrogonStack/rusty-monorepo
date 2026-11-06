@@ -3,6 +3,11 @@
 
 use std::fmt;
 
+extern crate self as trogon_object_id;
+
+#[cfg(feature = "derive")]
+pub use trogon_object_id_derive::{ObjectIdDomain, ObjectIdUnion};
+
 pub const MAX_VALUE_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
