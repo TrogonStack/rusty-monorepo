@@ -8,8 +8,8 @@ pub struct ParseError;
 pub struct ObjectId(String);
 
 impl ObjectId {
-    pub fn try_from_raw(_value: &str) -> Result<Self, ParseError> {
-        Err(ParseError)
+    pub fn try_from_raw(value: &str) -> Result<Self, ParseError> {
+        Ok(Self(value.to_owned()))
     }
 
     pub fn as_raw(&self) -> &str {
