@@ -1,6 +1,57 @@
 use trogon_uuid_build::{generate, Template};
+use prost::Message;
+use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 
 const DESCRIPTORS: &[u8] = include_bytes!("fixtures/recipes.binpb");
+
+fn alter_field(message: &mut DynamicMessage, parent: &str, field_name: &str, property: &str, value: &Value) -> bool {
+    let is_parent = message.get_field_by_name("name").is_some_and(|name| name.as_ref() == &Value::String(parent.to_owned()));
+    if is_parent {
+        if let Some(Value::List(fields)) = message.get_field_by_name_mut("field") {
+            for field in fields {
+                if let Value::Message(field) = field {
+                    if field.get_field_by_name("name").is_some_and(|name| name.as_ref() == &Value::String(field_name.to_owned())) {
+                        field.set_field_by_name(property, value.clone());
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    for (_, nested) in message.fields_mut() {
+        match nested {
+            Value::Message(nested) => {
+                if alter_field(nested, parent, field_name, property, value) { return true; }
+            }
+            Value::List(items) => {
+                for item in items {
+                    if let Value::Message(nested) = item {
+                        if alter_field(nested, parent, field_name, property, value) { return true; }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn changed_schema(parent: &str, field: &str, property: &str, value: Value) -> Vec<u8> {
+    let pool = DescriptorPool::decode(DESCRIPTORS).unwrap();
+    let descriptor = pool.get_message_by_name("google.protobuf.FileDescriptorSet").unwrap();
+    let mut message = DynamicMessage::decode(descriptor, DESCRIPTORS).unwrap();
+    assert!(alter_field(&mut message, parent, field, property, &value));
+    message.encode_to_vec()
+}
+
+#[test]
+fn rejects_schema_with_changed_inner_wire_contract() {
+    let descriptors = changed_schema("Format", "template", "number", Value::I32(3));
+    let result = generate(&descriptors, &[Template::new(
+        "example.catalog.v1.SkuIdentityVersion", "SKU_IDENTITY_VERSION_V1", "SkuIdentityV1",
+    )]);
+    assert!(result.is_err(), "changed field tag must not silently change generated identity");
+}
 
 #[test]
 fn emits_a_typed_recipe_for_a_selected_identity_version() {
