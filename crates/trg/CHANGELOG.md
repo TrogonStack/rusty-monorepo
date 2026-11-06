@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.1...trg@v0.14.2) (2026-11-06)
+
+
+### Bug Fixes
+
+* **release:** Drop the SLSA generator the org's action policy rejects ([#329](https://github.com/TrogonStack/rusty-monorepo/issues/329)) ([a074512](https://github.com/TrogonStack/rusty-monorepo/commit/a074512097c59e4ee8e67dc5c49539c8f1c81f04))
+
 ## [0.14.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.0...trg@v0.14.1) (2026-11-05)
 
 
