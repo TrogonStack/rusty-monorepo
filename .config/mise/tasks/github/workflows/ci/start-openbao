@@ -10,7 +10,7 @@ docker run -d --name openbao \
   openbao/openbao@sha256:597f62847dd382382056a1d6704d50465908c2040038c4611832a23269a67112 \
   server -dev -dev-no-store-token
 for _ in $(seq 1 30); do
-  if curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null; then
+  if curl -sf --max-time 2 http://127.0.0.1:8200/v1/sys/health > /dev/null; then
     exit 0
   fi
   sleep 1
