@@ -2934,6 +2934,7 @@ dependencies = [
  "stats_alloc",
  "thiserror 2.0.21",
  "trogon_object_id_derive",
+ "trogon_uuid",
  "uuid",
 ]
 
@@ -3053,6 +3054,16 @@ checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
 dependencies = [
  "outref",
  "vsimd",
+]
+
+[[package]]
+name = "uuid_identity_example"
+version = "0.1.0"
+dependencies = [
+ "stats_alloc",
+ "trogon_object_id",
+ "trogon_uuid",
+ "trogon_uuid_build",
 ]
 
 [[package]]

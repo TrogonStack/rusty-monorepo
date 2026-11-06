@@ -188,11 +188,57 @@ randomness and time behavior; its randomness failure can panic, even though the
 shared generation API returns `Result` for fallible custom generators. UUID
 version 7 exposes a timestamp. Identifiers do not establish authorization.
 
+## Binding a compiled UUIDv5 recipe
+
+Enable `derive` and `template` to select a recipe using a Rust type path:
+
+```rust
+# #[cfg(all(feature = "derive", feature = "template"))]
+# {
+# mod generated {
+#     use trogon_object_id::{Uuid, UuidTemplate};
+#     pub struct ItemIdentityV1;
+#     pub struct ItemIdentityV1Input<'a> { pub external_key: &'a str }
+#     impl UuidTemplate for ItemIdentityV1 {
+#         type Input<'a> = ItemIdentityV1Input<'a>;
+#         const NAMESPACE: Uuid = Uuid::NAMESPACE_DNS;
+#         fn uuid5(input: Self::Input<'_>) -> Uuid {
+#             Uuid::new_v5(&Self::NAMESPACE, input.external_key.as_bytes())
+#         }
+#     }
+# }
+use trogon_object_id::{ObjectId, Uuid};
+
+#[derive(ObjectId)]
+#[object_id(prefix = "item", template = generated::ItemIdentityV1)]
+#[repr(transparent)]
+struct ItemId(Uuid);
+
+let item = ItemId::from_identity(generated::ItemIdentityV1Input {
+    external_key: "example.org",
+})?;
+assert_eq!(item.payload().get_version_num(), 5);
+# }
+# Ok::<(), trogon_object_id::ParseError>(())
+```
+
+The recipe owns its namespace, version and input contract. The attribute binds
+the ID to that recipe without repeating namespace or template strings.
+`from_identity` receives the recipe's associated input type and wraps its UUID
+through the same checked constructor. Generated recipes can come from
+`trogon_uuid_build`; protobuf descriptors remain a build-time dependency.
+
+A binding selects the convenience constructor; it does not restrict the other
+checked constructors to UUIDs from that recipe. UUID syntax alone cannot prove
+which recipe produced a value. A template binding requires a UUID payload and
+fails compilation when the feature, recipe trait or payload type is wrong.
+
 ## Using the core without derives
 
 `ObjectIdDomain` remains available when an application prefers a zero-sized
 marker plus `ObjectId<Marker>` alias. It accepts `payload = Type` because the
-marker has no payload field.
+marker has no payload field. With `template` enabled it also accepts
+`template = Recipe` alongside `payload = Uuid`.
 
 The `derive` feature is optional. An ordinary `Domain` implementation provides
 the same ID behavior without a procedural macro:
@@ -236,6 +282,7 @@ UUID options from protobuf descriptors during code generation.
 The default build has no optional features. `derive` enables `ObjectId`,
 `ObjectIdDomain` and `ObjectIdUnion`. `serde` enables JSON-compatible traits and
 raw field adapters. `uuid` enables compact UUID payloads and generation.
+`template` binds UUID IDs to compiled `trogon_uuid` recipes and enables `uuid`.
 The implementation forbids unsafe Rust.
 
 ## License
