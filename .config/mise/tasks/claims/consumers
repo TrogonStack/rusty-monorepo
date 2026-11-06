@@ -24,7 +24,7 @@ consumer() {
 expect_missing() {
   local features="$1" binary="$2" expected="$3"
   shift 3
-  local log="$probe_dir/$binary-${features:-none}.internal.trogonai.md" status codes
+  local log="$probe_dir/$binary-${features:-none}.internal.trogonai.md" status codes diagnostics
   if CARGO_TERM_COLOR=never consumer check "$features" "$binary" > "$log" 2>&1; then
     echo "feature boundary failed: $binary unexpectedly compiled with '${features:-none}'" >&2
     cat "$log" >&2
@@ -39,14 +39,15 @@ expect_missing() {
     echo "expected disabled public API diagnostic $expected, not another Cargo failure" >&2
     return 1
   fi
+  diagnostics="$(sed -n '/^error\[E0432\]: unresolved import/p; /^error\[E0603\]: /p' "$log")"
   local symbol pattern
   for symbol in "$@"; do
     case "$expected" in
-      E0432) pattern="trogon_claims::$symbol" ;;
+      E0432) pattern='`trogon_claims::'"$symbol"'`' ;;
       E0603) pattern='error[E0603]: module `'"$symbol"'` is private' ;;
       *) echo "unsupported feature-probe diagnostic $expected" >&2; return 1 ;;
     esac
-    if ! grep -Fq "$pattern" "$log"; then
+    if ! grep -Fq "$pattern" <<< "$diagnostics"; then
       cat "$log" >&2
       echo "missing expected disabled import diagnostic for $symbol" >&2
       return 1
