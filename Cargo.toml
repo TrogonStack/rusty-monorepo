@@ -2,6 +2,9 @@
 members = ["crates/trg", "crates/trogon_object_id"]
 resolver = "2"
 
+[workspace.package]
+license = "Apache-2.0"
+
 [workspace.lints.clippy]
 derivable_impls = "deny"
 disallowed_methods = "deny"

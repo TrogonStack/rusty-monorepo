@@ -188,3 +188,7 @@ specific to the Elixir environment and are not included.
 The default build has no optional features. `serde` enables JSON-compatible
 traits and raw field adapters. `uuid` enables compact UUID payloads and
 generation. The implementation forbids unsafe Rust.
+
+## License
+
+Licensed under [Apache-2.0](LICENSE).
