@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description = "Resolve the release version and source commit"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+version="$(mise run -q release:version "${TAG:?}")"
+commit="$(mise run -q release:commit "$TAG")"
+printf 'tag=%s\nversion=%s\ncommit=%s\n' "$TAG" "$version" "$commit" >> "${GITHUB_OUTPUT:?}"

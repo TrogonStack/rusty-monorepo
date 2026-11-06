@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Reject checked-in schema drift"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+git diff --exit-code crates/trg/schemas/

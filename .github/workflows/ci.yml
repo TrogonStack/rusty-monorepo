@@ -14,6 +14,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
 
 jobs:
   fmt:
@@ -30,7 +31,7 @@ jobs:
           install_args: rust
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: mise run github:workflows:ci:check-format
 
   clippy:
     name: Clippy
@@ -64,7 +65,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy with strict warnings
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: mise run github:workflows:ci:check-clippy
 
   test:
     name: Test
@@ -98,10 +99,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --locked --workspace --lib --tests
-
-      - name: Run doc tests
-        run: cargo test --locked --workspace --doc
+        run: mise run github:workflows:ci:check-tests
 
   build:
     name: Build
@@ -135,10 +133,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build debug
-        run: cargo build --locked --workspace
+        run: mise run github:workflows:ci:build-debug
 
       - name: Build release
-        run: cargo build --locked --workspace --release
+        run: mise run github:workflows:ci:build-release
 
   schemas:
     name: Schemas
@@ -176,10 +174,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Regenerate schemas
-        run: cargo run --locked -p trg --bin generate-schemas
+        run: mise run github:workflows:ci:generate-schemas
 
       - name: Fail on drift
-        run: git diff --exit-code crates/trg/schemas/
+        run: mise run github:workflows:ci:check-schema-drift
 
   openbao:
     name: OpenBao Wire Tests
@@ -216,46 +214,21 @@ jobs:
       # suite needs `server -dev`, and a service block cannot override the
       # image command.
       - name: Start OpenBao
-        run: |
-          docker run -d --name openbao \
-            --cap-add=IPC_LOCK \
-            -p 8200:8200 \
-            -e BAO_DEV_ROOT_TOKEN_ID=trg-ci-root \
-            -e BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
-            openbao/openbao@sha256:597f62847dd382382056a1d6704d50465908c2040038c4611832a23269a67112 \
-            server -dev -dev-no-store-token
-          for _ in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:8200/v1/sys/health > /dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "OpenBao did not come up" >&2
-          docker logs openbao >&2
-          exit 1
+        run: mise run github:workflows:ci:start-openbao
 
       # The suite reads the config `trg` itself reads, so CI declares one
       # rather than the suite inventing an instance on its own.
       - name: Declare the backend
-        run: |
-          cat > "${RUNNER_TEMP}/bao-config.toml" <<'EOF'
-          [secrets.backends.ci]
-          kind = "openbao"
-          addr = "http://127.0.0.1:8200"
-          mount = "secret"
-          path_prefix = "trg-ci"
-          owner = "ci"
-          token = "trg-ci-root"
-          EOF
+        run: mise run github:workflows:ci:configure-openbao
 
       - name: Run OpenBao wire tests
         env:
           BAO_CONFIG: ${{ runner.temp }}/bao-config.toml
-        run: cargo test --locked -p trg --test openbao_live -- --ignored
+        run: mise run github:workflows:ci:check-openbao
 
       - name: OpenBao logs
         if: failure()
-        run: docker logs openbao
+        run: mise run github:workflows:ci:openbao-logs
 
   lints:
     name: Policy Lints
@@ -283,14 +256,13 @@ jobs:
           key: ${{ runner.os }}-trogon-dylint-lints-target-${{ hashFiles('crates/trogon_dylint_lints/Cargo.lock') }}
 
       - name: Install the pinned lint toolchain
-        run: mise run lints:toolchain
+        run: mise run github:workflows:ci:install-lint-toolchain
 
       - name: Check formatting
-        working-directory: crates/trogon_dylint_lints
-        run: cargo fmt --all -- --check
+        run: mise run github:workflows:ci:check-lints-format
 
       - name: Run the ui tests
-        run: mise run lints:test
+        run: mise run github:workflows:ci:check-policy-lints
 
   security:
     name: Security Audit
@@ -306,7 +278,7 @@ jobs:
           install_args: rust cargo:cargo-audit
 
       - name: Run security audit
-        run: cargo audit
+        run: mise run github:workflows:ci:audit-dependencies
 
   coverage:
     name: Code Coverage
@@ -322,7 +294,7 @@ jobs:
           install_args: rust cargo:cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --locked --workspace --out Xml --timeout 300
+        run: mise run github:workflows:ci:generate-coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Lint the Rust workspace"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+mise run check:clippy

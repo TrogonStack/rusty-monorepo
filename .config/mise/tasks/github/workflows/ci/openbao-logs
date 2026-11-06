@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Print the OpenBao service logs"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+docker logs openbao

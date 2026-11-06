@@ -5,20 +5,26 @@
 ```bash
 git clone https://github.com/TrogonStack/rusty-monorepo.git
 cd rusty-monorepo
-cargo build --workspace
+mise install rust
+mise run build:debug
 ```
+
+Tasks use explicitly installed tools. Install optional tools with `mise install`
+only when needed, for example `mise install cargo:cargo-audit` before a dependency audit.
 
 ## Before Submitting
 
 Run the verification suite:
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+mise run check
 ```
 
-All must pass before merge.
+This runs workspace formatting, strict Clippy, unit/integration and documentation
+tests. All must pass before merge.
+
+Task implementations live under `.config/mise/tasks/`, following
+[ADR 6647967335](https://github.com/straw-hat-team/adr/blob/af44966a0b1fd8422ab3749013a5e3dcac622e02/src/adrs/6647967335/README.md).
 
 The workspace Clippy policy, split across `Cargo.toml` and `clippy.toml`, mirrors `policies/rust/`, the reference copy shared with other repositories. Change them together.
 

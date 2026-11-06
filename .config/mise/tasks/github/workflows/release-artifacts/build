@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description = "Build the requested release source"
+set -euo pipefail
+cd "${RELEASE_SOURCE_ROOT:?}"
+if [[ "${USE_CROSS:?}" == "true" ]]; then
+  cross build --locked --release --target "${RELEASE_TARGET:?}" --package trg
+else
+  cargo build --locked --release --target "${RELEASE_TARGET:?}" --package trg
+fi

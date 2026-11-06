@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#MISE description = "Build the trogon_dylint_lints library"
+#MISE depends = ["lints:toolchain"]
+set -euo pipefail
+source "${MISE_PROJECT_ROOT:?}/.config/mise/lib/lints.sh"
+cd "$MISE_PROJECT_ROOT/crates/trogon_dylint_lints"
+channel="$(lints_toolchain)"
+rustup run "$channel" cargo build --release

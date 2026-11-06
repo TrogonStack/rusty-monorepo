@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description = "Run the trogon_dylint_lints UI tests"
+#MISE depends = ["lints:toolchain"]
+set -euo pipefail
+source "${MISE_PROJECT_ROOT:?}/.config/mise/lib/lints.sh"
+cd "$MISE_PROJECT_ROOT/crates/trogon_dylint_lints"
+channel="$(lints_toolchain)"
+# mise's stable pin outranks the crate toolchain unless rustup selects it.
+rustup run "$channel" cargo test --locked
