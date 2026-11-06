@@ -74,6 +74,9 @@ extern crate self as trogon_object_id;
 #[cfg(feature = "derive")]
 pub use trogon_object_id_derive::ObjectIdDomain;
 
+#[cfg(feature = "derive")]
+pub use trogon_object_id_derive::ObjectId;
+
 /// Derive parsing, formatting, conversions, and prefix checks for an ordinary enum.
 ///
 /// ```compile_fail

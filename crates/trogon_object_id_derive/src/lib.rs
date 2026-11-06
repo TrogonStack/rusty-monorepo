@@ -19,6 +19,43 @@ fn runtime_path() -> syn::Result<proc_macro2::TokenStream> {
     }
 }
 
+#[proc_macro_derive(ObjectId, attributes(object_id))]
+pub fn derive_object_id(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+    let Data::Struct(data) = &input.data else {
+        return syn::Error::new_spanned(name, "ObjectId requires a tuple struct").into_compile_error().into();
+    };
+    let Fields::Unnamed(fields) = &data.fields else {
+        return syn::Error::new_spanned(name, "ObjectId requires a tuple struct").into_compile_error().into();
+    };
+    let Some(field) = fields.unnamed.first() else {
+        return syn::Error::new_spanned(name, "ObjectId requires a payload").into_compile_error().into();
+    };
+    let payload = &field.ty;
+    let path = match runtime_path() {
+        Ok(path) => path,
+        Err(error) => return error.into_compile_error().into(),
+    };
+    quote! {
+        impl #path::Domain for #name {
+            const DEFINITION: #path::Definition = #path::Definition::new("stub", "_");
+            type Payload = #payload;
+        }
+        impl #name {
+            pub fn try_from_raw(value: &str) -> ::core::result::Result<Self, #path::ParseError> {
+                #path::ObjectId::<Self>::try_from_raw(value).map(|value| Self(value.into_payload()))
+            }
+        }
+        impl ::core::fmt::Display for #name {
+            fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str("stub_")?;
+                ::core::fmt::Display::fmt(&self.0, formatter)
+            }
+        }
+    }.into()
+}
+
 #[proc_macro_derive(ObjectIdDomain, attributes(object_id))]
 pub fn derive_domain(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
