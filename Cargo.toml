@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/trg"]
+members = ["crates/trg", "crates/trogon_object_id"]
 resolver = "2"
 
 [workspace.lints.clippy]
