@@ -6,3 +6,4 @@ for feature in serde uuid; do
   cargo test --locked -p trogon_object_id --no-default-features --features "$feature"
 done
 cargo test --locked -p trogon_object_id --all-features
+cargo test --locked -p trogon_object_id --all-features --release --test allocation_tests
