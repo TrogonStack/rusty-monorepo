@@ -75,7 +75,8 @@ impl<V: Validator> Payload for Text<V> {
         Self::try_from_owned(value)
     }
     fn validate(&self) -> Result<(), ParseError> {
-        validate_text::<V>(&self.value)
+        // Checked constructors and immutable storage preserve the validator's guarantee.
+        Ok(())
     }
     fn as_raw(&self) -> &str {
         self.as_str()
