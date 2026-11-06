@@ -1,34 +1,79 @@
 //! Validated claim, identity and principal value objects.
 //!
-//! This crate is the .NET `System.Security.Claims` model (`Claim`,
-//! `ClaimsIdentity`, `ClaimsPrincipal`) expressed in Rust, with every value type
-//! shaped so that it is always expressible as a SpiceDB object, subject,
-//! relation or caveat parameter. It starts where token verification ends: it
-//! never checks a signature, never authorizes, and has no async runtime.
+//! Represent claims, identities and principals as immutable Rust values, with
+//! explicit name/role selection, typed claim interpretation and identity
+//! provenance. Authorization subjects use a separate validated mapping.
+//! The caller verifies credentials before constructing authenticated identity
+//! data; this crate checks representation and refinement state, never a token
+//! signature or resource access decision.
+//!
+//! .NET provides an object-model reference; JWT, OpenID Connect and OAuth specifications
+//! define the protocol semantics. [`WellKnownClaim`] links each JWT/OIDC claim
+//! to its source, while [`CurrentActor`], [`AuthorizedActor`], [`Confirmation`]
+//! and [`Binding`] cite the delegation and proof-of-possession rules. These are
+//! references for interpreting the values, not a token-validation profile.
 //!
 //! # Build a principal
 //!
 //! ```
 //! use trogon_claims::{
-//!     AuthenticationType, Claim, ClaimText, ClaimValue, IdentityBuilder, Issuer, Principal, WellKnownClaim,
+//!     AuthenticationType, Claim, ClaimText, ClaimValue, IdentityBuilder, Issuer, NameClaimType,
+//!     Principal, RoleClaimType, WellKnownClaim,
 //! };
 //!
 //! let issuer = Issuer::try_new("https://issuer.example.com")?;
 //! let subject = Claim::builder(WellKnownClaim::Sub.into(), ClaimValue::Text(ClaimText::from("user-1")))
-//!     .issuer(issuer)
+//!     .issuer(issuer.clone())
 //!     .build();
-//! let identity = IdentityBuilder::new(AuthenticationType::try_new("jwt")?)
+//! let identity = IdentityBuilder::new(
+//!     AuthenticationType::try_new("jwt")?,
+//!     NameClaimType::new(WellKnownClaim::Sub.into()),
+//!     RoleClaimType::new(WellKnownClaim::Roles.into()),
+//! )
+//!     .with_default_issuer(issuer)
 //!     .push(subject)
 //!     .try_build()?;
 //! let principal = Principal::new(identity);
 //!
 //! assert!(principal.is_authenticated());
-//! assert!(principal.find_first(&WellKnownClaim::Sub.into()).is_some());
+//! let sourced = principal.find_first(&WellKnownClaim::Sub.into()).ok_or("subject missing")?;
+//! assert_eq!(sourced.identity().key().sub().as_str(), "user-1");
+//! assert_eq!(sourced.claim().claim_type(), &WellKnownClaim::Sub.into());
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! With the `json` feature, [`ingest`] turns a verified token payload into the
-//! same types in one step, and is the only place raw strings are accepted.
+//! same types in one step. Parsing raw JSON does not establish credential trust.
+//! Manual construction requires singular textual `iss` and `sub` claims; an
+//! explicit `with_default_issuer` supplies an issuer only when `iss` is absent.
+//! Malformed or duplicate issuer/subject claims are rejected.
+//!
+//! # Compose identities deliberately
+//!
+//! ```
+//! use trogon_claims::{Identity, PrimaryIdentityIndex, Principal, PrincipalBuildError, PrincipalBuilder};
+//!
+//! fn compose(first: Identity, second: Identity) -> Result<Principal, PrincipalBuildError> {
+//!     PrincipalBuilder::new(first)
+//!         .push(second)
+//!         .primary(PrimaryIdentityIndex::new(0))
+//!         .try_build()
+//! }
+//! ```
+//!
+//! Selecting an anonymous or out-of-range primary fails. Querying a principal
+//! searches its authenticated identities in insertion order and returns
+//! [`SourcedClaim`], which retains both the claim and its originating identity.
+//! Appending an identity does not change the primary.
+//!
+//! # Interpret standard claims
+//!
+//! [`DynamicClaims::standard`] provides typed accessors for standard assertions.
+//! `Ok(None)` means absent, `Ok(Some(value))` means a supported valid
+//! representation, and [`ClaimLookupError`] distinguishes malformed or
+//! ambiguous values. Requiredness and token acceptance remain caller policy.
+//! Scopes, roles and groups have separate value types. Custom claims remain
+//! accessible through a validated [`ClaimType`].
 //!
 //! # Coming from .NET
 //!
@@ -38,13 +83,25 @@
 //! | `ClaimsIdentity` | [`Identity`] | An enum: `Anonymous` is a variant, not an empty string |
 //! | `IsAuthenticated` | [`Identity::is_authenticated`], or a `match` | Not an emptiness check on a display string |
 //! | `Claim.Value` and `Claim.ValueType` | [`ClaimValue`] | One field whose type is the value type, so the two cannot disagree |
-//! | `AddClaim`, `AddIdentity` | [`IdentityBuilder`], [`PrincipalBuilder`], [`Principal::with_identity`] | Builders, then immutable values |
-//! | `FindFirst(string)` | [`Principal::find_first`] | Takes a parsed [`ClaimType`], never a `&str` |
-//! | `FindAll(string)` | [`Principal::find_all`] | Same |
+//! | `AddClaim`, `AddIdentity` | [`IdentityBuilder`], [`PrincipalBuilder`], [`Principal::with_identity`] | Builders, then immutable values; composition preserves an explicitly selected primary |
+//! | `FindFirst(string)` | [`Principal::find_first`] | Takes [`ClaimType`] and returns [`SourcedClaim`] with its identity provenance |
+//! | `FindAll(string)` | [`Principal::find_all`] | Same; queries iterate authenticated identities in insertion order |
 //! | `IsInRole` | [`Principal::is_in_role`] | Same semantics, including the per-identity role claim type |
 //! | `ClaimTypes.*` | [`WellKnownClaim`] | Short names and the `WS-*` URIs, matched exactly |
 //! | `GenericPrincipal` | none | One principal type, one storage |
 //! | `IClaimsTransformation` | a plain function | Values are immutable, so a transformation returns a new one |
+//!
+//! [`IdentityBuilder`] and [`IngestProfile`] require explicit [`NameClaimType`]
+//! and [`RoleClaimType`] arguments. No name or role claim type is selected by
+//! default, and JWT/OIDC names are not rewritten to WS-* URIs. Each selector
+//! uses one type without fallback; the distinct types prevent swapping them.
+//! The authentication key remains issuer plus subject, independently of the
+//! selected principal name.
+//!
+//! [MicroProfile JWT 2.1](https://download.eclipse.org/microprofile/microprofile-jwt-auth-2.1/microprofile-jwt-auth-spec-2.1.html)
+//! offers a related JVM model through `JsonWebToken` and its `Claims` enum. Its
+//! `upn`, `preferred_username`, `sub` name fallback and `groups` role convention
+//! are profile choices that this crate does not apply automatically.
 //!
 //! # Where this departs from .NET
 //!
@@ -55,8 +112,9 @@
 //! - **A claim value has a type, and the type is the value type.** There is no
 //!   free-form `ValueType` string to drift from the value. [`ClaimValue`] has no
 //!   null arm.
-//! - **Claim types are parsed once.** Lookups take a [`ClaimType`], so a typo in
-//!   a literal is caught at construction and never silently misses.
+//! - **Claim types are explicit values.** Lookups take [`ClaimType`]. Known
+//!   names match exactly; custom non-empty names remain available. Custom-name
+//!   validation does not detect a misspelling of a standard claim.
 //! - **Roles are a claim query, not a decision.** [`Principal::is_in_role`]
 //!   reports what the token asserted. Authorization belongs to a permission
 //!   check against a resource.
@@ -65,8 +123,9 @@
 //!   [`Principal::is_in_role`] skip anonymous identities.
 //! - **Authentication is a type.** [`AuthenticatedPrincipal`] is a distinct
 //!   wrapper that cannot be built from an anonymous principal. It deliberately
-//!   has no `Deref` to [`Principal`], so holding one is the proof that
-//!   authentication happened.
+//!   has no `Deref` to [`Principal`]. It proves that a caller-supplied principal
+//!   has an authenticated primary; credential verification remains the caller's
+//!   responsibility.
 //! - **Refinements are consuming and typed.** `try_kind`, `try_classified`,
 //!   `try_delegated`, `try_direct` and `try_bind` return a wrapper whose type
 //!   records what was checked, and a binding is only ever verified through the
@@ -77,6 +136,11 @@
 //!   stated one.
 //! - **No ambient identity.** Nothing is stored in thread-local or process-global
 //!   state. A principal is passed explicitly.
+//! - **Primary selection is explicit.** A multi-identity [`PrincipalBuilder`]
+//!   requires [`PrimaryIdentityIndex`]. Appending through
+//!   [`Principal::with_identity`] preserves the current primary, including an
+//!   anonymous primary; [`Principal::try_with_primary`] validates a deliberate
+//!   change to another authenticated identity.
 //! - **Bootstrap material never travels with an identity.** The raw credential
 //!   returned beside the claims is a [`BootstrapCredential`], which is redacted
 //!   in `Debug`, has no `Clone` and no serde, and is zeroized on drop.
@@ -148,6 +212,7 @@ mod check_outcome;
 mod check_request;
 mod civil;
 mod claim;
+mod claim_lookup_error;
 mod claim_property_key;
 mod claim_set;
 mod claim_text;
@@ -165,6 +230,7 @@ mod current_principal;
 mod delegation;
 mod dynamic_claims;
 mod errors;
+mod group_name;
 mod identity;
 mod identity_builder;
 #[cfg(feature = "json")]
@@ -179,6 +245,7 @@ mod kind;
 mod macros;
 #[cfg(feature = "axum")]
 mod masked;
+mod name_claim_type;
 mod numeric_date;
 mod object_id;
 #[cfg(feature = "spicedb")]
@@ -214,8 +281,11 @@ mod refinement_extract;
 mod relation_name;
 #[cfg(feature = "axum")]
 mod request_extensions;
+mod role_claim_type;
 mod role_name;
+mod scope;
 mod sealed;
+mod standard_claims;
 #[cfg(feature = "axum")]
 mod step_up;
 mod subject_id;
@@ -267,6 +337,7 @@ pub use check_outcome::{CheckOutcome, LookupOutcome};
 #[cfg(feature = "spicedb")]
 pub use check_request::CheckRequest;
 pub use claim::{Claim, ClaimBuilder};
+pub use claim_lookup_error::ClaimLookupError;
 pub use claim_property_key::ClaimPropertyKey;
 pub use claim_set::{ClaimSet, HasRoles, HasSubject, SubjectRef};
 pub use claim_text::ClaimText;
@@ -279,7 +350,8 @@ pub use current_principal::CurrentPrincipal;
 pub use delegation::Delegation;
 pub use dynamic_claims::DynamicClaims;
 pub use errors::{NumericDateError, TimestampError, Unsigned63Error, UtcOffsetError, ValueKind, ValueObjectError};
-pub use identity::{AuthenticatedIdentity, Identity};
+pub use group_name::{GroupName, GroupNameError};
+pub use identity::{AnonymousIdentityError, AuthenticatedIdentity, Identity};
 pub use identity_builder::{IdentityBuildError, IdentityBuilder};
 #[cfg(feature = "json")]
 pub use ingest_error::{ClaimValueError, ConfirmationError, IngestError};
@@ -288,6 +360,7 @@ pub use ingested::Ingested;
 pub use issuer::Issuer;
 pub use jwk::Jwk;
 pub use kind::{Classified, Kind, Unclassified};
+pub use name_claim_type::NameClaimType;
 pub use numeric_date::NumericDate;
 pub use object_id::ObjectId;
 #[cfg(feature = "spicedb")]
@@ -298,7 +371,7 @@ pub use outcome_error::OutcomeError;
 #[cfg(feature = "spicedb")]
 pub use param_name::ParamName;
 pub use principal::{Principal, SourcedClaim};
-pub use principal_builder::{PrincipalBuildError, PrincipalBuilder};
+pub use principal_builder::{PrimaryIdentityIndex, PrincipalBuildError, PrincipalBuilder};
 pub use principal_key::PrincipalKey;
 pub use principal_kind::PrincipalKind;
 pub use prior_actor::PriorActor;
@@ -316,7 +389,10 @@ pub use refinement::{
 };
 #[cfg(feature = "spicedb")]
 pub use relation_name::RelationName;
+pub use role_claim_type::RoleClaimType;
 pub use role_name::RoleName;
+pub use scope::{ScopeName, ScopeNameError, ScopeSet};
+pub use standard_claims::StandardClaims;
 pub use subject_id::SubjectId;
 pub use subject_mapping::{Base64UrlUnpadded, SubjectMapping, SubjectMappingError, Verbatim};
 #[cfg(feature = "spicedb")]

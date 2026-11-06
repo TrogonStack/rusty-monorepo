@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use thiserror::Error;
+
 use crate::authentication_context::AuthenticationContext;
 use crate::authentication_type::AuthenticationType;
 use crate::authorized_actor::AuthorizedActor;
@@ -11,17 +13,23 @@ use crate::claim_value::ClaimValue;
 use crate::current_actor::CurrentActor;
 use crate::delegation::Delegation;
 use crate::dynamic_claims::DynamicClaims;
+use crate::name_claim_type::NameClaimType;
 use crate::principal_key::PrincipalKey;
 use crate::principal_kind::PrincipalKind;
+use crate::role_claim_type::RoleClaimType;
 use crate::role_name::RoleName;
-use crate::verified_binding::{BindingError, Method, VerifiedBinding};
+use crate::verified_binding::{BindingError, BindingMethod, Dpop, Method, MutualTls, VerifiedBinding};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[error("an anonymous identity cannot be classified")]
+pub struct AnonymousIdentityError;
 
 #[derive(Clone, Debug)]
 pub(crate) struct IdentityParts<C: ClaimSet> {
     pub(crate) authentication_type: AuthenticationType,
     pub(crate) claims: C,
-    pub(crate) name_claim_type: ClaimType,
-    pub(crate) role_claim_type: ClaimType,
+    pub(crate) name_claim_type: NameClaimType,
+    pub(crate) role_claim_type: RoleClaimType,
     pub(crate) key: PrincipalKey,
     pub(crate) delegation: Delegation,
     pub(crate) binding: Binding,
@@ -33,8 +41,8 @@ pub(crate) struct IdentityParts<C: ClaimSet> {
 pub struct AuthenticatedIdentity<C: ClaimSet = DynamicClaims> {
     authentication_type: AuthenticationType,
     claims: C,
-    name_claim_type: ClaimType,
-    role_claim_type: ClaimType,
+    name_claim_type: NameClaimType,
+    role_claim_type: RoleClaimType,
     key: PrincipalKey,
     kind: Option<PrincipalKind>,
     delegation: Delegation,
@@ -67,11 +75,11 @@ impl<C: ClaimSet> AuthenticatedIdentity<C> {
         &self.claims
     }
 
-    pub fn name_claim_type(&self) -> &ClaimType {
+    pub fn name_claim_type(&self) -> &NameClaimType {
         &self.name_claim_type
     }
 
-    pub fn role_claim_type(&self) -> &ClaimType {
+    pub fn role_claim_type(&self) -> &RoleClaimType {
         &self.role_claim_type
     }
 
@@ -125,7 +133,7 @@ impl AuthenticatedIdentity<DynamicClaims> {
     }
 
     pub fn name(&self) -> Option<&str> {
-        match self.claims.find_first(&self.name_claim_type)?.value() {
+        match self.claims.find_first(self.name_claim_type.claim_type())?.value() {
             ClaimValue::Text(text) => Some(text.as_str()),
             _ => None,
         }
@@ -133,7 +141,7 @@ impl AuthenticatedIdentity<DynamicClaims> {
 
     pub fn is_in_role(&self, role: &RoleName) -> bool {
         self.claims
-            .find_all(&self.role_claim_type)
+            .find_all(self.role_claim_type.claim_type())
             .any(|claim| matches!(claim.value(), ClaimValue::Text(text) if text.as_str() == role.as_str()))
     }
 }
@@ -181,17 +189,25 @@ impl<C: ClaimSet> Clone for Identity<C> {
 }
 
 impl<C: ClaimSet + Clone> Identity<C> {
-    pub fn with_verified_binding(mut self, verified: VerifiedBinding) -> Self {
-        if let Self::Authenticated(identity) = &mut self {
-            Arc::make_mut(identity).binding = Binding::Verified(Box::new(verified));
-        }
-        self
+    /// Records supplied evidence only when it matches this identity's binding.
+    /// The caller remains responsible for validating the underlying proof.
+    pub fn try_with_verified_binding(mut self, verified: VerifiedBinding) -> Result<Self, BindingError> {
+        let Self::Authenticated(identity) = &mut self else {
+            return Err(BindingError::NotAsserted);
+        };
+        let matched = match verified.method() {
+            BindingMethod::Dpop => identity.binding.verify::<Dpop>(verified.thumbprint())?,
+            BindingMethod::MutualTls => identity.binding.verify::<MutualTls>(verified.thumbprint())?,
+        };
+        Arc::make_mut(identity).binding = Binding::Verified(Box::new(matched));
+        Ok(self)
     }
 
-    pub fn with_kind(mut self, kind: PrincipalKind) -> Self {
-        if let Self::Authenticated(identity) = &mut self {
-            Arc::make_mut(identity).kind = Some(kind);
-        }
-        self
+    pub fn try_with_kind(mut self, kind: PrincipalKind) -> Result<Self, AnonymousIdentityError> {
+        let Self::Authenticated(identity) = &mut self else {
+            return Err(AnonymousIdentityError);
+        };
+        Arc::make_mut(identity).kind = Some(kind);
+        Ok(self)
     }
 }

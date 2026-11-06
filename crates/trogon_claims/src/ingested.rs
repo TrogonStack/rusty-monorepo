@@ -5,33 +5,29 @@ use crate::current_actor::CurrentActor;
 use crate::identity::{AuthenticatedIdentity, Identity};
 use crate::principal::Principal;
 
+/// An ingested identity whose current actor is always read from that identity.
+/// Construction cannot attach an independent or contradictory actor value.
 #[derive(Clone, Debug)]
-pub enum Ingested<C: ClaimSet> {
-    Direct(Arc<AuthenticatedIdentity<C>>),
-    Delegated {
-        identity: Arc<AuthenticatedIdentity<C>>,
-        actor: Arc<CurrentActor>,
-    },
+pub struct Ingested<C: ClaimSet> {
+    identity: Arc<AuthenticatedIdentity<C>>,
 }
 
 impl<C: ClaimSet> Ingested<C> {
+    #[cfg(feature = "json")]
+    pub(crate) fn new(identity: Arc<AuthenticatedIdentity<C>>) -> Self {
+        Self { identity }
+    }
+
     pub fn identity(&self) -> &AuthenticatedIdentity<C> {
-        match self {
-            Self::Direct(identity) | Self::Delegated { identity, .. } => identity,
-        }
+        &self.identity
     }
 
     pub fn actor(&self) -> Option<&CurrentActor> {
-        match self {
-            Self::Direct(_) => None,
-            Self::Delegated { actor, .. } => Some(actor),
-        }
+        self.identity.actor().map(Arc::as_ref)
     }
 
     pub fn into_identity(self) -> Identity<C> {
-        match self {
-            Self::Direct(identity) | Self::Delegated { identity, .. } => Identity::Authenticated(identity),
-        }
+        Identity::Authenticated(self.identity)
     }
 }
 

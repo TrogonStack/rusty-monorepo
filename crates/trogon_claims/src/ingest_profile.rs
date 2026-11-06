@@ -1,34 +1,30 @@
 use crate::authentication_type::AuthenticationType;
-use crate::claim_type::ClaimType;
 use crate::issuer::Issuer;
-use crate::well_known_claim::WellKnownClaim;
+use crate::name_claim_type::NameClaimType;
+use crate::role_claim_type::RoleClaimType;
 
+/// Explicit claim selection for ingest. Each selector names one claim type;
+/// no name or role default, username fallback or group-to-role mapping is applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IngestProfile {
     authentication_type: AuthenticationType,
-    name_claim_type: ClaimType,
-    role_claim_type: ClaimType,
+    name_claim_type: NameClaimType,
+    role_claim_type: RoleClaimType,
     default_issuer: Option<Issuer>,
 }
 
 impl IngestProfile {
-    pub fn new(authentication_type: AuthenticationType) -> Self {
+    pub fn new(
+        authentication_type: AuthenticationType,
+        name_claim_type: NameClaimType,
+        role_claim_type: RoleClaimType,
+    ) -> Self {
         Self {
             authentication_type,
-            name_claim_type: WellKnownClaim::WsName.into(),
-            role_claim_type: WellKnownClaim::WsRole.into(),
+            name_claim_type,
+            role_claim_type,
             default_issuer: None,
         }
-    }
-
-    pub fn with_name_claim_type(mut self, claim_type: ClaimType) -> Self {
-        self.name_claim_type = claim_type;
-        self
-    }
-
-    pub fn with_role_claim_type(mut self, claim_type: ClaimType) -> Self {
-        self.role_claim_type = claim_type;
-        self
     }
 
     pub fn with_default_issuer(mut self, issuer: Issuer) -> Self {
@@ -40,11 +36,11 @@ impl IngestProfile {
         &self.authentication_type
     }
 
-    pub fn name_claim_type(&self) -> &ClaimType {
+    pub fn name_claim_type(&self) -> &NameClaimType {
         &self.name_claim_type
     }
 
-    pub fn role_claim_type(&self) -> &ClaimType {
+    pub fn role_claim_type(&self) -> &RoleClaimType {
         &self.role_claim_type
     }
 

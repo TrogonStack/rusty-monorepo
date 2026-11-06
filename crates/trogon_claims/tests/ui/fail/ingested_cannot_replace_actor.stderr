@@ -1,0 +1,11 @@
+error[E0223]: ambiguous associated type
+ --> tests/ui/fail/ingested_cannot_replace_actor.rs:7:13
+  |
+7 |     let _ = Ingested::Delegated { identity, actor };
+  |             ^^^^^^^^^^^^^^^^^^^
+  |
+help: if there were a trait named `Example` with associated type `Delegated` implemented for `Ingested<_>`, you could use the fully-qualified path
+  |
+7 -     let _ = Ingested::Delegated { identity, actor };
+7 +     let _ = <Ingested<_> as Example>::Delegated { identity, actor };
+  |

@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use trogon_claims::{
     AuthenticationType, Claim, ClaimText, ClaimValue, DynamicClaims, Identity, IdentityBuilder, IngestProfile, Issuer,
-    RawClaims, WellKnownClaim,
+    NameClaimType, RawClaims, RoleClaimType, WellKnownClaim,
 };
 
 struct CountingAllocator;
@@ -69,7 +69,11 @@ fn measure(label: &str, mut work: impl FnMut()) {
 }
 
 fn main() {
-    let profile = IngestProfile::new(AuthenticationType::try_new("jwt").unwrap());
+    let profile = IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    );
     let raw = RawClaims::from_slice(PAYLOAD.as_bytes()).unwrap();
     println!("payload members: {}", raw.len());
 
@@ -88,7 +92,19 @@ fn main() {
 
     let issuer = Issuer::try_new("https://issuer.example.com").unwrap();
     measure("IdentityBuilder::try_build", || {
-        let mut builder = IdentityBuilder::new(AuthenticationType::try_new("jwt").unwrap());
+        let mut builder = IdentityBuilder::new(
+            AuthenticationType::try_new("jwt").unwrap(),
+            NameClaimType::new(WellKnownClaim::WsName.into()),
+            RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        )
+        .push(
+            Claim::builder(
+                WellKnownClaim::Iss.into(),
+                ClaimValue::Text(ClaimText::from("https://issuer.example.com")),
+            )
+            .issuer(issuer.clone())
+            .build(),
+        );
         for index in 0..12 {
             let claim_type = if index == 0 {
                 WellKnownClaim::Sub.into()

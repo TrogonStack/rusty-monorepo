@@ -2,6 +2,9 @@ use crate::constants::{MAX_SECOND_DIGITS, MAX_UNIX_SECONDS, MIN_UNIX_SECONDS, NA
 use crate::errors::{NumericDateError, TimestampError};
 use crate::timestamp::Timestamp;
 
+/// Unix time using the `NumericDate` representation defined in
+/// [RFC 7519 §2](https://www.rfc-editor.org/rfc/rfc7519.html#section-2).
+/// Parsing a timestamp does not check token expiration or not-before policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NumericDate {
     secs: i64,

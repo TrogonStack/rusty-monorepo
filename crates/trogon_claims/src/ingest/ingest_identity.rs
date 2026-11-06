@@ -77,9 +77,6 @@ impl<C: IngestClaims + ClaimSet> Identity<C> {
             context,
         };
         let identity = Arc::new(AuthenticatedIdentity::from_parts(parts));
-        Ok(match actor {
-            Some(actor) => Ingested::Delegated { identity, actor },
-            None => Ingested::Direct(identity),
-        })
+        Ok(Ingested::new(identity))
     }
 }

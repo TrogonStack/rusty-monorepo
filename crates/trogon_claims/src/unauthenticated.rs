@@ -11,6 +11,11 @@ use crate::constants::{
 use crate::credential_outcome::CredentialOutcome;
 use crate::verified_binding::{BindingError, BindingMethod};
 
+/// Request refusal and its HTTP response. Bearer challenges follow
+/// [RFC 6750 §3](https://www.rfc-editor.org/rfc/rfc6750.html#section-3), including
+/// omitting an error when credentials are absent. DPoP challenges use the scheme
+/// defined in [RFC 9449 §7.1](https://www.rfc-editor.org/rfc/rfc9449.html#section-7.1).
+/// Credential and proof validation remain the middleware's responsibility.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unauthenticated {

@@ -2,6 +2,10 @@ use crate::authentication_method::AuthenticationMethod;
 use crate::claim_text::ClaimText;
 use crate::numeric_date::NumericDate;
 
+/// Authentication assertions defined by
+/// [OpenID Connect Core §2](https://openid.net/specs/openid-connect-core-1_0.html#IDToken).
+/// `acr` is a class identifier, `amr` records methods and `auth_time` records when
+/// authentication occurred. Their acceptability is a caller policy decision.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AuthenticationContext {
     acr: Option<ClaimText>,

@@ -113,6 +113,7 @@ pub const CLAIM_FAMILY_NAME: &str = "family_name";
 pub const CLAIM_ROLE: &str = "role";
 pub const CLAIM_ROLES: &str = "roles";
 pub const CLAIM_GROUPS: &str = "groups";
+pub const CLAIM_UPN: &str = "upn";
 pub const MIN_UNIX_SECONDS: i64 = -62_167_219_200;
 pub const MAX_UNIX_SECONDS: i64 = 253_402_300_799;
 pub const NANOS_PER_SECOND: u32 = 1_000_000_000;

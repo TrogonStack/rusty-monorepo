@@ -3,8 +3,8 @@
 
 use trogon_claims::ingest::IngestClaims;
 use trogon_claims::{
-    object_type, AuthenticationType, ClaimSet, HasSubject, Identity, IngestError, IngestProfile, ObjectId, ObjectType,
-    PrincipalKey, RawClaims, SubjectMapping, SubjectRef, Verbatim, WellKnownClaim,
+    object_type, AuthenticationType, ClaimSet, HasSubject, Identity, IngestError, IngestProfile, NameClaimType,
+    ObjectId, ObjectType, PrincipalKey, RawClaims, RoleClaimType, SubjectMapping, SubjectRef, Verbatim, WellKnownClaim,
 };
 
 struct UserClaims {
@@ -31,7 +31,11 @@ impl IngestClaims for UserClaims {
 }
 
 fn profile() -> IngestProfile {
-    IngestProfile::new(AuthenticationType::try_new("jwt").unwrap())
+    IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    )
 }
 
 #[test]

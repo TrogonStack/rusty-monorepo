@@ -1,18 +1,34 @@
 use crate::claim::Claim;
 use crate::claim_set::ClaimSet;
 use crate::claim_type::ClaimType;
+use crate::standard_claims::StandardClaims;
+
+#[cfg(feature = "json")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClaimShape {
+    Scalar,
+    Array,
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DynamicClaims {
     pub(crate) claims: Vec<Claim>,
     pub(crate) unprojected: Vec<ClaimType>,
+    #[cfg(feature = "json")]
+    pub(crate) source_shapes: Vec<(ClaimType, ClaimShape)>,
 }
 
 impl DynamicClaims {
+    pub fn standard(&self) -> StandardClaims<'_> {
+        StandardClaims { claims: self }
+    }
+
     pub fn from_claims(claims: Vec<Claim>) -> Self {
         Self {
             claims,
             unprojected: Vec::new(),
+            #[cfg(feature = "json")]
+            source_shapes: Vec::new(),
         }
     }
 

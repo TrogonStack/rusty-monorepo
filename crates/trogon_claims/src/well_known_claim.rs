@@ -1,34 +1,66 @@
 use crate::constants::*;
 
+/// Exact claim names from JWT, OpenID Connect and the .NET claims vocabulary.
+///
+/// The [IANA JWT Claims registry](https://www.iana.org/assignments/jwt/jwt.xhtml#claims)
+/// identifies each registered name's defining specification. Recognizing a name
+/// does not enforce that specification's token validation rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 #[non_exhaustive]
 pub enum WellKnownClaim {
+    /// Issuer, [RFC 7519 §4.1.1](https://www.rfc-editor.org/rfc/rfc7519.html#section-4.1.1).
     Iss,
+    /// Subject, [RFC 7519 §4.1.2](https://www.rfc-editor.org/rfc/rfc7519.html#section-4.1.2).
     Sub,
+    /// Audience, [RFC 7519 §4.1.3](https://www.rfc-editor.org/rfc/rfc7519.html#section-4.1.3).
     Aud,
+    /// Expiration time, [RFC 7519 §4.1.4](https://www.rfc-editor.org/rfc/rfc7519.html#section-4.1.4).
     Exp,
+    /// Not-before time, [RFC 7519 §4.1.5](https://www.rfc-editor.org/rfc/rfc7519.html#section-4.1.5).
     Nbf,
+    /// Issued-at time, [RFC 7519 §4.1.6](https://www.rfc-editor.org/rfc/rfc7519.html#section-4.1.6).
     Iat,
+    /// JWT identifier, [RFC 7519 §4.1.7](https://www.rfc-editor.org/rfc/rfc7519.html#section-4.1.7).
     Jti,
+    /// Current actor and delegation history, [RFC 8693 §4.1](https://www.rfc-editor.org/rfc/rfc8693.html#section-4.1).
     Act,
+    /// Actor eligible for delegation, [RFC 8693 §4.4](https://www.rfc-editor.org/rfc/rfc8693.html#section-4.4).
     MayAct,
+    /// Proof-of-possession confirmation, [RFC 7800 §3.1](https://www.rfc-editor.org/rfc/rfc7800.html#section-3.1).
     Cnf,
+    /// Access-token scope, [RFC 9068 §2.2.3](https://www.rfc-editor.org/rfc/rfc9068.html#section-2.2.3).
     Scope,
+    /// OAuth client identifier, [RFC 9068 §2.2](https://www.rfc-editor.org/rfc/rfc9068.html#section-2.2).
     ClientId,
+    /// Authentication time, [OpenID Connect Core §2](https://openid.net/specs/openid-connect-core-1_0.html#IDToken).
     AuthTime,
+    /// Authentication context class, [OpenID Connect Core §2](https://openid.net/specs/openid-connect-core-1_0.html#IDToken).
     Acr,
+    /// Authentication methods, [OpenID Connect Core §2](https://openid.net/specs/openid-connect-core-1_0.html#IDToken)
+    /// and [RFC 8176](https://www.rfc-editor.org/rfc/rfc8176.html).
     Amr,
+    /// Authorized party, [OpenID Connect Core §2](https://openid.net/specs/openid-connect-core-1_0.html#IDToken).
     Azp,
+    /// Session-binding nonce, [OpenID Connect Core §2](https://openid.net/specs/openid-connect-core-1_0.html#IDToken).
     Nonce,
+    /// Display name, [OpenID Connect Core §5.1](https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims).
     Name,
+    /// Email address, [OpenID Connect Core §5.1](https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims).
     Email,
+    /// Email verification assertion, [OpenID Connect Core §5.1](https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims).
     EmailVerified,
+    /// Preferred username, [OpenID Connect Core §5.1](https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims).
     PreferredUsername,
+    /// Given name, [OpenID Connect Core §5.1](https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims).
     GivenName,
+    /// Family name, [OpenID Connect Core §5.1](https://openid.net/specs/openid-connect-core-1_0.html#StandardClaims).
     FamilyName,
+    /// Application-defined singular role name; distinct from the registered `roles` claim.
     Role,
+    /// Access-token roles, [RFC 9068 §2.2.3.1](https://www.rfc-editor.org/rfc/rfc9068.html#section-2.2.3.1).
     Roles,
+    /// Access-token groups, [RFC 9068 §2.2.3.1](https://www.rfc-editor.org/rfc/rfc9068.html#section-2.2.3.1).
     Groups,
     WsAuthenticationInstant,
     WsAuthenticationMethod,
@@ -84,6 +116,8 @@ pub enum WellKnownClaim {
     WsWebpage,
     WsX500DistinguishedName,
     WsActor,
+    /// Principal name from [MicroProfile JWT 2.1](https://download.eclipse.org/microprofile/microprofile-jwt-auth-2.1/microprofile-jwt-auth-spec-2.1.html#_required_mp_jwt_claims).
+    Upn,
 }
 
 impl WellKnownClaim {
@@ -115,6 +149,7 @@ impl WellKnownClaim {
             Self::Role => CLAIM_ROLE,
             Self::Roles => CLAIM_ROLES,
             Self::Groups => CLAIM_GROUPS,
+            Self::Upn => CLAIM_UPN,
             Self::WsAuthenticationInstant => WS_AUTHENTICATION_INSTANT,
             Self::WsAuthenticationMethod => WS_AUTHENTICATION_METHOD,
             Self::WsCookiePath => WS_COOKIE_PATH,
@@ -200,6 +235,7 @@ impl WellKnownClaim {
             CLAIM_ROLE => Some(Self::Role),
             CLAIM_ROLES => Some(Self::Roles),
             CLAIM_GROUPS => Some(Self::Groups),
+            CLAIM_UPN => Some(Self::Upn),
             WS_AUTHENTICATION_INSTANT => Some(Self::WsAuthenticationInstant),
             WS_AUTHENTICATION_METHOD => Some(Self::WsAuthenticationMethod),
             WS_COOKIE_PATH => Some(Self::WsCookiePath),

@@ -2,7 +2,7 @@
 
 use trogon_claims::{
     AuthenticationType, Binding, Claim, ClaimText, ClaimType, ClaimValue, Delegation, Identity, IdentityBuildError,
-    IdentityBuilder, Issuer, PrincipalKind, RoleName, WellKnownClaim,
+    IdentityBuilder, Issuer, NameClaimType, PrincipalKind, RoleClaimType, RoleName, WellKnownClaim,
 };
 
 fn text_claim(name: impl Into<ClaimType>, value: &'static str) -> Claim {
@@ -12,10 +12,15 @@ fn text_claim(name: impl Into<ClaimType>, value: &'static str) -> Claim {
 }
 
 fn builder() -> IdentityBuilder {
-    IdentityBuilder::new(AuthenticationType::try_new("test").unwrap())
-        .push(text_claim(WellKnownClaim::Sub, "user-1"))
-        .push(text_claim(WellKnownClaim::WsName, "Ada"))
-        .push(text_claim(WellKnownClaim::WsRole, "admin"))
+    IdentityBuilder::new(
+        AuthenticationType::try_new("test").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    )
+    .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())
+    .push(text_claim(WellKnownClaim::Sub, "user-1"))
+    .push(text_claim(WellKnownClaim::WsName, "Ada"))
+    .push(text_claim(WellKnownClaim::WsRole, "admin"))
 }
 
 #[test]
@@ -33,7 +38,7 @@ fn the_builder_derives_the_key_from_the_claims() {
 }
 
 #[test]
-fn an_explicit_iss_claim_wins_over_the_claim_issuer() {
+fn an_explicit_iss_claim_wins_over_the_configured_fallback() {
     let identity = builder()
         .push(text_claim(WellKnownClaim::Iss, "https://other.example.com"))
         .try_build()
@@ -46,12 +51,21 @@ fn an_explicit_iss_claim_wins_over_the_claim_issuer() {
 
 #[test]
 fn the_builder_requires_a_textual_subject() {
-    let missing = IdentityBuilder::new(AuthenticationType::try_new("test").unwrap()).try_build();
+    let missing = IdentityBuilder::new(
+        AuthenticationType::try_new("test").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    )
+    .try_build();
     assert_eq!(missing.unwrap_err(), IdentityBuildError::MissingSubject);
-    let numeric = IdentityBuilder::new(AuthenticationType::try_new("test").unwrap())
-        .push(Claim::builder(WellKnownClaim::Sub.into(), ClaimValue::Integer(1)).build())
-        .try_build();
-    assert_eq!(numeric.unwrap_err(), IdentityBuildError::MissingSubject);
+    let numeric = IdentityBuilder::new(
+        AuthenticationType::try_new("test").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    )
+    .push(Claim::builder(WellKnownClaim::Sub.into(), ClaimValue::Integer(1)).build())
+    .try_build();
+    assert_eq!(numeric.unwrap_err(), IdentityBuildError::InvalidSubjectType);
 }
 
 #[test]
@@ -62,10 +76,22 @@ fn an_anonymous_identity_carries_nothing() {
 }
 
 #[test]
+fn an_anonymous_identity_cannot_be_classified() {
+    let identity: Identity = Identity::anonymous();
+    let error = identity
+        .try_with_kind(PrincipalKind::try_new("person").unwrap())
+        .unwrap_err();
+    assert_eq!(error.to_string(), "an anonymous identity cannot be classified");
+}
+
+#[test]
 fn kind_is_unset_until_classified_and_does_not_alter_the_source() {
     let original = builder().try_build().unwrap();
     assert!(original.as_authenticated().unwrap().kind().is_none());
-    let classified = original.clone().with_kind(PrincipalKind::try_new("service").unwrap());
+    let classified = original
+        .clone()
+        .try_with_kind(PrincipalKind::try_new("service").unwrap())
+        .unwrap();
     assert_eq!(
         classified.as_authenticated().unwrap().kind().unwrap().as_str(),
         "service"
@@ -75,10 +101,15 @@ fn kind_is_unset_until_classified_and_does_not_alter_the_source() {
 
 #[test]
 fn a_custom_name_claim_type_is_honoured_by_the_builder() {
-    let identity = builder()
-        .name_claim_type(WellKnownClaim::Name.into())
-        .push(text_claim(WellKnownClaim::Name, "Grace"))
-        .try_build()
-        .unwrap();
+    let identity = IdentityBuilder::new(
+        AuthenticationType::try_new("test").unwrap(),
+        NameClaimType::new(WellKnownClaim::Name.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    )
+    .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())
+    .push(text_claim(WellKnownClaim::Sub, "user-1"))
+    .push(text_claim(WellKnownClaim::Name, "Grace"))
+    .try_build()
+    .unwrap();
     assert_eq!(identity.as_authenticated().unwrap().name(), Some("Grace"));
 }

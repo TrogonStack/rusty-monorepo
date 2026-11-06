@@ -19,12 +19,18 @@ pub enum StepUpRequirementError {
     InvalidAcrValue,
 }
 
+/// Required authentication context for a step-up challenge, following
+/// [RFC 9470 §3](https://www.rfc-editor.org/rfc/rfc9470.html#section-3).
+/// Accepted `acr` values and authentication freshness are caller policy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepUpRequirement {
     acr_values: Vec<ClaimText>,
     max_age: Option<Duration>,
 }
 
+/// A failed step-up requirement, rendered as a `401` challenge with
+/// `insufficient_user_authentication` and the requested `acr_values` or `max_age`
+/// from [RFC 9470 §3](https://www.rfc-editor.org/rfc/rfc9470.html#section-3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StepUpRequired {
     requirement: StepUpRequirement,

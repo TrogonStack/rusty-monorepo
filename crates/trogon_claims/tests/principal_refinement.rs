@@ -6,8 +6,8 @@ use std::sync::Arc;
 use trogon_claims::{
     principal_kind, AnyBinding, AnyDelegation, AuthenticatedPrincipal, AuthenticationType, Binding, BindingError,
     BindingMethod, Classified, CurrentPrincipal, Delegated, Dpop, DynamicClaims, Identity, IngestProfile, Ingested,
-    Kind, MutualTls, Principal, PrincipalKind, RawClaims, Refined, Refinement, RefinementError, SenderConstrained,
-    Unclassified,
+    Kind, MutualTls, NameClaimType, Principal, PrincipalKind, RawClaims, Refined, Refinement, RefinementError,
+    RoleClaimType, SenderConstrained, Unclassified, WellKnownClaim,
 };
 
 struct Person;
@@ -24,7 +24,11 @@ impl Kind for Service {
 
 fn ingest(body: &str) -> Ingested<DynamicClaims> {
     let raw = RawClaims::from_slice(body.as_bytes()).unwrap();
-    let profile = IngestProfile::new(AuthenticationType::try_new("jwt").unwrap());
+    let profile = IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    );
     Identity::<DynamicClaims>::ingest(&raw, &profile).unwrap()
 }
 
@@ -33,7 +37,7 @@ fn principal(body: &str) -> Arc<Principal> {
 }
 
 fn classified(body: &str, kind: PrincipalKind) -> Arc<Principal> {
-    let identity = ingest(body).into_identity().with_kind(kind);
+    let identity = ingest(body).into_identity().try_with_kind(kind).unwrap();
     Arc::new(Principal::new(identity))
 }
 
@@ -49,6 +53,24 @@ fn an_ingested_value_converts_into_a_one_identity_principal() {
     assert_eq!(from_method.identities().len(), 1);
     assert!(from_method.is_authenticated());
     assert!(from_trait.is_authenticated());
+}
+
+#[test]
+fn an_ingested_actor_is_always_the_identity_actor() {
+    for body in [PLAIN, DELEGATED] {
+        let ingested = ingest(body);
+        let actor = ingested.actor();
+        let identity_actor = ingested.identity().actor().map(Arc::as_ref);
+        assert_eq!(actor, identity_actor);
+        if let (Some(actor), Some(identity_actor)) = (actor, identity_actor) {
+            assert!(std::ptr::eq(actor, identity_actor));
+        }
+        let principal = ingested.into_principal();
+        assert_eq!(
+            principal.primary().as_authenticated().unwrap().actor().is_some(),
+            body == DELEGATED
+        );
+    }
 }
 
 #[test]
@@ -176,7 +198,7 @@ fn a_verified_binding_can_be_recorded_on_the_stored_identity() {
         .unwrap()
         .verify_binding::<Dpop>("thumb-a")
         .unwrap();
-    let stored = identity.with_verified_binding(verified);
+    let stored = identity.try_with_verified_binding(verified).unwrap();
     let binding = stored.as_authenticated().unwrap().binding();
     assert!(matches!(binding, Binding::Verified(_)));
     assert!(stored
@@ -191,6 +213,51 @@ fn a_verified_binding_can_be_recorded_on_the_stored_identity() {
             .verify_binding::<Dpop>("thumb-z")
             .unwrap_err(),
         BindingError::Mismatch(BindingMethod::Dpop)
+    );
+}
+
+#[test]
+fn a_verified_binding_cannot_replace_another_identity_assertion() {
+    let source = ingest(DPOP).into_identity();
+    let verified = source
+        .as_authenticated()
+        .unwrap()
+        .verify_binding::<Dpop>("thumb-a")
+        .unwrap();
+    let target =
+        ingest(r#"{"iss":"https://issuer.example.com","sub":"user-2","cnf":{"jkt":"thumb-z"}}"#).into_identity();
+    assert_eq!(
+        target.try_with_verified_binding(verified).unwrap_err(),
+        BindingError::Mismatch(BindingMethod::Dpop)
+    );
+}
+
+#[test]
+fn stored_binding_evidence_cannot_change_its_method_or_bind_an_unasserted_identity() {
+    let source = ingest(DPOP).into_identity();
+    let verified = source
+        .as_authenticated()
+        .unwrap()
+        .verify_binding::<Dpop>("thumb-a")
+        .unwrap();
+    assert_eq!(
+        ingest(MTLS)
+            .into_identity()
+            .try_with_verified_binding(verified.clone())
+            .unwrap_err(),
+        BindingError::MemberMissing(BindingMethod::Dpop)
+    );
+    assert_eq!(
+        ingest(PLAIN)
+            .into_identity()
+            .try_with_verified_binding(verified.clone())
+            .unwrap_err(),
+        BindingError::NotAsserted
+    );
+    let anonymous: Identity = Identity::anonymous();
+    assert_eq!(
+        anonymous.try_with_verified_binding(verified).unwrap_err(),
+        BindingError::NotAsserted
     );
 }
 

@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+/// `amr` values from [RFC 8176 §2](https://www.rfc-editor.org/rfc/rfc8176.html#section-2).
+/// Unknown values are retained in [`Self::Other`] for extensions to the registry.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AuthenticationMethod {

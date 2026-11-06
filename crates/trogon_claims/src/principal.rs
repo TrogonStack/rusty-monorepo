@@ -3,6 +3,7 @@ use crate::claim_set::ClaimSet;
 use crate::claim_type::ClaimType;
 use crate::dynamic_claims::DynamicClaims;
 use crate::identity::{AuthenticatedIdentity, Identity};
+use crate::principal_builder::{PrimaryIdentityIndex, PrincipalBuildError};
 use crate::role_name::RoleName;
 
 #[derive(Debug)]
@@ -68,12 +69,28 @@ impl<C: ClaimSet> Principal<C> {
         self.identities.iter().filter_map(Identity::as_authenticated)
     }
 
+    /// Appends an identity while preserving the currently selected primary.
+    /// Use `try_with_primary` to select another authenticated identity explicitly.
     pub fn with_identity(mut self, identity: Identity<C>) -> Self {
-        if !self.primary.is_authenticated() && identity.is_authenticated() {
-            self.primary = identity.clone();
-        }
         self.identities.push(identity);
         self
+    }
+
+    /// Selects an existing authenticated identity as primary.
+    pub fn try_with_primary(mut self, index: PrimaryIdentityIndex) -> Result<Self, PrincipalBuildError> {
+        let index = index.get();
+        let chosen = self
+            .identities
+            .get(index)
+            .ok_or(PrincipalBuildError::PrimaryOutOfRange {
+                index,
+                len: self.identities.len(),
+            })?;
+        if !chosen.is_authenticated() {
+            return Err(PrincipalBuildError::PrimaryAnonymous);
+        }
+        self.primary = chosen.clone();
+        Ok(self)
     }
 }
 
@@ -88,14 +105,21 @@ impl Principal<DynamicClaims> {
         })
     }
 
-    pub fn find_first(&self, claim_type: &ClaimType) -> Option<&Claim> {
-        self.authenticated_identities()
-            .find_map(|identity| identity.find_first(claim_type))
+    /// Finds the first matching assertion in identity order, preserving its source.
+    pub fn find_first(&self, claim_type: &ClaimType) -> Option<SourcedClaim<'_>> {
+        self.authenticated_identities().find_map(|identity| {
+            identity
+                .find_first(claim_type)
+                .map(|claim| SourcedClaim { identity, claim })
+        })
     }
 
-    pub fn find_all<'a>(&'a self, claim_type: &'a ClaimType) -> impl Iterator<Item = &'a Claim> + 'a {
-        self.authenticated_identities()
-            .flat_map(move |identity| identity.find_all(claim_type))
+    pub fn find_all<'a>(&'a self, claim_type: &'a ClaimType) -> impl Iterator<Item = SourcedClaim<'a>> + 'a {
+        self.authenticated_identities().flat_map(move |identity| {
+            identity
+                .find_all(claim_type)
+                .map(move |claim| SourcedClaim { identity, claim })
+        })
     }
 
     pub fn has_claim(&self, claim_type: &ClaimType) -> bool {

@@ -4,6 +4,9 @@ use crate::claim::Claim;
 use crate::claim_type::ClaimType;
 use crate::constants::MAX_ACTOR_DEPTH;
 
+/// A historical actor in a nested `act` chain. Under
+/// [RFC 8693 §4.1](https://www.rfc-editor.org/rfc/rfc8693.html#section-4.1), prior
+/// actors are informational and must not be used for access-control decisions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PriorActor {
     key: ActorKey,

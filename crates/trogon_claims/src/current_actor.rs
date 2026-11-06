@@ -5,6 +5,9 @@ use crate::claim_type::ClaimType;
 use crate::constants::MAX_ACTOR_DEPTH;
 use crate::prior_actor::PriorActor;
 
+/// The outermost `act` actor from
+/// [RFC 8693 §4.1](https://www.rfc-editor.org/rfc/rfc8693.html#section-4.1).
+/// This actor is distinct from the token subject; nested actors record history.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CurrentActor {
     key: ActorKey,

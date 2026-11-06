@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use trogon_claims::{
-    AuthenticationType, Claim, ClaimText, ClaimType, ClaimValue, Identity, IdentityBuilder, Issuer, Principal,
-    PrincipalBuildError, PrincipalBuilder, RoleName, WellKnownClaim,
+    AuthenticationType, Claim, ClaimText, ClaimType, ClaimValue, Identity, IdentityBuilder, Issuer, NameClaimType,
+    PrimaryIdentityIndex, Principal, PrincipalBuildError, PrincipalBuilder, RoleClaimType, RoleName, WellKnownClaim,
 };
 
 fn text_claim(name: impl Into<ClaimType>, value: &'static str) -> Claim {
@@ -12,12 +12,17 @@ fn text_claim(name: impl Into<ClaimType>, value: &'static str) -> Claim {
 }
 
 fn identity(sub: &'static str, name: &'static str, role: &'static str) -> Identity {
-    IdentityBuilder::new(AuthenticationType::try_new("test").unwrap())
-        .push(text_claim(WellKnownClaim::Sub, sub))
-        .push(text_claim(WellKnownClaim::WsName, name))
-        .push(text_claim(WellKnownClaim::WsRole, role))
-        .try_build()
-        .unwrap()
+    IdentityBuilder::new(
+        AuthenticationType::try_new("test").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    )
+    .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())
+    .push(text_claim(WellKnownClaim::Sub, sub))
+    .push(text_claim(WellKnownClaim::WsName, name))
+    .push(text_claim(WellKnownClaim::WsRole, role))
+    .try_build()
+    .unwrap()
 }
 
 fn role(value: &str) -> RoleName {
@@ -40,10 +45,11 @@ fn the_anonymous_principal_answers_every_query() {
 }
 
 #[test]
-fn the_primary_defaults_to_the_first_authenticated_identity() {
+fn the_primary_is_selected_explicitly_among_multiple_identities() {
     let principal = PrincipalBuilder::new(Identity::Anonymous)
         .push(identity("user-1", "Ada", "admin"))
         .push(identity("user-2", "Grace", "auditor"))
+        .primary(PrimaryIdentityIndex::new(1))
         .try_build()
         .unwrap();
     assert!(principal.is_authenticated());
@@ -55,7 +61,7 @@ fn the_primary_defaults_to_the_first_authenticated_identity() {
 fn a_designated_primary_is_honoured() {
     let principal = PrincipalBuilder::new(identity("user-1", "Ada", "admin"))
         .push(identity("user-2", "Grace", "auditor"))
-        .primary(1)
+        .primary(PrimaryIdentityIndex::new(1))
         .try_build()
         .unwrap();
     assert_eq!(principal.name(), Some("Grace"));
@@ -64,7 +70,7 @@ fn a_designated_primary_is_honoured() {
 #[test]
 fn a_bad_primary_is_refused() {
     let out_of_range = PrincipalBuilder::new(identity("user-1", "Ada", "admin"))
-        .primary(4)
+        .primary(PrimaryIdentityIndex::new(4))
         .try_build()
         .unwrap_err();
     assert_eq!(
@@ -74,7 +80,7 @@ fn a_bad_primary_is_refused() {
 
     let anonymous = PrincipalBuilder::new(Identity::Anonymous)
         .push(identity("user-1", "Ada", "admin"))
-        .primary(0)
+        .primary(PrimaryIdentityIndex::new(0))
         .try_build()
         .unwrap_err();
     assert_eq!(anonymous, PrincipalBuildError::PrimaryAnonymous);
@@ -83,14 +89,19 @@ fn a_bad_primary_is_refused() {
 #[test]
 fn role_checks_cross_identities_each_with_its_own_role_claim_type() {
     let custom_role: ClaimType = ClaimType::try_new("groups").unwrap();
-    let custom = IdentityBuilder::new(AuthenticationType::try_new("test").unwrap())
-        .push(text_claim(WellKnownClaim::Sub, "user-2"))
-        .push(text_claim(custom_role.clone(), "ops"))
-        .role_claim_type(custom_role)
-        .try_build()
-        .unwrap();
+    let custom = IdentityBuilder::new(
+        AuthenticationType::try_new("test").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(custom_role.clone()),
+    )
+    .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())
+    .push(text_claim(WellKnownClaim::Sub, "user-2"))
+    .push(text_claim(custom_role.clone(), "ops"))
+    .try_build()
+    .unwrap();
     let principal = PrincipalBuilder::new(identity("user-1", "Ada", "admin"))
         .push(custom)
+        .primary(PrimaryIdentityIndex::new(0))
         .try_build()
         .unwrap();
     assert!(principal.is_in_role(&role("admin")));
@@ -102,6 +113,7 @@ fn role_checks_cross_identities_each_with_its_own_role_claim_type() {
 fn claims_are_paired_with_their_source_identity() {
     let principal = PrincipalBuilder::new(identity("user-1", "Ada", "admin"))
         .push(identity("user-2", "Grace", "auditor"))
+        .primary(PrimaryIdentityIndex::new(0))
         .try_build()
         .unwrap();
     let subs: Vec<_> = principal
@@ -114,8 +126,11 @@ fn claims_are_paired_with_their_source_identity() {
 }
 
 #[test]
-fn with_identity_promotes_an_authenticated_identity_over_anonymous() {
+fn with_identity_keeps_the_primary_until_explicitly_reselected() {
     let principal = Principal::anonymous().with_identity(identity("user-1", "Ada", "admin"));
+    assert!(!principal.is_authenticated());
+    assert_eq!(principal.name(), None);
+    let principal = principal.try_with_primary(PrimaryIdentityIndex::new(1)).unwrap();
     assert!(principal.is_authenticated());
     let kept = principal.with_identity(identity("user-2", "Grace", "auditor"));
     assert_eq!(kept.name(), Some("Ada"));

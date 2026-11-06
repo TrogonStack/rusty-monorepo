@@ -5,7 +5,6 @@ use thiserror::Error;
 
 use crate::authentication_context::AuthenticationContext;
 use crate::authentication_type::AuthenticationType;
-use crate::claim::Claim;
 use crate::claim_set::{ClaimSet, HasSubject, SubjectRef};
 use crate::claim_type::ClaimType;
 use crate::current_actor::CurrentActor;
@@ -195,11 +194,11 @@ impl<R: Refinement> AuthenticatedPrincipal<DynamicClaims, R> {
         self.principal.claims()
     }
 
-    pub fn find_first(&self, claim_type: &ClaimType) -> Option<&Claim> {
+    pub fn find_first(&self, claim_type: &ClaimType) -> Option<SourcedClaim<'_>> {
         self.principal.find_first(claim_type)
     }
 
-    pub fn find_all<'a>(&'a self, claim_type: &'a ClaimType) -> impl Iterator<Item = &'a Claim> + 'a {
+    pub fn find_all<'a>(&'a self, claim_type: &'a ClaimType) -> impl Iterator<Item = SourcedClaim<'a>> + 'a {
         self.principal.find_all(claim_type)
     }
 

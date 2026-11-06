@@ -19,8 +19,8 @@ use trogon_claims::axum::{
 };
 use trogon_claims::{
     principal_kind, AuthenticatedPrincipal, AuthenticationContext, AuthenticationType, ClaimText, CurrentPrincipal,
-    Delegated, Dpop, DynamicClaims, Identity, IngestProfile, Kind, NumericDate, Principal, PrincipalKind, RawClaims,
-    Refined, SenderConstrained, Unclassified,
+    Delegated, Dpop, DynamicClaims, Identity, IngestProfile, Kind, NameClaimType, NumericDate, Principal,
+    PrincipalKind, RawClaims, Refined, RoleClaimType, SenderConstrained, Unclassified, WellKnownClaim,
 };
 
 struct Person;
@@ -43,7 +43,11 @@ const STRONG_AUTH: &str = r#"{"iss":"https://issuer.example.com","sub":"user-1",
 
 fn ingest(body: &str) -> Identity<DynamicClaims> {
     let raw = RawClaims::from_slice(body.as_bytes()).unwrap();
-    let profile = IngestProfile::new(AuthenticationType::try_new("jwt").unwrap());
+    let profile = IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    );
     Identity::<DynamicClaims>::ingest(&raw, &profile)
         .unwrap()
         .into_identity()
@@ -62,7 +66,7 @@ fn principal_for(token: &str) -> Option<Principal> {
 }
 
 fn classified(kind: PrincipalKind) -> Principal {
-    Principal::new(ingest(PLAIN).with_kind(kind))
+    Principal::new(ingest(PLAIN).try_with_kind(kind).unwrap())
 }
 
 async fn attach(mut request: Request, next: Next) -> Response {

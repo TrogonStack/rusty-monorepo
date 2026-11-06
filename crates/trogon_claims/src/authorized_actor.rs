@@ -5,6 +5,10 @@ use crate::claim::Claim;
 use crate::client_id::ClientId;
 use crate::subject_id::SubjectId;
 
+/// A `may_act` assertion from
+/// [RFC 8693 §4.4](https://www.rfc-editor.org/rfc/rfc8693.html#section-4.4).
+/// It identifies an actor eligible for delegation; it does not establish that
+/// delegation occurred or grant permission to a resource.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AuthorizedActor {
     issuer: ActorIssuer,

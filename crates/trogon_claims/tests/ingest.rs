@@ -5,7 +5,7 @@ use trogon_claims::ingest::{introspection, jwt_payload};
 use trogon_claims::{
     ActorError, ActorIssuer, ActorKey, AuthenticationMethod, AuthenticationType, Binding, ClaimType, ClaimValue,
     ClaimValueError, ConfirmationError, Delegation, DynamicClaims, Identity, IngestError, IngestProfile, Ingested,
-    Issuer, RawClaims, RawClaimsError, RoleName, WellKnownClaim,
+    Issuer, NameClaimType, RawClaims, RawClaimsError, RoleClaimType, RoleName, WellKnownClaim,
 };
 
 const FIGURE_5: &str = r#"{
@@ -37,7 +37,11 @@ const FIGURE_6: &str = r#"{
 }"#;
 
 fn profile() -> IngestProfile {
-    IngestProfile::new(AuthenticationType::try_new("jwt").unwrap())
+    IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::WsName.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    )
 }
 
 fn ingest_with(json: &str, profile: &IngestProfile) -> Result<Ingested<DynamicClaims>, IngestError> {
@@ -185,9 +189,8 @@ fn a_numeric_subject_is_rejected_without_echoing_it() {
 #[test]
 fn figure_5_yields_a_direct_actor_and_drops_its_validity_claims() {
     let ingested = ingest(FIGURE_5).unwrap();
-    let Ingested::Delegated { identity, actor } = ingested else {
-        panic!("figure 5 is a delegation");
-    };
+    let identity = ingested.identity();
+    let actor = ingested.actor().unwrap();
     assert_eq!(identity.key().sub().as_str(), "user@example.com");
     assert!(matches!(identity.delegation(), Delegation::Delegated(_)));
     assert_eq!(
@@ -344,7 +347,8 @@ fn may_act_without_sub_or_client_id_is_rejected() {
 #[test]
 fn may_act_does_not_authenticate_anything_by_itself() {
     let ingested = ingest(r#"{"iss":"i","sub":"u","may_act":{"sub":"a"}}"#).unwrap();
-    assert!(matches!(ingested, Ingested::Direct(_)));
+    assert!(matches!(ingested.identity().delegation(), Delegation::Direct));
+    assert!(ingested.actor().is_none());
     assert!(ingested.identity().may_act().is_some());
 }
 
@@ -462,19 +466,31 @@ fn authentication_context_rejects_wrong_types() {
 #[test]
 fn name_resolution_honours_a_custom_name_claim_type() {
     let json = r#"{"iss":"i","sub":"u","name":"Ada","preferred_username":"ada"}"#;
-    let default_profile = ingest(json).unwrap();
-    assert_eq!(default_profile.identity().name(), None);
+    let ws_profile = ingest(json).unwrap();
+    assert_eq!(ws_profile.identity().name(), None);
 
-    let custom = profile().with_name_claim_type(claim_type("preferred_username"));
+    let custom = IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(claim_type("preferred_username")),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    );
     assert_eq!(ingest_with(json, &custom).unwrap().identity().name(), Some("ada"));
 
-    let well_known = profile().with_name_claim_type(WellKnownClaim::Name.into());
+    let well_known = IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::Name.into()),
+        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+    );
     assert_eq!(ingest_with(json, &well_known).unwrap().identity().name(), Some("Ada"));
 }
 
 #[test]
 fn is_in_role_never_consults_an_actor() {
-    let custom = profile().with_role_claim_type(claim_type("roles"));
+    let custom = IngestProfile::new(
+        AuthenticationType::try_new("jwt").unwrap(),
+        NameClaimType::new(WellKnownClaim::Sub.into()),
+        RoleClaimType::new(claim_type("roles")),
+    );
     let ingested = ingest_with(
         r#"{"iss":"i","sub":"u","roles":["viewer"],"act":{"sub":"a","roles":["admin"]}}"#,
         &custom,
