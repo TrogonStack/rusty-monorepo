@@ -9,6 +9,10 @@ base="thiserror trogon_claims_syntax zeroize"
 allowed() {
   local feature="$1" dependencies="$base"
   case "$feature" in
+    ws-claims) feature="" ;;
+    ws-claims,*) feature="${feature#ws-claims,}" ;;
+  esac
+  case "$feature" in
     macros) dependencies="$dependencies trogon_claims_macros"; feature="" ;;
     *,macros) dependencies="$dependencies trogon_claims_macros"; feature="${feature%,macros}" ;;
   esac
@@ -29,7 +33,7 @@ direct_dependencies() {
 }
 
 status=0
-for feature in "" macros serde serde,macros json json,macros spicedb spicedb,macros axum axum,macros; do
+for feature in "" macros serde serde,macros json json,macros spicedb spicedb,macros axum axum,macros ws-claims ws-claims,json ws-claims,macros ws-claims,spicedb ws-claims,spicedb,macros; do
   actual="$(direct_dependencies "$feature")"
   expected="$(allowed "$feature" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
   if [ "$actual" != "$expected" ]; then

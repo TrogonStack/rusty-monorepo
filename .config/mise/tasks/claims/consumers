@@ -157,3 +157,21 @@ consumer run syntax-spicedb syntax_spicedb_metadata
 consumer run spicedb syntax_spicedb
 consumer run spicedb syntax_spicedb_metadata
 consumer run macro-impl-spicedb,spicedb macro_impl_spicedb
+
+
+for features in "" dependency-default json macros spicedb; do
+  consumer run "$features" ws_behavior
+  expect_missing "$features" ws_constant E0432 constants::WS_NAME_IDENTIFIER
+  expect_missing "$features" ws_variant E0432 WellKnownClaim::WsNameIdentifier
+done
+for features in ws-claims ws-claims,json ws-claims,macros ws-claims,spicedb ws-claims,json,macros,spicedb; do
+  consumer run "$features" ws_constant
+  consumer run "$features" ws_variant
+  consumer run "$features" ws_behavior
+done
+consumer run json ws_json
+consumer run ws-claims,json ws_json
+check_dependency_tree ws-claims absent
+check_dependency_tree ws-claims,json absent
+check_dependency_tree ws-claims,spicedb absent
+check_dependency_tree ws-claims,macros present

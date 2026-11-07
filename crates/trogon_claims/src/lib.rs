@@ -88,7 +88,7 @@
 //! | `FindFirst(string)` | [`Principal::find_first`] | Takes [`ClaimType`] and returns [`SourcedClaim`] with its identity provenance |
 //! | `FindAll(string)` | [`Principal::find_all`] | Same; queries iterate authenticated identities in insertion order |
 //! | `IsInRole` | [`Principal::is_in_role`] | Same semantics, including the per-identity role claim type |
-//! | `ClaimTypes.*` | [`WellKnownClaim`] | Short names and the `WS-*` URIs, matched exactly |
+//! | `ClaimTypes.*` | [`WellKnownClaim`] | Short names, plus exact `WS-*` URIs with `ws-claims` |
 //! | `GenericPrincipal` | none | One principal type, one storage |
 //! | `IClaimsTransformation` | a plain function | Values are immutable, so a transformation returns a new one |
 //!
@@ -96,6 +96,10 @@
 //! and [`RoleClaimType`] arguments. No name or role claim type is selected by
 //! default, and JWT/OIDC names are not rewritten to WS-* URIs. Each selector
 //! uses one type without fallback; the distinct types prevent swapping them.
+//! The default feature set is empty. Enable `ws-claims` for WS claim-name
+//! constants and `WellKnownClaim::Ws*` recognition. Without it, nonempty WS URI
+//! names remain exact custom [`ClaimType`] values. Claim value datatype metadata
+//! remains independent, including its XML and legacy URI vocabulary.
 //! The authentication key remains issuer plus subject, independently of the
 //! selected principal name.
 //!

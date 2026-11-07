@@ -62,7 +62,7 @@ as received; ingest does not map `name` or `roles` to WS-* URIs.
 
 For example, a service can choose `NameClaimType::new(WellKnownClaim::Sub.into())`
 and `RoleClaimType::new(WellKnownClaim::Roles.into())`. A service using the .NET
-vocabulary can explicitly choose `WsName` and `WsRole`. Each selector chooses
+vocabulary can enable `ws-claims` and explicitly choose `WsName` and `WsRole`. Each selector chooses
 one claim type: selecting `PreferredUsername` does not fall back to `Sub`, and
 selecting `Roles` does not also use `Groups`. A missing or non-text selected name
 returns `None`. Selected role assertions can be repeated non-empty text or one
@@ -213,6 +213,7 @@ authorization decisions.
 |---|---|---|
 | none | Value objects, claims, identities, principals, refinements and runtime validation | `thiserror`, `zeroize`, `trogon_claims_syntax` |
 | `macros` | `principal_kind!`; backend literal constructors also require `spicedb` | `trogon_claims_macros` |
+| `ws-claims` | WS claim-name constants and well-known recognition; custom names remain available without it | none |
 | `json` | `ingest`: JWT payload and introspection to identity | `serde_json`, `fluent-uri` |
 | `serde` | Reserved for session serialization; no code yet | `serde` |
 | `spicedb` | `ObjectId`, `ObjectType`, subject mapping and `HasSubject`/`SubjectRef`, object/subject references, checks and caveat conversion | `prost`, `prost-types` |
@@ -222,6 +223,12 @@ The default feature set is empty. Enable `macros` explicitly for
 `principal_kind!`. `object_id!`, `object_type!`, `relation_name!` and `param_name!`
 require both `macros` and `spicedb`. Runtime constructors never require `macros`;
 backend types and their validated constructors require `spicedb`.
+
+Enable `ws-claims` for WS claim-name constants and `WellKnownClaim::Ws*`
+recognition. Without it, nonempty WS URI names remain custom `ClaimType`
+values with `well_known() == None`, preserving exact text, equality and hashing.
+Claim value datatype metadata remains available independently, including its
+XML Schema and legacy URI vocabulary.
 
 `HasSubject`, `SubjectRef`, `SubjectMapping`, `Verbatim` and
 `Base64UrlUnpadded` describe the optional backend projection. Their related
