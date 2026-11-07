@@ -137,8 +137,10 @@ pub use trogon_object_id_derive::ObjectIdDomain;
 #[cfg(feature = "derive")]
 pub use trogon_object_id_derive::ObjectIdUnion;
 
+/// Maximum UTF-8 byte length accepted by the built-in payload codecs.
 pub const MAX_VALUE_BYTES: usize = 1024;
 
+/// Validation failures that do not retain the rejected identifier text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ParseError {
@@ -164,6 +166,14 @@ pub struct Definition {
 }
 
 impl Definition {
+    /// Defines the prefix grammar used by parsing and formatting.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `object_type` contains 1 to 64 ASCII letters, digits, `_`
+    /// or `-` and starts with a letter, and `separator` contains 1 to 4 ASCII
+    /// punctuation characters. Invalid definitions fail during const evaluation
+    /// when used in a constant.
     pub const fn new(object_type: &'static str, separator: &'static str) -> Self {
         assert!(
             !object_type.is_empty() && object_type.len() <= 64,
@@ -205,6 +215,10 @@ impl Definition {
         self.separator
     }
 
+    /// Removes this exact object type and separator without validating the suffix.
+    ///
+    /// `Some("")` means the prefix matched but the payload is empty; callers
+    /// must still run the payload codec before accepting an identifier.
     pub fn strip_prefix(self, value: &str) -> Option<&str> {
         value.strip_prefix(self.object_type)?.strip_prefix(self.separator)
     }
@@ -212,12 +226,18 @@ impl Definition {
 
 /// Trusted, deterministic application validation for text payloads.
 pub trait Validator {
+    /// Checks the application-specific rule without changing the input spelling.
+    ///
+    /// [`Text`] applies its shared length and control-character checks first.
+    /// Keep this rule deterministic so immutable text retains its guarantees.
     fn validate(value: &str) -> Result<(), ParseError>;
 }
 
+/// Application-specific text rules applied after the shared payload constraints.
 pub mod validators {
     use crate::{ParseError, Validator};
 
+    /// Adds no restrictions beyond [`crate::Text`]'s shared constraints.
     pub struct Any;
     impl Validator for Any {
         fn validate(_value: &str) -> Result<(), ParseError> {
@@ -291,6 +311,7 @@ pub trait Domain {
 /// A trusted source of typed payloads. Generated values still pass `Payload::validate`.
 pub trait Generator {
     type Payload: Payload;
+    /// Produces a candidate payload; [`ObjectId::generate`] validates it before use.
     fn generate() -> Result<Self::Payload, ParseError>;
 }
 
@@ -327,10 +348,18 @@ impl Generator for Uuid7 {
 }
 
 /// The raw representation of one concrete identifier domain.
+///
+/// Implementations are trusted to validate every construction path and preserve
+/// their declared prefix. Union parsers rely on this contract when dispatching
+/// owned or borrowed values to a member identifier.
 pub trait Identifier: Sized {
     const DEFINITION: Definition;
     type Raw: ?Sized + fmt::Display;
+    /// Validates an unprefixed suffix before constructing the identifier.
     fn try_from_raw(value: &str) -> Result<Self, ParseError>;
+    /// Applies the same validation as [`Self::try_from_raw`] to owned input.
+    ///
+    /// Text implementations should retain the input allocation where possible.
     fn try_from_owned(value: String) -> Result<Self, ParseError>;
     fn as_raw(&self) -> &Self::Raw;
 }
@@ -455,9 +484,13 @@ macro_rules! __impl_serde {
 #[cfg(feature = "serde")]
 pub mod serde_raw {
     use crate::Identifier;
+    /// Encodes only the raw payload, so storage must establish the identifier's domain.
     pub fn serialize<T: Identifier, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(value.as_raw())
     }
+    /// Decodes an unprefixed string through the identifier's checked raw constructor.
+    ///
+    /// The adapter accepts owned strings without discarding their allocation.
     pub fn deserialize<'de, T: Identifier, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
         crate::__private::deserialize_owned(deserializer, T::try_from_raw, T::try_from_owned)
     }
