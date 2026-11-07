@@ -1,0 +1,5 @@
+error: principal_kind "": must not be empty
+ --> tests/ui/fail/principal_kind_empty.rs:4:29
+  |
+4 |     let _ = principal_kind!("");
+  |                             ^^

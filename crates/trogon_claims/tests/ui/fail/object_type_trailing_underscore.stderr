@@ -1,0 +1,5 @@
+error: object_type "abc_": a segment must end with a lowercase ASCII letter or digit, found '_' at byte 3
+ --> tests/ui/fail/object_type_trailing_underscore.rs:4:26
+  |
+4 |     let _ = object_type!("abc_");
+  |                          ^^^^^^
