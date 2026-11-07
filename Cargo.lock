@@ -2880,6 +2880,7 @@ dependencies = [
  "chrono",
  "thiserror 2.0.21",
  "trogon_claims_syntax",
+ "zeroize",
 ]
 
 [[package]]
