@@ -22,14 +22,12 @@ fn runtime_path() -> syn::Result<proc_macro2::TokenStream> {
 struct IdOptions {
     prefix: LitStr,
     separator: LitStr,
-    payload: Option<Type>,
     template: Option<Type>,
 }
 
 fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
     let mut prefix = None;
     let mut separator = None;
-    let mut payload = None;
     let mut template = None;
     for attribute in &input.attrs {
         if !attribute.path().is_ident("object_id") {
@@ -47,17 +45,14 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
                 }
                 separator = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("payload") {
-                if payload.is_some() {
-                    return Err(meta.error("duplicate object_id payload"));
-                }
-                payload = Some(meta.value()?.parse()?);
+                return Err(meta.error("ObjectId infers its payload from the tuple field; remove the payload option"));
             } else if meta.path.is_ident("template") {
                 if template.is_some() {
                     return Err(meta.error("duplicate object_id template"));
                 }
                 template = Some(meta.value()?.parse()?);
             } else {
-                return Err(meta.error("expected prefix, separator, payload, or template"));
+                return Err(meta.error("expected prefix, separator, or template"));
             }
             Ok(())
         })?;
@@ -66,7 +61,6 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
         prefix: prefix
             .ok_or_else(|| syn::Error::new_spanned(&input.ident, "missing #[object_id(prefix = \"...\")]"))?,
         separator: separator.unwrap_or_else(|| LitStr::new("_", proc_macro2::Span::call_site())),
-        payload,
         template,
     })
 }
@@ -81,6 +75,17 @@ pub fn derive_object_id(input: TokenStream) -> TokenStream {
 
 fn expand_object_id(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     reject_generics(&input, "ObjectId")?;
+    match &input.data {
+        Data::Struct(_) => expand_struct(input),
+        Data::Enum(_) => expand_enum(input),
+        Data::Union(_) => Err(syn::Error::new_spanned(
+            &input.ident,
+            "ObjectId requires a payload newtype struct or an enum of identifiers",
+        )),
+    }
+}
+
+fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
     let field = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -113,12 +118,6 @@ fn expand_object_id(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
         ));
     }
     let options = id_options(&input)?;
-    if let Some(payload) = &options.payload {
-        return Err(syn::Error::new_spanned(
-            payload,
-            "ObjectId infers its payload from the tuple field; remove the payload option",
-        ));
-    }
     let path = runtime_path()?;
     let prefix = &options.prefix;
     let separator = &options.separator;
@@ -187,44 +186,6 @@ fn expand_object_id(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     })
 }
 
-#[proc_macro_derive(ObjectIdDomain, attributes(object_id))]
-pub fn derive_domain(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    expand_domain(input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
-fn expand_domain(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    reject_generics(&input, "ObjectIdDomain")?;
-    if !matches!(&input.data, Data::Struct(data) if matches!(&data.fields, Fields::Unit)) {
-        return Err(syn::Error::new_spanned(
-            &input.ident,
-            "ObjectIdDomain requires a unit struct",
-        ));
-    }
-    let path = runtime_path()?;
-    let options = id_options(&input)?;
-    let prefix = &options.prefix;
-    let separator = &options.separator;
-    let payload = options
-        .payload
-        .map(|ty| quote!(#ty))
-        .unwrap_or_else(|| quote!(#path::Text));
-    let name = &input.ident;
-    let template = options
-        .template
-        .map(|template| quote!(#path::__impl_template_domain!(#name, #template, domain);));
-    Ok(quote! {
-        const _: #path::Definition = #path::Definition::new(#prefix, #separator);
-        impl #path::Domain for #name {
-            const DEFINITION: #path::Definition = #path::Definition::new(#prefix, #separator);
-            type Payload = #payload;
-        }
-        #template
-    })
-}
-
 fn reject_generics(input: &DeriveInput, derive_name: &str) -> syn::Result<()> {
     if !input.generics.params.is_empty() || input.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(
@@ -235,31 +196,48 @@ fn reject_generics(input: &DeriveInput, derive_name: &str) -> syn::Result<()> {
     Ok(())
 }
 
-#[proc_macro_derive(ObjectIdUnion)]
-pub fn derive_union(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    expand_union(input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
-fn expand_union(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    reject_generics(&input, "ObjectIdUnion")?;
+fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    if let Some(attribute) = input
+        .attrs
+        .iter()
+        .find(|attribute| attribute.path().is_ident("object_id"))
+    {
+        return Err(syn::Error::new_spanned(
+            attribute,
+            "ObjectId enums inherit their prefixes and payloads from their variants; remove #[object_id(...)] from the enum",
+        ));
+    }
     let path = runtime_path()?;
     let name = &input.ident;
     let data = match &input.data {
         Data::Enum(data) => data,
-        _ => return Err(syn::Error::new_spanned(name, "ObjectIdUnion requires an enum")),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                name,
+                "ObjectId requires a payload newtype struct or an enum of identifiers",
+            ))
+        }
     };
     if data.variants.is_empty() {
         return Err(syn::Error::new_spanned(
             name,
-            "ObjectIdUnion requires at least one variant",
+            "ObjectId enums require at least one variant",
         ));
     }
     let mut variants = Vec::new();
     let mut members = Vec::new();
     for variant in &data.variants {
+        if let Some(attribute) = variant
+            .attrs
+            .iter()
+            .chain(variant.fields.iter().flat_map(|field| &field.attrs))
+            .find(|attribute| attribute.path().is_ident("object_id"))
+        {
+            return Err(syn::Error::new_spanned(
+                attribute,
+                "ObjectId enum variants and fields do not accept #[object_id(...)]",
+            ));
+        }
         let field = match &variant.fields {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => fields.unnamed.first(),
             _ => None,
@@ -267,7 +245,7 @@ fn expand_union(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         .ok_or_else(|| {
             syn::Error::new_spanned(
                 variant,
-                "ObjectIdUnion variants must have exactly one unnamed identifier field",
+                "ObjectId enum variants must have exactly one unnamed identifier field",
             )
         })?;
         variants.push(&variant.ident);
