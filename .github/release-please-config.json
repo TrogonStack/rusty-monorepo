@@ -22,7 +22,9 @@
         }
       ]
     },
-    "crates/trogon_dylint_lints": {}
+    "crates/trogon_dylint_lints": {
+      "extra-files": ["README.md"]
+    }
   },
   "plugins": [
     {

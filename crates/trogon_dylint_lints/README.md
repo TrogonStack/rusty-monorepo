@@ -79,14 +79,12 @@ so a consuming workspace names the published tag:
 ```toml
 [workspace.metadata.dylint]
 libraries = [
-  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.3.1", pattern = "crates/trogon_dylint_lints" },
+  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.3.1", pattern = "crates/trogon_dylint_lints" }, # x-release-please-version
 ]
 ```
 
-The tag above is the released baseline. The new safety rules, broader
-suppression-reason checks, source-preservation improvements, advisory options
-policy, and profiles described here are unreleased changes in this checkout.
-Consumers need a containing Git revision or a future release to use them.
+The example follows the published lint-library release. Changes introduced
+after that release need a containing Git revision or a future release.
 
 ```bash
 cargo dylint --all --workspace --no-deps -- --all-features --all-targets
