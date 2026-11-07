@@ -61,7 +61,10 @@ fn escaped_braces() {
     tracing::info!("payload uses {{}} placeholders");
 }
 
-#[allow(unstructured_log_fields)]
+#[allow(
+    unstructured_log_fields,
+    reason = "this fixture validates an explicit structured-logging exception"
+)]
 fn allowed() {
     let user_id = 7;
     tracing::info!("user {}", user_id);

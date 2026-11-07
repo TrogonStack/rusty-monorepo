@@ -46,7 +46,7 @@ fn public_item() -> Option<usize> {
     [1u8, 2, 3].iter().position(|&byte| byte == 1)
 }
 
-#[allow(doc_hidden_access)]
+#[allow(doc_hidden_access, reason = "this fixture validates an explicit hidden-API exception")]
 fn allowed() -> Option<usize> {
     core::slice::memchr::memchr(1, &[1, 2, 3])
 }
