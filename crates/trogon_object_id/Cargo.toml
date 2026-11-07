@@ -19,7 +19,7 @@ trogon_uuid = { version = "0.1.0", path = "../trogon_uuid", optional = true }
 
 [features]
 default = []
-derive = ["dep:trogon_object_id_derive"]
+macros = ["dep:trogon_object_id_derive"]
 serde = ["dep:serde"]
 uuid = ["dep:uuid"]
 template = ["uuid", "dep:trogon_uuid"]

@@ -71,7 +71,7 @@ extern crate self as trogon_object_id;
 /// #[object_id(prefix = "user", separator = "")]
 /// struct InvalidUnusedSeparator;
 /// ```
-#[cfg(feature = "derive")]
+#[cfg(feature = "macros")]
 pub use trogon_object_id_derive::ObjectIdDomain;
 
 /// Derive checked identifier behavior for a private, transparent payload newtype.
@@ -173,7 +173,7 @@ pub use trogon_object_id_derive::ObjectIdDomain;
 /// }
 /// let forged = domain::ItemId(trogon_object_id::Text::try_from_raw("abc").unwrap());
 /// ```
-#[cfg(feature = "derive")]
+#[cfg(feature = "macros")]
 pub use trogon_object_id_derive::ObjectId;
 
 /// Derive parsing, formatting, conversions, and prefix checks for an ordinary enum.
@@ -236,7 +236,7 @@ pub use trogon_object_id_derive::ObjectId;
 /// #[derive(ObjectIdUnion)]
 /// enum Overlap { App(ObjectId<App>), Admin(ObjectId<Admin>) }
 /// ```
-#[cfg(feature = "derive")]
+#[cfg(feature = "macros")]
 pub use trogon_object_id_derive::ObjectIdUnion;
 
 pub const MAX_VALUE_BYTES: usize = 1024;
