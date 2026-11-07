@@ -20,7 +20,7 @@ fn blank_reason() {}
 fn justified() {}
 
 // Suppressing a different lint says nothing about this one.
-#[allow(function_local_use)]
+#[allow(function_local_use, reason = "this fixture isolates the serde-specific suppression check")]
 fn unrelated_suppression() {}
 
 fn main() {

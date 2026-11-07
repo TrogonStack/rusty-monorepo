@@ -47,8 +47,8 @@ pub(crate) fn check_item<'tcx>(cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         format!("options struct `{}` does not implement `Default`", ident.name),
         |diag| {
             diag.help(
-                "derive or implement `Default` so callers can set one field and take the rest with \
-                 `..Default::default()`",
+                "derive or implement `Default` only when every field has a meaningful default; otherwise keep \
+                 mandatory values explicit and explain the exception at the type",
             );
         },
     );

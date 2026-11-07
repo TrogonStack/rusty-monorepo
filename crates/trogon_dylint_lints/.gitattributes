@@ -1,0 +1,2 @@
+# Compiletest snapshots retain the diagnostic separator at the end of stderr.
+*.stderr whitespace=-blank-at-eof

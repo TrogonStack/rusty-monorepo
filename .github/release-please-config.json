@@ -22,7 +22,11 @@
         }
       ]
     },
-    "crates/trogon_dylint_lints": {},
+    "crates/trogon_dylint_lints": {
+      "extra-files": [
+        "README.md"
+      ]
+    },
     "crates/trogon_object_id": {
       "extra-files": [
         {

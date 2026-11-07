@@ -14,7 +14,7 @@ pub struct WriteOptions {
 }
 
 // `pub(super)` and `pub(crate)` both count as public: fires.
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this fixture isolates options-default checks and their exceptions")]
 mod nested {
     pub struct FlushOptions {
         pub(super) sync: bool,
@@ -70,7 +70,7 @@ pub struct GenericOptions<T> {
 }
 
 // Explicitly allowed at the site: must NOT fire.
-#[allow(options_struct_without_default)]
+#[allow(options_struct_without_default, reason = "this fixture isolates options-default checks and their exceptions")]
 pub struct AllowedOptions {
     pub retries: u32,
 }
