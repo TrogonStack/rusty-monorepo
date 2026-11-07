@@ -7,6 +7,10 @@ publish = false
 description = "Dependency-free validators shared by trogon_claims and its macros"
 license = "Apache-2.0"
 
+[features]
+default = []
+spicedb = []
+
 [lints.rust]
 warnings = "deny"
 

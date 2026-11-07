@@ -11,6 +11,7 @@ license = "Apache-2.0"
 default = []
 ws-claims = []
 json = ["dep:serde_json", "dep:fluent-uri"]
+spicedb = ["dep:prost", "dep:prost-types", "trogon_claims_syntax/spicedb"]
 
 [lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("axum", "macros", "serde"))'] }
@@ -28,6 +29,8 @@ thiserror = { workspace = true }
 zeroize = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"], optional = true }
 fluent-uri = { version = "0.4.1", default-features = false, optional = true }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
 
 [dev-dependencies]
 trybuild = { workspace = true }
