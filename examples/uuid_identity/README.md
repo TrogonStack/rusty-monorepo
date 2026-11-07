@@ -36,4 +36,4 @@ text form with `to_string()` allocates a string.
 Run `cargo test -p uuid_identity_example` to verify the generated recipes and
 their object-ID integration against independent UUIDv5 vectors.
 
-Licensed under [Apache-2.0](LICENSE).
+Licensed under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
