@@ -6,6 +6,8 @@ use thiserror::Error;
 use crate::authentication_context::AuthenticationContext;
 use crate::authentication_type::AuthenticationType;
 use crate::claim_set::ClaimSet;
+#[cfg(feature = "spicedb")]
+use crate::claim_set::{HasSubject, SubjectRef};
 use crate::claim_type::ClaimType;
 use crate::current_actor::CurrentActor;
 use crate::delegation::Delegation;
@@ -180,6 +182,13 @@ impl<C: ClaimSet, R: Refinement<Binding = AnyBinding>> AuthenticatedPrincipal<C,
             actor: self.actor,
             binding: BoundProof::new(verified),
         })
+    }
+}
+
+#[cfg(feature = "spicedb")]
+impl<C: HasSubject, R: Refinement> AuthenticatedPrincipal<C, R> {
+    pub fn subject(&self) -> SubjectRef<'_> {
+        self.primary.subject()
     }
 }
 
