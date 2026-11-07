@@ -2874,6 +2874,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "trogon_claims"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "thiserror 2.0.21",
+ "trogon_claims_syntax",
+]
+
+[[package]]
+name = "trogon_claims_syntax"
+version = "0.0.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
