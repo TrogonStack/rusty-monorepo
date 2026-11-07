@@ -1,4 +1,4 @@
-//! Raw JSON claims, compact JWT payload parsing, introspection and generic claim projection.
+//! Identity ingestion with bounded actor chains and explicit typed claim selection.
 //!
 //! Credential verification and resource authorization remain caller responsibilities.
 
@@ -39,6 +39,7 @@ pub mod ingest;
 #[cfg(feature = "json")]
 mod ingest_error;
 mod ingest_profile;
+mod ingested;
 mod issuer;
 mod jwk;
 mod kind;
@@ -103,6 +104,7 @@ pub use identity_builder::{IdentityBuildError, IdentityBuilder};
 #[cfg(feature = "json")]
 pub use ingest_error::{ClaimValueError, ConfirmationError, IngestError};
 pub use ingest_profile::IngestProfile;
+pub use ingested::Ingested;
 pub use issuer::Issuer;
 pub use jwk::Jwk;
 pub use kind::{Classified, Kind, Unclassified};
