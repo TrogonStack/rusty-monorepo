@@ -9,9 +9,11 @@ extern crate rustc_span;
 
 mod acyclic_modules;
 mod assertions_on_fixed_literals;
+mod blocking_call_in_async;
 mod constant_outside_constants_module;
 mod debug_remnants;
 mod discarded_error_source;
+mod discarded_task_handle;
 mod doc_hidden_access;
 mod error_string_comparison;
 mod error_type_naming;
@@ -25,7 +27,11 @@ mod manual_error_impl;
 mod multi_module_use;
 mod new_instead_of_from;
 mod options_struct_without_default;
+mod policy_config;
+mod policy_lint_suppression_without_reason;
+mod process_global_mutation_in_tests;
 mod redundant_module_path;
+mod secret_exposure_in_diagnostics;
 mod serde_json_macro;
 mod serde_json_macro_allow_without_reason;
 mod std_env_access;
@@ -53,44 +59,99 @@ dylint_linting::dylint_library!();
 #[unsafe(no_mangle)]
 pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut LintStore) {
     dylint_linting::init_config(sess);
-    lint_store.register_lints(&[
-        ACYCLIC_MODULES,
-        ASSERTIONS_ON_FIXED_LITERALS,
-        CONSTANT_OUTSIDE_CONSTANTS_MODULE,
-        DEBUG_REMNANTS,
-        DISCARDED_ERROR_SOURCE,
-        DOC_HIDDEN_ACCESS,
-        ERROR_STRING_COMPARISON,
-        ERROR_TYPE_NAMING,
-        FALLIBLE_NEW,
-        FUNCTION_LOCAL_MACRO_RULES,
-        FUNCTION_LOCAL_USE,
-        INLINE_MODULE_BLOCK,
-        ITERATOR_CHAIN_IN_FOR_HEADER,
-        LITERAL_TEMPLATE_REPLACE,
-        MANUAL_ERROR_IMPL,
-        MULTI_MODULE_USE,
-        NEW_INSTEAD_OF_FROM,
-        OPTIONS_STRUCT_WITHOUT_DEFAULT,
-        REDUNDANT_MODULE_PATH,
-        SERDE_JSON_MACRO,
-        SERDE_JSON_MACRO_ALLOW_WITHOUT_REASON,
-        STD_ENV_ACCESS,
-        TELEMETRY_ATTRIBUTE_LITERAL,
-        TELEMETRY_KEY_VALUE_LITERAL,
-        TELEMETRY_METRIC_CONSTRUCTION,
-        TELEMETRY_METRIC_NAME_LITERAL,
-        TELEMETRY_SPAN_NAME_LITERAL,
-        TEST_MODULE_NAMING,
-        UNBOUNDED_CHANNEL,
-        UNSTRUCTURED_LOG_FIELDS,
-        WEAKENED_WRITE_PRECONDITION,
-    ]);
-    lint_store.register_late_pass(|_| Box::<TrogonLints>::default());
+    let policy = policy_config::PolicyConfig::load(sess);
+    lint_store.register_lints(POLICY_LINTS);
+    lint_store.register_late_pass(move |_| {
+        Box::new(TrogonLints {
+            policy,
+            ..TrogonLints::default()
+        })
+    });
     lint_store.register_early_pass(|| Box::new(multi_module_use::MultiModuleUse));
     lint_store.register_early_pass(|| Box::new(redundant_module_path::RedundantModulePath));
     lint_store
         .register_early_pass(|| Box::new(serde_json_macro_allow_without_reason::SerdeJsonMacroAllowWithoutReason));
+    lint_store.register_early_pass(|| {
+        Box::new(policy_lint_suppression_without_reason::PolicyLintSuppressionWithoutReason::new(POLICY_LINTS))
+    });
+}
+
+static POLICY_LINTS: &[&rustc_session::lint::Lint] = &[
+    ACYCLIC_MODULES,
+    ASSERTIONS_ON_FIXED_LITERALS,
+    BLOCKING_CALL_IN_ASYNC,
+    CONSTANT_OUTSIDE_CONSTANTS_MODULE,
+    DEBUG_REMNANTS,
+    DISCARDED_ERROR_SOURCE,
+    DISCARDED_TASK_HANDLE,
+    DOC_HIDDEN_ACCESS,
+    ERROR_STRING_COMPARISON,
+    ERROR_TYPE_NAMING,
+    FALLIBLE_NEW,
+    FUNCTION_LOCAL_MACRO_RULES,
+    FUNCTION_LOCAL_USE,
+    INLINE_MODULE_BLOCK,
+    ITERATOR_CHAIN_IN_FOR_HEADER,
+    LITERAL_TEMPLATE_REPLACE,
+    MANUAL_ERROR_IMPL,
+    MULTI_MODULE_USE,
+    NEW_INSTEAD_OF_FROM,
+    OPTIONS_STRUCT_WITHOUT_DEFAULT,
+    POLICY_LINT_SUPPRESSION_WITHOUT_REASON,
+    PROCESS_GLOBAL_MUTATION_IN_TESTS,
+    REDUNDANT_MODULE_PATH,
+    SECRET_EXPOSURE_IN_DIAGNOSTICS,
+    SERDE_JSON_MACRO,
+    SERDE_JSON_MACRO_ALLOW_WITHOUT_REASON,
+    STD_ENV_ACCESS,
+    TELEMETRY_ATTRIBUTE_LITERAL,
+    TELEMETRY_KEY_VALUE_LITERAL,
+    TELEMETRY_METRIC_CONSTRUCTION,
+    TELEMETRY_METRIC_NAME_LITERAL,
+    TELEMETRY_SPAN_NAME_LITERAL,
+    TEST_MODULE_NAMING,
+    UNBOUNDED_CHANNEL,
+    UNSTRUCTURED_LOG_FIELDS,
+    WEAKENED_WRITE_PRECONDITION,
+];
+
+rustc_session::declare_lint! {
+    /// Detects a direct secrecy exposure passed into a resolved diagnostic
+    /// macro, without treating authorized request formatting as a diagnostic.
+    pub SECRET_EXPOSURE_IN_DIAGNOSTICS,
+    Warn,
+    "diagnostics must not receive exposed secret values",
+}
+
+rustc_session::declare_lint! {
+    /// Detects explicitly discarded Tokio task handles, which detach the task
+    /// instead of observing completion or retaining lifecycle ownership.
+    pub DISCARDED_TASK_HANDLE,
+    Warn,
+    "retain task handles or state why detaching is deliberate",
+}
+
+rustc_session::declare_lint! {
+    /// Requires an explicit, nonblank reason when suppressing a policy lint.
+    pub POLICY_LINT_SUPPRESSION_WITHOUT_REASON,
+    Deny,
+    "policy lint exceptions must state their technical reason",
+}
+
+rustc_session::declare_lint! {
+    /// Detects known blocking standard-library operations executed directly in
+    /// an async body, where blocking occupies the executor's worker thread.
+    pub BLOCKING_CALL_IN_ASYNC,
+    Warn,
+    "known blocking operations should run outside async executor workers",
+}
+
+rustc_session::declare_lint! {
+    /// Detects mutations of process-global environment and working-directory
+    /// state in tests, where concurrently executing cases share that state.
+    pub PROCESS_GLOBAL_MUTATION_IN_TESTS,
+    Warn,
+    "tests should inject process state or mutate it in an isolated subprocess",
 }
 
 rustc_session::declare_lint! {
@@ -284,6 +345,8 @@ rustc_session::declare_lint! {
     /// Detects code that replaces a `Result`'s error without reading it:
     /// `map_err` with a closure whose parameter is `_` or a binding the body
     /// never uses, and `.ok()` fed straight into `ok_or` / `ok_or_else`.
+    /// Direct standard `ToString` conversions in `map_err` are also reported
+    /// when a wrapper retains only that text instead of the typed cause.
     ///
     /// Out of scope: an error type of `()`, `!`, or `Infallible`, since there
     /// is nothing to lose, and fallbacks such as `unwrap_or_else(|_| ...)`
@@ -776,6 +839,12 @@ rustc_session::declare_lint! {
     /// caller writes only what differs and takes the rest with struct update
     /// syntax.
     ///
+    /// This is advisory because some fields have no meaningful default.
+    /// Required endpoints, identities, and credentials must stay explicit;
+    /// keep a validating constructor and state that invariant in a reasoned
+    /// `expect` instead of inventing a default. Consumers that deny warnings
+    /// also promote this advisory diagnostic to an error.
+    ///
     /// ### Example
     ///
     /// ```rust,ignore
@@ -797,7 +866,7 @@ rustc_session::declare_lint! {
     /// let options = ConnectOptions { retries: 3, ..Default::default() };
     /// ```
     pub OPTIONS_STRUCT_WITHOUT_DEFAULT,
-    Deny,
+    Warn,
     "an options struct with all public fields should implement `Default`",
 }
 
@@ -1466,6 +1535,7 @@ rustc_session::declare_lint! {
 
 #[derive(Default)]
 struct TrogonLints {
+    policy: policy_config::PolicyConfig,
     acyclic_modules: acyclic_modules::AcyclicModules,
     debug_remnants: debug_remnants::DebugRemnants,
     doc_hidden_access: doc_hidden_access::DocHiddenAccess,
@@ -1473,6 +1543,7 @@ struct TrogonLints {
     function_local_use: function_local_use::FunctionLocalUse,
     new_instead_of_from: new_instead_of_from::NewInsteadOfFrom,
     serde_json_macro: serde_json_macro::SerdeJsonMacro,
+    secret_exposure_in_diagnostics: secret_exposure_in_diagnostics::SecretExposureInDiagnostics,
     std_env_access: std_env_access::StdEnvAccess,
     telemetry_attribute_literal: telemetry_attribute_literal::TelemetryAttributeLiteral,
     telemetry_key_value_literal: telemetry_key_value_literal::TelemetryKeyValueLiteral,
@@ -1493,21 +1564,27 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         assertions_on_fixed_literals::check_expr(cx, expr);
+        blocking_call_in_async::check_expr(cx, expr);
         discarded_error_source::check_expr(cx, expr);
+        discarded_task_handle::check_expr(cx, expr);
         iterator_chain_in_for_header::check_expr(cx, expr);
         literal_template_replace::check_expr(cx, expr);
+        process_global_mutation_in_tests::check_expr(cx, expr);
+        self.secret_exposure_in_diagnostics.check_expr(cx, expr);
         unbounded_channel::check_expr(cx, expr);
         self.acyclic_modules.check_expr(cx, expr);
         self.debug_remnants.check_expr(cx, expr);
         self.doc_hidden_access.check_expr(cx, expr);
         self.error_string_comparison.check_expr(cx, expr);
         self.serde_json_macro.check_expr(cx, expr);
-        self.std_env_access.check_expr(cx, expr);
-        self.telemetry_attribute_literal.check_expr(cx, expr);
-        self.telemetry_key_value_literal.check_expr(cx, expr);
-        self.telemetry_metric_construction.check_expr(cx, expr);
-        self.telemetry_metric_name_literal.check_expr(cx, expr);
-        self.telemetry_span_name_literal.check_expr(cx, expr);
+        if self.policy.uses_trogon_adapters() {
+            self.std_env_access.check_expr(cx, expr);
+            self.telemetry_attribute_literal.check_expr(cx, expr);
+            self.telemetry_key_value_literal.check_expr(cx, expr);
+            self.telemetry_metric_construction.check_expr(cx, expr);
+            self.telemetry_metric_name_literal.check_expr(cx, expr);
+            self.telemetry_span_name_literal.check_expr(cx, expr);
+        }
         self.unstructured_log_fields.check_expr(cx, expr);
     }
 
@@ -1525,6 +1602,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
     }
 
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'tcx>) {
+        discarded_task_handle::check_stmt(cx, stmt);
         function_local_macro_rules::check_stmt(cx, stmt);
         self.function_local_use.check_stmt(cx, stmt);
     }
@@ -1548,7 +1626,9 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
     }
 
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, impl_item: &'tcx ImplItem<'tcx>) {
-        weakened_write_precondition::check_impl_item(cx, impl_item);
+        if self.policy.uses_trogon_adapters() {
+            weakened_write_precondition::check_impl_item(cx, impl_item);
+        }
     }
 
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
@@ -1560,9 +1640,11 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
 rustc_session::impl_lint_pass!(TrogonLints => [
     ACYCLIC_MODULES,
     ASSERTIONS_ON_FIXED_LITERALS,
+    BLOCKING_CALL_IN_ASYNC,
     CONSTANT_OUTSIDE_CONSTANTS_MODULE,
     DEBUG_REMNANTS,
     DISCARDED_ERROR_SOURCE,
+    DISCARDED_TASK_HANDLE,
     DOC_HIDDEN_ACCESS,
     ERROR_STRING_COMPARISON,
     ERROR_TYPE_NAMING,
@@ -1575,6 +1657,8 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     MANUAL_ERROR_IMPL,
     NEW_INSTEAD_OF_FROM,
     OPTIONS_STRUCT_WITHOUT_DEFAULT,
+    SECRET_EXPOSURE_IN_DIAGNOSTICS,
+    PROCESS_GLOBAL_MUTATION_IN_TESTS,
     SERDE_JSON_MACRO,
     STD_ENV_ACCESS,
     TELEMETRY_ATTRIBUTE_LITERAL,
@@ -1591,6 +1675,8 @@ rustc_session::impl_lint_pass!(TrogonLints => [
 rustc_session::impl_lint_pass!(multi_module_use::MultiModuleUse => [MULTI_MODULE_USE]);
 
 rustc_session::impl_lint_pass!(redundant_module_path::RedundantModulePath => [REDUNDANT_MODULE_PATH]);
+
+rustc_session::impl_lint_pass!(policy_lint_suppression_without_reason::PolicyLintSuppressionWithoutReason => [POLICY_LINT_SUPPRESSION_WITHOUT_REASON]);
 
 rustc_session::impl_lint_pass!(
     serde_json_macro_allow_without_reason::SerdeJsonMacroAllowWithoutReason
@@ -1614,6 +1700,42 @@ fn ui_new_instead_of_from_without_exported_guard() {
 fn ui_doc_hidden_access_owned_crates() {
     dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_doc_hidden_access_config")
         .dylint_toml("[doc_hidden_access]\nowned_crates = [\"std\", \"core\"]\n")
+        .run();
+}
+
+#[test]
+fn ui_portable_profile() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_portable_profile")
+        .dylint_toml("[trogon_dylint_lints]\nprofile = \"portable\"\n")
+        .run();
+}
+
+#[test]
+fn ui_portable_adapters() {
+    dylint_testing::ui::Test::example(env!("CARGO_PKG_NAME"), "portable_adapters")
+        .dylint_toml("[trogon_dylint_lints]\nprofile = \"portable\"\n")
+        .rustc_flags(["--cfg=portable_profile"])
+        .run();
+}
+
+#[test]
+fn ui_invalid_profile() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_invalid_profile")
+        .dylint_toml("[trogon_dylint_lints]\nprofile = \"portable_typo\"\n")
+        .run();
+}
+
+#[test]
+fn ui_unknown_profile_field() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_unknown_profile_field")
+        .dylint_toml("[trogon_dylint_lints]\nprofiles = \"portable\"\n")
+        .run();
+}
+
+#[test]
+fn ui_malformed_profile() {
+    dylint_testing::ui::Test::src_base(env!("CARGO_PKG_NAME"), "ui_malformed_profile")
+        .dylint_toml("[trogon_dylint_lints]\nprofile = 17\n")
         .run();
 }
 

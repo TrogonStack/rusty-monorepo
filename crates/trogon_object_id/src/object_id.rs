@@ -6,6 +6,11 @@ use std::str::FromStr;
 use crate::{Domain, Generator, Identifier, ParseError, Payload};
 
 /// An immutable identifier with the layout of its domain's payload.
+///
+/// [`std::str::FromStr`] and `TryFrom` parse the complete prefixed form.
+/// The `try_from_raw` and `try_from_owned` constructors interpret the input as
+/// payload text, without stripping or inferring a prefix. [`fmt::Display`]
+/// always emits the domain prefix and separator.
 #[repr(transparent)]
 pub struct ObjectId<D: Domain> {
     payload: D::Payload,
@@ -13,23 +18,37 @@ pub struct ObjectId<D: Domain> {
 }
 
 impl<D: Domain> ObjectId<D> {
+    /// Parses unprefixed text using the domain's payload codec.
+    ///
+    /// Validation and normalization follow [`Payload::parse`]. For [`crate::Text`],
+    /// successful parsing allocates an owned copy; compact UUID parsing does not.
     pub fn try_from_raw(value: &str) -> Result<Self, ParseError> {
         let _definition = D::DEFINITION;
         D::Payload::parse(value).map(Self::from_validated)
     }
 
-    /// Takes ownership of an unprefixed value; text payloads reuse its allocation.
+    /// Takes ownership of unprefixed text and applies the payload's validation.
+    ///
+    /// [`crate::Text`] preserves the spelling and reuses the input allocation.
+    /// To consume a complete prefixed identifier, use `TryFrom<String>` instead.
     pub fn try_from_owned(value: String) -> Result<Self, ParseError> {
         let _definition = D::DEFINITION;
         D::Payload::parse_owned(value).map(Self::from_validated)
     }
 
+    /// Checks an existing typed payload before transferring it into this domain.
+    ///
+    /// Custom payloads must reject invalid state in [`Payload::validate`]; using
+    /// a typed input does not bypass that check.
     pub fn try_from_payload(payload: D::Payload) -> Result<Self, ParseError> {
         let _definition = D::DEFINITION;
         payload.validate()?;
         Ok(Self::from_validated(payload))
     }
 
+    /// Generates a typed payload, then validates it before constructing the ID.
+    ///
+    /// Errors from either the generator or payload validation are preserved.
     pub fn generate<G: Generator<Payload = D::Payload>>() -> Result<Self, ParseError> {
         Self::try_from_payload(G::generate()?)
     }
@@ -40,6 +59,10 @@ impl<D: Domain> ObjectId<D> {
     pub fn into_payload(self) -> D::Payload {
         self.payload
     }
+    /// Borrows the storage representation without the domain prefix.
+    ///
+    /// This is `&str` for text payloads and `&Uuid` for compact UUID payloads.
+    /// Use [`fmt::Display`] when the domain must travel with the value.
     pub fn as_raw(&self) -> &<D::Payload as Payload>::Raw {
         self.payload.as_raw()
     }

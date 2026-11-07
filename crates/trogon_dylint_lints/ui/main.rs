@@ -9,7 +9,7 @@ impl std::fmt::Display for DomainError {
     }
 }
 
-#[allow(manual_error_impl)] impl std::error::Error for DomainError {}
+#[allow(manual_error_impl, reason = "this fixture isolates error-string comparison behavior")] impl std::error::Error for DomainError {}
 
 #[derive(Debug)]
 struct DomainValue;

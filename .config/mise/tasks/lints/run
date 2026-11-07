@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description = "Run the policy lint rules across every workspace feature"
+#MISE description = "Run the policy lint rules across every workspace feature and target"
 #MISE depends = ["lints:build"]
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
@@ -7,4 +7,4 @@ cd "${MISE_PROJECT_ROOT:?}"
 libraries=(crates/trogon_dylint_lints/target/release/libtrogon_dylint_lints@*)
 lib="${libraries[0]}"
 test -f "$lib"
-cargo dylint --lib-path "$lib" --workspace --no-deps -- --all-features
+cargo dylint --lib-path "$lib" --workspace --no-deps -- --all-features --all-targets

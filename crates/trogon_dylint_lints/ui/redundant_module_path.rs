@@ -11,7 +11,7 @@ mod tests;
 mod relocated;
 
 // `#[allow]` at the site must suppress the lint.
-#[allow(redundant_module_path)]
+#[allow(redundant_module_path, reason = "this fixture validates an explicit path-check exception")]
 #[path = "allowed.rs"]
 mod allowed;
 

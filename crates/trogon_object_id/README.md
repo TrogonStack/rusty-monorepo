@@ -256,10 +256,6 @@ compact UUID payloads and generation.
 `template` binds UUID IDs to compiled `trogon_uuid` recipes and enables `uuid`.
 The implementation forbids unsafe Rust.
 
-If you used the unreleased `derive` feature, change it to `macros` in
-`Cargo.toml`. Rust `#[derive(...)]` syntax and the `trogon_object_id_derive`
-companion crate name stay the same.
-
 ## License
 
-Licensed under [Apache-2.0](LICENSE).
+Licensed under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).
