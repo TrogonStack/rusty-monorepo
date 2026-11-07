@@ -102,7 +102,7 @@ extern crate self as trogon_object_id;
 ///     #[repr(transparent)]
 ///     pub struct ItemId(Text);
 /// }
-/// let forged = domain::ItemId(trogon_object_id::Text::try_from_raw("abc").unwrap());
+/// let forged = domain::ItemId(trogon_object_id::Text::try_from("abc").unwrap());
 /// ```
 ///
 /// Enums derive parsing, formatting, member conversions, and prefix checks.
@@ -315,7 +315,7 @@ pub enum ParseError {
     ControlCharacter,
     #[error("identifier prefix does not match the expected domain")]
     InvalidPrefix,
-    #[error("identifier value does not satisfy the domain validator")]
+    #[error("identifier value does not satisfy the payload constraints")]
     InvalidValue,
     #[error("identifier does not match an enum variant")]
     UnknownPrefix,
@@ -387,56 +387,13 @@ impl Definition {
     }
 }
 
-/// Trusted, deterministic application validation for text payloads.
-pub trait Validator {
-    /// Checks the application-specific rule without changing the input spelling.
-    ///
-    /// [`Text`] applies its shared length and control-character checks first.
-    /// Keep this rule deterministic so immutable text retains its guarantees.
-    fn validate(value: &str) -> Result<(), ParseError>;
-}
-
-/// Application-specific text rules applied after the shared payload constraints.
-pub mod validators {
-    use crate::{ParseError, Validator};
-
-    /// Adds no restrictions beyond [`crate::Text`]'s shared constraints.
-    pub struct Any;
-    impl Validator for Any {
-        fn validate(_value: &str) -> Result<(), ParseError> {
-            Ok(())
-        }
-    }
-
-    /// Signed ASCII decimal syntax without a numeric range or normalization.
-    pub struct Integer;
-    impl Validator for Integer {
-        fn validate(value: &str) -> Result<(), ParseError> {
-            let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
-            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                Ok(())
-            } else {
-                Err(ParseError::InvalidValue)
-            }
-        }
-    }
-
-    /// Spelling-preserving UUID validation for a `Text` payload.
-    #[cfg(feature = "uuid")]
-    pub struct Uuid;
-    #[cfg(feature = "uuid")]
-    impl Validator for Uuid {
-        fn validate(value: &str) -> Result<(), ParseError> {
-            <crate::Uuid as crate::Payload>::parse(value).map(|_| ())
-        }
-    }
-}
-
 mod object_id;
 mod payload;
 
 pub use object_id::ObjectId;
-pub use payload::{Payload, Text};
+#[cfg(feature = "uuid")]
+pub use payload::UuidText;
+pub use payload::{IntegerText, Payload, Text};
 #[cfg(feature = "uuid")]
 pub use uuid::Uuid;
 
@@ -517,11 +474,11 @@ pub trait Generator {
 /// Generates UUID version 4 values using the `uuid` crate's system randomness.
 ///
 /// ```compile_fail
-/// use trogon_object_id::{validators::Integer, Definition, Domain, ObjectId, Text, Uuid4};
+/// use trogon_object_id::{Definition, Domain, IntegerText, ObjectId, Uuid4};
 /// struct InvoiceDomain;
 /// impl Domain for InvoiceDomain {
 ///     const DEFINITION: Definition = Definition::new("invoice", "_");
-///     type Payload = Text<Integer>;
+///     type Payload = IntegerText;
 /// }
 /// let invalid = ObjectId::<InvoiceDomain>::generate::<Uuid4>();
 /// ```

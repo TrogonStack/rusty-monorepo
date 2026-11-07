@@ -4,7 +4,7 @@ Domain-specific prefixed identifiers for Rust, inspired by
 [`trogon_object_id` for Elixir](https://hex.pm/packages/trogon_object_id/0.3.0).
 Declare ordinary Rust newtypes and enums, then derive their supporting
 implementations. Payloads remain actual Rust types: UUID identifiers store a
-`Uuid`, while text identifiers store validated `Text<V>`.
+`Uuid`, while text identifiers store validated `Text` or another payload newtype.
 
 ## Quick start
 
@@ -22,7 +22,7 @@ pub struct UserId(Uuid);
 
 let user = UserId::generate::<Uuid7>()?;
 let encoded = user.to_string();
-let restored: UserId = encoded.parse()?;
+let restored = UserId::try_from(encoded)?;
 assert_eq!(restored, user);
 assert_eq!(std::mem::size_of::<UserId>(), 16);
 # }
@@ -39,24 +39,27 @@ The helper attribute `#[object_id(...)]` supplies the prefix and optional
 separator. `prefix` excludes the separator, which defaults to `_`. The payload
 type is inferred from the tuple field, so it is not repeated in the attribute.
 
-For spelling-preserving text, use `Text` or `Text<Validator>`:
+For spelling-preserving text, use `Text` or `IntegerText`:
 
 ```rust
 # #[cfg(feature = "macros")]
 # {
-use trogon_object_id::{validators::Integer, ObjectId, Text};
+use trogon_object_id::{IntegerText, ObjectId};
 
 #[derive(ObjectId)]
 #[object_id(prefix = "invoice", separator = ":")]
 #[repr(transparent)]
-struct InvoiceId(Text<Integer>);
+struct InvoiceId(IntegerText);
 
 let raw = String::from("+00042");
 let original_buffer = raw.as_ptr();
-let invoice = InvoiceId::try_from_owned(raw)?;
+let payload = IntegerText::try_from(raw)?;
+let invoice = InvoiceId::try_from_payload(payload)?;
 assert_eq!(invoice.as_raw(), "+00042");
 assert_eq!(invoice.as_raw().as_ptr(), original_buffer);
 assert_eq!(invoice.to_string(), "invoice:+00042");
+let raw = String::from(invoice.into_payload());
+assert_eq!(raw.as_ptr(), original_buffer);
 # }
 # Ok::<(), trogon_object_id::ParseError>(())
 ```
@@ -89,7 +92,8 @@ enum PrincipalId {
     Service(ServiceId),
 }
 
-let principal: PrincipalId = "user_abc-123".parse()?;
+let user = UserId::try_from("user_abc-123")?;
+let principal = PrincipalId::from(user);
 assert!(matches!(principal, PrincipalId::User(_)));
 # }
 # Ok::<(), trogon_object_id::ParseError>(())
@@ -149,15 +153,86 @@ UUID. Both support `Display` without allocating a temporary string.
 
 Raw values must contain between 1 and 1024 UTF-8 bytes and no Unicode control
 characters. Text keeps its exact spelling, including Unicode and integer signs
-or leading zeros. `Integer` validates signed ASCII decimal syntax without a
-numeric range. Custom text rules implement `Validator` and use `Text<V>`;
-validation must be deterministic and free of side effects.
+or leading zeros. `IntegerText` validates signed ASCII decimal syntax without a
+numeric range. These payloads implement `TryFrom<&str>`, `TryFrom<String>` and
+`FromStr`. `From<Text> for String` and the corresponding conversions from
+`IntegerText` return the existing storage without another allocation.
 
 `Payload` is the extension point for other typed representations. Its
 implementation is trusted to enforce immutable, valid state and the documented
-text bounds on all parsing paths. Prefer `Text<V>` when only a text rule changes.
+text bounds on all parsing paths. Custom payload newtypes put their construction
+rules in `TryFrom`, and their `Payload` parsers delegate to those conversions.
 The built-in parsers reject malformed input before allocating owned storage.
 Errors describe the failed constraint without retaining or displaying the input.
+
+## Custom payload conversions
+
+A custom payload can reuse checked text and add a rule in `TryFrom`. `From` is
+reserved for conversions that cannot fail, such as recovering the underlying
+text or wrapping an existing ID in an enum.
+
+```rust
+use trogon_object_id::{ParseError, Payload, Text};
+
+struct AsciiToken(Text);
+
+impl TryFrom<Text> for AsciiToken {
+    type Error = ParseError;
+
+    fn try_from(value: Text) -> Result<Self, Self::Error> {
+        if value.as_str().bytes().all(|byte| byte.is_ascii_lowercase()) {
+            Ok(Self(value))
+        } else {
+            Err(ParseError::InvalidValue)
+        }
+    }
+}
+
+impl From<AsciiToken> for Text {
+    fn from(value: AsciiToken) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for AsciiToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Payload for AsciiToken {
+    type Raw = str;
+
+    fn parse(value: &str) -> Result<Self, ParseError> {
+        Text::try_from(value)?.try_into()
+    }
+
+    fn parse_owned(value: String) -> Result<Self, ParseError> {
+        Text::try_from(value)?.try_into()
+    }
+
+    fn validate(&self) -> Result<(), ParseError> {
+        // Private immutable storage and TryFrom establish the rule once.
+        Ok(())
+    }
+
+    fn as_raw(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+let token = AsciiToken::try_from(Text::try_from("abc")?)?;
+let text = Text::from(token);
+assert_eq!(String::from(text), "abc");
+# Ok::<(), ParseError>(())
+```
+
+This example validates the shared text bounds before applying its lowercase
+rule, so malformed custom values can allocate a `Text` before being rejected.
+An implementation can validate borrowed input before allocating when that cost
+matters. Owned text retains its allocation through both conversions. Custom
+payloads must keep their constructors and `Payload::validate` consistent;
+unchecked or mutable state must be rejected when an ID wraps it.
 
 ## JSON
 
@@ -179,7 +254,7 @@ silently substitute text for a UUID or bypass payload validation.
 
 Compact UUID payloads accept hyphenated text and display canonical lowercase
 hyphenated text. UUID text capitalization is normalized. To preserve exact
-spelling instead, choose `Text<validators::Uuid>` and construct from text.
+spelling instead, choose `UuidText` and construct it with `TryFrom`.
 That choice intentionally keeps owned text allocation and cloning costs.
 
 UUID parsing, copying and formatting into an existing buffer need no heap
