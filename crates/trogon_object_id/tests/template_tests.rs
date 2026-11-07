@@ -1,4 +1,4 @@
-#![cfg(all(feature = "derive", feature = "template"))]
+#![cfg(all(feature = "macros", feature = "template"))]
 
 use trogon_object_id::{ObjectId, ObjectIdDomain, Uuid, UuidTemplate};
 

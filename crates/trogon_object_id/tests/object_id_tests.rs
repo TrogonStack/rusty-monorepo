@@ -1,4 +1,4 @@
-#![cfg(feature = "derive")]
+#![cfg(feature = "macros")]
 
 use std::collections::HashSet;
 use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ObjectIdUnion, ParseError, Text, Validator};
@@ -224,9 +224,9 @@ enum ConditionalPrincipalId {
     #[cfg_attr(all(), cfg(any()))]
     AlsoMissing(AlsoMissingId),
     User(UserId),
-    #[cfg(feature = "derive")]
+    #[cfg(feature = "macros")]
     Service(ServiceId),
-    #[cfg_attr(feature = "derive", cfg_attr(feature = "derive", cfg(feature = "derive")))]
+    #[cfg_attr(feature = "macros", cfg_attr(feature = "macros", cfg(feature = "macros")))]
     Enabled(EnabledId),
 }
 

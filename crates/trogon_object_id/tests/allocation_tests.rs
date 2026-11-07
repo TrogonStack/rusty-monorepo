@@ -99,7 +99,7 @@ fn typed_uuid_operations_and_owned_text_need_no_extra_allocations() {
         );
     });
 
-    #[cfg(feature = "derive")]
+    #[cfg(feature = "macros")]
     {
         #[derive(Clone, Copy, trogon_object_id::ObjectId)]
         #[object_id(prefix = "direct")]

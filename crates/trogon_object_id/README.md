@@ -9,10 +9,10 @@ supports domain markers and handwritten trait implementations.
 
 ## Quick start
 
-Enable the `derive` and `uuid` features for a compact UUID identifier:
+Enable the `macros` and `uuid` features for a compact UUID identifier:
 
 ```rust
-# #[cfg(all(feature = "derive", feature = "uuid"))]
+# #[cfg(all(feature = "macros", feature = "uuid"))]
 # {
 use trogon_object_id::{ObjectId, Uuid, Uuid7};
 
@@ -42,7 +42,7 @@ type is inferred from the tuple field, so it is not repeated in the attribute.
 For spelling-preserving text, use `Text` or `Text<Validator>`:
 
 ```rust
-# #[cfg(feature = "derive")]
+# #[cfg(feature = "macros")]
 # {
 use trogon_object_id::{validators::Integer, ObjectId, Text};
 
@@ -69,7 +69,7 @@ parsing, `Display`, member conversions, and Serde implementations when the
 explicit on the enum:
 
 ```rust
-# #[cfg(feature = "derive")]
+# #[cfg(feature = "macros")]
 # {
 use trogon_object_id::{ObjectId, ObjectIdUnion, Text};
 
@@ -190,10 +190,10 @@ version 7 exposes a timestamp. Identifiers do not establish authorization.
 
 ## Binding a compiled UUIDv5 recipe
 
-Enable `derive` and `template` to select a recipe using a Rust type path:
+Enable `macros` and `template` to select a recipe using a Rust type path:
 
 ```rust
-# #[cfg(all(feature = "derive", feature = "template"))]
+# #[cfg(all(feature = "macros", feature = "template"))]
 # {
 # mod generated {
 #     use trogon_object_id::{Uuid, UuidTemplate};
@@ -240,7 +240,7 @@ marker plus `ObjectId<Marker>` alias. It accepts `payload = Type` because the
 marker has no payload field. With `template` enabled it also accepts
 `template = Recipe` alongside `payload = Uuid`.
 
-The `derive` feature is optional. An ordinary `Domain` implementation provides
+The `macros` feature is optional. An ordinary `Domain` implementation provides
 the same ID behavior without a procedural macro:
 
 ```rust
@@ -279,11 +279,15 @@ Compact UUIDs canonicalize text. Ecto and Phoenix integrations remain specific
 to Elixir. This runtime has no protobuf dependency; `trogon_uuid_build` reads
 UUID options from protobuf descriptors during code generation.
 
-The default build has no optional features. `derive` enables `ObjectId`,
+The default build has no optional features. `macros` enables `ObjectId`,
 `ObjectIdDomain` and `ObjectIdUnion`. `serde` enables JSON-compatible traits and
 raw field adapters. `uuid` enables compact UUID payloads and generation.
 `template` binds UUID IDs to compiled `trogon_uuid` recipes and enables `uuid`.
 The implementation forbids unsafe Rust.
+
+If you used the unreleased `derive` feature, change it to `macros` in
+`Cargo.toml`. Rust `#[derive(...)]` syntax and the `trogon_object_id_derive`
+companion crate name stay the same.
 
 ## License
 

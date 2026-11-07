@@ -1,4 +1,4 @@
-#![cfg(all(feature = "serde", feature = "derive"))]
+#![cfg(all(feature = "serde", feature = "macros"))]
 
 use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ObjectIdUnion, ParseError, Text};
 
