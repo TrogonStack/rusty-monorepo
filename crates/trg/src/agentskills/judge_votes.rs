@@ -94,6 +94,13 @@ impl fmt::Display for JudgeVotes {
 impl FromStr for JudgeVotes {
     type Err = String;
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "The established command-line parser contract returns a field-specific String validation message instead of a source-bearing error"
+        )
+    )]
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let votes: u32 = value
             .trim()
@@ -161,114 +168,4 @@ pub fn tally_opinions<T>(opinions: impl IntoIterator<Item = (bool, T)>) -> Optio
 }
 
 #[cfg(test)]
-mod schema_agrees_with_the_parser {
-    use super::*;
-
-    fn validator() -> jsonschema::Validator {
-        let schema = serde_json::to_value(schemars::schema_for!(JudgeVotes)).unwrap();
-        jsonschema::validator_for(&schema).unwrap()
-    }
-
-    /// The schema and `Deserialize` have to refuse the same documents. When the schema is
-    /// the looser of the two, `eval verify --mode strict` calls a report conformant and
-    /// the next command to read those same bytes fails on them.
-    #[test]
-    fn the_schema_refuses_every_value_deserialize_refuses() {
-        let validator = validator();
-        for value in [
-            serde_json::json!(0),
-            serde_json::json!(2),
-            serde_json::json!(4),
-            serde_json::json!(4_294_967_296u64),
-            serde_json::json!(4_294_967_297u64),
-        ] {
-            assert!(
-                serde_json::from_value::<JudgeVotes>(value.clone()).is_err(),
-                "expected Deserialize to refuse {value}"
-            );
-            assert!(!validator.is_valid(&value), "schema admitted {value}");
-        }
-    }
-
-    #[test]
-    fn the_schema_admits_every_panel_size_deserialize_admits() {
-        let validator = validator();
-        for value in [
-            serde_json::json!(1),
-            serde_json::json!(3),
-            serde_json::json!(4_294_967_295u32),
-        ] {
-            assert!(serde_json::from_value::<JudgeVotes>(value.clone()).is_ok());
-            assert!(validator.is_valid(&value), "schema refused {value}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn one_opinion_decides_unless_the_operator_asks_for_a_panel() {
-        assert_eq!(JudgeVotes::default().count(), 1);
-        assert!(JudgeVotes::default().is_single());
-    }
-
-    #[test]
-    fn an_assertion_nobody_judges_is_refused() {
-        assert!(JudgeVotes::parse(0).is_err());
-    }
-
-    #[test]
-    fn a_panel_that_could_tie_is_refused() {
-        assert!(JudgeVotes::parse(2).is_err());
-        assert!(JudgeVotes::parse(4).is_err());
-        assert_eq!(JudgeVotes::parse(3).unwrap().count(), 3);
-        assert_eq!(JudgeVotes::parse(5).unwrap().count(), 5);
-    }
-
-    #[test]
-    fn a_vote_count_is_parsed_from_the_command_line_form() {
-        assert_eq!("3".parse::<JudgeVotes>().unwrap().count(), 3);
-        assert!("2".parse::<JudgeVotes>().is_err());
-        assert!("some".parse::<JudgeVotes>().is_err());
-    }
-
-    #[test]
-    fn every_opinion_is_numbered() {
-        assert_eq!(
-            JudgeVotes::parse(3).unwrap().ballots().collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-    }
-
-    #[test]
-    fn the_majority_answer_is_what_the_panel_reports() {
-        let verdict = tally_opinions([(true, "a"), (false, "b"), (true, "c")]).unwrap();
-        assert!(verdict.tally.majority_passed());
-        assert_eq!(verdict.tally, JudgeVoteTally { passed: 2, failed: 1 });
-        assert_eq!(verdict.tally.total(), 3);
-        assert!(!verdict.tally.is_unanimous());
-    }
-
-    /// The losing side's evidence argues for the answer the panel did not give, so
-    /// showing it would leave a reader with a `passed` value its own evidence contradicts.
-    #[test]
-    fn the_evidence_shown_argues_for_the_answer_reported() {
-        let verdict = tally_opinions([(true, "for"), (false, "against"), (false, "against-too")]).unwrap();
-        assert!(!verdict.tally.majority_passed());
-        assert_eq!(verdict.opinion, "against");
-    }
-
-    #[test]
-    fn a_unanimous_panel_says_so() {
-        let verdict = tally_opinions([(true, "a"), (true, "b"), (true, "c")]).unwrap();
-        assert!(verdict.tally.is_unanimous());
-        assert_eq!(verdict.tally, JudgeVoteTally { passed: 3, failed: 0 });
-    }
-
-    #[test]
-    fn a_panel_that_was_never_asked_decides_nothing() {
-        assert!(tally_opinions(Vec::<(bool, &str)>::new()).is_none());
-    }
-}
+mod tests;

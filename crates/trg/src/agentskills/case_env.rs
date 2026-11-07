@@ -4,13 +4,12 @@
 //! hold. A case that needs a value of its own therefore has to say so, and has to say it
 //! in a namespace that cannot be mistaken for the machinery around it.
 
+mod constants;
+pub use constants::CASE_ENV_PREFIX;
 use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-/// The prefix every variable a case sets has to carry.
-pub const CASE_ENV_PREFIX: &str = "EVAL_";
 
 /// The name of a variable a case sets.
 ///
@@ -143,83 +142,4 @@ impl JsonSchema for CaseEnv {
 }
 
 #[cfg(test)]
-mod schema_agrees_with_the_parser {
-    use super::*;
-
-    fn schema() -> serde_json::Value {
-        serde_json::to_value(schemars::schema_for!(CaseEnv)).unwrap()
-    }
-
-    fn validator() -> jsonschema::Validator {
-        jsonschema::validator_for(&schema()).unwrap()
-    }
-
-    #[test]
-    fn the_schema_refuses_every_map_deserialize_refuses() {
-        let validator = validator();
-        for refused in [
-            serde_json::json!({ "PATH": "/usr/bin" }),
-            serde_json::json!({ "HOME": "/tmp" }),
-            serde_json::json!({ "ANTHROPIC_API_KEY": "sk-x" }),
-            serde_json::json!({ "EVAL_": "x" }),
-            serde_json::json!({ "eval_lower": "x" }),
-            serde_json::json!({ "EVAL_bad": "x" }),
-            serde_json::json!({ "EVAL_HAS-DASH": "x" }),
-        ] {
-            assert!(
-                serde_json::from_value::<CaseEnv>(refused.clone()).is_err(),
-                "parser admitted {refused}"
-            );
-            assert!(!validator.is_valid(&refused), "schema admitted {refused}");
-        }
-    }
-
-    #[test]
-    fn the_schema_admits_every_map_deserialize_admits() {
-        let validator = validator();
-        for admitted in [
-            serde_json::json!({}),
-            serde_json::json!({ "EVAL_A": "1" }),
-            serde_json::json!({ "EVAL_FIXTURE_SEED": "42" }),
-            serde_json::json!({ "EVAL_MODE_2": "" }),
-        ] {
-            assert!(
-                serde_json::from_value::<CaseEnv>(admitted.clone()).is_ok(),
-                "parser refused {admitted}"
-            );
-            assert!(validator.is_valid(&admitted), "schema refused {admitted}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The prefix is the whole isolation guarantee: a case that could name `PATH` decides
-    /// which binary the harness is, and one that could name a credential variable decides
-    /// whose account pays, neither of which is a question the suite is asking.
-    #[test]
-    fn a_case_cannot_set_a_variable_outside_its_own_namespace() {
-        let error = CaseEnv::parse([("PATH", "/evil/bin")]).unwrap_err();
-        assert!(error.contains("PATH"), "{error}");
-        assert!(error.contains(CASE_ENV_PREFIX), "{error}");
-    }
-
-    #[test]
-    fn a_case_can_set_a_variable_in_its_own_namespace() {
-        let env = CaseEnv::parse([("EVAL_SEED", "42")]).unwrap();
-        assert_eq!(env.iter().collect::<Vec<_>>(), vec![("EVAL_SEED", "42")]);
-    }
-
-    /// Two passes over one suite have to hand the harness the same environment, or the
-    /// cache key cut from it would differ between passes that asked the same question.
-    #[test]
-    fn the_variables_come_back_in_a_stable_order() {
-        let env = CaseEnv::parse([("EVAL_B", "2"), ("EVAL_A", "1"), ("EVAL_C", "3")]).unwrap();
-        assert_eq!(
-            env.iter().map(|(key, _)| key).collect::<Vec<_>>(),
-            vec!["EVAL_A", "EVAL_B", "EVAL_C"]
-        );
-    }
-}
+mod tests;
