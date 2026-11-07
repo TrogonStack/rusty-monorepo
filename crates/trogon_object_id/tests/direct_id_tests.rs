@@ -22,7 +22,7 @@ fn direct_identifier_uses_its_declared_prefix() {
 #[repr(transparent)]
 struct InvoiceId(Text<trogon_object_id::validators::Integer>);
 
-#[derive(Debug, PartialEq, Eq, trogon_object_id::ObjectIdUnion)]
+#[derive(Debug, PartialEq, Eq, ObjectId)]
 enum PrincipalId {
     Item(ItemId),
     Invoice(InvoiceId),
