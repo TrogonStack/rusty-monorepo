@@ -2913,9 +2913,17 @@ dependencies = [
  "prost-types",
  "serde_json",
  "thiserror 2.0.21",
+ "trogon_claims_macros",
  "trogon_claims_syntax",
  "trybuild",
  "zeroize",
+]
+
+[[package]]
+name = "trogon_claims_macros"
+version = "0.0.0"
+dependencies = [
+ "trogon_claims_syntax",
 ]
 
 [[package]]

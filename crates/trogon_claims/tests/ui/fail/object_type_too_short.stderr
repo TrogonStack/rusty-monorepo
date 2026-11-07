@@ -1,0 +1,5 @@
+error: object_type "ab": a segment must be 3 to 64 bytes, violated at byte 0
+ --> tests/ui/fail/object_type_too_short.rs:4:26
+  |
+4 |     let _ = object_type!("ab");
+  |                          ^^^^

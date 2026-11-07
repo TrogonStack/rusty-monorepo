@@ -1,0 +1,23 @@
+[package]
+name = "trogon_claims_macros"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.94"
+publish = false
+description = "Compile-time literal constructors for trogon_claims"
+license = "Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"
+
+[dependencies]
+trogon_claims_syntax = { path = "../trogon_claims_syntax" }

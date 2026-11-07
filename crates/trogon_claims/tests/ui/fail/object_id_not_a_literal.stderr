@@ -1,0 +1,11 @@
+error: no rules expected `readme`
+ --> tests/ui/fail/object_id_not_a_literal.rs:4:24
+  |
+4 |     let _ = object_id!(readme);
+  |                        ^^^^^^ no rules expected this token in macro call
+  |
+note: while trying to match meta-variable `$literal:literal`
+ --> src/macros.rs
+  |
+  |     ($literal:literal) => {
+  |      ^^^^^^^^^^^^^^^^
