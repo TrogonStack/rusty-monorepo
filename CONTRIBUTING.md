@@ -5,12 +5,12 @@
 ```bash
 git clone https://github.com/TrogonStack/rusty-monorepo.git
 cd rusty-monorepo
-mise install rust cargo:cargo-dylint cargo:dylint-link
-mise run build:debug
+mise run setup
 ```
 
-Tasks use explicitly installed tools. Install optional tools with `mise install`
-only when needed, for example `mise install cargo:cargo-audit` before a dependency audit.
+Setup installs Rust, the shared policy lint tools and their pinned nightly, then
+builds the workspace. Install optional tools with `mise install` only when needed,
+for example `mise install cargo:cargo-audit` before a dependency audit.
 
 ## Before Submitting
 
