@@ -20,7 +20,7 @@ fn direct_identifier_uses_its_declared_prefix() {
 #[derive(Debug, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "invoice", separator = ":")]
 #[repr(transparent)]
-struct InvoiceId(Text<trogon_object_id::validators::Integer>);
+struct InvoiceId(trogon_object_id::IntegerText);
 
 #[derive(Debug, PartialEq, Eq, ObjectId)]
 enum PrincipalId {
@@ -64,7 +64,7 @@ fn direct_newtypes_reuse_owned_payloads_and_preserve_validation() {
     );
     assert_eq!(invoice.payload().as_str(), "+00042", "payload access is read only");
     assert_eq!(
-        InvoiceId::try_from_payload(Text::try_from_raw("42").expect("valid payload"))
+        InvoiceId::try_from_payload(trogon_object_id::IntegerText::try_from("42").expect("valid payload"))
             .expect("checked typed input")
             .as_raw(),
         "42",

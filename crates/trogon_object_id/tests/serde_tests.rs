@@ -1,6 +1,6 @@
 #![cfg(all(feature = "serde", feature = "macros"))]
 
-use trogon_object_id::{validators::Integer, ObjectId, ParseError, Text};
+use trogon_object_id::{IntegerText, ObjectId, ParseError, Text};
 
 #[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "user")]
@@ -10,7 +10,7 @@ struct UserId(Text);
 #[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "invoice")]
 #[repr(transparent)]
-struct InvoiceId(Text<Integer>);
+struct InvoiceId(IntegerText);
 
 #[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 enum PrincipalId {

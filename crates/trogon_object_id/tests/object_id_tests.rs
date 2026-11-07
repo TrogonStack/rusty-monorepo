@@ -1,7 +1,7 @@
 #![cfg(feature = "macros")]
 
 use std::collections::HashSet;
-use trogon_object_id::{validators::Integer, ObjectId, ParseError, Text, Validator};
+use trogon_object_id::{IntegerText, ObjectId, ParseError, Payload, Text};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "user")]
@@ -16,7 +16,7 @@ pub struct ServiceId(Text);
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "invoice", separator = ":")]
 #[repr(transparent)]
-pub struct InvoiceId(Text<Integer>);
+pub struct InvoiceId(IntegerText);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "app")]
@@ -41,21 +41,78 @@ pub enum AdjacentId {
     Apple(AppleId),
 }
 
-pub struct AsciiToken;
-impl Validator for AsciiToken {
-    fn validate(value: &str) -> Result<(), ParseError> {
-        if value.bytes().all(|byte| byte.is_ascii_lowercase()) {
-            Ok(())
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct AsciiToken(Text);
+
+impl TryFrom<Text> for AsciiToken {
+    type Error = ParseError;
+
+    fn try_from(value: Text) -> Result<Self, Self::Error> {
+        if value.as_str().bytes().all(|byte| byte.is_ascii_lowercase()) {
+            Ok(Self(value))
         } else {
             Err(ParseError::InvalidValue)
         }
     }
 }
 
+impl TryFrom<&str> for AsciiToken {
+    type Error = ParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Text::try_from(value)?.try_into()
+    }
+}
+
+impl TryFrom<String> for AsciiToken {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Text::try_from(value)?.try_into()
+    }
+}
+
+impl From<AsciiToken> for Text {
+    fn from(value: AsciiToken) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for AsciiToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Payload for AsciiToken {
+    type Raw = str;
+
+    fn parse(value: &str) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn parse_owned(value: String) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn validate(&self) -> Result<(), ParseError> {
+        if self.0.as_str().bytes().all(|byte| byte.is_ascii_lowercase()) {
+            Ok(())
+        } else {
+            Err(ParseError::InvalidValue)
+        }
+    }
+
+    fn as_raw(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "token")]
 #[repr(transparent)]
-pub struct TokenId(Text<AsciiToken>);
+pub struct TokenId(AsciiToken);
 
 #[test]
 fn accepts_a_nonempty_raw_identifier() {
@@ -136,12 +193,106 @@ fn applies_integer_and_custom_validation_on_every_input_path() {
     }
     assert!(
         TokenId::try_from_raw("abc").is_ok(),
-        "custom validator accepts domain value"
+        "custom conversion accepts domain value"
     );
     assert_eq!(
         "token_ABC".parse::<TokenId>(),
         Err(ParseError::InvalidValue),
-        "custom validator rejects parsed value"
+        "custom conversion rejects parsed value"
+    );
+}
+
+#[test]
+fn custom_try_from_rules_cover_raw_full_typed_and_generated_inputs() {
+    let owned = String::from("token_abc");
+    let pointer = owned.as_ptr();
+    let token = TokenId::try_from(owned).expect("owned custom conversion");
+    assert_eq!(
+        token.as_raw().as_ptr(),
+        pointer,
+        "custom conversion keeps owned storage"
+    );
+    let text = Text::from(token.into_payload());
+    assert_eq!(text.as_str().as_ptr(), pointer, "custom widening keeps owned storage");
+
+    for (raw, expected) in [
+        (String::new(), ParseError::EmptyValue),
+        ("a".repeat(1025), ParseError::ValueTooLong),
+        (String::from("a\n"), ParseError::ControlCharacter),
+        (String::from("ABC"), ParseError::InvalidValue),
+    ] {
+        assert_eq!(
+            AsciiToken::try_from(raw.as_str()),
+            Err(expected),
+            "borrowed payload conversion"
+        );
+        assert_eq!(
+            AsciiToken::try_from(raw.clone()),
+            Err(expected),
+            "owned payload conversion"
+        );
+        assert_eq!(
+            TokenId::try_from_raw(&raw),
+            Err(expected),
+            "raw borrowed ID construction"
+        );
+        assert_eq!(
+            TokenId::try_from_owned(raw.clone()),
+            Err(expected),
+            "raw owned ID construction"
+        );
+        let full = format!("token_{raw}");
+        assert_eq!(
+            TokenId::try_from(full.as_str()),
+            Err(expected),
+            "full borrowed ID conversion"
+        );
+        assert_eq!(TokenId::try_from(full), Err(expected), "full owned ID conversion");
+    }
+
+    struct RejectedToken;
+    impl trogon_object_id::Generator for RejectedToken {
+        type Payload = AsciiToken;
+
+        fn generate() -> Result<Self::Payload, ParseError> {
+            Ok(AsciiToken(Text::try_from("ABC").expect("valid general text")))
+        }
+    }
+    assert_eq!(
+        TokenId::try_from_payload(AsciiToken(Text::try_from("ABC").expect("valid general text"))),
+        Err(ParseError::InvalidValue),
+        "typed values must still satisfy the payload rule"
+    );
+    assert_eq!(
+        TokenId::generate::<RejectedToken>(),
+        Err(ParseError::InvalidValue),
+        "generation cannot bypass the payload rule"
+    );
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn custom_try_from_rules_apply_to_full_and_raw_serde() {
+    use serde::de::value::{Error, StringDeserializer};
+    use serde::Deserialize;
+
+    let full = String::from("token_abc");
+    let pointer = full.as_ptr();
+    let token = TokenId::deserialize(StringDeserializer::<Error>::new(full)).expect("owned custom serde");
+    assert_eq!(token.as_raw().as_ptr(), pointer, "full serde reuses custom storage");
+    let raw = String::from("abc");
+    let pointer = raw.as_ptr();
+    let token: TokenId =
+        trogon_object_id::serde_raw::deserialize(StringDeserializer::<Error>::new(raw)).expect("raw custom serde");
+    assert_eq!(token.as_raw().as_ptr(), pointer, "raw serde reuses custom storage");
+    assert!(
+        TokenId::deserialize(StringDeserializer::<Error>::new(String::from("token_ABC"))).is_err(),
+        "full serde rejects invalid custom syntax"
+    );
+    assert!(
+        trogon_object_id::serde_raw::deserialize::<TokenId, _>(StringDeserializer::<Error>::new(String::from("ABC")))
+            .is_err(),
+        "raw serde rejects invalid custom syntax"
     );
 }
 
