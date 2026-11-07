@@ -14,6 +14,7 @@
   ],
   "packages": {
     "crates/trg": {
+      "initial-version": "0.2.0",
       "extra-files": [
         {
           "type": "toml",
@@ -22,8 +23,11 @@
         }
       ]
     },
-    "crates/trogon_dylint_lints": {},
+    "crates/trogon_dylint_lints": {
+      "initial-version": "0.1.0"
+    },
     "crates/trogon_object_id": {
+      "initial-version": "0.1.0",
       "extra-files": [
         {
           "type": "toml",
@@ -33,6 +37,7 @@
       ]
     },
     "crates/trogon_object_id_derive": {
+      "initial-version": "0.1.0",
       "extra-files": [
         {
           "type": "toml",
@@ -42,6 +47,7 @@
       ]
     },
     "crates/trogon_uuid": {
+      "initial-version": "0.1.0",
       "extra-files": [
         {
           "type": "toml",
@@ -51,6 +57,7 @@
       ]
     },
     "crates/trogon_uuid_build": {
+      "initial-version": "0.1.0",
       "extra-files": [
         {
           "type": "toml",
@@ -69,6 +76,7 @@
   "include-v-in-tag": true,
   "include-component-in-tag": true,
   "release-type": "rust",
+  "bump-minor-pre-major": true,
   "draft": false,
   "draft-pull-request": false,
   "prerelease": false,
