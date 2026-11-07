@@ -1,0 +1,24 @@
+error[E0308]: arguments to this function are incorrect
+ --> tests/ui/fail/ingest_profile_swapped_claim_types.rs:4:13
+  |
+4 |     let _ = IngestProfile::new(
+  |             ^^^^^^^^^^^^^^^^^^
+5 |         AuthenticationType::try_new("jwt").unwrap(),
+6 |         RoleClaimType::new(WellKnownClaim::Roles.into()),
+  |         ------------------------------------------------ expected `NameClaimType`, found `RoleClaimType`
+7 |         NameClaimType::new(WellKnownClaim::Sub.into()),
+  |         ---------------------------------------------- expected `RoleClaimType`, found `NameClaimType`
+  |
+note: associated function defined here
+ --> src/ingest_profile.rs
+  |
+  |     pub fn new(
+  |            ^^^
+help: swap these arguments
+  |
+4 ~     let _ = IngestProfile::new(
+5 +         AuthenticationType::try_new("jwt").unwrap(),
+6 +         NameClaimType::new(WellKnownClaim::Sub.into()),
+7 +         RoleClaimType::new(WellKnownClaim::Roles.into()),
+8 ~     );
+  |

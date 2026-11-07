@@ -1,0 +1,10 @@
+error[E0599]: no method named `with_kind` found for enum `Identity<C>` in the current scope
+ --> tests/ui/fail/identity_classification_is_fallible.rs:4:45
+  |
+4 |     let _: Identity = Identity::anonymous().with_kind(PrincipalKind::try_new("person").unwrap());
+  |                                             ^^^^^^^^^
+  |
+help: there is a method `try_with_kind` with a similar name
+  |
+4 |     let _: Identity = Identity::anonymous().try_with_kind(PrincipalKind::try_new("person").unwrap());
+  |                                             ++++

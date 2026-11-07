@@ -1,4 +1,4 @@
-//! Immutable identities, actor chains, authentication context and proof binding.
+//! Principal composition and typed authentication refinements.
 //!
 //! Credential verification and resource authorization remain caller responsibilities.
 
@@ -6,6 +6,7 @@ mod actor_error;
 mod actor_issuer;
 mod actor_key;
 mod audience;
+mod authenticated_principal;
 mod authentication_context;
 mod authentication_method;
 mod authentication_type;
@@ -24,6 +25,7 @@ mod client_id;
 mod confirmation;
 pub mod constants;
 mod current_actor;
+mod current_principal;
 mod delegation;
 mod dynamic_claims;
 mod errors;
@@ -33,11 +35,15 @@ mod identity_builder;
 mod ingest_profile;
 mod issuer;
 mod jwk;
+mod kind;
 mod name_claim_type;
 mod numeric_date;
+mod principal;
+mod principal_builder;
 mod principal_key;
 mod principal_kind;
 mod prior_actor;
+mod refinement;
 mod role_claim_type;
 mod role_name;
 mod scope;
@@ -54,6 +60,7 @@ pub use actor_error::ActorError;
 pub use actor_issuer::ActorIssuer;
 pub use actor_key::ActorKey;
 pub use audience::Audience;
+pub use authenticated_principal::{AuthenticatedPrincipal, NotAuthenticatedError, RefinementError};
 pub use authentication_context::AuthenticationContext;
 pub use authentication_method::AuthenticationMethod;
 pub use authentication_type::AuthenticationType;
@@ -72,6 +79,7 @@ pub use claim_value::ClaimValue;
 pub use client_id::ClientId;
 pub use confirmation::Confirmation;
 pub use current_actor::{CurrentActor, PriorActors};
+pub use current_principal::CurrentPrincipal;
 pub use delegation::Delegation;
 pub use dynamic_claims::DynamicClaims;
 pub use errors::{NumericDateError, TimestampError, Unsigned63Error, UtcOffsetError, ValueKind, ValueObjectError};
@@ -81,11 +89,18 @@ pub use identity_builder::{IdentityBuildError, IdentityBuilder};
 pub use ingest_profile::IngestProfile;
 pub use issuer::Issuer;
 pub use jwk::Jwk;
+pub use kind::{Classified, Kind, Unclassified};
 pub use name_claim_type::NameClaimType;
 pub use numeric_date::NumericDate;
+pub use principal::{Principal, SourcedClaim};
+pub use principal_builder::{PrimaryIdentityIndex, PrincipalBuildError, PrincipalBuilder};
 pub use principal_key::PrincipalKey;
 pub use principal_kind::PrincipalKind;
 pub use prior_actor::PriorActor;
+pub use refinement::{
+    AnyBinding, AnyDelegation, BindingState, BoundProof, Delegated, DelegationState, Direct, KindState, KnownKind,
+    Refined, Refinement, SenderConstrained, WithBinding, WithDelegation, WithKind,
+};
 pub use role_claim_type::RoleClaimType;
 pub use role_name::RoleName;
 pub use scope::{ScopeName, ScopeNameError, ScopeSet};
