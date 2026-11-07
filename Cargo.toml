@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/trg"]
+members = [
+  "crates/trg",
+  "crates/trogon_claims",
+  "crates/trogon_claims_syntax",
+]
 resolver = "2"
 
 [workspace.lints.clippy]
