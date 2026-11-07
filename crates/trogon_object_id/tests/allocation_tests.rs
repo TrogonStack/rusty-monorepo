@@ -99,7 +99,7 @@ fn typed_uuid_operations_and_owned_text_need_no_extra_allocations() {
         );
     });
 
-    #[cfg(feature = "derive")]
+    #[cfg(feature = "macros")]
     {
         #[derive(Clone, Copy, trogon_object_id::ObjectId)]
         #[object_id(prefix = "direct")]
@@ -110,6 +110,19 @@ fn typed_uuid_operations_and_owned_text_need_no_extra_allocations() {
             black_box("direct_550e8400-e29b-41d4-a716-446655440000")
                 .parse::<DirectId>()
                 .expect("direct UUID")
+        });
+        #[derive(trogon_object_id::ObjectId)]
+        enum PrincipalId {
+            Direct(DirectId),
+        }
+        without_allocations(|| {
+            let principal = black_box("direct_550e8400-e29b-41d4-a716-446655440000")
+                .parse::<PrincipalId>()
+                .expect("enum UUID");
+            let mut buffer = Buffer { bytes: [0; 64], len: 0 };
+            write!(&mut buffer, "{principal}").expect("fixed enum output capacity");
+            black_box(buffer);
+            black_box(PrincipalId::from(direct));
         });
         without_allocations(|| {
             black_box(DirectId::try_from_payload(black_box(*direct.payload())).expect("direct payload"));
@@ -136,6 +149,15 @@ fn typed_uuid_operations_and_owned_text_need_no_extra_allocations() {
             black_box(
                 serde_json::from_str::<DirectId>("\"direct_550e8400-e29b-41d4-a716-446655440000\"")
                     .expect("borrowed direct JSON UUID"),
+            );
+            let principal = PrincipalId::from(direct);
+            let mut enum_bytes = [0_u8; 64];
+            let mut enum_output = std::io::Cursor::new(enum_bytes.as_mut_slice());
+            serde_json::to_writer(&mut enum_output, &principal).expect("fixed enum JSON output capacity");
+            black_box(enum_output.position());
+            black_box(
+                serde_json::from_str::<PrincipalId>("\"direct_550e8400-e29b-41d4-a716-446655440000\"")
+                    .expect("borrowed enum JSON UUID"),
             );
         });
     }

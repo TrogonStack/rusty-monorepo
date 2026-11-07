@@ -1,6 +1,6 @@
-#![cfg(feature = "derive")]
+#![cfg(feature = "macros")]
 
-use trogon_object_id::{ObjectId, Text};
+use trogon_object_id::{ObjectId, ParseError, Text};
 
 #[derive(Debug, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "item")]
@@ -22,7 +22,7 @@ fn direct_identifier_uses_its_declared_prefix() {
 #[repr(transparent)]
 struct InvoiceId(Text<trogon_object_id::validators::Integer>);
 
-#[derive(Debug, PartialEq, Eq, trogon_object_id::ObjectIdUnion)]
+#[derive(Debug, PartialEq, Eq, ObjectId)]
 enum PrincipalId {
     Item(ItemId),
     Invoice(InvoiceId),
@@ -73,8 +73,8 @@ fn direct_newtypes_reuse_owned_payloads_and_preserve_validation() {
 }
 
 #[test]
-fn derived_union_accepts_direct_identifier_types() {
-    let principal = "invoice:42".parse::<PrincipalId>().expect("known union variant");
+fn derived_enum_accepts_direct_identifier_types() {
+    let principal = "invoice:42".parse::<PrincipalId>().expect("known enum variant");
     assert!(
         matches!(principal, PrincipalId::Invoice(_)),
         "full prefix selects the direct type"
@@ -85,10 +85,33 @@ fn derived_union_accepts_direct_identifier_types() {
         "item_abc",
         "conversion preserves its domain"
     );
-    assert!(
-        "invoice:bad".parse::<PrincipalId>().is_err(),
-        "union cannot bypass the custom payload validator"
+    let full = String::from("invoice:+00042");
+    let pointer = full.as_ptr();
+    let PrincipalId::Invoice(invoice) = PrincipalId::try_from(full).expect("owned enum input") else {
+        panic!("expected invoice variant")
+    };
+    assert_eq!(invoice.as_raw(), "+00042", "enum preserves validated spelling");
+    assert_eq!(
+        invoice.as_raw().as_ptr(),
+        pointer,
+        "enum parsing reuses the owned buffer"
     );
+    for (invalid, expected) in [
+        ("invoice:bad", ParseError::InvalidValue),
+        ("invoice:", ParseError::EmptyValue),
+        ("unknown_123", ParseError::UnknownPrefix),
+    ] {
+        assert_eq!(
+            invalid.parse::<PrincipalId>(),
+            Err(expected),
+            "borrowed enum input preserves member validation and prefix errors"
+        );
+        assert_eq!(
+            PrincipalId::try_from(invalid.to_owned()),
+            Err(expected),
+            "owned enum input preserves member validation and prefix errors"
+        );
+    }
 }
 
 #[cfg(feature = "uuid")]
@@ -161,10 +184,10 @@ fn direct_identifiers_serialize_through_checked_full_form() {
         "direct raw adapter retains custom validation"
     );
     let principal = PrincipalId::from(record.invoice);
-    let json = serde_json::to_string(&principal).expect("serialize direct union");
+    let json = serde_json::to_string(&principal).expect("serialize direct enum");
     assert_eq!(
-        serde_json::from_str::<PrincipalId>(&json).expect("deserialize direct union"),
+        serde_json::from_str::<PrincipalId>(&json).expect("deserialize direct enum"),
         principal,
-        "direct union serde round trip"
+        "direct enum serde round trip"
     );
 }

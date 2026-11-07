@@ -20,9 +20,15 @@
           "path": "/Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='trg')].version"
         }
-      ]
+      ],
+      "initial-version": "0.2.0"
     },
-    "crates/trogon_dylint_lints": {},
+    "crates/trogon_dylint_lints": {
+      "extra-files": [
+        "README.md"
+      ],
+      "initial-version": "0.1.0"
+    },
     "crates/trogon_object_id": {
       "extra-files": [
         {
@@ -30,7 +36,8 @@
           "path": "/Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='trogon_object_id')].version"
         }
-      ]
+      ],
+      "initial-version": "0.1.0"
     },
     "crates/trogon_object_id_derive": {
       "extra-files": [
@@ -39,7 +46,8 @@
           "path": "/Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='trogon_object_id_derive')].version"
         }
-      ]
+      ],
+      "initial-version": "0.1.0"
     },
     "crates/trogon_uuid": {
       "extra-files": [
@@ -48,7 +56,8 @@
           "path": "/Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='trogon_uuid')].version"
         }
-      ]
+      ],
+      "initial-version": "0.1.0"
     },
     "crates/trogon_uuid_build": {
       "extra-files": [
@@ -57,7 +66,8 @@
           "path": "/Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='trogon_uuid_build')].version"
         }
-      ]
+      ],
+      "initial-version": "0.1.0"
     }
   },
   "plugins": [
@@ -74,5 +84,6 @@
   "prerelease": false,
   "pull-request-header": "An automated release has been created for you.",
   "separate-pull-requests": true,
-  "signoff": "SHT Bot <61149376+sht-bot@users.noreply.github.com>"
+  "signoff": "SHT Bot <61149376+sht-bot@users.noreply.github.com>",
+  "bump-minor-pre-major": true
 }

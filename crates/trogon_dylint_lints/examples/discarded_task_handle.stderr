@@ -1,0 +1,51 @@
+warning: task handle is discarded without an explicit detachment policy
+  --> $DIR/discarded_task_handle.rs:11:5
+   |
+LL |     tokio::spawn(async {});
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the handle or transfer it to a task owner; if detachment is deliberate, explain it with `expect(discarded_task_handle, reason = "...")`
+   = note: `#[warn(discarded_task_handle)]` on by default
+
+warning: task handle is discarded without an explicit detachment policy
+  --> $DIR/discarded_task_handle.rs:15:5
+   |
+LL |     tokio::task::spawn_blocking(|| {});
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the handle or transfer it to a task owner; if detachment is deliberate, explain it with `expect(discarded_task_handle, reason = "...")`
+
+warning: task handle is discarded without an explicit detachment policy
+  --> $DIR/discarded_task_handle.rs:19:5
+   |
+LL |     std::mem::drop(handle);
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the handle or transfer it to a task owner; if detachment is deliberate, explain it with `expect(discarded_task_handle, reason = "...")`
+
+warning: task handle is discarded without an explicit detachment policy
+  --> $DIR/discarded_task_handle.rs:23:5
+   |
+LL |     drop(tokio::spawn(async {}));
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the handle or transfer it to a task owner; if detachment is deliberate, explain it with `expect(discarded_task_handle, reason = "...")`
+
+warning: task handle is discarded without an explicit detachment policy
+  --> $DIR/discarded_task_handle.rs:67:5
+   |
+LL |     release(handle);
+   |     ^^^^^^^^^^^^^^^
+   |
+   = help: await the handle or transfer it to a task owner; if detachment is deliberate, explain it with `expect(discarded_task_handle, reason = "...")`
+
+warning: task handle is discarded without an explicit detachment policy
+  --> $DIR/discarded_task_handle.rs:87:5
+   |
+LL |     tokio::task::spawn_local(async {});
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: await the handle or transfer it to a task owner; if detachment is deliberate, explain it with `expect(discarded_task_handle, reason = "...")`
+
+warning: 6 warnings emitted
+
