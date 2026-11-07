@@ -8,8 +8,6 @@ use crate::authorized_actor::AuthorizedActor;
 use crate::binding::Binding;
 use crate::claim::Claim;
 use crate::claim_set::ClaimSet;
-#[cfg(feature = "spicedb")]
-use crate::claim_set::{HasSubject, SubjectRef};
 use crate::claim_type::ClaimType;
 use crate::claim_value::ClaimValue;
 use crate::current_actor::CurrentActor;
@@ -171,13 +169,6 @@ impl AuthenticatedIdentity<DynamicClaims> {
                 .try_fold(false, match_role)
                 .unwrap_or(false),
         }
-    }
-}
-
-#[cfg(feature = "spicedb")]
-impl<C: HasSubject> AuthenticatedIdentity<C> {
-    pub fn subject(&self) -> SubjectRef<'_> {
-        self.claims.subject()
     }
 }
 

@@ -11,7 +11,7 @@ license = "Apache-2.0"
 default = []
 
 [lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("json", "spicedb", "axum", "macros", "serde"))'] }
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("json", "axum", "macros", "serde"))'] }
 warnings = "deny"
 
 [lints.clippy]
