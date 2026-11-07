@@ -1,6 +1,6 @@
 #![cfg(feature = "macros")]
 
-use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
+use trogon_object_id::{ObjectId, ObjectIdDomain};
 
 #[derive(ObjectIdDomain)]
 #[object_id(prefix = "user")]
@@ -12,7 +12,7 @@ type UserId = ObjectId<UserDomain>;
 struct ServiceDomain;
 type ServiceId = ObjectId<ServiceDomain>;
 
-#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 enum PrincipalId {
     User(UserId),
     Service(ServiceId),
@@ -23,7 +23,7 @@ enum PrincipalId {
 struct InvoiceDomain;
 type InvoiceId = ObjectId<InvoiceDomain>;
 
-#[derive(Debug, PartialEq, Eq, ObjectIdUnion)]
+#[derive(Debug, PartialEq, Eq, ObjectId)]
 enum ConditionalId {
     #[cfg(any())]
     Disabled(MissingDomain),
@@ -45,7 +45,7 @@ fn derived_domain_uses_its_declared_prefix() {
 }
 
 #[test]
-fn derived_union_parses_and_formats_normal_enum_variants() {
+fn derived_enum_parses_and_formats_normal_enum_variants() {
     let principal = "user_abc-123".parse::<PrincipalId>().expect("known domain prefix");
     assert!(
         matches!(principal, PrincipalId::User(_)),
@@ -54,22 +54,22 @@ fn derived_union_parses_and_formats_normal_enum_variants() {
     assert_eq!(
         principal.to_string(),
         "user_abc-123",
-        "formatted union retains its discriminator"
+        "formatted enum retains its discriminator"
     );
 }
 
 #[test]
-fn owned_union_input_reuses_its_text_payload_allocation() {
+fn owned_enum_input_reuses_its_text_payload_allocation() {
     let input = String::from("user_owned-value");
     let pointer = input.as_ptr();
-    let principal = PrincipalId::try_from(input).expect("owned full union identifier");
+    let principal = PrincipalId::try_from(input).expect("owned full enum identifier");
     let PrincipalId::User(user) = principal else {
         panic!("expected user variant")
     };
     assert_eq!(
         user.as_str().as_ptr(),
         pointer,
-        "union parsing consumes the existing buffer"
+        "enum parsing consumes the existing buffer"
     );
 }
 
@@ -87,7 +87,7 @@ fn native_conditional_variants_preserve_dispatch_and_validation() {
     assert_eq!(
         "invoice:bad".parse::<ConditionalId>(),
         Err(trogon_object_id::ParseError::InvalidValue),
-        "union keeps member validation errors"
+        "enum keeps member validation errors"
     );
     assert_eq!(
         "unknown_abc".parse::<ConditionalId>(),
@@ -120,12 +120,12 @@ fn derived_domains_preserve_compact_copy_payloads() {
 
 #[cfg(feature = "serde")]
 #[test]
-fn derived_union_serde_preserves_full_prefix_and_validation() {
+fn derived_enum_serde_preserves_full_prefix_and_validation() {
     let principal = "user_abc".parse::<PrincipalId>().expect("known prefix");
-    let json = serde_json::to_string(&principal).expect("serialize derived union");
+    let json = serde_json::to_string(&principal).expect("serialize derived enum");
     assert_eq!(json, "\"user_abc\"", "wire encoding keeps the discriminator");
     assert_eq!(
-        serde_json::from_str::<PrincipalId>(&json).expect("decode derived union"),
+        serde_json::from_str::<PrincipalId>(&json).expect("decode derived enum"),
         principal,
         "derived serde round trip"
     );

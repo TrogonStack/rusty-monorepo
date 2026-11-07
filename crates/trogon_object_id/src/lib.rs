@@ -5,7 +5,9 @@ use std::fmt;
 
 extern crate self as trogon_object_id;
 
-/// Derive a domain definition for an ordinary unit struct.
+/// Derive an advanced generic domain definition for an ordinary unit struct.
+///
+/// Direct ID types use `#[derive(ObjectId)]` on the payload struct instead.
 ///
 /// ```
 /// use trogon_object_id::{ObjectId, ObjectIdDomain};
@@ -74,7 +76,7 @@ extern crate self as trogon_object_id;
 #[cfg(feature = "macros")]
 pub use trogon_object_id_derive::ObjectIdDomain;
 
-/// Derive checked identifier behavior for a private, transparent payload newtype.
+/// Derive checked identifier behavior for a transparent payload newtype or an enum of IDs.
 ///
 /// ```
 /// use trogon_object_id::{ObjectId, Text};
@@ -173,71 +175,170 @@ pub use trogon_object_id_derive::ObjectIdDomain;
 /// }
 /// let forged = domain::ItemId(trogon_object_id::Text::try_from_raw("abc").unwrap());
 /// ```
-#[cfg(feature = "macros")]
-pub use trogon_object_id_derive::ObjectId;
-
-/// Derive parsing, formatting, conversions, and prefix checks for an ordinary enum.
+///
+/// Enums derive parsing, formatting, member conversions, and prefix checks.
+///
+/// ```
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "service")]
+/// #[repr(transparent)]
+/// struct ServiceId(Text);
+/// #[derive(ObjectId)]
+/// enum PrincipalId { User(UserId), Service(ServiceId) }
+/// let id: PrincipalId = "user_abc".parse()?;
+/// assert!(matches!(id, PrincipalId::User(_)));
+/// # Ok::<(), trogon_object_id::ParseError>(())
+/// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
 /// enum Empty {}
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
 /// enum UnitVariant { Empty }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::{ObjectIdUnion, ObjectId, Domain, Definition, Text};
-/// struct UserDomain;
-/// impl Domain for UserDomain {
-///     const DEFINITION: Definition = Definition::new("user", "_");
-///     type Payload = Text;
-/// }
-/// #[derive(ObjectIdUnion)]
-/// enum NamedVariant { User { value: ObjectId<UserDomain> } }
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// enum NamedVariant { User { value: UserId } }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
 /// enum MultipleFields { Pair(String, String) }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
-/// enum GenericUnion<T> { Value(T) }
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
+/// enum GenericEnum<T> { Value(T) }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
-/// #[derive(ObjectIdDomain)]
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "user")]
-/// struct First;
-/// #[derive(ObjectIdDomain)]
+/// #[repr(transparent)]
+/// struct First(Text);
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "user")]
-/// struct Second;
-/// #[derive(ObjectIdUnion)]
-/// enum Duplicate { First(ObjectId<First>), Second(ObjectId<Second>) }
+/// #[repr(transparent)]
+/// struct Second(Text);
+/// #[derive(ObjectId)]
+/// enum Duplicate { First(First), Second(Second) }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
-/// #[derive(ObjectIdDomain)]
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "app")]
-/// struct App;
-/// #[derive(ObjectIdDomain)]
+/// #[repr(transparent)]
+/// struct AppId(Text);
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "app_admin")]
-/// struct Admin;
-/// #[derive(ObjectIdUnion)]
-/// enum Overlap { App(ObjectId<App>), Admin(ObjectId<Admin>) }
+/// #[repr(transparent)]
+/// struct AdminId(Text);
+/// #[derive(ObjectId)]
+/// enum Overlap { App(AppId), Admin(AdminId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
+/// union Unsupported { first: u64, second: u32 }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "principal")]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(separator = ":")]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(payload = String)]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(template = String)]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(unknown = true)]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// enum PrincipalId { #[object_id(prefix = "wrong")] User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// enum PrincipalId { User(#[object_id(prefix = "wrong")] UserId) }
 /// ```
 #[cfg(feature = "macros")]
-pub use trogon_object_id_derive::ObjectIdUnion;
+pub use trogon_object_id_derive::ObjectId;
 
 pub const MAX_VALUE_BYTES: usize = 1024;
 
@@ -476,7 +577,7 @@ pub trait Identifier: Sized {
     fn as_raw(&self) -> &Self::Raw;
 }
 
-/// Rejects duplicate or overlapping complete prefixes. Call in a `const` for a handwritten union.
+/// Rejects duplicate or overlapping complete prefixes. Call in a `const` for a handwritten identifier enum.
 pub const fn assert_disjoint(definitions: &[Definition]) {
     assert!(!definitions.is_empty(), "union must contain a member");
     let mut left = 0;

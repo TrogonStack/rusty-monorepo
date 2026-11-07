@@ -81,6 +81,17 @@ pub fn derive_object_id(input: TokenStream) -> TokenStream {
 
 fn expand_object_id(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     reject_generics(&input, "ObjectId")?;
+    match &input.data {
+        Data::Struct(_) => expand_struct(input),
+        Data::Enum(_) => expand_enum(input),
+        Data::Union(_) => Err(syn::Error::new_spanned(
+            &input.ident,
+            "ObjectId requires a payload newtype struct or an enum of identifiers",
+        )),
+    }
+}
+
+fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
     let field = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -235,31 +246,48 @@ fn reject_generics(input: &DeriveInput, derive_name: &str) -> syn::Result<()> {
     Ok(())
 }
 
-#[proc_macro_derive(ObjectIdUnion)]
-pub fn derive_union(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    expand_union(input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
-fn expand_union(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    reject_generics(&input, "ObjectIdUnion")?;
+fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    if let Some(attribute) = input
+        .attrs
+        .iter()
+        .find(|attribute| attribute.path().is_ident("object_id"))
+    {
+        return Err(syn::Error::new_spanned(
+            attribute,
+            "ObjectId enums inherit their prefixes and payloads from their variants; remove #[object_id(...)] from the enum",
+        ));
+    }
     let path = runtime_path()?;
     let name = &input.ident;
     let data = match &input.data {
         Data::Enum(data) => data,
-        _ => return Err(syn::Error::new_spanned(name, "ObjectIdUnion requires an enum")),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                name,
+                "ObjectId requires a payload newtype struct or an enum of identifiers",
+            ))
+        }
     };
     if data.variants.is_empty() {
         return Err(syn::Error::new_spanned(
             name,
-            "ObjectIdUnion requires at least one variant",
+            "ObjectId enums require at least one variant",
         ));
     }
     let mut variants = Vec::new();
     let mut members = Vec::new();
     for variant in &data.variants {
+        if let Some(attribute) = variant
+            .attrs
+            .iter()
+            .chain(variant.fields.iter().flat_map(|field| &field.attrs))
+            .find(|attribute| attribute.path().is_ident("object_id"))
+        {
+            return Err(syn::Error::new_spanned(
+                attribute,
+                "ObjectId enum variants and fields do not accept #[object_id(...)]",
+            ));
+        }
         let field = match &variant.fields {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => fields.unnamed.first(),
             _ => None,
@@ -267,7 +295,7 @@ fn expand_union(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         .ok_or_else(|| {
             syn::Error::new_spanned(
                 variant,
-                "ObjectIdUnion variants must have exactly one unnamed identifier field",
+                "ObjectId enum variants must have exactly one unnamed identifier field",
             )
         })?;
         variants.push(&variant.ident);

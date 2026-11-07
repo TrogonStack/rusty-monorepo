@@ -1,7 +1,7 @@
 #![cfg(feature = "macros")]
 
 use std::collections::HashSet;
-use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ObjectIdUnion, ParseError, Text, Validator};
+use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ParseError, Text, Validator};
 
 #[derive(ObjectIdDomain)]
 #[object_id(prefix = "user")]
@@ -28,14 +28,14 @@ pub type AppId = ObjectId<AppDomain>;
 pub struct AppleDomain;
 pub type AppleId = ObjectId<AppleDomain>;
 
-#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 pub enum PrincipalId {
     User(UserId),
     Service(ServiceId),
     Invoice(InvoiceId),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 pub enum AdjacentId {
     App(AppId),
     Apple(AppleId),
@@ -155,17 +155,17 @@ fn value_traits_work_without_runtime_registries() {
 }
 
 #[test]
-fn union_dispatches_without_losing_the_discriminator() {
+fn enum_dispatches_without_losing_the_discriminator() {
     let user = UserId::try_from_raw("123").expect("valid user");
-    let union = PrincipalId::from(user.clone());
-    assert_eq!(union.to_string(), "user_123", "union storage retains prefix");
+    let principal = PrincipalId::from(user.clone());
+    assert_eq!(principal.to_string(), "user_123", "enum storage retains prefix");
     assert_eq!(
-        "user_123".parse::<PrincipalId>().expect("parse union"),
-        union,
-        "union round trip"
+        "user_123".parse::<PrincipalId>().expect("parse enum"),
+        principal,
+        "enum round trip"
     );
     assert!(
-        matches!(union, PrincipalId::User(id) if id == user),
+        matches!(principal, PrincipalId::User(id) if id == user),
         "exhaustive enum retains domain"
     );
     assert!(
@@ -180,7 +180,7 @@ fn union_dispatches_without_losing_the_discriminator() {
     assert_eq!(
         "invoice:bad".parse::<PrincipalId>(),
         Err(ParseError::InvalidValue),
-        "member validation survives union dispatch"
+        "member validation survives enum dispatch"
     );
     assert_eq!(
         "user_".parse::<PrincipalId>(),
@@ -217,7 +217,7 @@ struct ConditionalDomain;
 struct EnabledDomain;
 type EnabledId = ObjectId<EnabledDomain>;
 
-#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 enum ConditionalPrincipalId {
     #[cfg(any())]
     Missing(MissingId),
