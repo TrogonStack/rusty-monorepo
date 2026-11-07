@@ -92,14 +92,21 @@ impl std::fmt::Display for CheckedPayload {
         formatter.write_str(if self.0 { "allowed" } else { "rejected" })
     }
 }
-impl trogon_object_id::Payload for CheckedPayload {
-    type Raw = str;
-    fn parse(value: &str) -> Result<Self, trogon_object_id::ParseError> {
+impl TryFrom<&str> for CheckedPayload {
+    type Error = trogon_object_id::ParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         if value == "allowed" {
             Ok(Self(true))
         } else {
             Err(trogon_object_id::ParseError::InvalidValue)
         }
+    }
+}
+impl trogon_object_id::Payload for CheckedPayload {
+    type Raw = str;
+    fn parse(value: &str) -> Result<Self, trogon_object_id::ParseError> {
+        Self::try_from(value)
     }
     fn validate(&self) -> Result<(), trogon_object_id::ParseError> {
         if self.0 {
@@ -147,24 +154,43 @@ fn custom_typed_inputs_and_generators_cannot_skip_payload_validation() {
     );
 }
 
-struct CountingValidator;
+struct CountingText(trogon_object_id::Text);
 static VALIDATION_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-impl trogon_object_id::Validator for CountingValidator {
-    fn validate(_value: &str) -> Result<(), trogon_object_id::ParseError> {
+impl TryFrom<&str> for CountingText {
+    type Error = trogon_object_id::ParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         VALIDATION_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        trogon_object_id::Text::try_from(value).map(Self)
+    }
+}
+impl std::fmt::Display for CountingText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+impl trogon_object_id::Payload for CountingText {
+    type Raw = str;
+    fn parse(value: &str) -> Result<Self, trogon_object_id::ParseError> {
+        Self::try_from(value)
+    }
+    fn validate(&self) -> Result<(), trogon_object_id::ParseError> {
         Ok(())
+    }
+    fn as_raw(&self) -> &str {
+        self.0.as_str()
     }
 }
 struct CountingDomain;
 impl Domain for CountingDomain {
     const DEFINITION: Definition = Definition::new("counted", "_");
-    type Payload = trogon_object_id::Text<CountingValidator>;
+    type Payload = CountingText;
 }
 struct CountingGenerator;
 impl trogon_object_id::Generator for CountingGenerator {
-    type Payload = trogon_object_id::Text<CountingValidator>;
+    type Payload = CountingText;
     fn generate() -> Result<Self::Payload, trogon_object_id::ParseError> {
-        trogon_object_id::Text::try_from_raw("generated")
+        CountingText::try_from("generated")
     }
 }
 
@@ -172,7 +198,7 @@ impl trogon_object_id::Generator for CountingGenerator {
 fn immutable_text_guarantees_are_established_once() {
     use std::sync::atomic::Ordering;
     VALIDATION_CALLS.store(0, Ordering::Relaxed);
-    let payload = trogon_object_id::Text::<CountingValidator>::try_from_raw("valid").expect("validated text");
+    let payload = CountingText::try_from("valid").expect("validated text");
     let id = ObjectId::<CountingDomain>::try_from_payload(payload).expect("wrap validated text");
     assert_eq!(id.as_raw(), "valid", "typed wrapping preserves payload");
     assert_eq!(

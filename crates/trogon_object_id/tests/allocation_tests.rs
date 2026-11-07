@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::hint::black_box;
 
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
-use trogon_object_id::{Definition, Domain, ObjectId, Text, Uuid, Uuid4, Uuid7};
+use trogon_object_id::{Definition, Domain, IntegerText, ObjectId, Text, Uuid, Uuid4, Uuid7, UuidText};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
@@ -86,6 +86,31 @@ fn typed_uuid_operations_and_owned_text_need_no_extra_allocations() {
     let pointer = full.as_ptr();
     let id = without_allocations(|| TextId::try_from(full).expect("owned full text"));
     assert_eq!(id.as_raw().as_ptr(), pointer, "owned full text keeps its buffer");
+
+    for invalid in ["", "1\n", "not-a-number"] {
+        without_allocations(|| {
+            black_box(IntegerText::try_from(black_box(invalid))).expect_err("invalid integer");
+        });
+    }
+    for invalid in ["", "a\n", "not-a-uuid", "550e8400e29b41d4a716446655440000"] {
+        without_allocations(|| {
+            black_box(UuidText::try_from(black_box(invalid))).expect_err("invalid UUID text");
+        });
+    }
+    let integer = String::from("+00042");
+    let pointer = integer.as_ptr();
+    let integer = without_allocations(|| IntegerText::try_from(integer).expect("owned integer"));
+    let text = without_allocations(|| Text::from(integer));
+    let integer = without_allocations(|| IntegerText::try_from(text).expect("text narrowing"));
+    let integer = without_allocations(|| String::from(integer));
+    assert_eq!(integer.as_ptr(), pointer, "integer conversions preserve storage");
+    let uuid = String::from("550E8400-E29B-41D4-A716-446655440000");
+    let pointer = uuid.as_ptr();
+    let uuid = without_allocations(|| UuidText::try_from(uuid).expect("owned UUID text"));
+    let text = without_allocations(|| Text::from(uuid));
+    let uuid = without_allocations(|| UuidText::try_from(text).expect("UUID text narrowing"));
+    let uuid = without_allocations(|| String::from(uuid));
+    assert_eq!(uuid.as_ptr(), pointer, "UUID text conversions preserve storage");
 
     #[cfg(feature = "serde")]
     without_allocations(|| {

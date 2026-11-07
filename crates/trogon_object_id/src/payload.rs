@@ -1,14 +1,13 @@
 use std::fmt;
-use std::hash::Hash;
-use std::marker::PhantomData;
+use std::str::FromStr;
 
-use crate::validators;
-use crate::{ParseError, Validator, MAX_VALUE_BYTES};
+use crate::{ParseError, MAX_VALUE_BYTES};
 
 /// A trusted payload codec and its immutable raw representation.
 ///
 /// Implementations must reject invalid values on every construction path and
-/// keep validation deterministic. Prefer `Text<V>` for custom text rules.
+/// keep validation deterministic. Delegate parsing to standard `TryFrom`
+/// implementations on immutable payload newtypes.
 /// Payloads with interior mutation can invalidate an identifier's guarantees.
 pub trait Payload: Sized + fmt::Display {
     /// The borrowed representation used when storage already establishes the domain.
@@ -37,47 +36,278 @@ pub trait Payload: Sized + fmt::Display {
 
 /// Validated, spelling-preserving owned text.
 ///
-/// Text must be nonempty, contain at most [`MAX_VALUE_BYTES`] UTF-8 bytes and
-/// contain no Unicode control characters before the custom validator runs.
-/// Spelling is never normalized, including case and signed decimal padding.
+/// Construction through `TryFrom<&str>` or `TryFrom<String>` requires nonempty
+/// text, at most [`MAX_VALUE_BYTES`] UTF-8 bytes and no Unicode control characters.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct Text<V: Validator = validators::Any> {
-    value: String,
-    validator: PhantomData<fn() -> V>,
-}
+pub struct Text(String);
 
-impl<V: Validator> Text<V> {
-    /// Validates borrowed text, then allocates an owned copy without normalization.
-    ///
-    /// Returns [`ParseError::EmptyValue`], [`ParseError::ValueTooLong`] or
-    /// [`ParseError::ControlCharacter`] for the shared constraints, or the error
-    /// returned by `V` for an application-specific rule.
-    pub fn try_from_raw(value: &str) -> Result<Self, ParseError> {
-        validate_text::<V>(value)?;
-        Ok(Self {
-            value: value.to_owned(),
-            validator: PhantomData,
-        })
-    }
-
-    /// Applies the same checks as [`Self::try_from_raw`] while retaining the allocation.
-    pub fn try_from_owned(value: String) -> Result<Self, ParseError> {
-        validate_text::<V>(&value)?;
-        Ok(Self {
-            value,
-            validator: PhantomData,
-        })
-    }
-
+impl Text {
     pub fn as_str(&self) -> &str {
-        &self.value
-    }
-    pub fn into_string(self) -> String {
-        self.value
+        &self.0
     }
 }
 
-fn validate_text<V: Validator>(value: &str) -> Result<(), ParseError> {
+impl TryFrom<&str> for Text {
+    type Error = ParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        check_text(value)?;
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl TryFrom<String> for Text {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        check_text(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl FromStr for Text {
+    type Err = ParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value)
+    }
+}
+
+impl From<Text> for String {
+    fn from(value: Text) -> Self {
+        value.0
+    }
+}
+
+impl AsRef<str> for Text {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for Text {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Payload for Text {
+    type Raw = str;
+
+    fn parse(value: &str) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn parse_owned(value: String) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn validate(&self) -> Result<(), ParseError> {
+        Ok(())
+    }
+
+    fn as_raw(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// Signed ASCII decimal text without a numeric range or normalization.
+///
+/// `TryFrom` preserves signs and leading zeros. An owned input keeps its allocation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct IntegerText(Text);
+
+impl IntegerText {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TryFrom<&str> for IntegerText {
+    type Error = ParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        check_integer(value)?;
+        Ok(Self(Text(value.to_owned())))
+    }
+}
+
+impl TryFrom<String> for IntegerText {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        check_integer(&value)?;
+        Ok(Self(Text(value)))
+    }
+}
+
+impl TryFrom<Text> for IntegerText {
+    type Error = ParseError;
+
+    fn try_from(value: Text) -> Result<Self, Self::Error> {
+        check_integer_syntax(value.as_str())?;
+        Ok(Self(value))
+    }
+}
+
+impl FromStr for IntegerText {
+    type Err = ParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value)
+    }
+}
+
+impl From<IntegerText> for Text {
+    fn from(value: IntegerText) -> Self {
+        value.0
+    }
+}
+
+impl From<IntegerText> for String {
+    fn from(value: IntegerText) -> Self {
+        value.0.into()
+    }
+}
+
+impl AsRef<str> for IntegerText {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for IntegerText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Payload for IntegerText {
+    type Raw = str;
+
+    fn parse(value: &str) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn parse_owned(value: String) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn validate(&self) -> Result<(), ParseError> {
+        Ok(())
+    }
+
+    fn as_raw(&self) -> &str {
+        self.as_str()
+    }
+}
+
+/// Hyphenated UUID text that retains its original capitalization.
+///
+/// Use [`crate::Uuid`] instead when a compact, canonical binary payload is desired.
+#[cfg(feature = "uuid")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct UuidText(Text);
+
+#[cfg(feature = "uuid")]
+impl UuidText {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl TryFrom<&str> for UuidText {
+    type Error = ParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        parse_uuid(value)?;
+        Ok(Self(Text(value.to_owned())))
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl TryFrom<String> for UuidText {
+    type Error = ParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        parse_uuid(&value)?;
+        Ok(Self(Text(value)))
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl TryFrom<Text> for UuidText {
+    type Error = ParseError;
+
+    fn try_from(value: Text) -> Result<Self, Self::Error> {
+        parse_uuid_syntax(value.as_str())?;
+        Ok(Self(value))
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl FromStr for UuidText {
+    type Err = ParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::try_from(value)
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl From<UuidText> for Text {
+    fn from(value: UuidText) -> Self {
+        value.0
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl From<UuidText> for String {
+    fn from(value: UuidText) -> Self {
+        value.0.into()
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl AsRef<str> for UuidText {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl fmt::Display for UuidText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[cfg(feature = "uuid")]
+impl Payload for UuidText {
+    type Raw = str;
+
+    fn parse(value: &str) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn parse_owned(value: String) -> Result<Self, ParseError> {
+        Self::try_from(value)
+    }
+
+    fn validate(&self) -> Result<(), ParseError> {
+        Ok(())
+    }
+
+    fn as_raw(&self) -> &str {
+        self.as_str()
+    }
+}
+
+fn check_text(value: &str) -> Result<(), ParseError> {
     if value.is_empty() {
         return Err(ParseError::EmptyValue);
     }
@@ -87,87 +317,49 @@ fn validate_text<V: Validator>(value: &str) -> Result<(), ParseError> {
     if value.chars().any(char::is_control) {
         return Err(ParseError::ControlCharacter);
     }
-    V::validate(value)
+    Ok(())
 }
 
-impl<V: Validator> Payload for Text<V> {
-    type Raw = str;
-    fn parse(value: &str) -> Result<Self, ParseError> {
-        Self::try_from_raw(value)
-    }
-    fn parse_owned(value: String) -> Result<Self, ParseError> {
-        Self::try_from_owned(value)
-    }
-    fn validate(&self) -> Result<(), ParseError> {
-        // Checked constructors and immutable storage preserve the validator's guarantee.
+fn check_integer(value: &str) -> Result<(), ParseError> {
+    check_text(value)?;
+    check_integer_syntax(value)
+}
+
+fn check_integer_syntax(value: &str) -> Result<(), ParseError> {
+    let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+    if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
         Ok(())
-    }
-    fn as_raw(&self) -> &str {
-        self.as_str()
+    } else {
+        Err(ParseError::InvalidValue)
     }
 }
 
-impl<V: Validator> fmt::Display for Text<V> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.value)
-    }
+#[cfg(feature = "uuid")]
+fn parse_uuid(value: &str) -> Result<uuid::Uuid, ParseError> {
+    check_text(value)?;
+    parse_uuid_syntax(value)
 }
-impl<V: Validator> fmt::Debug for Text<V> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.value.fmt(formatter)
+
+#[cfg(feature = "uuid")]
+fn parse_uuid_syntax(value: &str) -> Result<uuid::Uuid, ParseError> {
+    if value.len() != 36 {
+        return Err(ParseError::InvalidValue);
     }
-}
-impl<V: Validator> Clone for Text<V> {
-    fn clone(&self) -> Self {
-        Self {
-            value: self.value.clone(),
-            validator: PhantomData,
-        }
-    }
-}
-impl<V: Validator> PartialEq for Text<V> {
-    fn eq(&self, other: &Self) -> bool {
-        self.value == other.value
-    }
-}
-impl<V: Validator> Eq for Text<V> {}
-impl<V: Validator> PartialOrd for Text<V> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl<V: Validator> Ord for Text<V> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.value.cmp(&other.value)
-    }
-}
-impl<V: Validator> Hash for Text<V> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.value.hash(state);
-    }
+    uuid::Uuid::try_from(value).map_err(|_| ParseError::InvalidValue)
 }
 
 #[cfg(feature = "uuid")]
 impl Payload for uuid::Uuid {
     type Raw = Self;
+
     fn parse(value: &str) -> Result<Self, ParseError> {
-        if value.is_empty() {
-            return Err(ParseError::EmptyValue);
-        }
-        if value.len() > MAX_VALUE_BYTES {
-            return Err(ParseError::ValueTooLong);
-        }
-        if value.chars().any(char::is_control) {
-            return Err(ParseError::ControlCharacter);
-        }
-        if value.len() != 36 {
-            return Err(ParseError::InvalidValue);
-        }
-        uuid::Uuid::parse_str(value).map_err(|_| ParseError::InvalidValue)
+        parse_uuid(value)
     }
+
     fn validate(&self) -> Result<(), ParseError> {
         Ok(())
     }
+
     fn as_raw(&self) -> &Self {
         self
     }
