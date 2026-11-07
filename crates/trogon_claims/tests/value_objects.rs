@@ -107,7 +107,10 @@ fn claim_type_matches_exactly_and_only_exactly() {
     assert_ne!(sub, upper);
 
     let uri = ClaimType::try_new("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier").unwrap();
+    #[cfg(feature = "ws-claims")]
     assert_eq!(uri.well_known(), Some(WellKnownClaim::WsNameIdentifier));
+    #[cfg(not(feature = "ws-claims"))]
+    assert_eq!(uri.well_known(), None);
     assert_ne!(uri, sub);
 
     let set: HashSet<ClaimType> = [sub.clone(), ClaimType::from(WellKnownClaim::Sub), upper]
@@ -121,8 +124,11 @@ fn well_known_claims_round_trip_through_their_spelling() {
     for claim in [
         WellKnownClaim::Iss,
         WellKnownClaim::MayAct,
+        #[cfg(feature = "ws-claims")]
         WellKnownClaim::WsRole,
+        #[cfg(feature = "ws-claims")]
         WellKnownClaim::WsX500DistinguishedName,
+        #[cfg(feature = "ws-claims")]
         WellKnownClaim::WsActor,
     ] {
         assert_eq!(WellKnownClaim::from_name(claim.as_str()), Some(claim));

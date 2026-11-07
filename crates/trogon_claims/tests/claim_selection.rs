@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use trogon_claims::{
-    AuthenticationType, Claim, ClaimText, ClaimValue, Identity, IdentityBuilder, Issuer, NameClaimType, Principal,
-    RoleClaimType, RoleName, WellKnownClaim,
+    AuthenticationType, Claim, ClaimText, ClaimType, ClaimValue, Identity, IdentityBuilder, Issuer, NameClaimType,
+    Principal, RoleClaimType, RoleName, WellKnownClaim,
 };
 
 fn builder(name: WellKnownClaim, role: WellKnownClaim, username: Option<&'static str>) -> IdentityBuilder {
@@ -12,16 +12,22 @@ fn builder(name: WellKnownClaim, role: WellKnownClaim, username: Option<&'static
         RoleClaimType::new(role.into()),
     );
     for (name, value) in [
-        (WellKnownClaim::Iss, "https://issuer.example.com"),
-        (WellKnownClaim::Sub, "user-42"),
-        (WellKnownClaim::Name, "Display Name"),
-        (WellKnownClaim::WsName, "Windows Name"),
-        (WellKnownClaim::WsRole, "ws-admin"),
-        (WellKnownClaim::Roles, "jwt-admin"),
-        (WellKnownClaim::Groups, "group-admin"),
+        (WellKnownClaim::Iss.into(), "https://issuer.example.com"),
+        (WellKnownClaim::Sub.into(), "user-42"),
+        (WellKnownClaim::Name.into(), "Display Name"),
+        (
+            ClaimType::try_new("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name").unwrap(),
+            "Windows Name",
+        ),
+        (
+            ClaimType::try_new("http://schemas.microsoft.com/ws/2008/06/identity/claims/role").unwrap(),
+            "ws-admin",
+        ),
+        (WellKnownClaim::Roles.into(), "jwt-admin"),
+        (WellKnownClaim::Groups.into(), "group-admin"),
     ] {
         builder = builder.push(
-            Claim::builder(name.into(), ClaimValue::Text(ClaimText::from(value)))
+            Claim::builder(name, ClaimValue::Text(ClaimText::from(value)))
                 .issuer(Issuer::try_new("https://issuer.example.com").unwrap())
                 .build(),
         );
@@ -136,7 +142,12 @@ fn assert_role_membership(identity: &Identity, role: &str, expected: bool) {
 
 #[test]
 fn selected_role_lists_match_flat_claims_in_identity_and_principal_queries() {
-    for selected in [WellKnownClaim::Roles, WellKnownClaim::Groups, WellKnownClaim::WsRole] {
+    for selected in [
+        WellKnownClaim::Roles,
+        WellKnownClaim::Groups,
+        #[cfg(feature = "ws-claims")]
+        WellKnownClaim::WsRole,
+    ] {
         for values in [
             vec![text("reader"), text("admin")],
             vec![ClaimValue::List(vec![text("reader"), text("admin")])],
@@ -221,8 +232,8 @@ fn ingest(name: WellKnownClaim, role: WellKnownClaim, username: Option<&str>) ->
         "name": "Display Name",
         "roles": ["jwt-admin"],
         "groups": ["group-admin"],
-        WellKnownClaim::WsName.as_str(): "Windows Name",
-        WellKnownClaim::WsRole.as_str(): "ws-admin"
+        "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name": "Windows Name",
+        "http://schemas.microsoft.com/ws/2008/06/identity/claims/role": "ws-admin"
     });
     if let Some(username) = username {
         payload["preferred_username"] = serde_json::Value::String(username.to_owned());

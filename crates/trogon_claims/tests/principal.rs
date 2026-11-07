@@ -14,13 +14,13 @@ fn text_claim(name: impl Into<ClaimType>, value: &'static str) -> Claim {
 fn identity(sub: &'static str, name: &'static str, role: &'static str) -> Identity {
     IdentityBuilder::new(
         AuthenticationType::try_new("test").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     )
     .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())
     .push(text_claim(WellKnownClaim::Sub, sub))
-    .push(text_claim(WellKnownClaim::WsName, name))
-    .push(text_claim(WellKnownClaim::WsRole, role))
+    .push(text_claim(WellKnownClaim::PreferredUsername, name))
+    .push(text_claim(WellKnownClaim::Roles, role))
     .try_build()
     .unwrap()
 }
@@ -91,7 +91,7 @@ fn role_checks_cross_identities_each_with_its_own_role_claim_type() {
     let custom_role: ClaimType = ClaimType::try_new("groups").unwrap();
     let custom = IdentityBuilder::new(
         AuthenticationType::try_new("test").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
+        NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
         RoleClaimType::new(custom_role.clone()),
     )
     .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())

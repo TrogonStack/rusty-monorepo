@@ -39,8 +39,8 @@ const FIGURE_6: &str = r#"{
 fn profile() -> IngestProfile {
     IngestProfile::new(
         AuthenticationType::try_new("jwt").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        NameClaimType::new(WellKnownClaim::Upn.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     )
 }
 
@@ -618,20 +618,20 @@ fn authentication_context_rejects_wrong_types() {
 #[test]
 fn name_resolution_honours_a_custom_name_claim_type() {
     let json = r#"{"iss":"i","sub":"u","name":"Ada","preferred_username":"ada"}"#;
-    let ws_profile = ingest(json).unwrap();
-    assert_eq!(ws_profile.identity().name(), None);
+    let unselected_name = ingest(json).unwrap();
+    assert_eq!(unselected_name.identity().name(), None);
 
     let custom = IngestProfile::new(
         AuthenticationType::try_new("jwt").unwrap(),
         NameClaimType::new(claim_type("preferred_username")),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     );
     assert_eq!(ingest_with(json, &custom).unwrap().identity().name(), Some("ada"));
 
     let well_known = IngestProfile::new(
         AuthenticationType::try_new("jwt").unwrap(),
         NameClaimType::new(WellKnownClaim::Name.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     );
     assert_eq!(ingest_with(json, &well_known).unwrap().identity().name(), Some("Ada"));
 }
