@@ -3,7 +3,7 @@ name = "trogon_object_id"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
-description = "Type-safe prefixed identifiers with compile-time domain declarations"
+description = "Type-safe prefixed identifiers with compile-time checked declarations"
 repository = "https://github.com/TrogonStack/rusty-monorepo"
 readme = "README.md"
 
@@ -19,7 +19,7 @@ trogon_uuid = { version = "0.1.0", path = "../trogon_uuid", optional = true }
 
 [features]
 default = []
-derive = ["dep:trogon_object_id_derive"]
+macros = ["dep:trogon_object_id_derive"]
 serde = ["dep:serde"]
 uuid = ["dep:uuid"]
 template = ["uuid", "dep:trogon_uuid"]

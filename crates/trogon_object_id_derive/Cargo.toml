@@ -3,7 +3,7 @@ name = "trogon_object_id_derive"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
-description = "Derive macros for typed object ID domains and unions"
+description = "Derive checked behavior for object ID structs and enums"
 repository = "https://github.com/TrogonStack/rusty-monorepo"
 readme = "README.md"
 

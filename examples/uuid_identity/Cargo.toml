@@ -10,7 +10,7 @@ workspace = true
 
 [dependencies]
 trogon_uuid = { path = "../../crates/trogon_uuid" }
-trogon_object_id = { path = "../../crates/trogon_object_id", features = ["derive", "template"] }
+trogon_object_id = { path = "../../crates/trogon_object_id", features = ["macros", "template"] }
 
 [build-dependencies]
 trogon_uuid_build = { path = "../../crates/trogon_uuid_build" }

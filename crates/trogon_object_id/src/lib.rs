@@ -5,76 +5,7 @@ use std::fmt;
 
 extern crate self as trogon_object_id;
 
-/// Derive a domain definition for an ordinary unit struct.
-///
-/// ```
-/// use trogon_object_id::{ObjectId, ObjectIdDomain};
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// struct UserDomain;
-/// let user = ObjectId::<UserDomain>::try_from_raw("abc")?;
-/// assert_eq!(user.to_string(), "user_abc");
-/// # Ok::<(), trogon_object_id::ParseError>(())
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// enum WrongShape { User }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// struct StatefulDomain { value: String }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// struct GenericDomain<T>(T);
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// struct MissingPrefix;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user", invalid = true)]
-/// struct UnknownOption;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user", prefix = "order")]
-/// struct DuplicateOption;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "")]
-/// struct InvalidUnusedDomain;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user", separator = "")]
-/// struct InvalidUnusedSeparator;
-/// ```
-#[cfg(feature = "derive")]
-pub use trogon_object_id_derive::ObjectIdDomain;
-
-/// Derive checked identifier behavior for a private, transparent payload newtype.
+/// Derive checked identifier behavior for a transparent payload newtype or an enum of IDs.
 ///
 /// ```
 /// use trogon_object_id::{ObjectId, Text};
@@ -173,74 +104,206 @@ pub use trogon_object_id_derive::ObjectIdDomain;
 /// }
 /// let forged = domain::ItemId(trogon_object_id::Text::try_from_raw("abc").unwrap());
 /// ```
-#[cfg(feature = "derive")]
-pub use trogon_object_id_derive::ObjectId;
-
-/// Derive parsing, formatting, conversions, and prefix checks for an ordinary enum.
+///
+/// Enums derive parsing, formatting, member conversions, and prefix checks.
+///
+/// ```
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "service")]
+/// #[repr(transparent)]
+/// struct ServiceId(Text);
+/// #[derive(ObjectId)]
+/// enum PrincipalId { User(UserId), Service(ServiceId) }
+/// let id: PrincipalId = "user_abc".parse()?;
+/// assert!(matches!(id, PrincipalId::User(_)));
+/// # Ok::<(), trogon_object_id::ParseError>(())
+/// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
 /// enum Empty {}
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
 /// enum UnitVariant { Empty }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::{ObjectIdUnion, ObjectId, Domain, Definition, Text};
-/// struct UserDomain;
-/// impl Domain for UserDomain {
-///     const DEFINITION: Definition = Definition::new("user", "_");
-///     type Payload = Text;
-/// }
-/// #[derive(ObjectIdUnion)]
-/// enum NamedVariant { User { value: ObjectId<UserDomain> } }
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// enum NamedVariant { User { value: UserId } }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
 /// enum MultipleFields { Pair(String, String) }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::ObjectIdUnion;
-/// #[derive(ObjectIdUnion)]
-/// enum GenericUnion<T> { Value(T) }
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
+/// enum GenericEnum<T> { Value(T) }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
-/// #[derive(ObjectIdDomain)]
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "user")]
-/// struct First;
-/// #[derive(ObjectIdDomain)]
+/// #[repr(transparent)]
+/// struct First(Text);
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "user")]
-/// struct Second;
-/// #[derive(ObjectIdUnion)]
-/// enum Duplicate { First(ObjectId<First>), Second(ObjectId<Second>) }
+/// #[repr(transparent)]
+/// struct Second(Text);
+/// #[derive(ObjectId)]
+/// enum Duplicate { First(First), Second(Second) }
 /// ```
 ///
 /// ```compile_fail
-/// use trogon_object_id::{ObjectId, ObjectIdDomain, ObjectIdUnion};
-/// #[derive(ObjectIdDomain)]
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "app")]
-/// struct App;
-/// #[derive(ObjectIdDomain)]
+/// #[repr(transparent)]
+/// struct AppId(Text);
+/// #[derive(ObjectId)]
 /// #[object_id(prefix = "app_admin")]
-/// struct Admin;
-/// #[derive(ObjectIdUnion)]
-/// enum Overlap { App(ObjectId<App>), Admin(ObjectId<Admin>) }
+/// #[repr(transparent)]
+/// struct AdminId(Text);
+/// #[derive(ObjectId)]
+/// enum Overlap { App(AppId), Admin(AdminId) }
 /// ```
-#[cfg(feature = "derive")]
-pub use trogon_object_id_derive::ObjectIdUnion;
+///
+/// ```compile_fail
+/// use trogon_object_id::ObjectId;
+/// #[derive(ObjectId)]
+/// union Unsupported { first: u64, second: u32 }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "principal")]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(separator = ":")]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(payload = String)]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(template = String)]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// #[object_id(unknown = true)]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// enum PrincipalId { #[object_id(prefix = "wrong")] User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
+/// enum PrincipalId { User(#[object_id(prefix = "wrong")] UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[repr(transparent)]
+/// struct MissingPrefix(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user", invalid = true)]
+/// #[repr(transparent)]
+/// struct UnknownOption(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user", prefix = "order")]
+/// #[repr(transparent)]
+/// struct DuplicateOption(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user", separator = "")]
+/// #[repr(transparent)]
+/// struct InvalidSeparator(Text);
+/// ```
+#[cfg(feature = "macros")]
+pub use trogon_object_id_derive::ObjectId;
 
+/// Maximum UTF-8 byte length accepted by the built-in payload codecs.
 pub const MAX_VALUE_BYTES: usize = 1024;
 
+/// Validation failures that do not retain the rejected identifier text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ParseError {
@@ -254,7 +317,7 @@ pub enum ParseError {
     InvalidPrefix,
     #[error("identifier value does not satisfy the domain validator")]
     InvalidValue,
-    #[error("identifier does not match a union member")]
+    #[error("identifier does not match an enum variant")]
     UnknownPrefix,
 }
 
@@ -266,6 +329,14 @@ pub struct Definition {
 }
 
 impl Definition {
+    /// Defines the prefix grammar used by parsing and formatting.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `object_type` contains 1 to 64 ASCII letters, digits, `_`
+    /// or `-` and starts with a letter, and `separator` contains 1 to 4 ASCII
+    /// punctuation characters. Invalid definitions fail during const evaluation
+    /// when used in a constant.
     pub const fn new(object_type: &'static str, separator: &'static str) -> Self {
         assert!(
             !object_type.is_empty() && object_type.len() <= 64,
@@ -307,6 +378,10 @@ impl Definition {
         self.separator
     }
 
+    /// Removes this exact object type and separator without validating the suffix.
+    ///
+    /// `Some("")` means the prefix matched but the payload is empty; callers
+    /// must still run the payload codec before accepting an identifier.
     pub fn strip_prefix(self, value: &str) -> Option<&str> {
         value.strip_prefix(self.object_type)?.strip_prefix(self.separator)
     }
@@ -314,12 +389,18 @@ impl Definition {
 
 /// Trusted, deterministic application validation for text payloads.
 pub trait Validator {
+    /// Checks the application-specific rule without changing the input spelling.
+    ///
+    /// [`Text`] applies its shared length and control-character checks first.
+    /// Keep this rule deterministic so immutable text retains its guarantees.
     fn validate(value: &str) -> Result<(), ParseError>;
 }
 
+/// Application-specific text rules applied after the shared payload constraints.
 pub mod validators {
     use crate::{ParseError, Validator};
 
+    /// Adds no restrictions beyond [`crate::Text`]'s shared constraints.
     pub struct Any;
     impl Validator for Any {
         fn validate(_value: &str) -> Result<(), ParseError> {
@@ -403,13 +484,10 @@ pub use trogon_uuid::UuidTemplate;
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __impl_template_domain {
-    ($name:ident, $template:ty, domain) => {
+    ($name:ident, $template:ty, direct) => {
         impl $crate::TemplateDomain for $name {
             type Template = $template;
         }
-    };
-    ($name:ident, $template:ty, direct) => {
-        $crate::__impl_template_domain!($name, $template, domain);
         impl $name {
             pub fn from_identity(
                 input: <<Self as $crate::TemplateDomain>::Template as $crate::UuidTemplate>::Input<'_>,
@@ -432,6 +510,7 @@ macro_rules! __impl_template_domain {
 /// A trusted source of typed payloads. Generated values still pass `Payload::validate`.
 pub trait Generator {
     type Payload: Payload;
+    /// Produces a candidate payload; [`ObjectId::generate`] validates it before use.
     fn generate() -> Result<Self::Payload, ParseError>;
 }
 
@@ -468,17 +547,25 @@ impl Generator for Uuid7 {
 }
 
 /// The raw representation of one concrete identifier domain.
+///
+/// Implementations are trusted to validate every construction path and preserve
+/// their declared prefix. Enum parsers rely on this contract when dispatching
+/// owned or borrowed values to a member identifier.
 pub trait Identifier: Sized {
     const DEFINITION: Definition;
     type Raw: ?Sized + fmt::Display;
+    /// Validates an unprefixed suffix before constructing the identifier.
     fn try_from_raw(value: &str) -> Result<Self, ParseError>;
+    /// Applies the same validation as [`Self::try_from_raw`] to owned input.
+    ///
+    /// Text implementations should retain the input allocation where possible.
     fn try_from_owned(value: String) -> Result<Self, ParseError>;
     fn as_raw(&self) -> &Self::Raw;
 }
 
-/// Rejects duplicate or overlapping complete prefixes. Call in a `const` for a handwritten union.
+/// Rejects duplicate or overlapping complete prefixes. Call in a `const` for a handwritten identifier enum.
 pub const fn assert_disjoint(definitions: &[Definition]) {
-    assert!(!definitions.is_empty(), "union must contain a member");
+    assert!(!definitions.is_empty(), "identifier enum must contain a variant");
     let mut left = 0;
     while left < definitions.len() {
         let a = definitions[left];
@@ -495,7 +582,7 @@ pub const fn assert_disjoint(definitions: &[Definition]) {
                 }
                 index += 1;
             }
-            assert!(index < common, "union prefixes must not duplicate or overlap");
+            assert!(index < common, "enum prefixes must not duplicate or overlap");
             right += 1;
         }
         left += 1;
@@ -596,9 +683,13 @@ macro_rules! __impl_serde {
 #[cfg(feature = "serde")]
 pub mod serde_raw {
     use crate::Identifier;
+    /// Encodes only the raw payload, so storage must establish the identifier's domain.
     pub fn serialize<T: Identifier, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(value.as_raw())
     }
+    /// Decodes an unprefixed string through the identifier's checked raw constructor.
+    ///
+    /// The adapter accepts owned strings without discarding their allocation.
     pub fn deserialize<'de, T: Identifier, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
         crate::__private::deserialize_owned(deserializer, T::try_from_raw, T::try_from_owned)
     }
