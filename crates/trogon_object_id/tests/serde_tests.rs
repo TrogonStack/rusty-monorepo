@@ -1,18 +1,18 @@
-#![cfg(all(feature = "serde", feature = "derive"))]
+#![cfg(all(feature = "serde", feature = "macros"))]
 
-use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ObjectIdUnion, ParseError, Text};
+use trogon_object_id::{validators::Integer, ObjectId, ParseError, Text};
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "user")]
-struct UserDomain;
-type UserId = ObjectId<UserDomain>;
+#[repr(transparent)]
+struct UserId(Text);
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "invoice", payload = Text<Integer>)]
-struct InvoiceDomain;
-type InvoiceId = ObjectId<InvoiceDomain>;
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
+#[object_id(prefix = "invoice")]
+#[repr(transparent)]
+struct InvoiceId(Text<Integer>);
 
-#[derive(Debug, Clone, PartialEq, Eq, ObjectIdUnion)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 enum PrincipalId {
     User(UserId),
     Invoice(InvoiceId),
@@ -25,7 +25,7 @@ struct Record {
 }
 
 #[test]
-fn serde_round_trips_full_identifier_and_union_forms() {
+fn serde_round_trips_full_identifier_and_enum_forms() {
     let id = UserId::try_from_raw("abc_🦀").expect("valid user");
     let json = serde_json::to_string(&id).expect("serialize identifier");
     assert_eq!(json, "\"user_abc_🦀\"", "canonical full JSON form");
@@ -34,12 +34,12 @@ fn serde_round_trips_full_identifier_and_union_forms() {
         id,
         "full JSON round trip"
     );
-    let union = PrincipalId::from(id);
-    let encoded = serde_json::to_string(&union).expect("serialize union");
+    let principal = PrincipalId::from(id);
+    let encoded = serde_json::to_string(&principal).expect("serialize enum");
     assert_eq!(
-        serde_json::from_str::<PrincipalId>(&encoded).expect("deserialize union"),
-        union,
-        "union JSON retains discriminator"
+        serde_json::from_str::<PrincipalId>(&encoded).expect("deserialize enum"),
+        principal,
+        "enum JSON retains discriminator"
     );
 }
 
@@ -65,7 +65,7 @@ fn serde_never_bypasses_the_domain_parser() {
         let json = serde_json::to_string(value).expect("encode input fixture");
         assert!(
             serde_json::from_str::<PrincipalId>(&json).is_err(),
-            "union preserves validation"
+            "enum preserves validation"
         );
     }
     let too_long = serde_json::to_string(&format!("user_{}", "x".repeat(1025))).expect("encode oversized fixture");

@@ -19,14 +19,14 @@ mod outer {
 }
 
 // Explicitly allowed at the site: must NOT be linted.
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this fixture validates explicit inline-module exceptions")]
 mod allowed_inline {
     pub fn run() {}
 }
 
 // `#[allow]` on a parent must suppress nested inline modules too: neither
 // `allowed_outer` nor `allowed_inner` may be linted.
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this fixture validates explicit inline-module exceptions")]
 mod allowed_outer {
     mod allowed_inner {
         pub fn run() {}
