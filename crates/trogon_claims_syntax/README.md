@@ -10,8 +10,6 @@ violation naming the rule, the byte offset and the offending byte, or `Ok(())`.
 
 ## Reference
 
-- Object ids, object types, relation names and caveat parameter names follow
-  SpiceDB schema syntax.
 - Principal kinds, subject ids and client ids follow the rules the claims model
   applies at ingest.
 - The full list is in the [crate documentation](src/lib.rs).
@@ -23,10 +21,10 @@ validators in value objects. Depend on this crate directly only to write another
 macro over the same rules.
 
 ```rust
-use trogon_claims_syntax::validate_object_id;
+use trogon_claims_syntax::validate_subject_id;
 
-assert!(validate_object_id("user-1").is_ok());
-assert!(validate_object_id("*").is_err());
+assert!(validate_subject_id("user-1").is_ok());
+assert!(validate_subject_id("").is_err());
 ```
 
 ## Consuming
