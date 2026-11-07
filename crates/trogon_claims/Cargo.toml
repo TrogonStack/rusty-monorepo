@@ -9,9 +9,10 @@ license = "Apache-2.0"
 
 [features]
 default = []
+json = ["dep:serde_json", "dep:fluent-uri"]
 
 [lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("json", "spicedb", "axum", "macros", "serde"))'] }
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("spicedb", "axum", "macros", "serde"))'] }
 warnings = "deny"
 
 [lints.clippy]
@@ -24,6 +25,8 @@ unwrap_used = "deny"
 trogon_claims_syntax = { path = "../trogon_claims_syntax" }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"], optional = true }
+fluent-uri = { version = "0.4.1", default-features = false, optional = true }
 
 [dev-dependencies]
 trybuild = { workspace = true }

@@ -2899,6 +2899,8 @@ name = "trogon_claims"
 version = "0.0.0"
 dependencies = [
  "chrono",
+ "fluent-uri",
+ "serde_json",
  "thiserror 2.0.21",
  "trogon_claims_syntax",
  "trybuild",

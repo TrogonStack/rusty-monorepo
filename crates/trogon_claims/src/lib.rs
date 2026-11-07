@@ -1,4 +1,4 @@
-//! Principal composition and typed authentication refinements.
+//! Raw JSON claims, compact JWT payload parsing, introspection and generic claim projection.
 //!
 //! Credential verification and resource authorization remain caller responsibilities.
 
@@ -11,6 +11,8 @@ mod authentication_context;
 mod authentication_method;
 mod authentication_type;
 mod authorized_actor;
+#[cfg(any(feature = "json", feature = "spicedb"))]
+mod base64url;
 mod binding;
 mod bootstrap_credential;
 mod civil;
@@ -32,6 +34,10 @@ mod errors;
 mod group_name;
 mod identity;
 mod identity_builder;
+#[cfg(feature = "json")]
+pub mod ingest;
+#[cfg(feature = "json")]
+mod ingest_error;
 mod ingest_profile;
 mod issuer;
 mod jwk;
@@ -43,6 +49,14 @@ mod principal_builder;
 mod principal_key;
 mod principal_kind;
 mod prior_actor;
+#[cfg(feature = "json")]
+mod raw_claims;
+#[cfg(feature = "json")]
+mod raw_claims_error;
+#[cfg(feature = "json")]
+mod raw_json;
+#[cfg(feature = "json")]
+mod raw_scan;
 mod refinement;
 mod role_claim_type;
 mod role_name;
@@ -86,6 +100,8 @@ pub use errors::{NumericDateError, TimestampError, Unsigned63Error, UtcOffsetErr
 pub use group_name::{GroupName, GroupNameError};
 pub use identity::{AnonymousIdentityError, AuthenticatedIdentity, Identity};
 pub use identity_builder::{IdentityBuildError, IdentityBuilder};
+#[cfg(feature = "json")]
+pub use ingest_error::{ClaimValueError, ConfirmationError, IngestError};
 pub use ingest_profile::IngestProfile;
 pub use issuer::Issuer;
 pub use jwk::Jwk;
@@ -97,6 +113,12 @@ pub use principal_builder::{PrimaryIdentityIndex, PrincipalBuildError, Principal
 pub use principal_key::PrincipalKey;
 pub use principal_kind::PrincipalKind;
 pub use prior_actor::PriorActor;
+#[cfg(feature = "json")]
+pub use raw_claims::RawClaims;
+#[cfg(feature = "json")]
+pub use raw_claims_error::RawClaimsError;
+#[cfg(feature = "json")]
+pub use raw_json::{RawJson, RawKind};
 pub use refinement::{
     AnyBinding, AnyDelegation, BindingState, BoundProof, Delegated, DelegationState, Direct, KindState, KnownKind,
     Refined, Refinement, SenderConstrained, WithBinding, WithDelegation, WithKind,
