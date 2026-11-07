@@ -4,8 +4,6 @@ use crate::actor_error::ActorError;
 use crate::claim_type::ClaimType;
 use crate::errors::{NumericDateError, ValueObjectError};
 use crate::raw_claims_error::RawClaimsError;
-#[cfg(feature = "spicedb")]
-use crate::subject_mapping::SubjectMappingError;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -51,9 +49,6 @@ pub enum ClaimValueError {
     Confirmation(#[from] ConfirmationError),
     #[error("{0}")]
     Invalid(#[from] ValueObjectError),
-    #[cfg(feature = "spicedb")]
-    #[error("subject mapping failed: {0}")]
-    SubjectMapping(#[from] SubjectMappingError),
     #[error("nested object is malformed: {0}")]
     Nested(#[from] RawClaimsError),
 }

@@ -11,7 +11,7 @@ mod authentication_context;
 mod authentication_method;
 mod authentication_type;
 mod authorized_actor;
-#[cfg(any(feature = "json", feature = "spicedb"))]
+#[cfg(feature = "json")]
 mod base64url;
 mod binding;
 mod bootstrap_credential;
@@ -85,8 +85,6 @@ pub use claim::{Claim, ClaimBuilder};
 pub use claim_lookup_error::ClaimLookupError;
 pub use claim_property_key::ClaimPropertyKey;
 pub use claim_set::{ClaimSet, HasRoles};
-#[cfg(feature = "spicedb")]
-pub use claim_set::{HasSubject, SubjectRef};
 pub use claim_text::ClaimText;
 pub use claim_type::ClaimType;
 pub use claim_value::ClaimValue;
