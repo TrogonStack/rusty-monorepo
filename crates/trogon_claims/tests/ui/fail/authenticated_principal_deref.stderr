@@ -1,0 +1,11 @@
+error[E0599]: no method named `into_principal` found for struct `AuthenticatedPrincipal<C, R>` in the current scope
+ --> tests/ui/fail/authenticated_principal_deref.rs:8:33
+  |
+8 |         let _ = wrapper.clone().into_principal();
+  |                                 ^^^^^^^^^^^^^^ method not found in `AuthenticatedPrincipal<_>`
+
+error[E0614]: type `AuthenticatedPrincipal<_>` cannot be dereferenced
+ --> tests/ui/fail/authenticated_principal_deref.rs:9:30
+  |
+9 |         let _: &Principal = &*wrapper;
+  |                              ^^^^^^^^ can't be dereferenced
