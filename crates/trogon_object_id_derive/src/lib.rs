@@ -22,14 +22,12 @@ fn runtime_path() -> syn::Result<proc_macro2::TokenStream> {
 struct IdOptions {
     prefix: LitStr,
     separator: LitStr,
-    payload: Option<Type>,
     template: Option<Type>,
 }
 
 fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
     let mut prefix = None;
     let mut separator = None;
-    let mut payload = None;
     let mut template = None;
     for attribute in &input.attrs {
         if !attribute.path().is_ident("object_id") {
@@ -47,17 +45,14 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
                 }
                 separator = Some(meta.value()?.parse()?);
             } else if meta.path.is_ident("payload") {
-                if payload.is_some() {
-                    return Err(meta.error("duplicate object_id payload"));
-                }
-                payload = Some(meta.value()?.parse()?);
+                return Err(meta.error("ObjectId infers its payload from the tuple field; remove the payload option"));
             } else if meta.path.is_ident("template") {
                 if template.is_some() {
                     return Err(meta.error("duplicate object_id template"));
                 }
                 template = Some(meta.value()?.parse()?);
             } else {
-                return Err(meta.error("expected prefix, separator, payload, or template"));
+                return Err(meta.error("expected prefix, separator, or template"));
             }
             Ok(())
         })?;
@@ -66,7 +61,6 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
         prefix: prefix
             .ok_or_else(|| syn::Error::new_spanned(&input.ident, "missing #[object_id(prefix = \"...\")]"))?,
         separator: separator.unwrap_or_else(|| LitStr::new("_", proc_macro2::Span::call_site())),
-        payload,
         template,
     })
 }
@@ -124,12 +118,6 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         ));
     }
     let options = id_options(&input)?;
-    if let Some(payload) = &options.payload {
-        return Err(syn::Error::new_spanned(
-            payload,
-            "ObjectId infers its payload from the tuple field; remove the payload option",
-        ));
-    }
     let path = runtime_path()?;
     let prefix = &options.prefix;
     let separator = &options.separator;
@@ -194,44 +182,6 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
         #path::__impl_serde!(#name);
-        #template
-    })
-}
-
-#[proc_macro_derive(ObjectIdDomain, attributes(object_id))]
-pub fn derive_domain(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    expand_domain(input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
-fn expand_domain(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    reject_generics(&input, "ObjectIdDomain")?;
-    if !matches!(&input.data, Data::Struct(data) if matches!(&data.fields, Fields::Unit)) {
-        return Err(syn::Error::new_spanned(
-            &input.ident,
-            "ObjectIdDomain requires a unit struct",
-        ));
-    }
-    let path = runtime_path()?;
-    let options = id_options(&input)?;
-    let prefix = &options.prefix;
-    let separator = &options.separator;
-    let payload = options
-        .payload
-        .map(|ty| quote!(#ty))
-        .unwrap_or_else(|| quote!(#path::Text));
-    let name = &input.ident;
-    let template = options
-        .template
-        .map(|template| quote!(#path::__impl_template_domain!(#name, #template, domain);));
-    Ok(quote! {
-        const _: #path::Definition = #path::Definition::new(#prefix, #separator);
-        impl #path::Domain for #name {
-            const DEFINITION: #path::Definition = #path::Definition::new(#prefix, #separator);
-            type Payload = #payload;
-        }
         #template
     })
 }

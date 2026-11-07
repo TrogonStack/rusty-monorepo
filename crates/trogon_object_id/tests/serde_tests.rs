@@ -1,16 +1,16 @@
 #![cfg(all(feature = "serde", feature = "macros"))]
 
-use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ParseError, Text};
+use trogon_object_id::{validators::Integer, ObjectId, ParseError, Text};
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "user")]
-struct UserDomain;
-type UserId = ObjectId<UserDomain>;
+#[repr(transparent)]
+struct UserId(Text);
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "invoice", payload = Text<Integer>)]
-struct InvoiceDomain;
-type InvoiceId = ObjectId<InvoiceDomain>;
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
+#[object_id(prefix = "invoice")]
+#[repr(transparent)]
+struct InvoiceId(Text<Integer>);
 
 #[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 enum PrincipalId {

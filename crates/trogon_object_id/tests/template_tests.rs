@@ -1,6 +1,6 @@
 #![cfg(all(feature = "macros", feature = "template"))]
 
-use trogon_object_id::{ObjectId, ObjectIdDomain, Uuid, UuidTemplate};
+use trogon_object_id::{Definition, Domain, ObjectId, TemplateDomain, Uuid, UuidTemplate};
 
 struct ItemIdentityV1;
 struct ItemIdentityV1Input<'a> {
@@ -19,9 +19,14 @@ impl UuidTemplate for ItemIdentityV1 {
 #[repr(transparent)]
 struct ItemId(Uuid);
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "configured", payload = Uuid, template = ItemIdentityV1)]
 struct ConfiguredDomain;
+impl Domain for ConfiguredDomain {
+    const DEFINITION: Definition = Definition::new("configured", "_");
+    type Payload = Uuid;
+}
+impl TemplateDomain for ConfiguredDomain {
+    type Template = ItemIdentityV1;
+}
 type ConfiguredId = ObjectId<ConfiguredDomain>;
 
 #[test]
@@ -35,11 +40,20 @@ fn direct_identifier_uses_the_bound_typed_recipe() {
 }
 
 #[test]
-fn generic_identifier_uses_the_marker_template_binding() {
+fn generic_identifier_uses_a_handwritten_template_binding() {
     let id = ConfiguredId::from_identity(ItemIdentityV1Input {
         external_key: "example.org",
     })
     .expect("generated identity");
     let expected = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"example.org");
-    assert_eq!(*id.payload(), expected, "marker domains share the same recipe contract");
+    assert_eq!(
+        *id.payload(),
+        expected,
+        "handwritten domains share the same recipe contract"
+    );
+    assert_eq!(
+        id.to_string(),
+        format!("configured_{expected}"),
+        "generic binding retains its prefix"
+    );
 }

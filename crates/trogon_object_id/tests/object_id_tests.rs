@@ -1,32 +1,32 @@
 #![cfg(feature = "macros")]
 
 use std::collections::HashSet;
-use trogon_object_id::{validators::Integer, ObjectId, ObjectIdDomain, ParseError, Text, Validator};
+use trogon_object_id::{validators::Integer, ObjectId, ParseError, Text, Validator};
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "user")]
-pub struct UserDomain;
-pub type UserId = ObjectId<UserDomain>;
+#[repr(transparent)]
+pub struct UserId(Text);
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "service")]
-pub struct ServiceDomain;
-pub type ServiceId = ObjectId<ServiceDomain>;
+#[repr(transparent)]
+pub struct ServiceId(Text);
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "invoice", separator = ":", payload = Text<Integer>)]
-pub struct InvoiceDomain;
-pub type InvoiceId = ObjectId<InvoiceDomain>;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
+#[object_id(prefix = "invoice", separator = ":")]
+#[repr(transparent)]
+pub struct InvoiceId(Text<Integer>);
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "app")]
-pub struct AppDomain;
-pub type AppId = ObjectId<AppDomain>;
+#[repr(transparent)]
+pub struct AppId(Text);
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
 #[object_id(prefix = "apple")]
-pub struct AppleDomain;
-pub type AppleId = ObjectId<AppleDomain>;
+#[repr(transparent)]
+pub struct AppleId(Text);
 
 #[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 pub enum PrincipalId {
@@ -52,10 +52,10 @@ impl Validator for AsciiToken {
     }
 }
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "token", payload = Text<AsciiToken>)]
-pub struct TokenDomain;
-pub type TokenId = ObjectId<TokenDomain>;
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
+#[object_id(prefix = "token")]
+#[repr(transparent)]
+pub struct TokenId(Text<AsciiToken>);
 
 #[test]
 fn accepts_a_nonempty_raw_identifier() {
@@ -202,20 +202,22 @@ fn enforces_utf8_byte_limits_without_losing_boundary_values() {
 }
 
 #[cfg(any())]
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "", payload = MissingPayload)]
-struct DisabledDomain;
+#[derive(ObjectId)]
+#[object_id(prefix = "")]
+#[repr(transparent)]
+struct DisabledId(MissingPayload);
 
 #[cfg_attr(all(), cfg(any()), doc = "disabled")]
-#[derive(ObjectIdDomain)]
+#[derive(ObjectId)]
 #[object_id(prefix = "")]
-struct ConditionalDomain;
+#[repr(transparent)]
+struct ConditionalId(Text);
 
 #[cfg_attr(any(), cfg(any()))]
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "enabled")]
-struct EnabledDomain;
-type EnabledId = ObjectId<EnabledDomain>;
+#[repr(transparent)]
+struct EnabledId(Text);
 
 #[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 enum ConditionalPrincipalId {

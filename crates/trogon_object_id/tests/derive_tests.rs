@@ -1,16 +1,16 @@
 #![cfg(feature = "macros")]
 
-use trogon_object_id::{ObjectId, ObjectIdDomain};
+use trogon_object_id::{ObjectId, Text};
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "user")]
-struct UserDomain;
-type UserId = ObjectId<UserDomain>;
+#[repr(transparent)]
+struct UserId(Text);
 
-#[derive(ObjectIdDomain)]
+#[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "service")]
-struct ServiceDomain;
-type ServiceId = ObjectId<ServiceDomain>;
+#[repr(transparent)]
+struct ServiceId(Text);
 
 #[derive(Debug, Clone, PartialEq, Eq, ObjectId)]
 enum PrincipalId {
@@ -18,10 +18,10 @@ enum PrincipalId {
     Service(ServiceId),
 }
 
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "invoice", separator = ":", payload = trogon_object_id::Text<trogon_object_id::validators::Integer>)]
-struct InvoiceDomain;
-type InvoiceId = ObjectId<InvoiceDomain>;
+#[derive(Debug, PartialEq, Eq, ObjectId)]
+#[object_id(prefix = "invoice", separator = ":")]
+#[repr(transparent)]
+struct InvoiceId(Text<trogon_object_id::validators::Integer>);
 
 #[derive(Debug, PartialEq, Eq, ObjectId)]
 enum ConditionalId {
@@ -35,7 +35,7 @@ enum ConditionalId {
 }
 
 #[test]
-fn derived_domain_uses_its_declared_prefix() {
+fn derived_identifier_uses_its_declared_prefix() {
     let user = UserId::try_from_raw("abc-123").expect("valid suffix");
     assert_eq!(
         user.to_string(),
@@ -67,7 +67,7 @@ fn owned_enum_input_reuses_its_text_payload_allocation() {
         panic!("expected user variant")
     };
     assert_eq!(
-        user.as_str().as_ptr(),
+        user.as_raw().as_ptr(),
         pointer,
         "enum parsing consumes the existing buffer"
     );
@@ -97,20 +97,20 @@ fn native_conditional_variants_preserve_dispatch_and_validation() {
 }
 
 #[cfg(feature = "uuid")]
-#[derive(ObjectIdDomain)]
-#[object_id(prefix = "session", payload = trogon_object_id::Uuid)]
-struct SessionDomain;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ObjectId)]
+#[object_id(prefix = "session")]
+#[repr(transparent)]
+struct SessionId(trogon_object_id::Uuid);
 
 #[cfg(feature = "uuid")]
 #[test]
-fn derived_domains_preserve_compact_copy_payloads() {
-    type SessionId = ObjectId<SessionDomain>;
+fn derived_identifiers_preserve_compact_copy_payloads() {
     fn copy<T: Copy>(value: T) -> (T, T) {
         (value, value)
     }
     let session = SessionId::generate::<trogon_object_id::Uuid7>().expect("UUID7 generation");
     let (first, second) = copy(session);
-    assert_eq!(first, second, "domain derive adds no marker trait requirements");
+    assert_eq!(first, second, "direct identifiers preserve Copy payloads");
     assert_eq!(
         std::mem::size_of::<SessionId>(),
         std::mem::size_of::<trogon_object_id::Uuid>(),

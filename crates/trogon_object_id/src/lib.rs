@@ -5,77 +5,6 @@ use std::fmt;
 
 extern crate self as trogon_object_id;
 
-/// Derive an advanced generic domain definition for an ordinary unit struct.
-///
-/// Direct ID types use `#[derive(ObjectId)]` on the payload struct instead.
-///
-/// ```
-/// use trogon_object_id::{ObjectId, ObjectIdDomain};
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// struct UserDomain;
-/// let user = ObjectId::<UserDomain>::try_from_raw("abc")?;
-/// assert_eq!(user.to_string(), "user_abc");
-/// # Ok::<(), trogon_object_id::ParseError>(())
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// enum WrongShape { User }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// struct StatefulDomain { value: String }
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user")]
-/// struct GenericDomain<T>(T);
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// struct MissingPrefix;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user", invalid = true)]
-/// struct UnknownOption;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user", prefix = "order")]
-/// struct DuplicateOption;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "")]
-/// struct InvalidUnusedDomain;
-/// ```
-///
-/// ```compile_fail
-/// use trogon_object_id::ObjectIdDomain;
-/// #[derive(ObjectIdDomain)]
-/// #[object_id(prefix = "user", separator = "")]
-/// struct InvalidUnusedSeparator;
-/// ```
-#[cfg(feature = "macros")]
-pub use trogon_object_id_derive::ObjectIdDomain;
-
 /// Derive checked identifier behavior for a transparent payload newtype or an enum of IDs.
 ///
 /// ```
@@ -337,6 +266,37 @@ pub use trogon_object_id_derive::ObjectIdDomain;
 /// #[derive(ObjectId)]
 /// enum PrincipalId { User(#[object_id(prefix = "wrong")] UserId) }
 /// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[repr(transparent)]
+/// struct MissingPrefix(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user", invalid = true)]
+/// #[repr(transparent)]
+/// struct UnknownOption(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user", prefix = "order")]
+/// #[repr(transparent)]
+/// struct DuplicateOption(Text);
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user", separator = "")]
+/// #[repr(transparent)]
+/// struct InvalidSeparator(Text);
+/// ```
 #[cfg(feature = "macros")]
 pub use trogon_object_id_derive::ObjectId;
 
@@ -504,13 +464,10 @@ pub use trogon_uuid::UuidTemplate;
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __impl_template_domain {
-    ($name:ident, $template:ty, domain) => {
+    ($name:ident, $template:ty, direct) => {
         impl $crate::TemplateDomain for $name {
             type Template = $template;
         }
-    };
-    ($name:ident, $template:ty, direct) => {
-        $crate::__impl_template_domain!($name, $template, domain);
         impl $name {
             pub fn from_identity(
                 input: <<Self as $crate::TemplateDomain>::Template as $crate::UuidTemplate>::Input<'_>,

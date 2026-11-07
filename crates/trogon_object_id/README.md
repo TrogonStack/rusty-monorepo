@@ -4,8 +4,7 @@ Domain-specific prefixed identifiers for Rust, inspired by
 [`trogon_object_id` for Elixir](https://hex.pm/packages/trogon_object_id/0.3.0).
 Declare ordinary Rust newtypes and enums, then derive their supporting
 implementations. Payloads remain actual Rust types: UUID identifiers store a
-`Uuid`, while text identifiers store validated `Text<V>`. The typed core also
-supports domain markers and handwritten trait implementations.
+`Uuid`, while text identifiers store validated `Text<V>`.
 
 ## Quick start
 
@@ -107,8 +106,8 @@ retained.
 
 Domain definitions require an ASCII letter followed by ASCII letters, digits,
 `_`, or `-`, with at most 64 bytes in the prefix. Separators contain between 1
-and 4 ASCII punctuation characters. Both identifier derives check these constraints
-during compilation, even when the domain is unused.
+and 4 ASCII punctuation characters. The `ObjectId` derive checks these constraints
+during compilation, even when the ID is unused.
 
 `ObjectId` on an enum rejects duplicate or overlapping complete prefixes during
 compilation, even when the enum is unused. `app_` and `app_admin_` overlap;
@@ -234,42 +233,11 @@ checked constructors to UUIDs from that recipe. UUID syntax alone cannot prove
 which recipe produced a value. A template binding requires a UUID payload and
 fails compilation when the feature, recipe trait or payload type is wrong.
 
-## Advanced domain markers and the core
-
-Direct ID structs need no separate domain marker or `type` alias.
-`ObjectIdDomain` remains available when generic code needs a zero-sized
-marker plus `ObjectId<Marker>` alias. It accepts `payload = Type` because the
-marker has no payload field. With `template` enabled it also accepts
-`template = Recipe` alongside `payload = Uuid`.
-
-The `macros` feature is optional. An ordinary `Domain` implementation provides
-the same ID behavior without a procedural macro:
-
-```rust
-use trogon_object_id::{Definition, Domain, ObjectId, Text};
-
-struct ExternalDomain;
-impl Domain for ExternalDomain {
-    const DEFINITION: Definition = Definition::new("external", ":");
-    type Payload = Text;
-}
-
-type ExternalId = ObjectId<ExternalDomain>;
-let external: ExternalId = "external:abc-123".parse()?;
-assert_eq!(external.as_raw(), "abc-123");
-# Ok::<(), trogon_object_id::ParseError>(())
-```
-
-`Definition::new` is a `const` constructor. An invalid associated definition
-fails when evaluated; to check an otherwise unused handwritten domain eagerly,
-declare `const _: Definition = DomainName::DEFINITION`. Handwritten enum parsers
-can call `assert_disjoint` in a `const` assertion for the same prefix checks.
-
 ## Performance and compatibility
 
-Domain markers and static trait dispatch add no stored domain data, vtables or
-runtime registry. `ObjectId` has the same layout as its payload. Text parsed
-from `&str` allocates once; owned text is validated and moved. Cloning text
+Generated implementations use static trait dispatch with no stored domain data,
+vtables or runtime registry. ID structs have the same layout as their payloads.
+Text parsed from `&str` allocates once; owned text is validated and moved. Cloning text
 copies its string, while UUID IDs are `Copy`. Derives generate implementations
 during compilation and introduce no runtime registry. Validation, entropy
 acquisition, formatting work and enum discriminators still have real costs.
@@ -281,8 +249,8 @@ Compact UUIDs canonicalize text. Ecto and Phoenix integrations remain specific
 to Elixir. This runtime has no protobuf dependency; `trogon_uuid_build` reads
 UUID options from protobuf descriptors during code generation.
 
-The default build has no optional features. `macros` enables `ObjectId` for
-structs and enums, and `ObjectIdDomain` for advanced domain markers.
+The default build has no optional features. `macros` enables the `ObjectId`
+derive for structs and enums.
 `serde` enables JSON-compatible traits and raw field adapters. `uuid` enables
 compact UUID payloads and generation.
 `template` binds UUID IDs to compiled `trogon_uuid` recipes and enables `uuid`.
