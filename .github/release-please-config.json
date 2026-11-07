@@ -60,6 +60,11 @@
           "type": "toml",
           "path": "/Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='trogon_uuid')].version"
+        },
+        {
+          "type": "toml",
+          "path": "/crates/trogon_uuid_build/Cargo.toml",
+          "jsonpath": "$.dependencies.trogon_uuid.version"
         }
       ],
       "initial-version": "0.1.0"
