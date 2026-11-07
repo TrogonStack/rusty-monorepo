@@ -1,6 +1,6 @@
 # trogon_claims
 
-Validated scalar claim values and protocol syntax.
+Immutable claims, validated selectors and typed standard-claim views.
 
 Credential verification and resource authorization remain caller responsibilities.
 All optional features are disabled by default.
@@ -10,4 +10,6 @@ All optional features are disabled by default.
 This crate is unpublished. Consume it by a pinned Git revision.
 
 The default feature set is empty. Enable `ws-claims` for the WS claim-name
-constants. Claim value datatype metadata remains available independently.
+constants and `WellKnownClaim::Ws*` recognition. Without it, nonempty WS URI
+names remain exact custom `ClaimType` values. JWT/OIDC names and explicit
+name/role selectors remain available. Claim value datatype metadata is independent.
