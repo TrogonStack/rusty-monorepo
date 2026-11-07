@@ -76,7 +76,7 @@ fn macro_expansion() {
     }
 }
 
-#[allow(iterator_chain_in_for_header)]
+#[allow(iterator_chain_in_for_header, reason = "this fixture validates an explicit iterator-header exception")]
 fn suppressed(values: Vec<u32>) {
     for doubled in values.iter().map(|value| value * 2) {
         report(doubled);

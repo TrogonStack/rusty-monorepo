@@ -4,8 +4,7 @@
 This is a [Dylint](https://github.com/trailofbits/dylint) library of Rust lints
 that encode structural and operational policy, not style.
 
-**Each rule inspects the crate through the same HIR and type information rustc
-uses, so it judges what the code means rather than how it is spelled.** The
+**Rules use rustc AST, HIR, and type information as appropriate to the policy.** The
 rules cover module layering, constructor fallibility, error handling,
 observability, configuration access, and channel backpressure. Every rule ships
 with its default level declared in the library, so a workspace adopts the policy
@@ -37,9 +36,11 @@ per-invocation flags.
 | --- | --- | --- |
 | `acyclic_modules` | deny | module dependencies to flow in one direction, not in a cycle |
 | `assertions_on_fixed_literals` | deny | compile-time assertions to express more than an obvious property of a fixed literal |
+| `blocking_call_in_async` | warn | known blocking standard-library calls to run outside async executor workers |
 | `constant_outside_constants_module` | deny | module-level constants to be declared in a `constants` module |
 | `debug_remnants` | deny | diagnostics to be recorded as `tracing` events, not writes to stdout or stderr |
-| `discarded_error_source` | warn | a `Result`'s error to be carried as a source, not replaced without being read |
+| `discarded_error_source` | warn | a `Result`'s error to be preserved rather than discarded or reduced to display text |
+| `discarded_task_handle` | warn | Tokio task handles to be retained, awaited, or deliberately detached with a reason |
 | `doc_hidden_access` | deny | another crate's `#[doc(hidden)]` items not to be accessed, unless the crate is listed in `owned_crates` |
 | `error_string_comparison` | deny | error display strings not to drive behavior |
 | `error_type_naming` | deny | types implementing `std::error::Error` to carry an `Error` suffix |
@@ -52,8 +53,11 @@ per-invocation flags.
 | `manual_error_impl` | deny | `std::error::Error` to be implemented with the thiserror derive, not by hand |
 | `multi_module_use` | deny | a `use` statement to import items from one module, with no `::` inside its braces |
 | `new_instead_of_from` | warn | a single-field wrapper's `new` that only wraps its argument to be `From` instead |
-| `options_struct_without_default` | deny | a struct of public fields named `...Options` to implement `Default` |
+| `options_struct_without_default` | warn | defaultable `...Options` to offer `Default`, with reasoned exceptions for required values |
+| `policy_lint_suppression_without_reason` | deny | shared-policy `allow` and `expect` attributes to state a nonblank technical reason |
+| `process_global_mutation_in_tests` | warn | tests to avoid mutating the shared environment and working directory |
 | `redundant_module_path` | deny | `#[path]` to be dropped when `mod foo;` already resolves to the same file |
+| `secret_exposure_in_diagnostics` | warn | direct `secrecy::ExposeSecret` values to stay out of diagnostic macros |
 | `serde_json_macro` | deny | JSON payloads to be built from a `Serialize` type, not an ad-hoc `json!` literal |
 | `serde_json_macro_allow_without_reason` | deny | a technical reason to be stated when suppressing `serde_json_macro` |
 | `std_env_access` | deny | environment variables to be read through an injected `trogon_std::env::ReadEnv` |
@@ -75,17 +79,22 @@ so a consuming workspace names the published tag:
 ```toml
 [workspace.metadata.dylint]
 libraries = [
-  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.1.0", pattern = "crates/trogon_dylint_lints" },
+  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.3.1", pattern = "crates/trogon_dylint_lints" },
 ]
 ```
 
+The tag above is the released baseline. The new safety rules, broader
+suppression-reason checks, source-preservation improvements, advisory options
+policy, and profiles described here are unreleased changes in this checkout.
+Consumers need a containing Git revision or a future release to use them.
+
 ```bash
-cargo dylint --all --workspace --no-deps -- --all-features
+cargo dylint --all --workspace --no-deps -- --all-features --all-targets
 ```
 
-Every rule carries its own default level, so there are no flags to pass. Add
-`--all-targets` to also lint test code such as `#[cfg(test)] mod tests { ... }`,
-which a late (HIR) pass only sees once the test target is compiled.
+Every rule carries its own default level. `--all-targets` includes test code,
+which a late HIR pass only sees once the test target is compiled. A consumer
+that denies warnings promotes advisory rules to errors as well.
 
 Unit tests for `parser.rs` live beside it in `parser_tests.rs`, while remaining
 logical children of the implementation module:
@@ -133,15 +142,77 @@ the selected configuration. Inactive feature/platform branches and orphan
 files require separate source-tree validation. Existing application test files
 are not migrated by adopting the library.
 
-`new_instead_of_from` is the one rule with configuration. By default it skips a
-`new` reachable from outside the crate, to avoid breaking a public API out from
-under a downstream caller; a workspace that wants it enforced there too can add
-a `dylint.toml` at the workspace root:
+## Configuration
+
+The default `trogon` profile preserves the Trogon environment, generated
+telemetry, and write-precondition policies. Workspaces that use different
+adapters can select `portable` in their workspace-root `dylint.toml`:
+
+```toml
+[trogon_dylint_lints]
+profile = "portable"
+```
+
+The portable profile omits `std_env_access`, the `telemetry_*` rules, and
+`weakened_write_precondition`. Structural rules and the safety checks remain
+active. Unknown profile values, malformed values, and unknown fields in this
+configuration table fail compilation instead of selecting a permissive profile.
+
+`new_instead_of_from` skips externally reachable constructors by default to
+avoid breaking public APIs. To check them too:
 
 ```toml
 [new_instead_of_from]
 avoid_breaking_exported_api = false
 ```
+
+`doc_hidden_access` permits hidden items from explicitly owned crates:
+
+```toml
+[doc_hidden_access]
+owned_crates = ["my_macros_runtime"]
+```
+
+## Safety checks and exceptions
+
+Use a local `expect(rule, reason = "...")` for a deliberate exception so a
+stale exemption is reported. The shared-policy reason check covers both direct
+attributes and `cfg_attr(dylint_lib = "trogon_dylint_lints", ...)` attributes.
+Ordinary Clippy does not see an attribute whose Dylint condition is false.
+Compiler and Clippy suppression reasons can additionally be enforced with
+`clippy::allow_attributes_without_reason`.
+
+`options_struct_without_default` is advisory: implement `Default` only when
+all fields have meaningful defaults. An options type with required endpoints,
+identities, or credentials should retain its constructor and explain why a
+default is invalid instead of inventing one.
+
+`discarded_error_source` also reports direct standard `ToString` conversions
+of an error inside `Result::map_err`, including a tuple or struct wrapper that
+retains only that text. A wrapper that keeps the original typed cause remains
+valid. Arbitrary dataflow and helper functions are outside this check.
+
+`blocking_call_in_async` recognizes resolved `std::thread::{sleep, park,
+park_timeout}` and `std::fs::{read, read_to_string, write}` calls in async
+execution. Stored synchronous closures and blocking-worker callbacks are
+outside that execution context. Function-pointer calls and arbitrary
+synchronous callbacks require separate review.
+
+`process_global_mutation_in_tests` reports resolved `std::env::{set_var,
+remove_var, set_current_dir}` calls in test contexts. A legitimate isolated
+subprocess case can state that isolation in a reasoned exception. A lock within
+one test does not isolate unrelated tests that use the same process state.
+
+`discarded_task_handle` reports bare Tokio task-handle expressions and explicit
+`std::mem::drop` calls that detach them. Keeping, returning, awaiting, or
+transferring the handle is permitted. The check does not prove that a retained
+handle is supervised, and Clippy already covers `let _ = future`.
+
+`secret_exposure_in_diagnostics` recognizes direct `secrecy::ExposeSecret`
+values passed to standard printing/panic and `tracing`/`log` event macros.
+Redacted `Debug`, safe metadata, and formatting for an authorized request are
+permitted. The rule is not a general secret-taint analysis and does not follow
+values through local variables or helper functions.
 
 ## Credits
 

@@ -40,7 +40,7 @@ LL |     tracing::info!(user_id, "user performed {}", action);
    = help: pass the values as `tracing` fields, as in `tracing::info!(user_id, path, "request handled")`
 
 error: log event interpolates its values into the message instead of recording them as fields
-  --> $DIR/unstructured_log_fields.rs:108:5
+  --> $DIR/unstructured_log_fields.rs:111:5
    |
 LL |     tracing::info! { "user {} hit", user_id }
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
