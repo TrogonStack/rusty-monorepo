@@ -21,7 +21,7 @@ enum PrincipalId {
 #[derive(Debug, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "invoice", separator = ":")]
 #[repr(transparent)]
-struct InvoiceId(Text<trogon_object_id::validators::Integer>);
+struct InvoiceId(trogon_object_id::IntegerText);
 
 #[derive(Debug, PartialEq, Eq, ObjectId)]
 enum ConditionalId {
