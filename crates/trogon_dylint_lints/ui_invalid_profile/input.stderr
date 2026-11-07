@@ -1,0 +1,2 @@
+error: invalid trogon_dylint_lints configuration: toml error: unknown variant `portable_typo`, expected `trogon` or `portable` in `profile`
+

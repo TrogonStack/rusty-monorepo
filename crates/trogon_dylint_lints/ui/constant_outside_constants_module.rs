@@ -8,7 +8,7 @@ const MAX_INSPECTED_BODY: usize = 1024 * 1024;
 static GREETING: &str = "hi";
 
 // Explicitly allowed at the site: must NOT be linted.
-#[allow(constant_outside_constants_module)]
+#[allow(constant_outside_constants_module, reason = "this fixture isolates constant placement checks and explicit exceptions")]
 const ALLOWED: usize = 1;
 
 struct Widget;
@@ -26,24 +26,24 @@ fn compute() -> u8 {
 }
 
 // A constant inside an inline `tests` module is test scaffolding, not crate
-// configuration: must NOT be linted. (`#[allow(inline_module_block)]` keeps the
+// configuration: must NOT be linted. (`#[allow(inline_module_block, reason = "this single-file fixture isolates constant placement checks")]` keeps the
 // unrelated inline-module lint quiet in this fixture.)
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this single-file fixture isolates constant placement checks")]
 mod tests {
     const FIXTURE_TIMEOUT: u8 = 30;
 }
 
 // Constants inside the not-for-prod test-support module family (`test_support`,
 // `mocks`, `*_harness`, …) are scaffolding: must NOT be linted.
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this single-file fixture isolates constant placement checks")]
 mod test_support {
     const MOCK_LATENCY_MS: u8 = 5;
 }
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this single-file fixture isolates constant placement checks")]
 mod mocks {
     const MOCK_BATCH_ID: &str = "batch-1";
 }
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this single-file fixture isolates constant placement checks")]
 mod nats_harness {
     const HARNESS_TENANT: &str = "tenant-test";
 }
