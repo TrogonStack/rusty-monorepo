@@ -26,8 +26,8 @@ fn ingest(body: &str) -> Ingested<DynamicClaims> {
     let raw = RawClaims::from_slice(body.as_bytes()).unwrap();
     let profile = IngestProfile::new(
         AuthenticationType::try_new("jwt").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     );
     Identity::<DynamicClaims>::ingest(&raw, &profile).unwrap()
 }

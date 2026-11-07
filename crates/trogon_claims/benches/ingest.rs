@@ -71,8 +71,8 @@ fn measure(label: &str, mut work: impl FnMut()) {
 fn main() {
     let profile = IngestProfile::new(
         AuthenticationType::try_new("jwt").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        NameClaimType::new(WellKnownClaim::Name.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     );
     let raw = RawClaims::from_slice(PAYLOAD.as_bytes()).unwrap();
     println!("payload members: {}", raw.len());
@@ -94,8 +94,8 @@ fn main() {
     measure("IdentityBuilder::try_build", || {
         let mut builder = IdentityBuilder::new(
             AuthenticationType::try_new("jwt").unwrap(),
-            NameClaimType::new(WellKnownClaim::WsName.into()),
-            RoleClaimType::new(WellKnownClaim::WsRole.into()),
+            NameClaimType::new(WellKnownClaim::Name.into()),
+            RoleClaimType::new(WellKnownClaim::Roles.into()),
         )
         .push(
             Claim::builder(

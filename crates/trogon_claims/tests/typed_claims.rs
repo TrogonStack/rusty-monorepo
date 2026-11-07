@@ -68,8 +68,8 @@ mod spicedb {
     fn profile() -> IngestProfile {
         IngestProfile::new(
             AuthenticationType::try_new("jwt").unwrap(),
-            NameClaimType::new(WellKnownClaim::WsName.into()),
-            RoleClaimType::new(WellKnownClaim::WsRole.into()),
+            NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
+            RoleClaimType::new(WellKnownClaim::Roles.into()),
         )
     }
 

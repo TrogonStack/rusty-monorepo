@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use super::{ClaimType, Repr};
+#[cfg(feature = "ws-claims")]
 use crate::constants::WS_NAME_IDENTIFIER;
 use crate::well_known_claim::WellKnownClaim;
 
@@ -18,7 +19,11 @@ fn bypassed_normalization_still_equals_and_hashes_like_the_well_known_twin() {
     assert_eq!(well_known, custom);
     assert_eq!(custom, well_known);
     assert_eq!(hash_of(&well_known), hash_of(&custom));
+}
 
+#[cfg(feature = "ws-claims")]
+#[test]
+fn custom_ws_storage_equals_and_hashes_like_the_well_known_twin() {
     let uri = ClaimType::from(WellKnownClaim::WsNameIdentifier);
     let custom_uri = ClaimType(Repr::Custom(WS_NAME_IDENTIFIER.into()));
     assert_eq!(uri, custom_uri);

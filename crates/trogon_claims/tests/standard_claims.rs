@@ -150,6 +150,7 @@ fn text_boolean_and_name_claims_have_no_implicit_coercions_or_fallbacks() {
     assert_eq!(standard.upn().unwrap().unwrap().as_str(), "principal-name");
     assert_eq!(standard.preferred_username(), Ok(None));
     assert_eq!(standard.email_verified(), Ok(Some(true)));
+    #[cfg(feature = "ws-claims")]
     assert_ne!(WellKnownClaim::Upn.as_str(), WellKnownClaim::WsUpn.as_str());
     assert_eq!(WellKnownClaim::from_name("upn"), Some(WellKnownClaim::Upn));
     let malformed = DynamicClaims::from_claims(vec![claim(WellKnownClaim::EmailVerified, text("true"))]);

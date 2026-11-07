@@ -9,6 +9,7 @@ license = "Apache-2.0"
 
 [features]
 default = []
+ws-claims = []
 macros = ["dep:trogon_claims_macros"]
 json = ["dep:serde_json", "dep:fluent-uri"]
 spicedb = ["dep:prost", "dep:prost-types", "trogon_claims_syntax/spicedb", "trogon_claims_macros?/spicedb"]
