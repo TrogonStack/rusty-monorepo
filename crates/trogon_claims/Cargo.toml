@@ -23,6 +23,7 @@ unwrap_used = "deny"
 [dependencies]
 trogon_claims_syntax = { path = "../trogon_claims_syntax" }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 

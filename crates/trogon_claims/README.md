@@ -1,6 +1,6 @@
 # trogon_claims
 
-Immutable claims, validated selectors and typed standard-claim views.
+Immutable identities, actor chains, authentication context and proof binding.
 
 Credential verification and resource authorization remain caller responsibilities.
 All optional features are disabled by default.
