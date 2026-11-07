@@ -10,7 +10,7 @@
     reason = "an integration test is test code end to end, so a failed setup step should fail the test"
 )]
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,6 @@ fn a_read_only_backend_rejects_a_put() {
     // Give it a value to write, in case the rejection did not come first.
     // If the backend is correctly rejected before stdin is read, this write
     // is simply never consumed.
-    use std::io::Write;
     let mut stdin = child.stdin.take().unwrap();
     let _ = stdin.write_all(b"a-value\n");
     drop(stdin);

@@ -6,7 +6,7 @@ use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::OutputFormat;
 use clap::Args;
-use serde_json::json;
+use serde::Serialize;
 
 use super::print_json;
 
@@ -55,6 +55,13 @@ pub struct NextIterationArgs {
 }
 
 impl NextIterationArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let options = NextIterationOptions {
             allow_eval_suite_drift: self.allow_eval_suite_drift,
@@ -72,11 +79,17 @@ impl NextIterationArgs {
         };
 
         if self.output_format.is_json() {
-            let document = json!({
-                "output_dir": output.output_dir.display().to_string(),
-                "markdown_path": output.markdown_path.display().to_string(),
-                "json_path": output.json_path.display().to_string(),
-            });
+            #[derive(Serialize)]
+            struct NextIterationDocument {
+                output_dir: String,
+                markdown_path: String,
+                json_path: String,
+            }
+            let document = NextIterationDocument {
+                output_dir: output.output_dir.display().to_string(),
+                markdown_path: output.markdown_path.display().to_string(),
+                json_path: output.json_path.display().to_string(),
+            };
             return print_json(&document, ExitCode::Success);
         }
 
@@ -88,29 +101,5 @@ impl NextIterationArgs {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agentskills::improvement_bundle::testutil::sample_prior_iteration_fixture;
-    use crate::agentskills::improvement_bundle::{BUNDLE_JSON_NAME, BUNDLE_MD_NAME, NEXT_ITERATION_DIR};
-
-    #[test]
-    fn next_iteration_command_writes_bundle_from_fixture() {
-        let temp = tempfile::tempdir().unwrap();
-        let skill_root = temp.path().join("current-skill");
-        let report_dir = sample_prior_iteration_fixture(&temp, &skill_root);
-
-        let status = NextIterationArgs {
-            report_dir: report_dir.clone(),
-            skill_dir: Some(skill_root),
-            eval_dir: None,
-            allow_eval_suite_drift: false,
-            output_format: OutputFormat::Text,
-        }
-        .handle(&crate::fs::testutil::MemFS::new());
-        assert_eq!(status, ExitCode::Success);
-
-        let bundle_dir = report_dir.parent().unwrap().join(NEXT_ITERATION_DIR);
-        assert!(bundle_dir.join(BUNDLE_MD_NAME).is_file());
-        assert!(bundle_dir.join(BUNDLE_JSON_NAME).is_file());
-    }
-}
+#[path = "next_iteration_tests.rs"]
+mod tests;

@@ -50,6 +50,13 @@ struct ExportJsonOutput<'a> {
 }
 
 impl ExportArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let document = match load_report_document(&self.report_dir) {
             Ok(document) => document,
@@ -88,6 +95,13 @@ impl ExportArgs {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+    )
+)]
 fn print_summary(replayed: &Replay) {
     match replayed {
         Replay::Exported {
