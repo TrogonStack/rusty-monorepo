@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#MISE description = "Enforce the claims dependency budget and portable compiler fixtures"
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:?}"
+
+base="thiserror trogon_claims_syntax zeroize"
+
+allowed() {
+  local feature="$1" dependencies="$base"
+  case "$feature" in
+    macros) dependencies="$dependencies trogon_claims_macros"; feature="" ;;
+    *,macros) dependencies="$dependencies trogon_claims_macros"; feature="${feature%,macros}" ;;
+  esac
+  case "$feature" in
+    "") echo "$dependencies" ;;
+    serde) echo "$dependencies serde" ;;
+    json) echo "$dependencies fluent-uri serde_json" ;;
+    spicedb) echo "$dependencies prost prost-types" ;;
+    axum) echo "$dependencies axum-core http" ;;
+    *) echo "unknown claims budget feature '$feature'" >&2; return 1 ;;
+  esac
+}
+
+direct_dependencies() {
+  local tree
+  tree="$(cargo tree --locked -p trogon_claims -e no-dev --depth 1 --prefix none --no-default-features ${1:+--features "$1"})" || return
+  printf '%s\n' "$tree" | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' '
+}
+
+status=0
+for feature in "" macros serde serde,macros json json,macros spicedb spicedb,macros axum axum,macros; do
+  actual="$(direct_dependencies "$feature")"
+  expected="$(allowed "$feature" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+  if [ "$actual" != "$expected" ]; then
+    echo "dependency budget violated for feature '${feature:-default}'" >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    status=1
+  fi
+done
+
+all_features="$(cargo tree --locked -p trogon_claims --all-features -e no-dev --prefix none)"
+all_names="$(awk '{print $1}' <<< "$all_features")"
+if grep -qx secrecy <<< "$all_names"; then
+  echo "secrecy must not appear in the trogon_claims dependency tree" >&2
+  status=1
+fi
+
+syntax_tree="$(cargo tree --locked -p trogon_claims_syntax -e no-dev --depth 1 --prefix none)"
+syntax_deps="$(printf '%s\n' "$syntax_tree" | tail -n +2 | wc -l | tr -d ' ')"
+if [ "$syntax_deps" != "0" ]; then
+  echo "trogon_claims_syntax must have no dependencies" >&2
+  status=1
+fi
+
+goldens=(crates/trogon_claims/tests/ui crates/trogon_claims/tests/ui_spicedb)
+
+if grep -rlE "/Users|/Volumes|/home|C:\\\\" "${goldens[@]}"; then
+  echo "absolute paths found in trybuild goldens" >&2
+  status=1
+fi
+
+if grep -rlF "\$RUST" "${goldens[@]}"; then
+  echo "trybuild goldens quote standard library source, which depends on rust-src being installed" >&2
+  status=1
+fi
+
+exit "$status"

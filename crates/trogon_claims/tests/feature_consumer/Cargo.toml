@@ -1,0 +1,21 @@
+[package]
+name = "claims-feature-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+dependency-default = ["trogon_claims/default"]
+macros = ["trogon_claims/macros"]
+spicedb = ["trogon_claims/spicedb"]
+json = ["trogon_claims/json"]
+syntax-spicedb = ["trogon_claims_syntax/spicedb"]
+macro-impl = ["dep:trogon_claims_macros"]
+macro-impl-spicedb = ["macro-impl", "trogon_claims_macros/spicedb"]
+
+[dependencies]
+trogon_claims = { path = "../..", default-features = false }
+trogon_claims_syntax = { path = "../../../trogon_claims_syntax", default-features = false }
+trogon_claims_macros = { path = "../../../trogon_claims_macros", default-features = false, optional = true }

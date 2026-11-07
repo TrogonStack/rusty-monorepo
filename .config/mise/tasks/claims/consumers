@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+#MISE description = "Verify claims core, SpiceDB and macro API gates in an isolated consumer"
+set -euo pipefail
+
+cd "${MISE_PROJECT_ROOT:?}/crates/trogon_claims/tests/feature_consumer"
+cargo fmt --all -- --check
+if [ -n "${CLAIMS_FEATURE_LOG_DIR:-}" ]; then
+  probe_dir="$CLAIMS_FEATURE_LOG_DIR"
+  mkdir -p "$probe_dir"
+else
+  probe_dir="$(mktemp -d)"
+  trap 'rm -rf "$probe_dir"' EXIT
+fi
+
+consumer() {
+  local command="$1" features="$2" binary="$3"
+  local flags=(--locked --no-default-features)
+  if [ -n "$features" ]; then
+    flags+=(--features "$features")
+  fi
+  cargo "$command" "${flags[@]}" --bin "$binary"
+}
+
+expect_missing() {
+  local features="$1" binary="$2" expected="$3"
+  shift 3
+  local log="$probe_dir/$binary-${features:-none}.internal.trogonai.md" status codes diagnostics
+  if CARGO_TERM_COLOR=never consumer check "$features" "$binary" > "$log" 2>&1; then
+    echo "feature boundary failed: $binary unexpectedly compiled with '${features:-none}'" >&2
+    cat "$log" >&2
+    return 1
+  else
+    status=$?
+  fi
+  printf '\nACTUAL_CARGO_EXIT=%s\n' "$status" >> "$log"
+  codes="$(sed -n 's/^error\[\(E[0-9]*\)\]:.*/\1/p' "$log" | sort -u)"
+  if [ "$status" -ne 101 ] || [ "$codes" != "$expected" ]; then
+    cat "$log" >&2
+    echo "expected disabled public API diagnostic $expected, not another Cargo failure" >&2
+    return 1
+  fi
+  diagnostics="$(sed -n '/^error\[E0432\]: unresolved import/p; /^error\[E0603\]: /p' "$log")"
+  local symbol pattern
+  for symbol in "$@"; do
+    case "$expected" in
+      E0432)
+        case "$symbol" in
+          trogon_claims_syntax::*|trogon_claims_macros::*) pattern='`'"$symbol"'`' ;;
+          *) pattern='`trogon_claims::'"$symbol"'`' ;;
+        esac
+        ;;
+      E0603) pattern='error[E0603]: module `'"$symbol"'` is private' ;;
+      *) echo "unsupported feature-probe diagnostic $expected" >&2; return 1 ;;
+    esac
+    if ! grep -Fq "$pattern" <<< "$diagnostics"; then
+      cat "$log" >&2
+      echo "missing expected disabled import diagnostic for $symbol" >&2
+      return 1
+    fi
+  done
+  echo "Confirmed disabled $binary API with '${features:-none}'"
+}
+
+check_dependency_tree() {
+  local features="$1" expected="$2" tree
+  local flags=(--locked --no-default-features -e normal --prefix none)
+  if [ -n "$features" ]; then
+    flags+=(--features "$features")
+  fi
+  tree="$(cargo tree "${flags[@]}")" || return
+  printf '%s\n' "$tree" > "$probe_dir/tree-${features:-none}.internal.trogonai.md"
+  if ! grep -q '^trogon_claims v' <<< "$tree"; then
+    echo "consumer dependency probe did not include trogon_claims" >&2
+    return 1
+  fi
+  if grep -q '^trogon_claims_macros v' <<< "$tree"; then
+    if [ "$expected" != present ]; then
+      echo "trogon_claims_macros leaked into the feature-off dependency tree" >&2
+      return 1
+    fi
+  elif [ "$expected" = present ]; then
+    echo "macro-enabled dependency probe did not include trogon_claims_macros" >&2
+    return 1
+  fi
+}
+
+consumer run "" runtime
+consumer run dependency-default runtime
+consumer run macros literals
+consumer run json typed_runtime
+consumer run spicedb spicedb_types
+consumer run spicedb spicedb_metadata
+consumer run macros,spicedb object_literals
+consumer run macros,spicedb spicedb_literals
+consumer run macros,spicedb spicedb_proc_bridge
+
+for features in "" dependency-default json; do
+  check_dependency_tree "$features" absent
+  expect_missing "$features" literals E0603 principal_kind
+  expect_missing "$features" proc_bridge E0432 __private
+  expect_missing "$features" object_literals E0432 object_id object_type
+  expect_missing "$features" spicedb_literals E0432 relation_name param_name
+done
+for features in "" dependency-default macros json; do
+  expect_missing "$features" spicedb_types E0432 Base64UrlUnpadded HasSubject ObjectId ObjectType SubjectMapping SubjectMappingError SubjectRef Verbatim
+  expect_missing "$features" spicedb_metadata E0432 constants::OBJECT_SEPARATOR ValueKind::ObjectId
+done
+expect_missing spicedb literals E0603 principal_kind
+expect_missing spicedb proc_bridge E0432 __private
+expect_missing spicedb object_literals E0603 object_id object_type
+expect_missing spicedb spicedb_literals E0603 relation_name param_name
+expect_missing macros object_literals E0432 object_id object_type
+expect_missing macros spicedb_literals E0432 relation_name param_name
+expect_missing macros spicedb_proc_bridge E0432 __private::object_id_impl __private::object_type_impl __private::param_name_impl __private::relation_name_impl
+check_dependency_tree spicedb absent
+check_dependency_tree macros present
+check_dependency_tree macros,spicedb present
+
+syntax_validators=(
+  trogon_claims_syntax::validate_object_id
+  trogon_claims_syntax::validate_object_type
+  trogon_claims_syntax::validate_param_name
+  trogon_claims_syntax::validate_relation_name
+)
+syntax_metadata=(
+  trogon_claims_syntax::OBJECT_ID_ALPHABET
+  trogon_claims_syntax::OBJECT_ID_MAX_BYTES
+  trogon_claims_syntax::OBJECT_TYPE_MAX_BYTES
+  trogon_claims_syntax::PARAM_NAME_MAX_BYTES
+  trogon_claims_syntax::RELATION_NAME_MAX_BYTES
+  trogon_claims_syntax::SEGMENT_MIN_BYTES
+  trogon_claims_syntax::TYPE_FINAL_SEGMENT_MAX_BYTES
+  trogon_claims_syntax::TYPE_INNER_SEGMENT_MAX_BYTES
+  trogon_claims_syntax::WILDCARD_BYTE
+  trogon_claims_syntax::SyntaxRule::MaxBytes
+  trogon_claims_syntax::SyntaxRule::ObjectIdAlphabet
+  trogon_claims_syntax::SyntaxRule::NotWildcard
+  trogon_claims_syntax::SyntaxRule::SegmentAlphabet
+  trogon_claims_syntax::SyntaxRule::SegmentStart
+  trogon_claims_syntax::SyntaxRule::SegmentEnd
+  trogon_claims_syntax::SyntaxRule::SegmentLength
+  trogon_claims_syntax::SyntaxRule::IdentifierStart
+  trogon_claims_syntax::SyntaxRule::IdentifierAlphabet
+)
+
+for features in "" dependency-default json macros macro-impl; do
+  consumer run "$features" syntax_core
+  expect_missing "$features" syntax_spicedb E0432 "${syntax_validators[@]}"
+  expect_missing "$features" syntax_spicedb_metadata E0432 "${syntax_metadata[@]}"
+done
+for features in macro-impl macro-impl,json macro-impl,macros; do
+  consumer run "$features" macro_impl_core
+  expect_missing "$features" macro_impl_spicedb E0432 trogon_claims_macros::object_id_impl trogon_claims_macros::object_type_impl trogon_claims_macros::param_name_impl trogon_claims_macros::relation_name_impl
+done
+consumer run syntax-spicedb syntax_spicedb
+consumer run syntax-spicedb syntax_spicedb_metadata
+consumer run spicedb syntax_spicedb
+consumer run spicedb syntax_spicedb_metadata
+consumer run macro-impl-spicedb,spicedb macro_impl_spicedb
