@@ -1,6 +1,6 @@
 # trogon_claims
 
-Validated scalar claim values and protocol syntax.
+Immutable claims, validated selectors and typed standard-claim views.
 
 Credential verification and resource authorization remain caller responsibilities.
 All optional features are disabled by default.
