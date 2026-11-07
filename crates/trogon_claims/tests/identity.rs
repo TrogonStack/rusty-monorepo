@@ -14,13 +14,13 @@ fn text_claim(name: impl Into<ClaimType>, value: &'static str) -> Claim {
 fn builder() -> IdentityBuilder {
     IdentityBuilder::new(
         AuthenticationType::try_new("test").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     )
     .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())
     .push(text_claim(WellKnownClaim::Sub, "user-1"))
-    .push(text_claim(WellKnownClaim::WsName, "Ada"))
-    .push(text_claim(WellKnownClaim::WsRole, "admin"))
+    .push(text_claim(WellKnownClaim::PreferredUsername, "Ada"))
+    .push(text_claim(WellKnownClaim::Roles, "admin"))
 }
 
 #[test]
@@ -53,15 +53,15 @@ fn an_explicit_iss_claim_wins_over_the_configured_fallback() {
 fn the_builder_requires_a_textual_subject() {
     let missing = IdentityBuilder::new(
         AuthenticationType::try_new("test").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     )
     .try_build();
     assert_eq!(missing.unwrap_err(), IdentityBuildError::MissingSubject);
     let numeric = IdentityBuilder::new(
         AuthenticationType::try_new("test").unwrap(),
-        NameClaimType::new(WellKnownClaim::WsName.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     )
     .push(Claim::builder(WellKnownClaim::Sub.into(), ClaimValue::Integer(1)).build())
     .try_build();
@@ -104,7 +104,7 @@ fn a_custom_name_claim_type_is_honoured_by_the_builder() {
     let identity = IdentityBuilder::new(
         AuthenticationType::try_new("test").unwrap(),
         NameClaimType::new(WellKnownClaim::Name.into()),
-        RoleClaimType::new(WellKnownClaim::WsRole.into()),
+        RoleClaimType::new(WellKnownClaim::Roles.into()),
     )
     .with_default_issuer(Issuer::try_new("https://issuer.example.com").unwrap())
     .push(text_claim(WellKnownClaim::Sub, "user-1"))
