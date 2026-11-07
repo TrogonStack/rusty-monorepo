@@ -1,20 +1,9 @@
 use core::fmt;
 
-use crate::constants::OBJECT_ID_ALPHABET;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyntaxRule {
     NonEmpty,
-    MaxBytes(usize),
-    ObjectIdAlphabet,
-    NotWildcard,
     PrintableAscii,
-    SegmentAlphabet,
-    SegmentStart,
-    SegmentEnd,
-    SegmentLength { min: usize, max: usize },
-    IdentifierStart,
-    IdentifierAlphabet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,39 +49,10 @@ impl fmt::Display for SyntaxViolation {
         let offset = self.offset;
         match self.rule {
             SyntaxRule::NonEmpty => f.write_str("must not be empty"),
-            SyntaxRule::MaxBytes(max) => write!(f, "exceeds {max} bytes at byte {offset}"),
-            SyntaxRule::ObjectIdAlphabet => write!(
-                f,
-                "invalid character {offender} at byte {offset} (allowed: {OBJECT_ID_ALPHABET})"
-            ),
-            SyntaxRule::NotWildcard => f.write_str("the wildcard '*' is not an object id"),
             SyntaxRule::PrintableAscii => write!(
                 f,
                 "invalid character {offender} at byte {offset} (allowed: printable ASCII 0x20 to 0x7E)"
             ),
-            SyntaxRule::SegmentAlphabet => write!(
-                f,
-                "invalid character {offender} at byte {offset} (allowed in a segment: [a-z0-9_])"
-            ),
-            SyntaxRule::SegmentStart => write!(
-                f,
-                "a segment must start with a lowercase ASCII letter, found {offender} at byte {offset}"
-            ),
-            SyntaxRule::SegmentEnd => write!(
-                f,
-                "a segment must end with a lowercase ASCII letter or digit, found {offender} at byte {offset}"
-            ),
-            SyntaxRule::IdentifierStart => write!(
-                f,
-                "an identifier must start with an ASCII letter or '_', found {offender} at byte {offset}"
-            ),
-            SyntaxRule::IdentifierAlphabet => write!(
-                f,
-                "invalid character {offender} at byte {offset} (allowed in an identifier: [a-zA-Z0-9_])"
-            ),
-            SyntaxRule::SegmentLength { min, max } => {
-                write!(f, "a segment must be {min} to {max} bytes, violated at byte {offset}")
-            }
         }
     }
 }
