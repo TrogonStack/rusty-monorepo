@@ -1,5 +1,5 @@
 // edition:2024
-#![allow(unused, constant_outside_constants_module)]
+#![allow(unused, constant_outside_constants_module, reason = "this single-file fixture isolates literal template replacement checks")]
 
 const TEMPLATE: &str = "Hello, $USER!";
 static BANNER: &str = "== {title} ==";
@@ -44,6 +44,6 @@ fn main() {
     let _ = Custom.replace("a", "b");
 
     // `#[allow]` at the site must suppress the lint.
-    #[allow(literal_template_replace)]
+    #[allow(literal_template_replace, reason = "this single-file fixture isolates literal template replacement checks")]
     let _ = "Hello, {name}!".replace("{name}", name);
 }

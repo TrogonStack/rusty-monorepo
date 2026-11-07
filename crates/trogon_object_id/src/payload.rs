@@ -11,17 +11,35 @@ use crate::{ParseError, Validator, MAX_VALUE_BYTES};
 /// keep validation deterministic. Prefer `Text<V>` for custom text rules.
 /// Payloads with interior mutation can invalidate an identifier's guarantees.
 pub trait Payload: Sized + fmt::Display {
+    /// The borrowed representation used when storage already establishes the domain.
     type Raw: ?Sized + fmt::Display;
 
+    /// Parses unprefixed text and returns only values satisfying this codec's rules.
+    ///
+    /// An implementation may normalize text, but its [`fmt::Display`] output
+    /// must remain a valid representation accepted by this codec.
     fn parse(value: &str) -> Result<Self, ParseError>;
+    /// Parses owned unprefixed text, with the same validation as [`Self::parse`].
+    ///
+    /// The default borrows the input and calls `parse`; codecs that store text
+    /// can override it to retain the existing allocation.
     fn parse_owned(value: String) -> Result<Self, ParseError> {
         Self::parse(&value)
     }
+    /// Rejects invalid typed or generated values before an identifier wraps them.
+    ///
+    /// Immutable payloads whose constructors establish the invariant may rely
+    /// on that invariant instead of repeating validation.
     fn validate(&self) -> Result<(), ParseError>;
+    /// Borrows the raw value without adding the identifier's prefix or separator.
     fn as_raw(&self) -> &Self::Raw;
 }
 
 /// Validated, spelling-preserving owned text.
+///
+/// Text must be nonempty, contain at most [`MAX_VALUE_BYTES`] UTF-8 bytes and
+/// contain no Unicode control characters before the custom validator runs.
+/// Spelling is never normalized, including case and signed decimal padding.
 #[repr(transparent)]
 pub struct Text<V: Validator = validators::Any> {
     value: String,
@@ -29,6 +47,11 @@ pub struct Text<V: Validator = validators::Any> {
 }
 
 impl<V: Validator> Text<V> {
+    /// Validates borrowed text, then allocates an owned copy without normalization.
+    ///
+    /// Returns [`ParseError::EmptyValue`], [`ParseError::ValueTooLong`] or
+    /// [`ParseError::ControlCharacter`] for the shared constraints, or the error
+    /// returned by `V` for an application-specific rule.
     pub fn try_from_raw(value: &str) -> Result<Self, ParseError> {
         validate_text::<V>(value)?;
         Ok(Self {
@@ -37,6 +60,7 @@ impl<V: Validator> Text<V> {
         })
     }
 
+    /// Applies the same checks as [`Self::try_from_raw`] while retaining the allocation.
     pub fn try_from_owned(value: String) -> Result<Self, ParseError> {
         validate_text::<V>(&value)?;
         Ok(Self {
