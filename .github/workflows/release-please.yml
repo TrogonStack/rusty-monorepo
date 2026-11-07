@@ -14,10 +14,13 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Release please
         id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        uses: TrogonStack/github-actions/actions/release-please@1ac8b52a4b60bb9efa39fc22461e3852d14282da
         with:
-          config-file: .github/release-please-config.json
-          manifest-file: .github/release-please-manifest.json
           token: ${{ secrets.GH_PAT_RELEASE_PLEASE_ACTION }}
