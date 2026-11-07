@@ -39,8 +39,6 @@ pub use claim::{Claim, ClaimBuilder};
 pub use claim_lookup_error::ClaimLookupError;
 pub use claim_property_key::ClaimPropertyKey;
 pub use claim_set::{ClaimSet, HasRoles};
-#[cfg(feature = "spicedb")]
-pub use claim_set::{HasSubject, SubjectRef};
 pub use claim_text::ClaimText;
 pub use claim_type::ClaimType;
 pub use claim_value::ClaimValue;

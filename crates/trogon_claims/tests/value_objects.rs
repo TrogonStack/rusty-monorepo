@@ -2,12 +2,6 @@
 
 use std::collections::HashSet;
 
-#[cfg(feature = "spicedb")]
-use trogon_claims::{ObjectId, ObjectType, ValueKind};
-
-#[cfg(all(feature = "macros", feature = "spicedb"))]
-use trogon_claims::{object_id, object_type};
-
 use trogon_claims::{
     Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId, Issuer, PrincipalKind,
     RoleName, SubjectId, Unsigned63, WellKnownClaim,
@@ -63,38 +57,6 @@ fn unsigned63_stops_at_i64_max() {
     assert_eq!(err.value(), i64::MAX as u64 + 1);
     assert!(Unsigned63::try_from(u64::MAX).is_err());
     assert_eq!(u64::from(Unsigned63::from(7_u32)), 7);
-}
-
-#[cfg(feature = "spicedb")]
-#[test]
-fn object_id_reports_kind_and_position() {
-    let err = ObjectId::try_new("a@b").unwrap_err();
-    assert_eq!(err.kind(), ValueKind::ObjectId);
-    assert_eq!(
-        err.to_string(),
-        "object_id: invalid character '@' at byte 1 (allowed: [a-zA-Z0-9/_|\\-=+])"
-    );
-    assert!(ObjectId::try_new("*").is_err());
-    assert!("readme".parse::<ObjectId>().is_ok());
-    assert!(ObjectId::try_from(String::from("a b")).is_err());
-}
-
-#[cfg(feature = "spicedb")]
-#[test]
-fn object_type_follows_the_definition_name_grammar() {
-    assert!(ObjectType::try_new("myapp/document").is_ok());
-    assert!(ObjectType::try_new("Document").is_err());
-    assert!(ObjectType::try_new("ab").is_err());
-}
-
-#[cfg(all(feature = "macros", feature = "spicedb"))]
-#[test]
-fn literal_macros_build_the_newtypes() {
-    let id: ObjectId = object_id!("readme");
-    let kind: ObjectType = object_type!("myapp/document");
-    assert_eq!(id.as_str(), "readme");
-    assert_eq!(kind.to_string(), "myapp/document");
-    assert_eq!(id, ObjectId::try_new("readme").unwrap());
 }
 
 #[test]

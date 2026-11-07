@@ -11,15 +11,7 @@ pub enum ValueKind {
     ClaimType,
     ClientId,
     Issuer,
-    #[cfg(feature = "spicedb")]
-    ObjectId,
-    #[cfg(feature = "spicedb")]
-    ObjectType,
-    #[cfg(feature = "spicedb")]
-    ParamName,
     PrincipalKind,
-    #[cfg(feature = "spicedb")]
-    RelationName,
     RoleName,
     SubjectId,
 }
@@ -33,15 +25,7 @@ impl ValueKind {
             Self::ClaimType => "claim_type",
             Self::ClientId => "client_id",
             Self::Issuer => "issuer",
-            #[cfg(feature = "spicedb")]
-            Self::ObjectId => "object_id",
-            #[cfg(feature = "spicedb")]
-            Self::ObjectType => "object_type",
-            #[cfg(feature = "spicedb")]
-            Self::ParamName => "param_name",
             Self::PrincipalKind => "principal_kind",
-            #[cfg(feature = "spicedb")]
-            Self::RelationName => "relation_name",
             Self::RoleName => "role_name",
             Self::SubjectId => "subject_id",
         }
