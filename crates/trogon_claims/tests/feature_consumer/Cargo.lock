@@ -25,6 +25,8 @@ name = "claims-feature-consumer"
 version = "0.0.0"
 dependencies = [
  "trogon_claims",
+ "trogon_claims_macros",
+ "trogon_claims_syntax",
 ]
 
 [[package]]

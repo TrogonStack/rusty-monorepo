@@ -43,7 +43,12 @@ expect_missing() {
   local symbol pattern
   for symbol in "$@"; do
     case "$expected" in
-      E0432) pattern='`trogon_claims::'"$symbol"'`' ;;
+      E0432)
+        case "$symbol" in
+          trogon_claims_syntax::*|trogon_claims_macros::*) pattern='`'"$symbol"'`' ;;
+          *) pattern='`trogon_claims::'"$symbol"'`' ;;
+        esac
+        ;;
       E0603) pattern='error[E0603]: module `'"$symbol"'` is private' ;;
       *) echo "unsupported feature-probe diagnostic $expected" >&2; return 1 ;;
     esac
@@ -110,3 +115,45 @@ expect_missing macros spicedb_proc_bridge E0432 __private::object_id_impl __priv
 check_dependency_tree spicedb absent
 check_dependency_tree macros present
 check_dependency_tree macros,spicedb present
+
+syntax_validators=(
+  trogon_claims_syntax::validate_object_id
+  trogon_claims_syntax::validate_object_type
+  trogon_claims_syntax::validate_param_name
+  trogon_claims_syntax::validate_relation_name
+)
+syntax_metadata=(
+  trogon_claims_syntax::OBJECT_ID_ALPHABET
+  trogon_claims_syntax::OBJECT_ID_MAX_BYTES
+  trogon_claims_syntax::OBJECT_TYPE_MAX_BYTES
+  trogon_claims_syntax::PARAM_NAME_MAX_BYTES
+  trogon_claims_syntax::RELATION_NAME_MAX_BYTES
+  trogon_claims_syntax::SEGMENT_MIN_BYTES
+  trogon_claims_syntax::TYPE_FINAL_SEGMENT_MAX_BYTES
+  trogon_claims_syntax::TYPE_INNER_SEGMENT_MAX_BYTES
+  trogon_claims_syntax::WILDCARD_BYTE
+  trogon_claims_syntax::SyntaxRule::MaxBytes
+  trogon_claims_syntax::SyntaxRule::ObjectIdAlphabet
+  trogon_claims_syntax::SyntaxRule::NotWildcard
+  trogon_claims_syntax::SyntaxRule::SegmentAlphabet
+  trogon_claims_syntax::SyntaxRule::SegmentStart
+  trogon_claims_syntax::SyntaxRule::SegmentEnd
+  trogon_claims_syntax::SyntaxRule::SegmentLength
+  trogon_claims_syntax::SyntaxRule::IdentifierStart
+  trogon_claims_syntax::SyntaxRule::IdentifierAlphabet
+)
+
+for features in "" dependency-default json macros macro-impl; do
+  consumer run "$features" syntax_core
+  expect_missing "$features" syntax_spicedb E0432 "${syntax_validators[@]}"
+  expect_missing "$features" syntax_spicedb_metadata E0432 "${syntax_metadata[@]}"
+done
+for features in macro-impl macro-impl,json macro-impl,macros; do
+  consumer run "$features" macro_impl_core
+  expect_missing "$features" macro_impl_spicedb E0432 trogon_claims_macros::object_id_impl trogon_claims_macros::object_type_impl trogon_claims_macros::param_name_impl trogon_claims_macros::relation_name_impl
+done
+consumer run syntax-spicedb syntax_spicedb
+consumer run syntax-spicedb syntax_spicedb_metadata
+consumer run spicedb syntax_spicedb
+consumer run spicedb syntax_spicedb_metadata
+consumer run macro-impl-spicedb,spicedb macro_impl_spicedb

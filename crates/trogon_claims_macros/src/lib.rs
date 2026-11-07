@@ -14,7 +14,8 @@
 //!
 //! Consumers enable `trogon_claims`'s opt-in `macros` feature to use these public
 //! helpers. `object_id!`, `object_type!`, `relation_name!` and `param_name!`
-//! additionally require `spicedb`.
+//! additionally require `spicedb`, which forwards this crate's default-off
+//! `spicedb` feature. Without it, only `principal_kind_impl` is exported.
 //! Runtime types and validated constructors do not require the `macros` feature.
 //!
 //! The crate is not published to crates.io.
@@ -28,11 +29,13 @@ use proc_macro::TokenStream;
 
 use expand::{expand, Target};
 
+#[cfg(feature = "spicedb")]
 #[proc_macro]
 pub fn object_id_impl(input: TokenStream) -> TokenStream {
     expand(input, Target::ObjectId)
 }
 
+#[cfg(feature = "spicedb")]
 #[proc_macro]
 pub fn object_type_impl(input: TokenStream) -> TokenStream {
     expand(input, Target::ObjectType)
@@ -43,11 +46,13 @@ pub fn principal_kind_impl(input: TokenStream) -> TokenStream {
     expand(input, Target::PrincipalKind)
 }
 
+#[cfg(feature = "spicedb")]
 #[proc_macro]
 pub fn relation_name_impl(input: TokenStream) -> TokenStream {
     expand(input, Target::RelationName)
 }
 
+#[cfg(feature = "spicedb")]
 #[proc_macro]
 pub fn param_name_impl(input: TokenStream) -> TokenStream {
     expand(input, Target::ParamName)

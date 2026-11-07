@@ -28,7 +28,10 @@ let kind = principal_kind!("person");
 `macros` is disabled by default in `trogon_claims`. It enables `principal_kind!`.
 Enable both `macros` and `spicedb` for `object_id!`, `object_type!`,
 `relation_name!` and `param_name!`. Runtime constructors do not require macros;
-backend types and constructors additionally require `spicedb`.
+backend types and constructors additionally require `spicedb`. That feature
+forwards this implementation crate's default-off `spicedb` feature. Without it,
+only `principal_kind_impl` is exported. Enabling `spicedb` on `trogon_claims`
+alone does not activate its optional macro dependency.
 
 ## Reference
 

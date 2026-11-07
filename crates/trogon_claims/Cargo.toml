@@ -12,7 +12,7 @@ default = []
 macros = ["dep:trogon_claims_macros"]
 serde = ["dep:serde"]
 json = ["dep:serde_json", "dep:fluent-uri"]
-spicedb = ["dep:prost", "dep:prost-types"]
+spicedb = ["dep:prost", "dep:prost-types", "trogon_claims_syntax/spicedb", "trogon_claims_macros?/spicedb"]
 axum = ["dep:axum-core", "dep:http"]
 
 [lints.rust]
