@@ -1,48 +1,63 @@
 use proc_macro::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
-use trogon_claims_syntax::{
-    validate_object_id, validate_object_type, validate_param_name, validate_principal_kind, validate_relation_name,
-    SyntaxViolation,
-};
+#[cfg(feature = "spicedb")]
+use trogon_claims_syntax::{validate_object_id, validate_object_type, validate_param_name, validate_relation_name};
+use trogon_claims_syntax::{validate_principal_kind, SyntaxViolation};
 
 use crate::diagnostic::compile_error;
 use crate::literal::string_value;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Target {
+    #[cfg(feature = "spicedb")]
     ObjectId,
+    #[cfg(feature = "spicedb")]
     ObjectType,
     PrincipalKind,
+    #[cfg(feature = "spicedb")]
     RelationName,
+    #[cfg(feature = "spicedb")]
     ParamName,
 }
 
 impl Target {
     fn label(self) -> &'static str {
         match self {
+            #[cfg(feature = "spicedb")]
             Target::ObjectId => "object_id",
+            #[cfg(feature = "spicedb")]
             Target::ObjectType => "object_type",
             Target::PrincipalKind => "principal_kind",
+            #[cfg(feature = "spicedb")]
             Target::RelationName => "relation_name",
+            #[cfg(feature = "spicedb")]
             Target::ParamName => "param_name",
         }
     }
 
     fn type_name(self) -> &'static str {
         match self {
+            #[cfg(feature = "spicedb")]
             Target::ObjectId => "ObjectId",
+            #[cfg(feature = "spicedb")]
             Target::ObjectType => "ObjectType",
             Target::PrincipalKind => "PrincipalKind",
+            #[cfg(feature = "spicedb")]
             Target::RelationName => "RelationName",
+            #[cfg(feature = "spicedb")]
             Target::ParamName => "ParamName",
         }
     }
 
     fn validate(self, value: &str) -> Result<(), SyntaxViolation> {
         match self {
+            #[cfg(feature = "spicedb")]
             Target::ObjectId => validate_object_id(value),
+            #[cfg(feature = "spicedb")]
             Target::ObjectType => validate_object_type(value),
             Target::PrincipalKind => validate_principal_kind(value),
+            #[cfg(feature = "spicedb")]
             Target::RelationName => validate_relation_name(value),
+            #[cfg(feature = "spicedb")]
             Target::ParamName => validate_param_name(value),
         }
     }

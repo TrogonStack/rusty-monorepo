@@ -1,19 +1,32 @@
 use core::fmt;
 
+#[cfg(feature = "spicedb")]
 use crate::constants::OBJECT_ID_ALPHABET;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyntaxRule {
     NonEmpty,
+    #[cfg(feature = "spicedb")]
     MaxBytes(usize),
+    #[cfg(feature = "spicedb")]
     ObjectIdAlphabet,
+    #[cfg(feature = "spicedb")]
     NotWildcard,
     PrintableAscii,
+    #[cfg(feature = "spicedb")]
     SegmentAlphabet,
+    #[cfg(feature = "spicedb")]
     SegmentStart,
+    #[cfg(feature = "spicedb")]
     SegmentEnd,
-    SegmentLength { min: usize, max: usize },
+    #[cfg(feature = "spicedb")]
+    SegmentLength {
+        min: usize,
+        max: usize,
+    },
+    #[cfg(feature = "spicedb")]
     IdentifierStart,
+    #[cfg(feature = "spicedb")]
     IdentifierAlphabet,
 }
 
@@ -60,36 +73,45 @@ impl fmt::Display for SyntaxViolation {
         let offset = self.offset;
         match self.rule {
             SyntaxRule::NonEmpty => f.write_str("must not be empty"),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::MaxBytes(max) => write!(f, "exceeds {max} bytes at byte {offset}"),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::ObjectIdAlphabet => write!(
                 f,
                 "invalid character {offender} at byte {offset} (allowed: {OBJECT_ID_ALPHABET})"
             ),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::NotWildcard => f.write_str("the wildcard '*' is not an object id"),
             SyntaxRule::PrintableAscii => write!(
                 f,
                 "invalid character {offender} at byte {offset} (allowed: printable ASCII 0x20 to 0x7E)"
             ),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::SegmentAlphabet => write!(
                 f,
                 "invalid character {offender} at byte {offset} (allowed in a segment: [a-z0-9_])"
             ),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::SegmentStart => write!(
                 f,
                 "a segment must start with a lowercase ASCII letter, found {offender} at byte {offset}"
             ),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::SegmentEnd => write!(
                 f,
                 "a segment must end with a lowercase ASCII letter or digit, found {offender} at byte {offset}"
             ),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::IdentifierStart => write!(
                 f,
                 "an identifier must start with an ASCII letter or '_', found {offender} at byte {offset}"
             ),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::IdentifierAlphabet => write!(
                 f,
                 "invalid character {offender} at byte {offset} (allowed in an identifier: [a-zA-Z0-9_])"
             ),
+            #[cfg(feature = "spicedb")]
             SyntaxRule::SegmentLength { min, max } => {
                 write!(f, "a segment must be {min} to {max} bytes, violated at byte {offset}")
             }

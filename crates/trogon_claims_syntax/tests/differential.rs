@@ -1,3 +1,4 @@
+#![cfg(feature = "spicedb")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use regex::Regex;
