@@ -38,7 +38,7 @@ impl WorkspaceScaffold {
     /// A run is only answerable for the workspace it was handed, so editing the script has
     /// to reach the key. Without this the second pass is served the first pass's artifacts
     /// and reports a state the run never saw.
-    pub fn digest(&self, skill_path: &Path) -> Result<ScaffoldDigest, ScaffoldFailure> {
+    pub fn digest(&self, skill_path: &Path) -> Result<ScaffoldDigest, ScaffoldError> {
         let path = self.resolve_in(skill_path);
         let bytes = std::fs::read(&path).map_err(|source| self.unreadable(source))?;
         let mut hasher = Sha256::new();
@@ -49,14 +49,14 @@ impl WorkspaceScaffold {
         )))
     }
 
-    fn unreadable(&self, source: std::io::Error) -> ScaffoldFailure {
-        ScaffoldFailure::Unreadable {
+    fn unreadable(&self, source: std::io::Error) -> ScaffoldError {
+        ScaffoldError::Unreadable {
             script: self.0.as_str().to_string(),
             source,
         }
     }
 
-    fn run_in(&self, skill_path: &Path, workspace_dir: &Path) -> Result<(), ScaffoldFailure> {
+    fn run_in(&self, skill_path: &Path, workspace_dir: &Path) -> Result<(), ScaffoldError> {
         // The child changes into the workspace before it execs, so a skill directory given
         // as a relative path would be looked for inside the workspace and not found.
         let script = std::fs::canonicalize(self.resolve_in(skill_path)).map_err(|source| self.unreadable(source))?;
@@ -87,7 +87,7 @@ impl WorkspaceScaffold {
             return Ok(());
         }
 
-        Err(ScaffoldFailure::Rejected {
+        Err(ScaffoldError::Rejected {
             script: self.0.as_str().to_string(),
             exit_code: output.status.code(),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -132,7 +132,7 @@ impl ScaffoldPermission {
 }
 
 #[derive(Debug, Error)]
-pub enum ScaffoldFailure {
+pub enum ScaffoldError {
     #[error(
         "case declares a workspace scaffold '{script}', which runs author-supplied code as you; \
          pass --allow-scaffold to run it"
@@ -178,13 +178,13 @@ pub fn scaffold_workspace(
     permission: ScaffoldPermission,
     skill_path: &Path,
     workspace_dir: &Path,
-) -> Result<(), ScaffoldFailure> {
+) -> Result<(), ScaffoldError> {
     let Some(scaffold) = scaffold else {
         return Ok(());
     };
 
     if !permission.is_granted() {
-        return Err(ScaffoldFailure::Withheld {
+        return Err(ScaffoldError::Withheld {
             script: scaffold.script().as_str().to_string(),
         });
     }

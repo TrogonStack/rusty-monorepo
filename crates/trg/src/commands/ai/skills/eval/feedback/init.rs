@@ -6,7 +6,7 @@ use crate::commands::ai::skills::eval::print_json;
 use crate::exit_code::ExitCode;
 use crate::output::OutputFormat;
 use clap::Args;
-use serde_json::json;
+use serde::Serialize;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -37,6 +37,13 @@ pub struct FeedbackInitArgs {
 }
 
 impl FeedbackInitArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self) -> ExitCode {
         let report = match init_feedback(&self.report_dir, self.reviewer.as_deref()) {
             Ok(report) => report,
@@ -52,11 +59,17 @@ impl FeedbackInitArgs {
         }
 
         if self.output_format.is_json() {
-            let document = json!({
-                "report_dir": self.report_dir.display().to_string(),
-                "created": report.created,
-                "skipped": report.skipped,
-            });
+            #[derive(Serialize)]
+            struct FeedbackInitDocument {
+                report_dir: String,
+                created: usize,
+                skipped: usize,
+            }
+            let document = FeedbackInitDocument {
+                report_dir: self.report_dir.display().to_string(),
+                created: report.created,
+                skipped: report.skipped,
+            };
             return print_json(&document, ExitCode::Success);
         }
 
@@ -69,34 +82,5 @@ impl FeedbackInitArgs {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agentskills::feedback::list_runs_needing_review;
-    use crate::commands::ai::skills::eval::feedback::testutil::sample_report_dir;
-
-    #[test]
-    fn init_command_scaffolds_feedback_and_syncs_report() {
-        let temp = tempfile::tempdir().unwrap();
-        let report_dir = sample_report_dir(&temp);
-
-        let status = FeedbackInitArgs {
-            report_dir: report_dir.clone(),
-            reviewer: Some("reviewer@example.com".to_string()),
-            output_format: OutputFormat::Text,
-        }
-        .handle();
-        assert_eq!(status, ExitCode::Success);
-
-        assert!(list_runs_needing_review(&report_dir).unwrap().is_empty());
-
-        let report: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(report_dir.join("report.json")).unwrap()).unwrap();
-        assert!(report.pointer("/summaries/human_feedback/reviewed_runs").is_some());
-        assert_eq!(
-            report
-                .pointer("/runs/0/artifacts/0/kind")
-                .and_then(|value| value.as_str()),
-            Some("human_feedback")
-        );
-    }
-}
+#[path = "init_tests.rs"]
+mod tests;

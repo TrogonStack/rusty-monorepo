@@ -209,39 +209,52 @@ fn env_policy_request<'a>(
 const LEAK_VAR: &str = "TRG_EVAL_ENVIRONMENT_LEAK_PROBE";
 const LEAK_SCRIPT: &str = r#"printf '{"type":"result","leak":"%s"}\n' "${TRG_EVAL_ENVIRONMENT_LEAK_PROBE:-}""#;
 
-static OPERATOR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+const OPERATOR_PROBE: &str = "operator-secret";
 
-/// The operator environment a run is probed for, held for one test at a time.
-///
-/// An environment variable belongs to the whole process, and these tests run on
-/// different threads of that one process, so without taking turns one test clears
-/// the variable the other is still asking a subprocess about.
-struct OperatorEnvironment {
-    _turn: std::sync::MutexGuard<'static, ()>,
-}
-
-impl OperatorEnvironment {
-    const SECRET: &'static str = "operator-secret";
-
-    fn visible_to_this_process() -> Self {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the lock guards no data, only whose turn it is, so a test that panicked holding it left nothing half-written"
-        )]
-        let turn = OPERATOR_ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        std::env::set_var(LEAK_VAR, Self::SECRET);
-        Self { _turn: turn }
+fn run_with_operator_environment(test_name: &str, variables: &[(&str, &str)]) -> bool {
+    let marker = "TRG_TEST_OPERATOR_ENVIRONMENT_CHILD";
+    if std::env::var(marker).ok().as_deref() == Some(test_name) {
+        return false;
     }
-}
-
-impl Drop for OperatorEnvironment {
-    fn drop(&mut self) {
-        std::env::remove_var(LEAK_VAR);
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(marker, test_name)
+        .envs(variables.iter().copied())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("isolated operator-environment test exceeded its deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "isolated test failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    true
 }
 
 #[test]
 fn a_scrubbed_run_cannot_see_the_operator_environment() {
+    if run_with_operator_environment(
+        "agentskills::runner::tests::a_scrubbed_run_cannot_see_the_operator_environment",
+        &[(LEAK_VAR, OPERATOR_PROBE)],
+    ) {
+        return;
+    }
     let temp = tempdir().unwrap();
     let run_dir = temp.path().join("runs/run-001");
     let workspace = run_dir.join("workspace");
@@ -250,7 +263,6 @@ fn a_scrubbed_run_cannot_see_the_operator_environment() {
     let transcript_path = run_dir.join("transcript.jsonl");
     let stderr_path = run_dir.join("stderr.log");
 
-    let _operator = OperatorEnvironment::visible_to_this_process();
     let request = env_policy_request(
         &case,
         &workspace,
@@ -270,6 +282,12 @@ fn a_scrubbed_run_cannot_see_the_operator_environment() {
 
 #[test]
 fn an_inherited_run_still_sees_the_operator_environment() {
+    if run_with_operator_environment(
+        "agentskills::runner::tests::an_inherited_run_still_sees_the_operator_environment",
+        &[(LEAK_VAR, OPERATOR_PROBE)],
+    ) {
+        return;
+    }
     let temp = tempdir().unwrap();
     let run_dir = temp.path().join("runs/run-001");
     let workspace = run_dir.join("workspace");
@@ -278,7 +296,6 @@ fn an_inherited_run_still_sees_the_operator_environment() {
     let transcript_path = run_dir.join("transcript.jsonl");
     let stderr_path = run_dir.join("stderr.log");
 
-    let _operator = OperatorEnvironment::visible_to_this_process();
     let request = env_policy_request(
         &case,
         &workspace,
@@ -288,7 +305,7 @@ fn an_inherited_run_still_sees_the_operator_environment() {
     );
     let outcome = run_bash(&request, LEAK_SCRIPT).unwrap();
 
-    assert!(outcome.final_text.contains(OperatorEnvironment::SECRET));
+    assert!(outcome.final_text.contains(OPERATOR_PROBE));
 }
 
 #[test]
@@ -349,6 +366,13 @@ fn a_run_past_its_tool_call_cap_is_stopped_as_budget_exhausted_and_not_retried()
 }
 
 #[test]
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        literal_template_replace,
+        reason = "The completed fixture reuses the hanging fixture's identical tool-call sequence and removes only its intentional delay."
+    )
+)]
 fn a_run_within_its_tool_call_cap_completes() {
     let temp = tempdir().unwrap();
     let workspace = temp.path().join("ws");
@@ -424,3 +448,12 @@ fn claude_enforces_its_own_turn_cap_so_no_watch_is_kept_for_it() {
     assert!(CapWatch::of(Runner::Codex, caps).is_some());
     assert!(CapWatch::of(Runner::Codex, RunCaps::default()).is_none());
 }
+
+#[cfg(test)]
+mod effective_permission_grant_tests;
+
+#[cfg(test)]
+mod unfinished_run_cost_tests;
+
+#[cfg(test)]
+mod workspace_tests;

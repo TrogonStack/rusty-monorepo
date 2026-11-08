@@ -1,5 +1,9 @@
 #![cfg(feature = "macros")]
 
+#[cfg(feature = "serde")]
+use serde::de::value::{Error, StringDeserializer};
+#[cfg(feature = "serde")]
+use serde::Deserialize;
 use std::collections::HashSet;
 use trogon_object_id::{IntegerText, ObjectId, ParseError, Payload, Text};
 
@@ -273,9 +277,6 @@ fn custom_try_from_rules_cover_raw_full_typed_and_generated_inputs() {
 #[cfg(feature = "serde")]
 #[test]
 fn custom_try_from_rules_apply_to_full_and_raw_serde() {
-    use serde::de::value::{Error, StringDeserializer};
-    use serde::Deserialize;
-
     let full = String::from("token_abc");
     let pointer = full.as_ptr();
     let token = TokenId::deserialize(StringDeserializer::<Error>::new(full)).expect("owned custom serde");
