@@ -33,6 +33,21 @@ impl Payload for Digit {
         self
     }
 }
+
+pub struct ManualId(Digit);
+impl ids::Identifier for ManualId {
+    const DEFINITION: Definition = Definition::new("manual", "_");
+    type Raw = Digit;
+
+    fn try_from_raw(value: &str) -> Result<Self, ParseError> {
+        Digit::parse(value).map(Self)
+    }
+
+    fn as_raw(&self) -> &Self::Raw {
+        &self.0
+    }
+}
+
 struct Item;
 impl Domain for Item {
     const DEFINITION: Definition = Definition::new("item", "_");
@@ -56,6 +71,7 @@ impl Write for Buffer {
 }
 
 pub fn exercise() -> Result<(), ParseError> {
+    let _manual = <ManualId as ids::Identifier>::try_from_raw("7")?;
     let id = ObjectId::<Item>::try_from("item_7")?;
     let mut output = Buffer { bytes: [0; 64], len: 0 };
     assert!(write!(&mut output, "{id}").is_ok());
@@ -147,6 +163,12 @@ mod tests {
 #[cfg(feature = "owned")]
 fn owned() -> Result<(), ParseError> {
     use alloc::string::String;
+    let manual = <ManualId as ids::Identifier>::try_from_owned(String::from("7"))?;
+    assert_eq!(<ManualId as ids::Identifier>::as_raw(&manual), &Digit(true));
+    assert!(matches!(
+        <ManualId as ids::Identifier>::try_from_owned(String::from("invalid")),
+        Err(ParseError::InvalidValue)
+    ));
     struct TextDomain;
     impl Domain for TextDomain {
         const DEFINITION: Definition = Definition::new("text", "_");
