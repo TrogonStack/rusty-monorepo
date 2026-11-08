@@ -29,6 +29,7 @@ mod new_instead_of_from;
 mod options_struct_without_default;
 mod policy_config;
 mod policy_lint_suppression_without_reason;
+mod prefer_integration_tests;
 mod process_global_mutation_in_tests;
 mod redundant_module_path;
 mod secret_exposure_in_diagnostics;
@@ -98,6 +99,7 @@ static POLICY_LINTS: &[&rustc_session::lint::Lint] = &[
     NEW_INSTEAD_OF_FROM,
     OPTIONS_STRUCT_WITHOUT_DEFAULT,
     POLICY_LINT_SUPPRESSION_WITHOUT_REASON,
+    PREFER_INTEGRATION_TESTS,
     PROCESS_GLOBAL_MUTATION_IN_TESTS,
     REDUNDANT_MODULE_PATH,
     SECRET_EXPOSURE_IN_DIAGNOSTICS,
@@ -114,6 +116,29 @@ static POLICY_LINTS: &[&rustc_session::lint::Lint] = &[
     UNSTRUCTURED_LOG_FIELDS,
     WEAKENED_WRITE_PRECONDITION,
 ];
+
+rustc_session::declare_lint! {
+    /// Prefers Cargo integration tests for public API behavior. Each test is
+    /// checked independently, including the test-only helpers it references.
+    /// Non-exported production functions, types, methods, macros and fields justify
+    /// keeping a test in the owner's private test module. Public reexports and
+    /// public trait contracts remain public API even when their definitions
+    /// are reached through a private module or implementation item.
+    /// Crate-only construction and exhaustive struct patterns for
+    /// `#[non_exhaustive]` structs and variants also justify private tests.
+    ///
+    /// This is a resolved-reference check, not a proof of what a test intends
+    /// to verify. It does not inspect inactive cfg branches or unreferenced
+    /// helpers, and it does not follow the implementation of public production
+    /// functions or infer the exhaustiveness requirements of whole match
+    /// expressions. Other crate-only semantics can use a reasoned `expect`.
+    /// Binary targets are exempt because they cannot expose a Rust
+    /// library API to integration tests. Existing integration and benchmark
+    /// targets and generated test declarations are exempt too.
+    pub PREFER_INTEGRATION_TESTS,
+    Warn,
+    "prefer the crate's tests/ directory unless a test needs private implementation access",
+}
 
 rustc_session::declare_lint! {
     /// Detects a direct secrecy exposure passed into a resolved diagnostic
@@ -1136,6 +1161,9 @@ rustc_session::declare_lint! {
     /// does not follow the owner's test layout, unit tests placed directly in
     /// the crate root, and reserved test modules or source files compiled into
     /// a non-test target.
+    /// Public API tests belong in the crate's `tests/` directory beside `src/`,
+    /// as checked by `prefer_integration_tests`; this layout governs retained
+    /// tests that need private implementation access.
     ///
     /// ### Why is this bad?
     ///
@@ -1602,6 +1630,7 @@ impl<'tcx> LateLintPass<'tcx> for TrogonLints {
     ) {
         fallible_new::check_fn(cx, kind, body, span, def_id);
         self.new_instead_of_from.check_fn(cx, kind, body, span, def_id);
+        prefer_integration_tests::check_fn(cx, kind, body, def_id);
     }
 
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'tcx>) {
@@ -1660,6 +1689,7 @@ rustc_session::impl_lint_pass!(TrogonLints => [
     MANUAL_ERROR_IMPL,
     NEW_INSTEAD_OF_FROM,
     OPTIONS_STRUCT_WITHOUT_DEFAULT,
+    PREFER_INTEGRATION_TESTS,
     SECRET_EXPOSURE_IN_DIAGNOSTICS,
     PROCESS_GLOBAL_MUTATION_IN_TESTS,
     SERDE_JSON_MACRO,
@@ -1685,6 +1715,11 @@ rustc_session::impl_lint_pass!(
     serde_json_macro_allow_without_reason::SerdeJsonMacroAllowWithoutReason
         => [SERDE_JSON_MACRO_ALLOW_WITHOUT_REASON]
 );
+
+#[test]
+fn ui_prefer_integration_tests() {
+    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui_prefer_integration_tests");
+}
 
 #[test]
 fn ui() {
