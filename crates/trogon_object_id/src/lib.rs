@@ -483,9 +483,12 @@ pub trait Identifier: Sized {
     fn try_from_raw(value: &str) -> Result<Self, ParseError>;
     /// Applies the same validation as [`Self::try_from_raw`] to owned input.
     ///
+    /// The default borrows the input and calls `try_from_raw`.
     /// Text implementations should retain the input allocation where possible.
     #[cfg(feature = "alloc")]
-    fn try_from_owned(value: String) -> Result<Self, ParseError>;
+    fn try_from_owned(value: String) -> Result<Self, ParseError> {
+        Self::try_from_raw(&value)
+    }
     fn as_raw(&self) -> &Self::Raw;
 }
 
