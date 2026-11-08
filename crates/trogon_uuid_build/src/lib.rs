@@ -93,6 +93,12 @@ impl Config {
         self
     }
 
+    /// Generates Rust recipes from a protobuf descriptor set containing the UUID
+    /// option schema and selected enums. Empty templates produce constant UUIDs;
+    /// missing format options are rejected.
+    ///
+    /// Returns [`BuildError`] for malformed descriptors, incompatible option
+    /// schemas, invalid selections or Rust names, and malformed placeholders.
     pub fn generate(&self, descriptors: &[u8], templates: &[Template]) -> Result<String, BuildError> {
         if templates.is_empty() {
             return Err(BuildError::Configuration(

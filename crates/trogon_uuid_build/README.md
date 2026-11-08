@@ -42,7 +42,8 @@ Call `SkuIdentityV1::uuid5(SkuIdentityV1Input { ... })` to obtain a typed `Uuid`
 The marker also implements `trogon_uuid::UuidTemplate` for object-ID template
 bindings. Its `NAMESPACE` constant contains the resolved version namespace.
 A template without placeholders uses `()` as input and embeds its final UUID
-in a `VALUE` constant.
+in a `VALUE` constant. An empty template is also a valid constant recipe; an
+absent `format` option is an error.
 
 `Config::runtime_path("::uuid_runtime")` supports a renamed runtime dependency.
 The path and generated type names are parsed as Rust syntax before emission.
