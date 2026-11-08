@@ -11,17 +11,20 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-thiserror = { workspace = true }
-serde = { workspace = true, optional = true }
-uuid = { version = "1.26", features = ["v4", "v7"], optional = true }
+thiserror = { version = "2.0", default-features = false }
+serde = { version = "1.0", default-features = false, optional = true }
+uuid = { version = "1.26", default-features = false, optional = true }
 trogon_object_id_derive = { version = "0.1.0", path = "../trogon_object_id_derive", optional = true }
 
 [features]
 default = []
+alloc = ["serde?/alloc"]
 macros = ["dep:trogon_object_id_derive"]
 serde = ["dep:serde"]
 uuid = ["dep:uuid"]
+uuid-generate = ["uuid", "uuid/std", "uuid/v4", "uuid/v7"]
 
 [dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
 stats_alloc = "0.1.10"

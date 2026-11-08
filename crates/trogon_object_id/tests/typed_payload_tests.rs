@@ -1,3 +1,4 @@
+#![cfg(feature = "alloc")]
 #[cfg(feature = "serde")]
 use serde::de::value::{Error, StringDeserializer};
 #[cfg(feature = "serde")]

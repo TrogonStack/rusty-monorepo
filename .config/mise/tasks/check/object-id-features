@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
-#MISE description = "Test object IDs with independent and combined optional features"
+#MISE description = "Test core and owned object-ID capabilities independently"
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
-for feature in serde uuid macros macros,serde macros,uuid; do
+cargo test --locked -p trogon_object_id --no-default-features
+for feature in serde uuid macros macros,serde macros,uuid macros,serde,uuid alloc alloc,serde alloc,uuid alloc,macros alloc,macros,serde alloc,macros,uuid uuid-generate; do
   cargo test --locked -p trogon_object_id --no-default-features --features "$feature"
 done
 cargo test --locked -p trogon_object_id --all-features
 cargo test --locked -p trogon_object_id --all-features --release --test allocation_tests
+consumer=crates/trogon_object_id/tests/portability_consumer/Cargo.toml
+for feature in '' derive encoding binary derive,encoding,binary owned owned,derive,encoding,binary; do
+  cargo test --locked --manifest-path "$consumer" --lib --no-default-features --features "$feature"
+done
+tree=$(cargo tree --locked --manifest-path "$consumer" --no-default-features --features derive,encoding,binary --edges normal,no-proc-macro --format '{p} features=[{f}]')
+printf '%s\n' "$tree"
+if printf '%s\n' "$tree" | grep -E 'features=\[[^]]*(std|alloc|rng|getrandom|v4|v7)|getrandom v'; then
+  echo 'core-only consumer enabled an owned or platform capability' >&2
+  exit 1
+fi
 cargo test --locked -p trogon_uuid --release --test allocation_tests
+recipes=crates/trogon_uuid/tests/portability_consumer/Cargo.toml
+cargo test --locked --manifest-path "$recipes" --lib
+tree=$(cargo tree --locked --manifest-path "$recipes" --edges normal,no-proc-macro --format '{p} features=[{f}]')
+printf '%s\n' "$tree"
+if printf '%s\n' "$tree" | grep -E 'features=\[[^]]*(std|alloc|rng|getrandom|v4|v7)|getrandom v'; then
+  echo 'deterministic UUID runtime enabled an owned or platform capability' >&2
+  exit 1
+fi
