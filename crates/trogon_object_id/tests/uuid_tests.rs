@@ -1,6 +1,7 @@
+#![cfg(feature = "alloc")]
 #![cfg(feature = "uuid")]
 
-use trogon_object_id::{Definition, Domain, ObjectId, ParseError, Uuid, Uuid4, Uuid7};
+use trogon_object_id::{Definition, Domain, ObjectId, ParseError, Uuid};
 
 struct SessionDomain;
 impl Domain for SessionDomain {
@@ -37,15 +38,16 @@ fn parses_uuid_into_a_canonical_binary_payload() {
     }
 }
 
+#[cfg(feature = "uuid-generate")]
 #[test]
 fn uuid_generators_preserve_versions_and_pass_domain_validation() {
-    let random = SessionId::generate::<Uuid4>().expect("generate UUID4");
-    let time = SessionId::generate::<Uuid7>().expect("generate UUID7");
+    let random = SessionId::generate::<trogon_object_id::Uuid4>().expect("generate UUID4");
+    let time = SessionId::generate::<trogon_object_id::Uuid7>().expect("generate UUID7");
     assert_eq!(random.payload().get_version_num(), 4, "UUID4 version");
     assert_eq!(time.payload().get_version_num(), 7, "UUID7 version");
     assert_ne!(
         random,
-        SessionId::generate::<Uuid4>().expect("generate another UUID4"),
+        SessionId::generate::<trogon_object_id::Uuid4>().expect("generate another UUID4"),
         "UUID4 randomness"
     );
 }

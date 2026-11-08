@@ -1,3 +1,4 @@
+#![cfg(feature = "alloc")]
 #![cfg(feature = "macros")]
 
 #[cfg(feature = "serde")]
@@ -114,7 +115,7 @@ impl Payload for AsciiToken {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ObjectId)]
-#[object_id(prefix = "token")]
+#[object_id(prefix = "token", fallible)]
 #[repr(transparent)]
 pub struct TokenId(AsciiToken);
 

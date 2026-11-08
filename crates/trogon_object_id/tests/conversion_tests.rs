@@ -1,3 +1,4 @@
+#![cfg(feature = "alloc")]
 #[cfg(feature = "uuid")]
 use trogon_object_id::UuidText;
 use trogon_object_id::{IntegerText, ParseError, Text, MAX_VALUE_BYTES};
