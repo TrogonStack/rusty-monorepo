@@ -1,6 +1,8 @@
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage, Value};
-use trogon_uuid_build::{generate, Template};
+use quote::quote;
+use trogon_uuid::Uuid;
+use trogon_uuid_build::{generate, BuildError, Template};
 
 const DESCRIPTORS: &[u8] = include_bytes!("fixtures/recipes.binpb");
 
@@ -136,52 +138,98 @@ fn emits_a_typed_recipe_for_a_selected_identity_version() {
 }
 
 #[test]
-fn rejects_invalid_descriptor_recipe_and_target_configuration() {
-    let select = |value| [Template::new("example.catalog.v1.SkuIdentityVersion", value, "Chosen")];
-    for value in [
-        "MISSING_FORMAT",
-        "BAD_UUID",
-        "BAD_TEMPLATE",
-        "EMPTY_NAMESPACE",
-        "NOT_A_VERSION",
+fn embeds_static_and_empty_template_uuid_vectors_with_unit_input() {
+    for (value, namespace, identity) in [
+        (
+            "STATIC_TEMPLATE",
+            "d513793a-f5ec-5ff2-bfad-e312c5f3cf6a",
+            "e241525a-825f-5088-ba4b-73946b79c8d0",
+        ),
+        (
+            "EMPTY_TEMPLATE",
+            "43bce60e-413a-5553-90af-e293d5599c0f",
+            "941868af-9b87-5e64-90c5-a6a21bb4603e",
+        ),
     ] {
+        let source = generate(
+            DESCRIPTORS,
+            &[Template::new("example.catalog.v1.SkuIdentityVersion", value, "Chosen")],
+        )
+        .expect("templates without placeholders are valid constant recipes");
+        for (constant, expected) in [(quote!(NAMESPACE), namespace), (quote!(VALUE), identity)] {
+            let expected = Uuid::parse_str(expected).expect("fixed UUID vector");
+            let bytes = expected.as_bytes();
+            let declaration = quote! {
+                pub const #constant: ::trogon_uuid::Uuid = ::trogon_uuid::Uuid::from_bytes([#(#bytes),*]);
+            };
+            assert!(
+                source.contains(&declaration.to_string()),
+                "{value} embeds the fixed {constant} vector"
+            );
+        }
         assert!(
-            generate(DESCRIPTORS, &select(value)).is_err(),
-            "invalid recipe should fail: {value}"
+            source.contains(
+                &quote!(
+                    type Input<'a> = ();
+                )
+                .to_string()
+            ),
+            "{value} accepts unit input"
+        );
+        assert!(
+            !source.contains("ChosenInput"),
+            "{value} needs no generated input struct"
         );
     }
+}
+
+#[test]
+fn rejects_invalid_descriptor_recipe_and_target_configuration() {
+    let select = |value| [Template::new("example.catalog.v1.SkuIdentityVersion", value, "Chosen")];
+    for value in ["MISSING_FORMAT", "BAD_TEMPLATE", "EMPTY_NAMESPACE", "NOT_A_VERSION"] {
+        let result = generate(DESCRIPTORS, &select(value));
+        assert!(matches!(result, Err(BuildError::Recipe { .. })), "{value}: {result:?}");
+    }
+    let result = generate(DESCRIPTORS, &select("BAD_UUID"));
+    assert!(matches!(result, Err(BuildError::NamespaceUuid { .. })), "{result:?}");
+    let result = generate(&[0xff], &select("SKU_IDENTITY_VERSION_V1"));
     assert!(
-        generate(&[0xff], &select("SKU_IDENTITY_VERSION_V1")).is_err(),
-        "malformed descriptor data fails"
+        matches!(result, Err(BuildError::Descriptor(_))),
+        "malformed descriptor data: {result:?}"
     );
-    assert!(generate(DESCRIPTORS, &[]).is_err(), "empty target selection fails");
+    let result = generate(DESCRIPTORS, &[]);
     assert!(
-        generate(DESCRIPTORS, &[Template::new("missing.Enum", "V1", "Chosen")]).is_err(),
-        "missing enum fails"
+        matches!(result, Err(BuildError::Configuration(_))),
+        "empty target selection: {result:?}"
+    );
+    let result = generate(DESCRIPTORS, &[Template::new("missing.Enum", "V1", "Chosen")]);
+    assert!(
+        matches!(result, Err(BuildError::Recipe { .. })),
+        "missing enum: {result:?}"
+    );
+    let result = generate(
+        DESCRIPTORS,
+        &[Template::new(
+            "example.catalog.v1.MissingNamespaceVersion",
+            "MISSING_NAMESPACE_V1",
+            "Chosen",
+        )],
     );
     assert!(
-        generate(
-            DESCRIPTORS,
-            &[Template::new(
-                "example.catalog.v1.MissingNamespaceVersion",
-                "MISSING_NAMESPACE_V1",
-                "Chosen"
-            )]
-        )
-        .is_err(),
-        "missing namespace fails"
+        matches!(result, Err(BuildError::Recipe { .. })),
+        "missing namespace: {result:?}"
+    );
+    let result = generate(
+        DESCRIPTORS,
+        &[Template::new(
+            "example.catalog.v1.SkuIdentityVersion",
+            "SKU_IDENTITY_VERSION_V1",
+            "bad name",
+        )],
     );
     assert!(
-        generate(
-            DESCRIPTORS,
-            &[Template::new(
-                "example.catalog.v1.SkuIdentityVersion",
-                "SKU_IDENTITY_VERSION_V1",
-                "bad name"
-            )]
-        )
-        .is_err(),
-        "invalid generated name fails"
+        matches!(result, Err(BuildError::RustSyntax { .. })),
+        "invalid generated name: {result:?}"
     );
     let duplicates = [
         Template::new(
@@ -195,15 +243,16 @@ fn rejects_invalid_descriptor_recipe_and_target_configuration() {
             "ChosenInput",
         ),
     ];
+    let result = generate(DESCRIPTORS, &duplicates);
     assert!(
-        generate(DESCRIPTORS, &duplicates).is_err(),
-        "marker and input names cannot collide"
+        matches!(result, Err(BuildError::Configuration(_))),
+        "marker and input names cannot collide: {result:?}"
     );
+    let result = trogon_uuid_build::Config::new()
+        .runtime_path("::bad; injected")
+        .generate(DESCRIPTORS, &select("SKU_IDENTITY_VERSION_V1"));
     assert!(
-        trogon_uuid_build::Config::new()
-            .runtime_path("::bad; injected")
-            .generate(DESCRIPTORS, &select("SKU_IDENTITY_VERSION_V1"))
-            .is_err(),
-        "invalid runtime path fails"
+        matches!(result, Err(BuildError::RustSyntax { .. })),
+        "invalid runtime path: {result:?}"
     );
 }
