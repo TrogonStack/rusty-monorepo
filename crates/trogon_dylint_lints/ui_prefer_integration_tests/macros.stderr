@@ -1,0 +1,19 @@
+warning: test `exported_macro_can_move` does not require private implementation access
+  --> $DIR/macros.rs:26:8
+   |
+LL |     fn exported_macro_can_move() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+   = note: `#[warn(prefer_integration_tests)]` on by default
+
+warning: test `test_helper_macro_can_move` does not require private implementation access
+  --> $DIR/macros.rs:31:8
+   |
+LL |     fn test_helper_macro_can_move() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: 2 warnings emitted
+
