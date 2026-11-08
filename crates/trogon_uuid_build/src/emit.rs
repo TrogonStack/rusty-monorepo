@@ -1,8 +1,16 @@
 use std::collections::HashSet;
 
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::{Ident, Span, TokenStream};
 use quote::quote;
-use syn::{Ident, LitStr, Path};
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        doc_hidden_access,
+        reason = "Syn documents LitStr as a public root re-export; this import is reported hidden by the pinned policy driver."
+    )
+)]
+use syn::LitStr;
+use syn::Path;
 
 use crate::descriptor::Recipe;
 use crate::BuildError;
