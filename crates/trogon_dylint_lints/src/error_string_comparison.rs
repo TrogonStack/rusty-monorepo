@@ -327,6 +327,9 @@ fn is_string_forwarder(method: &str) -> bool {
 }
 
 fn lint(cx: &LateContext<'_>, expr: &Expr<'_>) {
+    if crate::test_context::is_test_context(cx, expr.hir_id, expr.span) {
+        return;
+    }
     span_lint_and_then(
         cx,
         ERROR_STRING_COMPARISON,

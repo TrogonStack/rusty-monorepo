@@ -5,6 +5,9 @@ resolver = "2"
 [workspace.package]
 license = "Apache-2.0"
 
+[workspace.lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(dylint_lib, values("trogon_dylint_lints"))'] }
+
 [workspace.lints.clippy]
 derivable_impls = "deny"
 disallowed_methods = "deny"

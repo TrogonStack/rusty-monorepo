@@ -341,6 +341,13 @@ fn parse_uuid(value: &str) -> Result<uuid::Uuid, ParseError> {
 }
 
 #[cfg(feature = "uuid")]
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        discarded_error_source,
+        reason = "UUID parse failures intentionally map to a Copy error that retains no rejected identifier text."
+    )
+)]
 fn parse_uuid_syntax(value: &str) -> Result<uuid::Uuid, ParseError> {
     if value.len() != 36 {
         return Err(ParseError::InvalidValue);

@@ -1,5 +1,7 @@
 //! Spans and metrics shared by the steps of an eval pass.
 
+mod constants;
+use constants::METER;
 use std::time::Duration;
 
 use opentelemetry::KeyValue;
@@ -17,8 +19,6 @@ use crate::telemetry::semconv::trg::{
     EVAL_ATTEMPTS_METRIC, EVAL_ATTEMPT_OUTCOME, EVAL_CACHE_HIT, EVAL_CACHE_LOOKUPS_METRIC, EVAL_COST_METRIC,
     EVAL_RUNS_METRIC, EVAL_RUN_STATUS, EVAL_SCENARIO,
 };
-
-const METER: &str = "trg";
 
 /// One step of a pass, named `{verb} {object}`.
 pub fn step_span(name: &'static str) -> tracing::Span {
@@ -143,25 +143,5 @@ pub fn record_run(run: &RunRecord) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn attempt_outcomes_are_the_values_the_registry_documents() {
-        let emitted = [
-            AttemptOutcome::Completed,
-            AttemptOutcome::TransientFailure,
-            AttemptOutcome::RunnerError,
-        ]
-        .map(AttemptOutcome::as_str);
-
-        assert_eq!(emitted, ["completed", "transient_failure", "runner_error"]);
-    }
-
-    #[test]
-    fn only_a_transient_failure_is_transient() {
-        assert!(AttemptOutcome::TransientFailure.is_transient());
-        assert!(!AttemptOutcome::Completed.is_transient());
-        assert!(!AttemptOutcome::RunnerError.is_transient());
-    }
-}
+#[path = "eval_telemetry_tests.rs"]
+mod tests;
