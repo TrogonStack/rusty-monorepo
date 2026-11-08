@@ -1,13 +1,15 @@
-use std::fmt;
-use std::hash::Hash;
-use std::marker::PhantomData;
-use std::str::FromStr;
+#[cfg(feature = "alloc")]
+use alloc::string::String;
+use core::fmt;
+use core::hash::Hash;
+use core::marker::PhantomData;
+use core::str::FromStr;
 
 use crate::{Domain, Generator, Identifier, ParseError, Payload};
 
 /// An immutable identifier with the layout of its domain's payload.
 ///
-/// [`std::str::FromStr`] and `TryFrom` parse the complete prefixed form.
+/// [`core::str::FromStr`] and `TryFrom` parse the complete prefixed form.
 /// The `try_from_raw` and `try_from_owned` constructors interpret the input as
 /// payload text, without stripping or inferring a prefix. [`fmt::Display`]
 /// always emits the domain prefix and separator.
@@ -20,7 +22,7 @@ pub struct ObjectId<D: Domain> {
 impl<D: Domain> ObjectId<D> {
     /// Parses unprefixed text using the domain's payload codec.
     ///
-    /// Validation and normalization follow [`Payload::parse`]. For [`crate::Text`],
+    /// Validation and normalization follow [`Payload::parse`]. For `Text`,
     /// successful parsing allocates an owned copy; compact UUID parsing does not.
     pub fn try_from_raw(value: &str) -> Result<Self, ParseError> {
         let _definition = D::DEFINITION;
@@ -29,8 +31,9 @@ impl<D: Domain> ObjectId<D> {
 
     /// Takes ownership of unprefixed text and applies the payload's validation.
     ///
-    /// [`crate::Text`] preserves the spelling and reuses the input allocation.
+    /// `Text` preserves the spelling and reuses the input allocation.
     /// To consume a complete prefixed identifier, use `TryFrom<String>` instead.
+    #[cfg(feature = "alloc")]
     pub fn try_from_owned(value: String) -> Result<Self, ParseError> {
         let _definition = D::DEFINITION;
         D::Payload::parse_owned(value).map(Self::from_validated)
@@ -104,6 +107,7 @@ impl<D: Domain> TryFrom<&str> for ObjectId<D> {
         value.parse()
     }
 }
+#[cfg(feature = "alloc")]
 impl<D: Domain> TryFrom<String> for ObjectId<D> {
     type Error = ParseError;
     fn try_from(mut value: String) -> Result<Self, ParseError> {
@@ -119,6 +123,7 @@ impl<D: Domain> Identifier for ObjectId<D> {
     fn try_from_raw(value: &str) -> Result<Self, ParseError> {
         Self::try_from_raw(value)
     }
+    #[cfg(feature = "alloc")]
     fn try_from_owned(value: String) -> Result<Self, ParseError> {
         Self::try_from_owned(value)
     }
@@ -168,7 +173,7 @@ impl<D: Domain> PartialOrd for ObjectId<D>
 where
     D::Payload: PartialOrd,
 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         self.payload.partial_cmp(&other.payload)
     }
 }
@@ -176,7 +181,7 @@ impl<D: Domain> Ord for ObjectId<D>
 where
     D::Payload: Ord,
 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.payload.cmp(&other.payload)
     }
 }
@@ -184,7 +189,7 @@ impl<D: Domain> Hash for ObjectId<D>
 where
     D::Payload: Hash,
 {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         self.payload.hash(state);
     }
 }
@@ -198,6 +203,33 @@ impl<D: Domain> serde::Serialize for ObjectId<D> {
 #[cfg(feature = "serde")]
 impl<'de, D: Domain> serde::Deserialize<'de> for ObjectId<D> {
     fn deserialize<S: serde::Deserializer<'de>>(deserializer: S) -> Result<Self, S::Error> {
-        crate::__private::deserialize_owned(deserializer, Self::from_str, Self::try_from)
+        crate::__deserialize!(deserializer, Self::from_str, Self::try_from)
     }
 }
+
+impl<D: Domain> TryFrom<crate::RawPayload<D::Payload>> for ObjectId<D> {
+    type Error = ParseError;
+    fn try_from(value: crate::RawPayload<D::Payload>) -> Result<Self, Self::Error> {
+        Self::try_from_payload(value.0)
+    }
+}
+
+#[cfg(any(feature = "alloc", feature = "uuid"))]
+macro_rules! infallible_payload {
+    ($payload:ty) => {
+        impl<D: Domain<Payload = $payload>> From<$payload> for ObjectId<D> {
+            fn from(payload: $payload) -> Self {
+                let _definition = D::DEFINITION;
+                Self::from_validated(payload)
+            }
+        }
+    };
+}
+#[cfg(feature = "alloc")]
+infallible_payload!(crate::Text);
+#[cfg(feature = "alloc")]
+infallible_payload!(crate::IntegerText);
+#[cfg(all(feature = "alloc", feature = "uuid"))]
+infallible_payload!(crate::UuidText);
+#[cfg(feature = "uuid")]
+infallible_payload!(crate::Uuid);

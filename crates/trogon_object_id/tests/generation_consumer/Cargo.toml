@@ -1,0 +1,16 @@
+[package]
+name = "object-id-generation-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+browser-backend = ["dep:uuid"]
+
+[dependencies]
+ids = { package = "trogon_object_id", path = "../..", default-features = false, features = ["macros", "uuid-generate"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+uuid = { version = "1.26", default-features = false, features = ["js"], optional = true }

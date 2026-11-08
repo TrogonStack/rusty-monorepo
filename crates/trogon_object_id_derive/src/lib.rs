@@ -31,12 +31,14 @@ struct IdOptions {
     prefix: LitStr,
     separator: LitStr,
     template: Option<Type>,
+    fallible: bool,
 }
 
 fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
     let mut prefix = None;
     let mut separator = None;
     let mut template = None;
+    let mut fallible = false;
     for attribute in &input.attrs {
         if !attribute.path().is_ident("object_id") {
             continue;
@@ -52,6 +54,11 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
                     return Err(meta.error("duplicate object_id separator"));
                 }
                 separator = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("fallible") {
+                if fallible {
+                    return Err(meta.error("duplicate object_id fallible"));
+                }
+                fallible = true;
             } else if meta.path.is_ident("payload") {
                 return Err(meta.error("ObjectId infers its payload from the tuple field; remove the payload option"));
             } else if meta.path.is_ident("template") {
@@ -60,12 +67,13 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
                 }
                 template = Some(meta.value()?.parse()?);
             } else {
-                return Err(meta.error("expected prefix, separator, or template"));
+                return Err(meta.error("expected prefix, separator, template or fallible"));
             }
             Ok(())
         })?;
     }
     Ok(IdOptions {
+        fallible,
         prefix: prefix
             .ok_or_else(|| syn::Error::new_spanned(&input.ident, "missing #[object_id(prefix = \"...\")]"))?,
         separator: separator.unwrap_or_else(|| LitStr::new("_", proc_macro2::Span::call_site())),
@@ -133,7 +141,26 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let template = options
         .template
         .map(|template| quote!(#path::__impl_template_domain!(#name, #template, direct);));
+    let conversion = if options.fallible {
+        quote! {
+            impl ::core::convert::TryFrom<#payload> for #name {
+                type Error = #path::ParseError;
+                fn try_from(value: #payload) -> ::core::result::Result<Self, Self::Error> {
+                    Self::try_from_payload(value)
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl ::core::convert::From<#payload> for #name {
+                fn from(value: #payload) -> Self {
+                    Self(#path::ObjectId::<Self>::from(value).into_payload())
+                }
+            }
+        }
+    };
     Ok(quote! {
+        #conversion
         const _: #path::Definition = #path::Definition::new(#prefix, #separator);
         impl #path::Domain for #name {
             const DEFINITION: #path::Definition = #path::Definition::new(#prefix, #separator);
@@ -143,8 +170,10 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             pub fn try_from_raw(value: &str) -> ::core::result::Result<Self, #path::ParseError> {
                 #path::ObjectId::<Self>::try_from_raw(value).map(|value| Self(value.into_payload()))
             }
-            pub fn try_from_owned(value: ::std::string::String) -> ::core::result::Result<Self, #path::ParseError> {
+            #path::__with_alloc! {
+            pub fn try_from_owned(value: #path::__private::String) -> ::core::result::Result<Self, #path::ParseError> {
                 #path::ObjectId::<Self>::try_from_owned(value).map(|value| Self(value.into_payload()))
+            }
             }
             pub fn try_from_payload(value: #payload) -> ::core::result::Result<Self, #path::ParseError> {
                 #path::ObjectId::<Self>::try_from_payload(value).map(|value| Self(value.into_payload()))
@@ -162,7 +191,9 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             const DEFINITION: #path::Definition = <Self as #path::Domain>::DEFINITION;
             type Raw = <#payload as #path::Payload>::Raw;
             fn try_from_raw(value: &str) -> ::core::result::Result<Self, #path::ParseError> { Self::try_from_raw(value) }
-            fn try_from_owned(value: ::std::string::String) -> ::core::result::Result<Self, #path::ParseError> { Self::try_from_owned(value) }
+            #path::__with_alloc! {
+            fn try_from_owned(value: #path::__private::String) -> ::core::result::Result<Self, #path::ParseError> { Self::try_from_owned(value) }
+            }
             fn as_raw(&self) -> &Self::Raw { self.as_raw() }
         }
         impl ::core::str::FromStr for #name {
@@ -175,11 +206,13 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             type Error = #path::ParseError;
             fn try_from(value: &str) -> ::core::result::Result<Self, Self::Error> { value.parse() }
         }
-        impl ::core::convert::TryFrom<::std::string::String> for #name {
+        #path::__with_alloc! {
+        impl ::core::convert::TryFrom<#path::__private::String> for #name {
             type Error = #path::ParseError;
-            fn try_from(value: ::std::string::String) -> ::core::result::Result<Self, Self::Error> {
+            fn try_from(value: #path::__private::String) -> ::core::result::Result<Self, Self::Error> {
                 #path::ObjectId::<Self>::try_from(value).map(|value| Self(value.into_payload()))
             }
+        }
         }
         impl ::core::fmt::Display for #name {
             fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
@@ -279,9 +312,10 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 value.parse()
             }
         }
-        impl ::core::convert::TryFrom<::std::string::String> for #name {
+        #path::__with_alloc! {
+        impl ::core::convert::TryFrom<#path::__private::String> for #name {
             type Error = #path::ParseError;
-            fn try_from(mut value: ::std::string::String) -> ::core::result::Result<Self, Self::Error> {
+            fn try_from(mut value: #path::__private::String) -> ::core::result::Result<Self, Self::Error> {
                 #(if let Some(raw) = <#members as #path::Identifier>::DEFINITION.strip_prefix(&value) {
                     let prefix_len = value.len() - raw.len();
                     value.drain(..prefix_len);
@@ -289,6 +323,7 @@ fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 })*
                 Err(#path::ParseError::UnknownPrefix)
             }
+        }
         }
         impl ::core::fmt::Display for #name {
             fn fmt(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {

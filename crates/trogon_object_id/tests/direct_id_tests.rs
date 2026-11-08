@@ -1,3 +1,4 @@
+#![cfg(feature = "alloc")]
 #![cfg(feature = "macros")]
 
 use trogon_object_id::{ObjectId, ParseError, Text};
@@ -114,13 +115,13 @@ fn derived_enum_accepts_direct_identifier_types() {
     }
 }
 
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "session")]
 #[repr(transparent)]
 struct SessionId(trogon_object_id::Uuid);
 
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 #[test]
 fn direct_uuid_identifiers_keep_binary_layout_and_checked_generation() {
     fn copy<T: Copy>(value: T) -> (T, T) {

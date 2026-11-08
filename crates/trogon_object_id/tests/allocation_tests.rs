@@ -1,4 +1,5 @@
-#![cfg(feature = "uuid")]
+#![cfg(feature = "alloc")]
+#![cfg(feature = "uuid-generate")]
 
 use std::alloc::System;
 use std::fmt::Write;

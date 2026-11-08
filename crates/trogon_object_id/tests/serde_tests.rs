@@ -1,3 +1,4 @@
+#![cfg(feature = "alloc")]
 #![cfg(all(feature = "serde", feature = "macros"))]
 
 use trogon_object_id::{IntegerText, ObjectId, ParseError, Text};

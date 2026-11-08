@@ -11,8 +11,8 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-uuid = { version = "1.26", features = ["v5"] }
-sha1_smol = "1.0"
+uuid = { version = "1.26", default-features = false, features = ["v5"] }
+sha1_smol = { version = "1.0", default-features = false }
 
 [dev-dependencies]
 stats_alloc = "0.1.10"

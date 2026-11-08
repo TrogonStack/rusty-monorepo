@@ -94,6 +94,18 @@ schemas mirror the public extension wire contract and use generic example
 names. Tests and the workspace example consume the fixture without an external
 protobuf compiler or network access.
 
+## Target portability
+
+This crate is host tooling and uses `std`, owned storage and filesystem I/O.
+Declare it under `build-dependencies`. Its generated markers, UUID constants,
+borrowed inputs and streaming recipe calls use the separate core-only
+`trogon_uuid` runtime. Generated code requires neither a target allocator nor
+randomness or a clock. Custom runtime implementations can have their own costs.
+
+`tests/portability_consumer` generates code through a renamed runtime dependency
+and links a final `no_std` Wasm executable with its own panic handler and no
+global allocator. Its normal target dependency graph excludes the host builder.
+
 ## License
 
 Licensed under [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0).

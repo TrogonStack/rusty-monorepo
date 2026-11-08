@@ -1,13 +1,21 @@
+#![no_std]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
-use std::fmt;
+use core::fmt;
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
+#[cfg(feature = "alloc")]
+use alloc::string::String;
 
 extern crate self as trogon_object_id;
 
 /// Derive checked identifier behavior for a transparent payload newtype or an enum of IDs.
 ///
 /// ```
+/// # #[cfg(feature = "alloc")]
+/// # {
 /// use trogon_object_id::{ObjectId, Text};
 /// #[derive(ObjectId)]
 /// #[object_id(prefix = "item")]
@@ -15,6 +23,7 @@ extern crate self as trogon_object_id;
 /// struct ItemId(Text);
 /// let id = ItemId::try_from_raw("abc")?;
 /// assert_eq!(id.to_string(), "item_abc");
+/// # }
 /// # Ok::<(), trogon_object_id::ParseError>(())
 /// ```
 ///
@@ -108,6 +117,8 @@ extern crate self as trogon_object_id;
 /// Enums derive parsing, formatting, member conversions, and prefix checks.
 ///
 /// ```
+/// # #[cfg(feature = "alloc")]
+/// # {
 /// use trogon_object_id::{ObjectId, Text};
 /// #[derive(ObjectId)]
 /// #[object_id(prefix = "user")]
@@ -121,6 +132,7 @@ extern crate self as trogon_object_id;
 /// enum PrincipalId { User(UserId), Service(ServiceId) }
 /// let id: PrincipalId = "user_abc".parse()?;
 /// assert!(matches!(id, PrincipalId::User(_)));
+/// # }
 /// # Ok::<(), trogon_object_id::ParseError>(())
 /// ```
 ///
@@ -392,9 +404,11 @@ mod object_id;
 mod payload;
 
 pub use object_id::ObjectId;
-#[cfg(feature = "uuid")]
+pub use payload::Payload;
+#[cfg(all(feature = "alloc", feature = "uuid"))]
 pub use payload::UuidText;
-pub use payload::{IntegerText, Payload, Text};
+#[cfg(feature = "alloc")]
+pub use payload::{IntegerText, Text};
 #[cfg(feature = "uuid")]
 pub use uuid::Uuid;
 
@@ -483,9 +497,9 @@ pub trait Generator {
 /// }
 /// let invalid = ObjectId::<InvoiceDomain>::generate::<Uuid4>();
 /// ```
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 pub struct Uuid4;
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 impl Generator for Uuid4 {
     type Payload = Uuid;
     fn generate() -> Result<Uuid, ParseError> {
@@ -494,9 +508,9 @@ impl Generator for Uuid4 {
 }
 
 /// Generates UUID version 7 values using the current time and system randomness.
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 pub struct Uuid7;
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 impl Generator for Uuid7 {
     type Payload = Uuid;
     fn generate() -> Result<Uuid, ParseError> {
@@ -517,6 +531,7 @@ pub trait Identifier: Sized {
     /// Applies the same validation as [`Self::try_from_raw`] to owned input.
     ///
     /// Text implementations should retain the input allocation where possible.
+    #[cfg(feature = "alloc")]
     fn try_from_owned(value: String) -> Result<Self, ParseError>;
     fn as_raw(&self) -> &Self::Raw;
 }
@@ -555,7 +570,6 @@ const fn prefix_byte(definition: Definition, index: usize) -> u8 {
     }
 }
 
-#[cfg(feature = "serde")]
 #[doc(hidden)]
 pub mod __private;
 
@@ -576,10 +590,10 @@ macro_rules! __impl_serde {
             fn deserialize<D: $crate::__private::serde::Deserializer<'de>>(
                 deserializer: D,
             ) -> ::core::result::Result<Self, D::Error> {
-                $crate::__private::deserialize_owned(
+                $crate::__deserialize!(
                     deserializer,
                     <Self as ::core::str::FromStr>::from_str,
-                    <Self as ::core::convert::TryFrom<::std::string::String>>::try_from,
+                    <Self as ::core::convert::TryFrom<$crate::__private::String>>::try_from,
                 )
             }
         }
@@ -596,3 +610,42 @@ macro_rules! __impl_serde {
 /// Explicit raw JSON field encoding for a concrete domain identifier.
 #[cfg(feature = "serde")]
 pub mod serde_raw;
+
+/// Explicit typed raw input for checked generic payload conversion.
+///
+/// Strings passed directly to `TryFrom` always mean complete prefixed identifiers.
+/// This wrapper carries a payload, and conversion still calls [`Payload::validate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawPayload<P: Payload>(pub P);
+
+#[cfg(feature = "alloc")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __with_alloc {
+    ($($tokens:tt)*) => { $($tokens)* };
+}
+
+#[cfg(not(feature = "alloc"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __with_alloc {
+    ($($tokens:tt)*) => {};
+}
+
+#[cfg(all(feature = "serde", feature = "alloc"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __deserialize {
+    ($deserializer:expr, $parse:expr, $owned:expr $(,)?) => {
+        $crate::__private::deserialize_owned($deserializer, $parse, $owned)
+    };
+}
+
+#[cfg(all(feature = "serde", not(feature = "alloc")))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __deserialize {
+    ($deserializer:expr, $parse:expr, $owned:expr $(,)?) => {
+        $crate::__private::deserialize($deserializer, $parse)
+    };
+}
