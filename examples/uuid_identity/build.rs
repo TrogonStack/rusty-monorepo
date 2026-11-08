@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 use trogon_uuid_build::{Config, Template};
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "Cargo build scripts send dependency-tracking directives through stdout."
+    )
+)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = "../../crates/trogon_uuid_build/tests/fixtures/recipes.binpb";
     println!("cargo:rerun-if-changed={fixture}");

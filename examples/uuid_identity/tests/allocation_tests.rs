@@ -4,10 +4,8 @@ use std::alloc::System;
 use std::hint::black_box;
 
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
-use uuid_identity_example::{
-    generated::{SkuIdentityV1, SkuIdentityV1Input},
-    SkuId,
-};
+use uuid_identity_example::generated::{SkuIdentityV1, SkuIdentityV1Input};
+use uuid_identity_example::SkuId;
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
