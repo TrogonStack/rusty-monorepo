@@ -6,7 +6,7 @@ use crate::commands::ai::skills::eval::print_json;
 use crate::exit_code::ExitCode;
 use crate::output::OutputFormat;
 use clap::Args;
-use serde_json::json;
+use serde::Serialize;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -30,6 +30,13 @@ pub struct FeedbackValidateArgs {
 }
 
 impl FeedbackValidateArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self) -> ExitCode {
         let report = match validate_feedback(&self.report_dir) {
             Ok(report) => report,
@@ -52,11 +59,17 @@ impl FeedbackValidateArgs {
         // breakdown, so under `json` it rides in the document rather than on
         // stderr where a parser will not see it.
         if self.output_format.is_json() {
-            let document = json!({
-                "report_dir": self.report_dir.display().to_string(),
-                "validated": report.validated,
-                "errors": report.errors,
-            });
+            #[derive(Serialize)]
+            struct FeedbackValidateDocument<'a> {
+                report_dir: String,
+                validated: usize,
+                errors: &'a [String],
+            }
+            let document = FeedbackValidateDocument {
+                report_dir: self.report_dir.display().to_string(),
+                validated: report.validated,
+                errors: &report.errors,
+            };
             return print_json(&document, ExitCode::from_gate(!failed));
         }
 
@@ -74,46 +87,5 @@ impl FeedbackValidateArgs {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agentskills::feedback::init_feedback;
-    use crate::commands::ai::skills::eval::feedback::testutil::sample_report_dir;
-
-    #[test]
-    fn validate_command_accepts_valid_feedback() {
-        let temp = tempfile::tempdir().unwrap();
-        let report_dir = sample_report_dir(&temp);
-        init_feedback(&report_dir, Some("reviewer@example.com")).unwrap();
-
-        let status = FeedbackValidateArgs {
-            report_dir,
-            output_format: OutputFormat::Text,
-        }
-        .handle();
-        assert_eq!(status, ExitCode::Success);
-    }
-
-    #[test]
-    fn validate_command_rejects_invalid_feedback() {
-        let temp = tempfile::tempdir().unwrap();
-        let report_dir = sample_report_dir(&temp);
-        init_feedback(&report_dir, Some("reviewer@example.com")).unwrap();
-
-        std::fs::write(
-            report_dir.join("runs/run-001/feedback.json"),
-            r#"{
-                "reviewer": "reviewer@example.com",
-                "reviewed_at": "not-a-timestamp",
-                "notes": []
-            }"#,
-        )
-        .unwrap();
-
-        let status = FeedbackValidateArgs {
-            report_dir,
-            output_format: OutputFormat::Text,
-        }
-        .handle();
-        assert_eq!(status, ExitCode::GateFailed);
-    }
-}
+#[path = "validate_tests.rs"]
+mod tests;

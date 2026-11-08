@@ -1,47 +1,43 @@
+mod constants;
+use constants::WORKER_SHUTDOWN_GRACE;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::io::IsTerminal;
 use std::time::Duration;
 
 use http::HeaderValue;
-use rmcp::{
-    model::{ClientRequest, ErrorCode, ErrorData, JsonRpcMessage, JsonRpcRequest},
-    service::{RxJsonRpcMessage, TxJsonRpcMessage},
-    transport::{
-        async_rw::AsyncRwTransport,
-        auth::AuthClient,
-        stdio_pipes,
-        streamable_http_client::{
-            StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
-        },
-        Transport,
-    },
-    RoleClient, RoleServer,
+use rmcp::model::{ClientRequest, ErrorCode, ErrorData, JsonRpcMessage, JsonRpcRequest};
+use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
+use rmcp::transport::async_rw::AsyncRwTransport;
+use rmcp::transport::auth::AuthClient;
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClient, StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
+use rmcp::transport::{stdio_pipes, Transport};
+use rmcp::{RoleClient, RoleServer};
 use secrecy::ExposeSecret;
 use tracing::{debug, error, info, warn, Instrument, Span};
 
 use super::telemetry::{
     operation_duration, Connection, Endpoint, ExitReason, ObservedHttpClient, RequestSpan, Session, SessionEnd,
 };
-use crate::{
-    commands::mcp::McpContext,
-    config::ResolvedMcpServer,
-    oauth::{
-        ensure_credentials_for,
-        telemetry::{auth_error_type, record_error, OAuthHttp, OAuthStep},
-        EnsureError, EnsureOutcome,
-    },
-    telemetry::ContentCapture,
-};
+use crate::commands::mcp::McpContext;
+use crate::config::ResolvedMcpServer;
+use crate::oauth::telemetry::{auth_error_type, record_error, OAuthHttp, OAuthStep};
+use crate::oauth::{ensure_credentials_for, EnsureError, EnsureOutcome};
+use crate::telemetry::ContentCapture;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransportBuildError {
     #[error("invalid header `{name}`: {cause}")]
-    Header { name: String, cause: String },
+    Header {
+        name: String,
+        #[source]
+        cause: http::header::InvalidHeaderValue,
+    },
 
     #[error("HTTP client: {0}")]
-    Client(String),
+    Client(#[source] reqwest::Error),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,8 +65,6 @@ impl ProxyError {
         }
     }
 }
-
-const WORKER_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 /// How a bridge stopped, before it is reported as a [`ProxyError`].
 enum BridgeExit {
@@ -196,7 +190,7 @@ fn default_http_client() -> Result<reqwest::Client, TransportBuildError> {
         .pool_max_idle_per_host(0)
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|e| TransportBuildError::Client(e.to_string()))
+        .map_err(TransportBuildError::Client)
 }
 
 /// Answer the host over the protocol instead of dying before one exists.
@@ -339,7 +333,7 @@ fn streamable_http_config(cfg: &ResolvedMcpServer) -> Result<StreamableHttpClien
             name.clone(),
             HeaderValue::try_from(value).map_err(|e| TransportBuildError::Header {
                 name: name.to_string(),
-                cause: e.to_string(),
+                cause: e,
             })?,
         );
     }
@@ -351,82 +345,5 @@ fn streamable_http_config(cfg: &ResolvedMcpServer) -> Result<StreamableHttpClien
 }
 
 #[cfg(test)]
-mod tests {
-    use opentelemetry::trace::Status;
-    use opentelemetry_semantic_conventions::attribute::{ERROR_TYPE, RPC_RESPONSE_STATUS_CODE};
-    use serde_json::json;
-
-    use super::*;
-    use crate::telemetry::testing::capture;
-
-    #[test]
-    fn a_refused_request_is_an_error_span() {
-        let request: JsonRpcRequest<ClientRequest> = serde_json::from_value(json!({
-            "jsonrpc": "2.0", "id": 4, "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": { "name": "host", "version": "1" },
-            },
-        }))
-        .expect("valid request");
-
-        let (answer, trace) = capture(|| {
-            let root = tracing::info_span!("trg");
-            root.in_scope(|| refusal("weather", &request, "OAuth: not a terminal"))
-        });
-
-        trace.assert_child_of("initialize", "trg");
-        let code = ErrorCode::INTERNAL_ERROR.0.to_string();
-        assert_eq!(
-            trace
-                .attribute("initialize", RPC_RESPONSE_STATUS_CODE)
-                .map(|v| v.to_string()),
-            Some(code.clone())
-        );
-        assert_eq!(
-            trace.attribute("initialize", ERROR_TYPE).map(|v| v.to_string()),
-            Some(code)
-        );
-        assert!(matches!(
-            trace.span("initialize").map(|s| &s.status),
-            Some(Status::Error { .. })
-        ));
-        assert_eq!(
-            serde_json::to_value(&answer).expect("serializable")["error"]["message"],
-            json!("OAuth: not a terminal")
-        );
-    }
-
-    struct NeverCloses;
-
-    impl Transport<RoleClient> for NeverCloses {
-        type Error = std::convert::Infallible;
-
-        fn send(
-            &mut self,
-            _item: TxJsonRpcMessage<RoleClient>,
-        ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
-            std::future::ready(Ok(()))
-        }
-
-        async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
-            None
-        }
-
-        async fn close(&mut self) -> Result<(), Self::Error> {
-            std::future::pending().await
-        }
-    }
-
-    #[tokio::test]
-    async fn a_remote_that_never_closes_does_not_hold_the_proxy_open() {
-        let closed = tokio::time::timeout(
-            Duration::from_secs(5),
-            close_remote(&mut NeverCloses, Duration::from_millis(20)),
-        )
-        .await;
-
-        assert!(closed.is_ok(), "close_remote must return once the grace has passed");
-    }
-}
+#[path = "run_tests.rs"]
+mod tests;

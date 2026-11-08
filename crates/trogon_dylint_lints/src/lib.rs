@@ -449,6 +449,9 @@ rustc_session::declare_lint! {
     ///
     /// Detects equality checks and string probes that are driven by
     /// `std::error::Error` display text.
+    /// Diagnostic assertions in test functions and test-support code are
+    /// exempt because the rendered message and its redaction are their contract.
+    /// Production functions remain checked when compiled into a test target.
     ///
     /// ### Why is this bad?
     ///
@@ -1687,6 +1690,11 @@ rustc_session::impl_lint_pass!(
 fn ui() {
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui");
     dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui_test_module_roots");
+}
+
+#[test]
+fn ui_error_message_assertions() {
+    dylint_testing::ui_test(env!("CARGO_PKG_NAME"), "ui_error_string_tests");
 }
 
 #[test]

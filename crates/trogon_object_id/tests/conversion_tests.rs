@@ -1,3 +1,5 @@
+#[cfg(feature = "uuid")]
+use trogon_object_id::UuidText;
 use trogon_object_id::{IntegerText, ParseError, Text, MAX_VALUE_BYTES};
 
 #[test]
@@ -71,7 +73,6 @@ fn integer_conversions_preserve_syntax_and_allocation() {
 #[cfg(feature = "uuid")]
 #[test]
 fn uuid_text_conversions_keep_case_and_owned_storage() {
-    use trogon_object_id::UuidText;
     let raw = "550E8400-E29B-41D4-A716-446655440000";
     let owned = raw.to_owned();
     let pointer = owned.as_ptr();

@@ -1,3 +1,8 @@
+#[cfg(feature = "serde")]
+use serde::de::value::{Error, StringDeserializer};
+#[cfg(feature = "serde")]
+use serde::Deserialize;
+use std::sync::atomic::Ordering;
 use trogon_object_id::{Definition, Domain, ObjectId};
 
 struct TextDomain;
@@ -73,8 +78,6 @@ fn binary_ids_are_copy_without_traits_on_the_domain_marker() {
 #[cfg(feature = "serde")]
 #[test]
 fn generic_and_raw_serde_decoders_reuse_owned_text() {
-    use serde::de::value::{Error, StringDeserializer};
-    use serde::Deserialize;
     let full = String::from("text_owned-value");
     let pointer = full.as_ptr();
     let id = ObjectId::<TextDomain>::deserialize(StringDeserializer::<Error>::new(full)).expect("owned serde text");
@@ -196,7 +199,6 @@ impl trogon_object_id::Generator for CountingGenerator {
 
 #[test]
 fn immutable_text_guarantees_are_established_once() {
-    use std::sync::atomic::Ordering;
     VALIDATION_CALLS.store(0, Ordering::Relaxed);
     let payload = CountingText::try_from("valid").expect("validated text");
     let id = ObjectId::<CountingDomain>::try_from_payload(payload).expect("wrap validated text");

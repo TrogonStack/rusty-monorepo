@@ -1,6 +1,9 @@
 //! MCP client spans for a recording session: one per JSON-RPC request `trg`
 //! sends the real server, under the CLI span of the server process.
 
+mod constants;
+pub(super) use constants::PROTOCOL_VERSION;
+use constants::{DURATION_BUCKETS, PIPE, TOOL_ERROR};
 use std::borrow::Cow;
 use std::time::Instant;
 
@@ -20,19 +23,6 @@ use crate::telemetry::semconv::generated::attributes::{
 };
 use crate::telemetry::semconv::generated::metrics::MCP_CLIENT_OPERATION_DURATION;
 use crate::telemetry::ContentCapture;
-
-/// The protocol revision the recording client offers in `initialize`.
-pub(super) const PROTOCOL_VERSION: &str = "2024-11-05";
-
-/// JSON-RPC over a child's stdin and stdout.
-const PIPE: &str = "pipe";
-
-/// `error.type` for a `tools/call` the server answered with `isError: true`.
-const TOOL_ERROR: &str = "tool_error";
-
-const DURATION_BUCKETS: [f64; 14] = [
-    0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
-];
 
 impl RecordingError {
     /// The low-cardinality `error.type` a failed request is reported under. A

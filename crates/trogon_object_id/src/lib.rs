@@ -289,8 +289,9 @@ extern crate self as trogon_object_id;
 #[cfg(feature = "macros")]
 pub use trogon_object_id_derive::ObjectId;
 
-/// Maximum UTF-8 byte length accepted by the built-in payload codecs.
-pub const MAX_VALUE_BYTES: usize = 1024;
+mod constants;
+
+pub use constants::MAX_VALUE_BYTES;
 
 /// Validation failures that do not retain the rejected identifier text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -509,51 +510,7 @@ const fn prefix_byte(definition: Definition, index: usize) -> u8 {
 
 #[cfg(feature = "serde")]
 #[doc(hidden)]
-pub mod __private {
-    pub use serde;
-    use std::fmt;
-    use std::marker::PhantomData;
-
-    pub fn serialize<T: fmt::Display, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(value)
-    }
-
-    pub fn deserialize_owned<'de, T, E, D, F, O>(deserializer: D, parse: F, parse_owned: O) -> Result<T, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-        F: Fn(&str) -> Result<T, E>,
-        O: Fn(String) -> Result<T, E>,
-        E: fmt::Display,
-    {
-        struct StringVisitor<T, F, O> {
-            parse: F,
-            parse_owned: O,
-            marker: PhantomData<fn() -> T>,
-        }
-        impl<'de, T, E, F, O> serde::de::Visitor<'de> for StringVisitor<T, F, O>
-        where
-            F: Fn(&str) -> Result<T, E>,
-            O: Fn(String) -> Result<T, E>,
-            E: fmt::Display,
-        {
-            type Value = T;
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a validated identifier string")
-            }
-            fn visit_str<E2: serde::de::Error>(self, value: &str) -> Result<T, E2> {
-                (self.parse)(value).map_err(E2::custom)
-            }
-            fn visit_string<E2: serde::de::Error>(self, value: String) -> Result<T, E2> {
-                (self.parse_owned)(value).map_err(E2::custom)
-            }
-        }
-        deserializer.deserialize_str(StringVisitor {
-            parse,
-            parse_owned,
-            marker: PhantomData,
-        })
-    }
-}
+pub mod __private;
 
 #[cfg(feature = "serde")]
 #[doc(hidden)]
@@ -591,16 +548,4 @@ macro_rules! __impl_serde {
 
 /// Explicit raw JSON field encoding for a concrete domain identifier.
 #[cfg(feature = "serde")]
-pub mod serde_raw {
-    use crate::Identifier;
-    /// Encodes only the raw payload, so storage must establish the identifier's domain.
-    pub fn serialize<T: Identifier, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(value.as_raw())
-    }
-    /// Decodes an unprefixed string through the identifier's checked raw constructor.
-    ///
-    /// The adapter accepts owned strings without discarding their allocation.
-    pub fn deserialize<'de, T: Identifier, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
-        crate::__private::deserialize_owned(deserializer, T::try_from_raw, T::try_from_owned)
-    }
-}
+pub mod serde_raw;

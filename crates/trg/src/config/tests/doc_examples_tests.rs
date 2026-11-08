@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use toml::Value;
 
-use super::FileRoot;
+use super::super::FileRoot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
