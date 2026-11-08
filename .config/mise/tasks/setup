@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description = "Install required tools and build the workspace"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+mise install rust cargo:cargo-dylint cargo:dylint-link
+mise run lints:toolchain
+mise run build:debug
