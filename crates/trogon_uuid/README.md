@@ -2,7 +2,10 @@
 
 Static UUIDv5 identity recipes with borrowed typed inputs. The crate reuses
 [`uuid::Uuid`](https://docs.rs/uuid/latest/uuid/struct.Uuid.html) and has no
-protobuf runtime dependency.
+protobuf runtime dependency. The runtime is `#![no_std]` and requires neither
+`std` nor a global allocator. UUID and hashing dependency defaults are disabled;
+UUIDv5 enables no random or time generation backend. Host build tooling remains
+a separate crate.
 
 ## Derive a UUID from exact bytes
 
