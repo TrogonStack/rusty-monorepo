@@ -27,3 +27,11 @@ if printf '%s\n' "$tree" | grep -E 'features=\[[^]]*(std|alloc|rng|getrandom|v4|
   echo 'deterministic UUID runtime enabled an owned or platform capability' >&2
   exit 1
 fi
+generated=crates/trogon_uuid_build/tests/portability_consumer/Cargo.toml
+cargo test --locked --manifest-path "$generated" --lib
+tree=$(cargo tree --locked --manifest-path "$generated" --edges normal,no-proc-macro --format '{p} features=[{f}]')
+printf '%s\n' "$tree"
+if printf '%s\n' "$tree" | grep -E 'features=\[[^]]*(std|alloc|rng|getrandom|v4|v7)|getrandom v'; then
+  echo 'generated target code enabled an owned or platform capability' >&2
+  exit 1
+fi
