@@ -1,15 +1,17 @@
 # Generated UUID identities
 
 This workspace example compiles public protobuf UUID options into Rust recipes
-in `build.rs`, then binds a recipe to an object-ID newtype.
+in `build.rs`, then binds a recipe to an object-ID newtype. The example runtime
+is `#![no_std]` and uses neither an allocator nor random or time generation.
+The build script and generator remain host tools with `std` and filesystem I/O.
 
 ```rust
-use uuid_identity_example::{generated::SkuIdentityV1Input, SkuId};
+use uuid_identity_example::{generated::{SkuIdentityV1, SkuIdentityV1Input}, SkuId};
 
-let id = SkuId::from_identity(SkuIdentityV1Input {
+let id = SkuId::from(SkuIdentityV1::uuid5(SkuIdentityV1Input {
     warehouse_id: "warehouse-17",
     sku_code: "ABC-123",
-})?;
+}));
 assert_eq!(id.to_string(), "sku_1724f7cd-15b8-5e76-ba00-70d188c9b209");
 # Ok::<(), trogon_object_id::ParseError>(())
 ```

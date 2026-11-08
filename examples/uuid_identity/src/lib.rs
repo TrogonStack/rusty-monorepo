@@ -1,5 +1,9 @@
+#![no_std]
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
+
+#[cfg(test)]
+extern crate std;
 
 pub mod generated;
 

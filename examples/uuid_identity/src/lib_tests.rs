@@ -1,3 +1,5 @@
+use std::string::ToString;
+
 use super::generated::*;
 use super::SkuId;
 

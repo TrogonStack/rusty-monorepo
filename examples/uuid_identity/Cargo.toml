@@ -9,8 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-trogon_uuid = { path = "../../crates/trogon_uuid" }
-trogon_object_id = { path = "../../crates/trogon_object_id", features = ["macros", "template"] }
+trogon_uuid = { path = "../../crates/trogon_uuid", default-features = false }
+trogon_object_id = { path = "../../crates/trogon_object_id", default-features = false, features = ["macros", "template"] }
 
 [build-dependencies]
 trogon_uuid_build = { path = "../../crates/trogon_uuid_build" }

@@ -310,6 +310,7 @@ Enable `macros` and `template` to select a recipe using a Rust type path:
 #         }
 #     }
 # }
+# use trogon_object_id::UuidTemplate;
 use trogon_object_id::{ObjectId, Uuid};
 
 #[derive(ObjectId)]
@@ -317,9 +318,9 @@ use trogon_object_id::{ObjectId, Uuid};
 #[repr(transparent)]
 struct ItemId(Uuid);
 
-let item = ItemId::from_identity(generated::ItemIdentityV1Input {
+let item = ItemId::from(generated::ItemIdentityV1::uuid5(generated::ItemIdentityV1Input {
     external_key: "example.org",
-})?;
+}));
 assert_eq!(item.payload().get_version_num(), 5);
 # }
 # Ok::<(), trogon_object_id::ParseError>(())
@@ -327,8 +328,10 @@ assert_eq!(item.payload().get_version_num(), 5);
 
 The recipe owns its namespace, version and input contract. The attribute binds
 the ID to that recipe without repeating namespace or template strings.
+`From<Uuid>` wraps the recipe output directly. The compatibility convenience
 `from_identity` receives the recipe's associated input type and wraps its UUID
-through the same checked constructor. Generated recipes can come from
+through the same checked constructor. Neither path enables random generation
+or an allocator. Generated recipes can come from
 `trogon_uuid_build`; protobuf descriptors remain a build-time dependency.
 
 A binding selects the convenience constructor; it does not restrict the other
