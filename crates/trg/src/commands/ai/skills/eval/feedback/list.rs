@@ -5,7 +5,7 @@ use crate::commands::ai::skills::eval::print_json;
 use crate::exit_code::ExitCode;
 use crate::output::OutputFormat;
 use clap::Args;
-use serde_json::json;
+use serde::Serialize;
 
 #[derive(Args)]
 #[command(after_help = "\
@@ -29,6 +29,13 @@ pub struct FeedbackListArgs {
 }
 
 impl FeedbackListArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self) -> ExitCode {
         let pending = match list_runs_needing_review(&self.report_dir) {
             Ok(pending) => pending,
@@ -39,10 +46,15 @@ impl FeedbackListArgs {
         };
 
         if self.output_format.is_json() {
-            let document = json!({
-                "report_dir": self.report_dir.display().to_string(),
-                "pending": pending,
-            });
+            #[derive(Serialize)]
+            struct FeedbackListDocument<'a> {
+                report_dir: String,
+                pending: &'a [String],
+            }
+            let document = FeedbackListDocument {
+                report_dir: self.report_dir.display().to_string(),
+                pending: &pending,
+            };
             return print_json(&document, ExitCode::Success);
         }
 
@@ -60,29 +72,5 @@ impl FeedbackListArgs {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agentskills::feedback::init_feedback;
-    use crate::commands::ai::skills::eval::feedback::testutil::sample_report_dir;
-
-    #[test]
-    fn list_command_reports_pending_runs() {
-        let temp = tempfile::tempdir().unwrap();
-        let report_dir = sample_report_dir(&temp);
-
-        let status = FeedbackListArgs {
-            report_dir: report_dir.clone(),
-            output_format: OutputFormat::Text,
-        }
-        .handle();
-        assert_eq!(status, ExitCode::Success);
-
-        init_feedback(&report_dir, Some("reviewer@example.com")).unwrap();
-        let status = FeedbackListArgs {
-            report_dir,
-            output_format: OutputFormat::Text,
-        }
-        .handle();
-        assert_eq!(status, ExitCode::Success);
-    }
-}
+#[path = "list_tests.rs"]
+mod tests;

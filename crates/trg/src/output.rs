@@ -37,6 +37,13 @@ impl OutputFormat {
 /// Under either format the result goes to stdout and everything that stopped
 /// the command from producing one goes to stderr, so `--output-format json` piped
 /// into a parser never has prose in front of it.
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+    )
+)]
 pub fn print_json<T: Serialize>(value: &T, code: ExitCode) -> ExitCode {
     match serde_json::to_string_pretty(value) {
         Ok(rendered) => {
