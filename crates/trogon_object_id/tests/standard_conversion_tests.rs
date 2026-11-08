@@ -1,21 +1,35 @@
 #![cfg(feature = "macros")]
 
+#[cfg(feature = "alloc")]
+use trogon_object_id::{IntegerText, Text};
 use trogon_object_id::{ObjectId, ParseError, Payload};
 
 #[derive(Debug)]
 struct Custom(bool);
 impl core::fmt::Display for Custom {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str("allowed") }
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("allowed")
+    }
 }
 impl Payload for Custom {
     type Raw = Self;
     fn parse(value: &str) -> Result<Self, ParseError> {
-        if value == "allowed" { Ok(Self(true)) } else { Err(ParseError::InvalidValue) }
+        if value == "allowed" {
+            Ok(Self(true))
+        } else {
+            Err(ParseError::InvalidValue)
+        }
     }
     fn validate(&self) -> Result<(), ParseError> {
-        if self.0 { Ok(()) } else { Err(ParseError::InvalidValue) }
+        if self.0 {
+            Ok(())
+        } else {
+            Err(ParseError::InvalidValue)
+        }
     }
-    fn as_raw(&self) -> &Self { self }
+    fn as_raw(&self) -> &Self {
+        self
+    }
 }
 #[derive(Debug, ObjectId)]
 #[object_id(prefix = "custom", fallible)]
@@ -24,7 +38,10 @@ struct CustomId(Custom);
 
 #[test]
 fn custom_standard_conversions_cannot_bypass_validation() {
-    assert!(matches!(CustomId::try_from(Custom(false)), Err(ParseError::InvalidValue)));
+    assert!(matches!(
+        CustomId::try_from(Custom(false)),
+        Err(ParseError::InvalidValue)
+    ));
     let id = CustomId::try_from(Custom(true)).expect("checked custom payload");
     assert_eq!(id.to_string(), "custom_allowed", "domain remains attached");
     let generic = trogon_object_id::ObjectId::<CustomId>::try_from(trogon_object_id::RawPayload(Custom(true)))
@@ -36,7 +53,6 @@ fn custom_standard_conversions_cannot_bypass_validation() {
 #[cfg(feature = "alloc")]
 #[test]
 fn validated_text_converts_infallibly_and_full_strings_stay_unambiguous() {
-    use trogon_object_id::{IntegerText, Text};
     #[derive(ObjectId)]
     #[object_id(prefix = "text")]
     #[repr(transparent)]
@@ -49,7 +65,11 @@ fn validated_text_converts_infallibly_and_full_strings_stay_unambiguous() {
     let pointer = value.as_ptr();
     let payload = Text::try_from(value).expect("validated text");
     let id = TextId::from(payload);
-    assert_eq!(id.to_string(), "text_text_already-prefixed", "typed payload is never guessed to be full form");
+    assert_eq!(
+        id.to_string(),
+        "text_text_already-prefixed",
+        "typed payload is never guessed to be full form"
+    );
     assert_eq!(id.as_raw().as_ptr(), pointer, "typed conversion reuses storage");
     let id = TextId::try_from(String::from("text_already-prefixed")).expect("full form");
     assert_eq!(id.as_raw(), "already-prefixed", "strings always mean full form");

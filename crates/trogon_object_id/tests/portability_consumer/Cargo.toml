@@ -8,10 +8,12 @@ publish = false
 
 [features]
 default = []
+owned = ["ids/alloc", "dep:dlmalloc"]
 derive = ["ids/macros"]
 encoding = ["ids/serde", "dep:serde"]
 binary = ["ids/uuid"]
 
 [dependencies]
+dlmalloc = { version = "0.2", default-features = false, features = ["global"], optional = true }
 ids = { package = "trogon_object_id", path = "../..", default-features = false }
 serde = { version = "1.0", default-features = false, optional = true }

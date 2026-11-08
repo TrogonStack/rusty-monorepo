@@ -1,3 +1,4 @@
+#![cfg(feature = "alloc")]
 #![cfg(feature = "macros")]
 
 use trogon_object_id::{ObjectId, Text};
@@ -96,13 +97,13 @@ fn native_conditional_variants_preserve_dispatch_and_validation() {
     );
 }
 
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ObjectId)]
 #[object_id(prefix = "session")]
 #[repr(transparent)]
 struct SessionId(trogon_object_id::Uuid);
 
-#[cfg(feature = "uuid")]
+#[cfg(feature = "uuid-generate")]
 #[test]
 fn derived_identifiers_preserve_compact_copy_payloads() {
     fn copy<T: Copy>(value: T) -> (T, T) {
