@@ -3,7 +3,15 @@
 use proc_macro::TokenStream;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, LitStr, Type};
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        doc_hidden_access,
+        reason = "Syn documents LitStr as a public root re-export; this import is reported hidden by the pinned policy driver."
+    )
+)]
+use syn::LitStr;
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
 
 fn runtime_path() -> syn::Result<proc_macro2::TokenStream> {
     match crate_name("trogon_object_id") {
