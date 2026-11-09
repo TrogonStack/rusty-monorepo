@@ -1,4 +1,11 @@
 #![cfg_attr(
+    all(dylint_lib = "trogon_dylint_lints", test),
+    expect(
+        prefer_integration_tests,
+        reason = "The in-crate suites predate this rule and exercise exported modules through `use super::*`; moving them into tests/ needs a dedicated migration"
+    )
+)]
+#![cfg_attr(
     dylint_lib = "trogon_dylint_lints",
     expect(
         acyclic_modules,

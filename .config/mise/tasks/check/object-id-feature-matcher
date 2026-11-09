@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#MISE description = "Check the object-ID dependency capability matcher"
+set -euo pipefail
+source "${MISE_PROJECT_ROOT:?}/.config/mise/lib/object-id.sh"
+
+for feature in std alloc rng getrandom v4 v7; do
+  for features in "$feature" "serde,$feature" "$feature,serde" "serde,$feature,derive"; do
+    if ! printf 'example v0.1.0 features=[%s]\n' "$features" | object_id_forbidden_features >/dev/null; then
+      printf 'missed forbidden feature token: %s\n' "$features" >&2
+      exit 1
+    fi
+  done
+done
+
+for features in '' serde 'allocator-api' nostd 'v4-compat' 'rng-support' 'getrandom-helper' 'serde,allocator-api,derive'; do
+  if printf 'example v0.1.0 features=[%s]\n' "$features" | object_id_forbidden_features >/dev/null; then
+    printf 'matched an unrelated feature token: %s\n' "$features" >&2
+    exit 1
+  fi
+done
+
+if ! printf '  └── getrandom v0.4.3 features=[]\n' | object_id_forbidden_features >/dev/null; then
+  echo 'missed the randomness dependency' >&2
+  exit 1
+fi
