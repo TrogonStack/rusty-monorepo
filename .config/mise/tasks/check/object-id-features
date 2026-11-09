@@ -2,6 +2,8 @@
 #MISE description = "Test core and owned object-ID capabilities independently"
 set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
+source "$MISE_PROJECT_ROOT/.config/mise/lib/object-id.sh"
+bash "$MISE_PROJECT_ROOT/.config/mise/tasks/check/object-id-feature-matcher"
 cargo test --locked -p trogon_object_id --no-default-features
 for feature in serde uuid macros macros,serde macros,uuid macros,serde,uuid alloc alloc,serde alloc,uuid alloc,macros alloc,macros,serde alloc,macros,uuid uuid-generate; do
   cargo test --locked -p trogon_object_id --no-default-features --features "$feature"
@@ -18,7 +20,7 @@ cargo build --locked --manifest-path "$consumer" --target wasm32-unknown-unknown
 cargo build --locked --manifest-path "$consumer" --target wasm32-unknown-unknown --no-default-features --features owned,derive,encoding,binary
 tree=$(cargo tree --locked --manifest-path "$consumer" --no-default-features --features derive,encoding,binary --edges normal,no-proc-macro --format '{p} features=[{f}]')
 printf '%s\n' "$tree"
-if printf '%s\n' "$tree" | grep -E 'features=\[[^]]*(std|alloc|rng|getrandom|v4|v7)|getrandom v'; then
+if printf '%s\n' "$tree" | object_id_forbidden_features; then
   echo 'core-only consumer enabled an owned or platform capability' >&2
   exit 1
 fi
