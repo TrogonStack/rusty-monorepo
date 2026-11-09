@@ -37,3 +37,55 @@ fn typed_claims_keep_the_identity_subject_without_backend_mapping() {
     );
     assert_eq!(ingested.identity().key().sub().as_str(), "user@example.com#fragment");
 }
+
+#[cfg(feature = "spicedb")]
+mod spicedb {
+    use super::*;
+    use trogon_claims::{HasSubject, ObjectId, ObjectType, SubjectMapping, SubjectRef, Verbatim};
+    struct UserClaims {
+        subject: ObjectId,
+    }
+
+    impl ClaimSet for UserClaims {}
+
+    impl HasSubject for UserClaims {
+        const SUBJECT_TYPE: ObjectType = ObjectType::from_static_unchecked("user");
+        type Mapping = Verbatim;
+
+        fn subject(&self) -> SubjectRef<'_> {
+            SubjectRef::new(Self::SUBJECT_TYPE, &self.subject)
+        }
+    }
+
+    impl IngestClaims for UserClaims {
+        fn try_from_raw(_raw: &RawClaims, key: &PrincipalKey) -> Result<Self, IngestError> {
+            let subject = <<Self as HasSubject>::Mapping as SubjectMapping>::map(key.sub())
+                .map_err(|error| IngestError::claim_for(WellKnownClaim::Sub, error))?;
+            Ok(Self { subject })
+        }
+    }
+
+    fn profile() -> IngestProfile {
+        IngestProfile::new(
+            AuthenticationType::try_new("jwt").unwrap(),
+            NameClaimType::new(WellKnownClaim::PreferredUsername.into()),
+            RoleClaimType::new(WellKnownClaim::Roles.into()),
+        )
+    }
+
+    #[test]
+    fn a_typed_claim_set_exposes_its_mapped_subject() {
+        let raw = RawClaims::from_slice(br#"{"iss":"https://issuer.example.com","sub":"user-42"}"#).unwrap();
+        let ingested = Identity::<UserClaims>::ingest(&raw, &profile()).unwrap();
+        let subject = ingested.identity().subject();
+        assert_eq!(subject.object_type().as_str(), "user");
+        assert_eq!(subject.id().as_str(), "user-42");
+    }
+
+    #[test]
+    fn a_subject_the_mapping_refuses_fails_ingest() {
+        let raw = RawClaims::from_slice(br#"{"iss":"https://issuer.example.com","sub":"*"}"#).unwrap();
+        let error = Identity::<UserClaims>::ingest(&raw, &profile()).err().unwrap();
+        assert!(matches!(error, IngestError::Claim { .. }));
+    }
+}
