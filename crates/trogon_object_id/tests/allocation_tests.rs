@@ -1,0 +1,190 @@
+#![cfg(feature = "alloc")]
+#![cfg(feature = "uuid-generate")]
+
+use std::alloc::System;
+use std::fmt::Write;
+use std::hint::black_box;
+
+use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
+use trogon_object_id::{Definition, Domain, IntegerText, ObjectId, Text, Uuid, Uuid4, Uuid7, UuidText};
+
+#[global_allocator]
+static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+
+struct SessionDomain;
+impl Domain for SessionDomain {
+    const DEFINITION: Definition = Definition::new("session", "_");
+    type Payload = Uuid;
+}
+type SessionId = ObjectId<SessionDomain>;
+
+struct TextDomain;
+impl Domain for TextDomain {
+    const DEFINITION: Definition = Definition::new("text", "_");
+    type Payload = Text;
+}
+type TextId = ObjectId<TextDomain>;
+
+struct Buffer {
+    bytes: [u8; 64],
+    len: usize,
+}
+impl Write for Buffer {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let end = self.len + value.len();
+        self.bytes
+            .get_mut(self.len..end)
+            .ok_or(std::fmt::Error)?
+            .copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn without_allocations<T>(action: impl FnOnce() -> T) -> T {
+    let region = Region::new(GLOBAL);
+    let result = action();
+    let delta = region.change();
+    assert_eq!(delta.allocations, 0, "operation must not allocate");
+    assert_eq!(delta.reallocations, 0, "operation must not reallocate");
+    result
+}
+
+#[test]
+fn typed_uuid_operations_and_owned_text_need_no_extra_allocations() {
+    let region = Region::new(GLOBAL);
+    black_box(String::from("positive allocation control"));
+    assert!(
+        region.change().allocations > 0,
+        "allocator instrumentation must observe real allocations"
+    );
+
+    let parsed = without_allocations(|| {
+        black_box("session_550E8400-E29B-41D4-A716-446655440000")
+            .parse::<SessionId>()
+            .expect("valid UUID")
+    });
+    let copied = without_allocations(|| black_box(parsed));
+    let typed = without_allocations(|| SessionId::try_from_payload(black_box(*copied.payload())).expect("typed UUID"));
+    without_allocations(|| {
+        let mut buffer = Buffer { bytes: [0; 64], len: 0 };
+        write!(&mut buffer, "{typed}").expect("fixed output capacity");
+        black_box(buffer);
+    });
+
+    let _warm_random = SessionId::generate::<Uuid4>().expect("warm UUID4 system randomness");
+    let _warm_time = SessionId::generate::<Uuid7>().expect("warm UUID7 system randomness");
+    without_allocations(|| {
+        black_box(SessionId::generate::<Uuid4>().expect("UUID4"));
+        black_box(SessionId::generate::<Uuid7>().expect("UUID7"));
+    });
+
+    let text = String::from("owned-value");
+    let pointer = text.as_ptr();
+    let id = without_allocations(|| TextId::try_from_owned(text).expect("owned raw text"));
+    assert_eq!(id.as_raw().as_ptr(), pointer, "owned raw text keeps its buffer");
+    let full = String::from("text_owned-value");
+    let pointer = full.as_ptr();
+    let id = without_allocations(|| TextId::try_from(full).expect("owned full text"));
+    assert_eq!(id.as_raw().as_ptr(), pointer, "owned full text keeps its buffer");
+
+    for invalid in ["", "1\n", "not-a-number"] {
+        without_allocations(|| {
+            black_box(IntegerText::try_from(black_box(invalid))).expect_err("invalid integer");
+        });
+    }
+    for invalid in ["", "a\n", "not-a-uuid", "550e8400e29b41d4a716446655440000"] {
+        without_allocations(|| {
+            black_box(UuidText::try_from(black_box(invalid))).expect_err("invalid UUID text");
+        });
+    }
+    let integer = String::from("+00042");
+    let pointer = integer.as_ptr();
+    let integer = without_allocations(|| IntegerText::try_from(integer).expect("owned integer"));
+    let text = without_allocations(|| Text::from(integer));
+    let integer = without_allocations(|| IntegerText::try_from(text).expect("text narrowing"));
+    let integer = without_allocations(|| String::from(integer));
+    assert_eq!(integer.as_ptr(), pointer, "integer conversions preserve storage");
+    let uuid = String::from("550E8400-E29B-41D4-A716-446655440000");
+    let pointer = uuid.as_ptr();
+    let uuid = without_allocations(|| UuidText::try_from(uuid).expect("owned UUID text"));
+    let text = without_allocations(|| Text::from(uuid));
+    let uuid = without_allocations(|| UuidText::try_from(text).expect("UUID text narrowing"));
+    let uuid = without_allocations(|| String::from(uuid));
+    assert_eq!(uuid.as_ptr(), pointer, "UUID text conversions preserve storage");
+
+    #[cfg(feature = "serde")]
+    without_allocations(|| {
+        let mut bytes = [0_u8; 64];
+        let mut output = std::io::Cursor::new(bytes.as_mut_slice());
+        serde_json::to_writer(&mut output, &typed).expect("fixed JSON output capacity");
+        black_box(output.position());
+        black_box(
+            serde_json::from_str::<SessionId>("\"session_550e8400-e29b-41d4-a716-446655440000\"")
+                .expect("borrowed JSON UUID"),
+        );
+    });
+
+    #[cfg(feature = "macros")]
+    {
+        #[derive(Clone, Copy, trogon_object_id::ObjectId)]
+        #[object_id(prefix = "direct")]
+        #[repr(transparent)]
+        struct DirectId(Uuid);
+
+        let direct = without_allocations(|| {
+            black_box("direct_550e8400-e29b-41d4-a716-446655440000")
+                .parse::<DirectId>()
+                .expect("direct UUID")
+        });
+        #[derive(trogon_object_id::ObjectId)]
+        enum PrincipalId {
+            Direct(DirectId),
+        }
+        without_allocations(|| {
+            let principal = black_box("direct_550e8400-e29b-41d4-a716-446655440000")
+                .parse::<PrincipalId>()
+                .expect("enum UUID");
+            let mut buffer = Buffer { bytes: [0; 64], len: 0 };
+            write!(&mut buffer, "{principal}").expect("fixed enum output capacity");
+            black_box(buffer);
+            black_box(PrincipalId::from(direct));
+        });
+        without_allocations(|| {
+            black_box(DirectId::try_from_payload(black_box(*direct.payload())).expect("direct payload"));
+            let mut buffer = Buffer { bytes: [0; 64], len: 0 };
+            write!(&mut buffer, "{direct}").expect("fixed direct output capacity");
+            black_box(buffer);
+        });
+
+        #[derive(trogon_object_id::ObjectId)]
+        #[object_id(prefix = "direct_text")]
+        #[repr(transparent)]
+        struct DirectTextId(Text);
+        let raw = String::from("owned-value");
+        let pointer = raw.as_ptr();
+        let direct_text = without_allocations(|| DirectTextId::try_from_owned(raw).expect("direct owned raw"));
+        assert_eq!(direct_text.as_raw().as_ptr(), pointer, "direct text keeps its buffer");
+
+        #[cfg(feature = "serde")]
+        without_allocations(|| {
+            let mut bytes = [0_u8; 64];
+            let mut output = std::io::Cursor::new(bytes.as_mut_slice());
+            serde_json::to_writer(&mut output, &direct).expect("fixed direct JSON output capacity");
+            black_box(output.position());
+            black_box(
+                serde_json::from_str::<DirectId>("\"direct_550e8400-e29b-41d4-a716-446655440000\"")
+                    .expect("borrowed direct JSON UUID"),
+            );
+            let principal = PrincipalId::from(direct);
+            let mut enum_bytes = [0_u8; 64];
+            let mut enum_output = std::io::Cursor::new(enum_bytes.as_mut_slice());
+            serde_json::to_writer(&mut enum_output, &principal).expect("fixed enum JSON output capacity");
+            black_box(enum_output.position());
+            black_box(
+                serde_json::from_str::<PrincipalId>("\"direct_550e8400-e29b-41d4-a716-446655440000\"")
+                    .expect("borrowed enum JSON UUID"),
+            );
+        });
+    }
+}

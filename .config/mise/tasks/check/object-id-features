@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#MISE description = "Test core and owned object-ID capabilities independently"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+source "$MISE_PROJECT_ROOT/.config/mise/lib/object-id.sh"
+bash "$MISE_PROJECT_ROOT/.config/mise/tasks/check/object-id-feature-matcher"
+cargo test --locked -p trogon_object_id --no-default-features
+for feature in serde uuid macros macros,serde macros,uuid macros,serde,uuid alloc alloc,serde alloc,uuid alloc,macros alloc,macros,serde alloc,macros,uuid uuid-generate; do
+  cargo test --locked -p trogon_object_id --no-default-features --features "$feature"
+done
+cargo test --locked -p trogon_object_id --all-features
+cargo test --locked -p trogon_object_id --all-features --release --test allocation_tests
+rustup target add wasm32-unknown-unknown
+consumer=crates/trogon_object_id/tests/portability_consumer/Cargo.toml
+for feature in '' derive encoding binary derive,encoding,binary owned owned,derive,encoding,binary; do
+  cargo test --locked --manifest-path "$consumer" --lib --no-default-features --features "$feature"
+done
+cargo build --locked --manifest-path "$consumer" --target wasm32-unknown-unknown --no-default-features
+cargo build --locked --manifest-path "$consumer" --target wasm32-unknown-unknown --no-default-features --features derive,encoding,binary
+cargo build --locked --manifest-path "$consumer" --target wasm32-unknown-unknown --no-default-features --features owned,derive,encoding,binary
+tree=$(cargo tree --locked --manifest-path "$consumer" --no-default-features --features derive,encoding,binary --edges normal,no-proc-macro --format '{p} features=[{f}]')
+printf '%s\n' "$tree"
+if printf '%s\n' "$tree" | object_id_forbidden_features; then
+  echo 'core-only consumer enabled an owned or platform capability' >&2
+  exit 1
+fi
