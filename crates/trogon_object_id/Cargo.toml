@@ -15,6 +15,7 @@ thiserror = { version = "2.0", default-features = false }
 serde = { version = "1.0", default-features = false, optional = true }
 uuid = { version = "1.26", default-features = false, optional = true }
 trogon_object_id_derive = { version = "0.1.0", path = "../trogon_object_id_derive", optional = true }
+trogon_uuid = { version = "0.1.0", path = "../trogon_uuid", default-features = false, optional = true }
 
 [features]
 default = []
@@ -22,6 +23,7 @@ alloc = ["serde?/alloc"]
 macros = ["dep:trogon_object_id_derive"]
 serde = ["dep:serde"]
 uuid = ["dep:uuid"]
+template = ["uuid", "dep:trogon_uuid"]
 uuid-generate = ["uuid", "uuid/std", "uuid/v4", "uuid/v7"]
 
 [dev-dependencies]

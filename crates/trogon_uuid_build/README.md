@@ -91,7 +91,7 @@ establishes deterministic identity, not authorization or secrecy.
 The checked descriptor fixture under `tests/fixtures` was generated with
 `protoc` 36.2 and `--include_imports`, without source information. Its readable
 schemas mirror the public extension wire contract and use generic example
-names. Tests consume the fixture without an external
+names. Tests and the workspace example consume the fixture without an external
 protobuf compiler or network access.
 
 ## Target portability

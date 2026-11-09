@@ -5,7 +5,7 @@ cd "${MISE_PROJECT_ROOT:?}"
 source "$MISE_PROJECT_ROOT/.config/mise/lib/object-id.sh"
 bash "$MISE_PROJECT_ROOT/.config/mise/tasks/check/object-id-feature-matcher"
 cargo test --locked -p trogon_object_id --no-default-features
-for feature in serde uuid macros macros,serde macros,uuid macros,serde,uuid alloc alloc,serde alloc,uuid alloc,macros alloc,macros,serde alloc,macros,uuid uuid-generate; do
+for feature in serde uuid macros macros,serde macros,uuid macros,serde,uuid alloc alloc,serde alloc,uuid alloc,macros alloc,macros,serde alloc,macros,uuid uuid-generate template template,serde template,macros template,macros,serde alloc,template,macros,serde; do
   cargo test --locked -p trogon_object_id --no-default-features --features "$feature"
 done
 cargo test --locked -p trogon_object_id --all-features
@@ -41,5 +41,15 @@ tree=$(cargo tree --locked --manifest-path "$generated" --edges normal,no-proc-m
 printf '%s\n' "$tree"
 if printf '%s\n' "$tree" | object_id_forbidden_features; then
   echo 'generated target code enabled an owned or platform capability' >&2
+  exit 1
+fi
+cargo test --locked -p uuid_identity_example --release --test allocation_tests
+templates=crates/trogon_object_id/tests/template_consumer/Cargo.toml
+cargo test --locked --manifest-path "$templates" --lib --features encoding
+cargo build --locked --manifest-path "$templates" --target wasm32-unknown-unknown --features encoding
+tree=$(cargo tree --locked --manifest-path "$templates" --features encoding --edges normal,no-proc-macro --format '{p} features=[{f}]')
+printf '%s\n' "$tree"
+if printf '%s\n' "$tree" | object_id_forbidden_features; then
+  echo 'typed template target enabled an owned or platform capability' >&2
   exit 1
 fi

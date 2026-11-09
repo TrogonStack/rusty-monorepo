@@ -291,6 +291,54 @@ and time backend. A successful target build alone does not prove host entropy
 or clock behavior. UUID
 version 7 exposes a timestamp. Identifiers do not establish authorization.
 
+## Binding a compiled UUIDv5 recipe
+
+Enable `macros` and `template` to select a recipe using a Rust type path:
+
+```rust
+# #[cfg(all(feature = "macros", feature = "template"))]
+# {
+# mod generated {
+#     use trogon_object_id::{Uuid, UuidTemplate};
+#     pub struct ItemIdentityV1;
+#     pub struct ItemIdentityV1Input<'a> { pub external_key: &'a str }
+#     impl UuidTemplate for ItemIdentityV1 {
+#         type Input<'a> = ItemIdentityV1Input<'a>;
+#         const NAMESPACE: Uuid = Uuid::NAMESPACE_DNS;
+#         fn uuid5(input: Self::Input<'_>) -> Uuid {
+#             Uuid::new_v5(&Self::NAMESPACE, input.external_key.as_bytes())
+#         }
+#     }
+# }
+# use trogon_object_id::UuidTemplate;
+use trogon_object_id::{ObjectId, Uuid};
+
+#[derive(ObjectId)]
+#[object_id(prefix = "item", template = generated::ItemIdentityV1)]
+#[repr(transparent)]
+struct ItemId(Uuid);
+
+let item = ItemId::from(generated::ItemIdentityV1::uuid5(generated::ItemIdentityV1Input {
+    external_key: "example.org",
+}));
+assert_eq!(item.payload().get_version_num(), 5);
+# }
+# Ok::<(), trogon_object_id::ParseError>(())
+```
+
+The recipe owns its namespace, version and input contract. The attribute binds
+the ID to that recipe without repeating namespace or template strings.
+`From<Uuid>` wraps the recipe output directly. The compatibility convenience
+`from_identity` receives the recipe's associated input type and wraps its UUID
+through the same checked constructor. Neither path enables random generation
+or an allocator. Generated recipes can come from
+`trogon_uuid_build`; protobuf descriptors remain a build-time dependency.
+
+A binding selects the convenience constructor; it does not restrict the other
+checked constructors to UUIDs from that recipe. UUID syntax alone cannot prove
+which recipe produced a value. A template binding requires a UUID payload and
+fails compilation when the feature, recipe trait or payload type is wrong.
+
 ## Performance and compatibility
 
 Generated implementations use static trait dispatch with no stored domain data,
@@ -304,7 +352,8 @@ This crate preserves the upstream prefixed wire format, configurable separators,
 text validation and typed enums. It strengthens raw-value bounds,
 control-character handling, declaration validation and enum prefix collision checks.
 Compact UUIDs canonicalize text. Ecto and Phoenix integrations remain specific
-to Elixir. This runtime has no protobuf dependency.
+to Elixir. This runtime has no protobuf dependency; `trogon_uuid_build` reads
+UUID options from protobuf descriptors during code generation.
 
 The runtime is `#![no_std]` with `default = []`. Its baseline metadata, errors,
 wrapper, borrowed parsing dispatch, formatting and custom compact payloads need
@@ -317,6 +366,7 @@ retain responsibility for their own costs.
 | `macros` | Host derive tooling emitting core-only target APIs, with owned operations following runtime `alloc` |
 | `serde` | Full-form and raw traits with borrowed string visitors, without enabling `alloc` |
 | `uuid` | Binary UUID payload and parsing, without RNG or clock |
+| `template` | Deterministic typed recipes, enabling `uuid` without RNG, clock or owned storage |
 | `uuid-generate` | UUID v4/v7 convenience generation using platform randomness/time and `uuid/std` |
 
 Existing text users must explicitly enable `alloc`; callers of `Uuid4`/`Uuid7`

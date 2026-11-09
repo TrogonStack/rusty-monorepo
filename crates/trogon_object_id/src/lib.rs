@@ -244,6 +244,17 @@ extern crate self as trogon_object_id;
 /// #[repr(transparent)]
 /// struct UserId(Text);
 /// #[derive(ObjectId)]
+/// #[object_id(template = String)]
+/// enum PrincipalId { User(UserId) }
+/// ```
+///
+/// ```compile_fail
+/// use trogon_object_id::{ObjectId, Text};
+/// #[derive(ObjectId)]
+/// #[object_id(prefix = "user")]
+/// #[repr(transparent)]
+/// struct UserId(Text);
+/// #[derive(ObjectId)]
 /// #[object_id(unknown = true)]
 /// enum PrincipalId { User(UserId) }
 /// ```
@@ -430,6 +441,42 @@ pub use uuid::Uuid;
 pub trait Domain {
     const DEFINITION: Definition;
     type Payload: Payload;
+}
+
+/// A UUID domain bound to one statically selected identity recipe.
+#[cfg(feature = "template")]
+pub trait TemplateDomain: Domain<Payload = Uuid> {
+    type Template: UuidTemplate;
+}
+
+#[cfg(feature = "template")]
+pub use trogon_uuid::UuidTemplate;
+
+#[cfg(feature = "template")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_template_domain {
+    ($name:ident, $template:ty, direct) => {
+        impl $crate::TemplateDomain for $name {
+            type Template = $template;
+        }
+        impl $name {
+            pub fn from_identity(
+                input: <<Self as $crate::TemplateDomain>::Template as $crate::UuidTemplate>::Input<'_>,
+            ) -> ::core::result::Result<Self, $crate::ParseError> {
+                $crate::ObjectId::<Self>::from_identity(input).map(|value| Self(value.into_payload()))
+            }
+        }
+    };
+}
+
+#[cfg(not(feature = "template"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __impl_template_domain {
+    ($($input:tt)*) => {
+        ::core::compile_error!("object_id template binding requires the `template` feature on trogon_object_id");
+    };
 }
 
 /// A trusted source of typed payloads. Generated values still pass `Payload::validate`.

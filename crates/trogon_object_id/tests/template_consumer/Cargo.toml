@@ -1,0 +1,15 @@
+[package]
+name = "object-id-template-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+encoding = ["ids/serde", "dep:serde"]
+
+[dependencies]
+ids = { package = "trogon_object_id", path = "../..", default-features = false, features = ["macros", "template"] }
+example = { package = "uuid_identity_example", path = "../../../../examples/uuid_identity", default-features = false }
+serde = { version = "1.0", default-features = false, optional = true }

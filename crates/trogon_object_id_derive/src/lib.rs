@@ -11,7 +11,7 @@ use quote::{format_ident, quote};
     )
 )]
 use syn::LitStr;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
 
 fn runtime_path() -> syn::Result<proc_macro2::TokenStream> {
     match crate_name("trogon_object_id") {
@@ -30,12 +30,14 @@ fn runtime_path() -> syn::Result<proc_macro2::TokenStream> {
 struct IdOptions {
     prefix: LitStr,
     separator: LitStr,
+    template: Option<Type>,
     fallible: bool,
 }
 
 fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
     let mut prefix = None;
     let mut separator = None;
+    let mut template = None;
     let mut fallible = false;
     for attribute in &input.attrs {
         if !attribute.path().is_ident("object_id") {
@@ -59,8 +61,13 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
                 fallible = true;
             } else if meta.path.is_ident("payload") {
                 return Err(meta.error("ObjectId infers its payload from the tuple field; remove the payload option"));
+            } else if meta.path.is_ident("template") {
+                if template.is_some() {
+                    return Err(meta.error("duplicate object_id template"));
+                }
+                template = Some(meta.value()?.parse()?);
             } else {
-                return Err(meta.error("expected prefix, separator or fallible"));
+                return Err(meta.error("expected prefix, separator, template or fallible"));
             }
             Ok(())
         })?;
@@ -70,6 +77,7 @@ fn id_options(input: &DeriveInput) -> syn::Result<IdOptions> {
         prefix: prefix
             .ok_or_else(|| syn::Error::new_spanned(&input.ident, "missing #[object_id(prefix = \"...\")]"))?,
         separator: separator.unwrap_or_else(|| LitStr::new("_", proc_macro2::Span::call_site())),
+        template,
     })
 }
 
@@ -130,6 +138,9 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let prefix = &options.prefix;
     let separator = &options.separator;
     let payload = &field.ty;
+    let template = options
+        .template
+        .map(|template| quote!(#path::__impl_template_domain!(#name, #template, direct);));
     let conversion = if options.fallible {
         quote! {
             impl ::core::convert::TryFrom<#payload> for #name {
@@ -212,6 +223,7 @@ fn expand_struct(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             }
         }
         #path::__impl_serde!(#name);
+        #template
     })
 }
 
