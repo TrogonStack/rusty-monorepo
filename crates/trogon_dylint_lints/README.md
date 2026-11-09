@@ -55,6 +55,7 @@ per-invocation flags.
 | `new_instead_of_from` | warn | a single-field wrapper's `new` that only wraps its argument to be `From` instead |
 | `options_struct_without_default` | warn | defaultable `...Options` to offer `Default`, with reasoned exceptions for required values |
 | `policy_lint_suppression_without_reason` | deny | shared-policy `allow` and `expect` attributes to state a nonblank technical reason |
+| `prefer_integration_tests` | warn | public API tests to live in the crate's `tests/` directory beside `src/`; tests that require private implementation access may stay with their owner |
 | `process_global_mutation_in_tests` | warn | tests to avoid mutating the shared environment and working directory |
 | `redundant_module_path` | deny | `#[path]` to be dropped when `mod foo;` already resolves to the same file |
 | `secret_exposure_in_diagnostics` | warn | direct `secrecy::ExposeSecret` values to stay out of diagnostic macros |
@@ -66,7 +67,7 @@ per-invocation flags.
 | `telemetry_metric_construction` | deny | metric instruments to be constructed through a generated `trogon_semconv::metric::build_*` constructor |
 | `telemetry_metric_name_literal` | deny | metric instruments to be named with a generated `trogon_semconv` constant |
 | `telemetry_span_name_literal` | deny | spans to be named with a generated `trogon_semconv` constant |
-| `test_module_naming` | deny | unit tests to live in the owner's `tests` module, in a sibling file or under the owner's module directory |
+| `test_module_naming` | deny | private unit tests to live in the owner's `tests` module, in a sibling file or under the owner's module directory |
 | `unbounded_channel` | deny | a channel to be given an explicit capacity, so a slow consumer applies backpressure |
 | `unstructured_log_fields` | deny | log values to be recorded as `tracing` fields, not format arguments in the message |
 | `weakened_write_precondition` | deny | an unconditional `WritePrecondition::Any` append to name the invariant it depends on |
@@ -94,8 +95,30 @@ Every rule carries its own default level. `--all-targets` includes test code,
 which a late HIR pass only sees once the test target is compiled. A consumer
 that denies warnings promotes advisory rules to errors as well.
 
-Unit tests for `parser.rs` live beside it in `parser_tests.rs`, while remaining
-logical children of the implementation module:
+Tests of a library's public API belong in the crate's `tests/` directory,
+beside `src/`, where they use the same interface as downstream callers:
+
+```rust
+// tests/parser.rs
+use example_library::parse;
+
+#[test]
+fn accepts_empty_input() {
+    assert!(parse("").is_ok());
+}
+```
+
+`prefer_integration_tests` checks each in-crate test separately and follows
+its test-only helpers. A private helper or fixture does not by itself require
+private implementation access. References to non-exported production items,
+private fields, or private production macros justify keeping a test near its
+owner. Public reexports and trait contracts remain public API. The rule does
+not inspect production function bodies, so a public function's internal calls
+do not make its callers private tests. Binary targets are exempt because their
+Rust API cannot be imported from an integration test.
+
+Private unit tests for `parser.rs` live beside it in `parser_tests.rs`, while
+remaining logical children of the implementation module:
 
 ```rust
 // parser.rs
@@ -104,7 +127,7 @@ logical children of the implementation module:
 mod tests;
 
 // parser_tests.rs
-use super::parse;
+use super::parse_internal;
 ```
 
 A suite that outgrows one file moves into the owner's module directory instead
@@ -118,12 +141,12 @@ test module:
 mod tests;
 
 // parser/tests.rs
-use super::parse;
+use super::parse_internal;
 
 mod parse_tests;
 
 // parser/tests/parse_tests.rs
-use super::super::parse;
+use super::super::parse_internal;
 ```
 
 Crate roots use `lib_tests.rs` and `main_tests.rs`, or `src/tests.rs` with
