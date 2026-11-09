@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.3](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.2...trg@v0.14.3) (2026-11-09)
+
+
+### Bug Fixes
+
+* **trg:** Record the integration-test exception for in-crate suites ([#365](https://github.com/TrogonStack/rusty-monorepo/issues/365)) ([8a916c4](https://github.com/TrogonStack/rusty-monorepo/commit/8a916c49c4d64e59097dfcde7b668d26b02ed22c))
+
 ## [0.14.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.1...trg@v0.14.2) (2026-11-06)
 
 
