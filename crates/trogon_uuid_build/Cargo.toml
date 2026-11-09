@@ -1,0 +1,22 @@
+[package]
+name = "trogon_uuid_build"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Build-time UUID recipe generation from protobuf descriptors"
+repository = "https://github.com/TrogonStack/rusty-monorepo"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+prost-reflect = "0.16.5"
+thiserror = { workspace = true }
+syn = "2.0"
+quote = "1.0"
+proc-macro2 = "1.0"
+trogon_uuid = { version = "0.1.0", path = "../trogon_uuid" }
+
+[dev-dependencies]
+prost = "0.14"

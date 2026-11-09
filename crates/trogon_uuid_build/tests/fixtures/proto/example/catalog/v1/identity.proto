@@ -1,0 +1,44 @@
+syntax = "proto3";
+package example.catalog.v1;
+import "trogon/uuid/v1/options.proto";
+
+enum SkuIdentityVersion {
+  option (trogon.uuid.v1.enum).namespace = { dns: "inventory.example.com" };
+  SKU_IDENTITY_VERSION_UNSPECIFIED = 0;
+  SKU_IDENTITY_VERSION_V1 = 1 [(trogon.uuid.v1.enum_value).format = {
+    template: "warehouse/{warehouse_id}/sku/{sku_code}"
+  }];
+  SKU_IDENTITY_VERSION_V2 = 2 [(trogon.uuid.v1.enum_value).format = {
+    template: "warehouse/{warehouse_id}/sku/{sku_code}"
+  }];
+  DIRECT_UUID = 3 [(trogon.uuid.v1.enum_value).format = {
+    namespace: { uuid: "550e8400-e29b-41d4-a716-446655440000" }
+    template: "{sku_code}"
+  }];
+  URL_NAMESPACE = 4 [(trogon.uuid.v1.enum_value).format = {
+    namespace: { url: "https://example.com/catalog" }
+    template: "{sku_code}"
+  }];
+  STATIC_TEMPLATE = 5 [(trogon.uuid.v1.enum_value).format = { template: "singleton" }];
+  REPEATED_TEMPLATE = 6 [(trogon.uuid.v1.enum_value).format = { template: "ключ/{sku_code}/{sku_code}" }];
+  MISSING_FORMAT = 7;
+  BAD_UUID = 8 [(trogon.uuid.v1.enum_value).format = {
+    namespace: { uuid: "not-a-uuid" }
+    template: "{sku_code}"
+  }];
+  BAD_TEMPLATE = 9 [(trogon.uuid.v1.enum_value).format = { template: "{sku-code}" }];
+  EMPTY_NAMESPACE = 10 [(trogon.uuid.v1.enum_value).format = {
+    namespace: {}
+    template: "{sku_code}"
+  }];
+  EMPTY_TEMPLATE = 11 [(trogon.uuid.v1.enum_value).format = {}];
+}
+
+enum MissingNamespaceVersion {
+  MISSING_NAMESPACE_UNSPECIFIED = 0;
+  MISSING_NAMESPACE_V1 = 1 [(trogon.uuid.v1.enum_value).format = { template: "{sku_code}" }];
+  OVERRIDE_WITHOUT_DEFAULT = 2 [(trogon.uuid.v1.enum_value).format = {
+    namespace: { uuid: "550e8400-e29b-41d4-a716-446655440000" }
+    template: "{sku_code}"
+  }];
+}

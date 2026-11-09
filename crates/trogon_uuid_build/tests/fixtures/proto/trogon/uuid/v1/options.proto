@@ -1,0 +1,17 @@
+syntax = "proto3";
+package trogon.uuid.v1;
+
+import "google/protobuf/descriptor.proto";
+import "trogon/uuid/v1/namespace.proto";
+
+// Public wire contract: TrogonStack/trogon-proto, trogon/uuid/v1/options.proto.
+message EnumOptions { optional Namespace namespace = 1; }
+message EnumValueOptions {
+  message Format {
+    optional Namespace namespace = 1;
+    string template = 2;
+  }
+  optional Format format = 1;
+}
+extend google.protobuf.EnumOptions { optional EnumOptions enum = 870001; }
+extend google.protobuf.EnumValueOptions { optional EnumValueOptions enum_value = 870002; }
