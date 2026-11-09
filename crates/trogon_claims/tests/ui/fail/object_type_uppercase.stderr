@@ -1,0 +1,5 @@
+error: object_type "Document": a segment must start with a lowercase ASCII letter, found 'D' at byte 0
+ --> tests/ui/fail/object_type_uppercase.rs:4:26
+  |
+4 |     let _ = object_type!("Document");
+  |                          ^^^^^^^^^^

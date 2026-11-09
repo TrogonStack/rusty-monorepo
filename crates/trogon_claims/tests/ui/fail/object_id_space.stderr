@@ -1,0 +1,5 @@
+error: object_id "has a space": invalid character ' ' at byte 3 (allowed: [a-zA-Z0-9/_|\-=+])
+ --> tests/ui/fail/object_id_space.rs:4:24
+  |
+4 |     let _ = object_id!("has a space");
+  |                        ^^^^^^^^^^^^^

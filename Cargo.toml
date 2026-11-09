@@ -2,6 +2,7 @@
 members = [
   "crates/trg",
   "crates/trogon_claims",
+  "crates/trogon_claims_macros",
   "crates/trogon_claims_syntax",
 ]
 resolver = "2"
