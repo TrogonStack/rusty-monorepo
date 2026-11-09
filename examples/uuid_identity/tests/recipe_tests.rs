@@ -1,7 +1,9 @@
-use std::string::ToString;
-
-use super::generated::*;
-use super::SkuId;
+use uuid_identity_example::generated::{
+    DirectIdentity, DirectIdentityInput, EmptyIdentity, OverrideIdentity, OverrideIdentityInput, RepeatedIdentity,
+    RepeatedIdentityInput, SkuIdentityV1, SkuIdentityV1Input, SkuIdentityV2, SkuIdentityV2Input, StaticIdentity,
+    UrlIdentity, UrlIdentityInput,
+};
+use uuid_identity_example::SkuId;
 
 #[test]
 fn generated_recipes_match_independent_uuid_v5_vectors() {
