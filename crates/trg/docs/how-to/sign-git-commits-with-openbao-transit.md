@@ -103,11 +103,17 @@ Git treats a `user.signingkey` that starts with `ssh-` as the key itself, so
 the `key::` prefix is optional. Both forms work, and so does the path of a
 `.pub` file, or of a private key that has a `.pub` beside it.
 
-Git also needs an allowed signers file to verify:
+Git also needs an allowed signers file to verify, holding your email as the
+principal and the same public key:
 
 ```sh
+mkdir -p ~/.config/git
+echo "you@example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF90u+fxY15X29x2s3wSRElNouutw3GGhm7A7ZE4UrAI" >> ~/.config/git/allowed_signers
 git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
 ```
+
+The principal must match `user.email`, or `git verify-commit` reports the
+signature as made by an unknown key.
 
 ## 4. Check it
 

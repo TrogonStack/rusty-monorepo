@@ -1,9 +1,11 @@
 //! The key file `-f` names, read for the public key it identifies.
 //!
-//! Git passes either a `.pub` file, or a private key path whose `.pub` sibling
-//! holds the public half. Either way only the public key is read: the private
-//! half is never what a signer here needs, and not opening it means a signing
-//! program with no business near private keys never touches one.
+//! Git passes either a `.pub` file, a temporary file holding a literal key, or
+//! a private key path whose `.pub` sibling holds the public half. A `.pub`
+//! sibling is read in preference to the path itself, so a private key is never
+//! opened when its public half is beside it: the private half is never what a
+//! signer here needs, and a signing program with no business near private keys
+//! should not touch one.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +43,10 @@ pub struct KeyFile {
 
 impl KeyFile {
     pub fn read(path: &Path) -> Result<Self, KeyFileError> {
+        let sibling = sibling_of(path);
+        if path.extension().is_none_or(|ext| ext != "pub") && sibling.is_file() {
+            return Self::read_public(sibling);
+        }
         let text = std::fs::read_to_string(path).map_err(|source| KeyFileError::Unreadable {
             path: path.to_path_buf(),
             source,
@@ -54,14 +60,11 @@ impl KeyFile {
                 path: path.to_path_buf(),
                 cause,
             }),
-            Some(Err(_)) | None => Self::read_sibling(path),
+            Some(Err(_)) | None => Self::read_public(sibling),
         }
     }
 
-    fn read_sibling(private: &Path) -> Result<Self, KeyFileError> {
-        let mut name = private.as_os_str().to_os_string();
-        name.push(".pub");
-        let path = PathBuf::from(name);
+    fn read_public(path: PathBuf) -> Result<Self, KeyFileError> {
         let text = std::fs::read_to_string(&path).map_err(|source| KeyFileError::Unreadable {
             path: path.clone(),
             source,
@@ -85,6 +88,12 @@ impl KeyFile {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn sibling_of(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".pub");
+    PathBuf::from(name)
 }
 
 fn first_key_line(text: &str) -> Option<&str> {

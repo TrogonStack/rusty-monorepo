@@ -1,7 +1,9 @@
 //! Signing through an SSH agent.
 //!
 //! The signature itself is made by `ssh-keygen`, which already speaks the agent
-//! protocol and writes exactly the file git expects. What this module adds is
+//! protocol. It reads the message on standard input and answers on standard
+//! output, so no file name ever reaches its command line and the signature only
+//! lands once it exists. What this module adds is
 //! the question asked first: does the agent hold the key at all? An agent that
 //! is down, or does not hold the key, is a reason to try the next address. An
 //! agent that holds it and then declines to sign is an answer, and it is the
@@ -93,30 +95,43 @@ pub fn require_key(socket: &Path, key: &PublicKey) -> Result<(), AgentError> {
     Err(AgentError::KeyNotHeld)
 }
 
-/// What `ssh-keygen -Y sign` is asked to do for one file.
+/// What `ssh-keygen -Y sign` is asked to do for one message.
 pub struct AgentSigning<'a> {
     pub socket: &'a Path,
     pub namespace: &'a str,
     pub key_file: &'a Path,
     pub options: &'a [String],
-    pub file: &'a Path,
+    pub message: &'a [u8],
 }
 
-/// Sign `file` through the agent, leaving `<file>.sig` beside it.
-pub fn sign(request: &AgentSigning<'_>) -> Result<(), AgentError> {
-    let status = Command::new(SSH_KEYGEN)
+/// Sign `message` through the agent and return the armored signature.
+pub fn sign(request: &AgentSigning<'_>) -> Result<Vec<u8>, AgentError> {
+    let mut child = Command::new(SSH_KEYGEN)
         .args(["-Y", "sign", "-n", request.namespace, "-f"])
         .arg(request.key_file)
         .arg("-U")
         .args(request.options.iter().map(|o| format!("-O{o}")))
-        .arg(request.file)
         .env("SSH_AUTH_SOCK", request.socket)
-        .stdin(Stdio::null())
-        .status()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
         .map_err(AgentError::Spawn)?;
-    if status.success() {
-        Ok(())
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| AgentError::Spawn(std::io::ErrorKind::BrokenPipe.into()))?;
+    let output = std::thread::scope(|scope| {
+        // A child that stops reading early closes the pipe, and its exit
+        // status is the answer that matters, so a failed write is not one.
+        scope.spawn(move || {
+            let _ = stdin.write_all(request.message);
+        });
+        child.wait_with_output()
+    })
+    .map_err(AgentError::Spawn)?;
+    if output.status.success() {
+        Ok(output.stdout)
     } else {
-        Err(AgentError::SigningFailed(status.to_string()))
+        Err(AgentError::SigningFailed(output.status.to_string()))
     }
 }

@@ -14,6 +14,7 @@
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
@@ -570,6 +571,83 @@ fn a_private_key_path_is_read_through_its_pub_sibling() {
 }
 
 #[test]
+fn an_unreadable_private_key_is_never_opened_when_its_pub_sibling_is_there() {
+    let fixture = Fixture::new();
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend("homelab", transit.addr),
+        transit_signer(&fixture, "homelab", "")
+    ));
+    std::fs::set_permissions(&fixture.key.private, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let payload = fixture.payload("unreadable private key\n");
+
+    let output = fixture.sign(&[
+        "-Y",
+        "sign",
+        "-n",
+        "git",
+        "-f",
+        fixture.key.private.to_str().unwrap(),
+        payload.to_str().unwrap(),
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        fixture.verifies(&payload, &fixture.path("payload.sig")),
+        "ssh-keygen rejected the signature"
+    );
+}
+
+#[test]
+fn a_key_file_path_that_is_not_utf8_is_read_as_spelled() {
+    let fixture = Fixture::new();
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend("homelab", transit.addr),
+        transit_signer(&fixture, "homelab", "")
+    ));
+    let dir = fixture.dir.path().join(std::ffi::OsStr::from_bytes(b"keys-\xff"));
+    // APFS refuses names that are not UTF-8, so only file systems that store
+    // raw bytes, as Linux ones do, can hold the case at all.
+    if let Err(e) = std::fs::create_dir(&dir) {
+        assert_eq!(e.raw_os_error(), Some(libc_eilseq()), "{e}");
+        return;
+    }
+    let key = dir.join("signing.pub");
+    std::fs::copy(fixture.key.public_file(), &key).unwrap();
+    let payload = fixture.payload("non-utf8 key path\n");
+
+    for flag in [None, Some(())] {
+        std::fs::remove_file(fixture.path("payload.sig")).ok();
+        let mut command = Command::new(&fixture.trg);
+        command.args(["git", "ssh", "sign", "-Y", "sign", "-n", "git"]);
+        match flag {
+            None => command.arg("-f").arg(&key),
+            Some(()) => {
+                let mut attached = std::ffi::OsString::from("-f");
+                attached.push(&key);
+                command.arg(attached)
+            }
+        };
+        let output = command
+            .arg(&payload)
+            .env("XDG_CONFIG_HOME", &fixture.config_home)
+            .env_remove("SSH_AUTH_SOCK")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(
+            fixture.verifies(&payload, &fixture.path("payload.sig")),
+            "ssh-keygen rejected the signature"
+        );
+    }
+}
+
+#[test]
 fn without_dash_y_the_flags_still_sign() {
     let fixture = Fixture::new();
     let transit = FakeTransit::start(&fixture.key, &fixture.key);
@@ -877,6 +955,47 @@ fn a_denied_agent_signature_is_never_routed_around() {
         stderr(&output).contains("holds the key"),
         "the stop does not say the agent held the key: {}",
         stderr(&output)
+    );
+}
+
+#[test]
+fn a_denied_agent_signature_leaves_the_approved_signature_in_place() {
+    let fixture = Fixture::new();
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
+    let socket = denying_agent(fixture.dir.path(), &fixture.key);
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend("homelab", transit.addr),
+        fixture.signer(
+            "personal",
+            &format!(
+                "{{ ssh_agent = \"{}\", fallbacks = [{{ backend = \"homelab\", transit_key = \"{TRANSIT_KEY}\" }}] }}",
+                socket.display()
+            )
+        )
+    ));
+    let payload = fixture.payload("denied over an existing signature\n");
+    std::fs::write(fixture.path("payload.sig"), "previous signature\n").unwrap();
+
+    let mut child = Command::new(&fixture.trg)
+        .args(["git", "ssh", "sign", "-Y", "sign", "-n", "git", "-f"])
+        .arg(fixture.key.public_file())
+        .arg(&payload)
+        .env("XDG_CONFIG_HOME", &fixture.config_home)
+        .env_remove("SSH_AUTH_SOCK")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"y\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
+    assert_eq!(
+        std::fs::read_to_string(fixture.path("payload.sig")).unwrap(),
+        "previous signature\n",
+        "the denial replaced the existing signature"
     );
 }
 
@@ -1344,4 +1463,13 @@ fn configuration_errors_are_reported_at_load() {
         nested.contains("fallbacks"),
         "nested fallbacks must be rejected: {nested}"
     );
+}
+
+/// `EILSEQ`, which the two platforms number differently.
+fn libc_eilseq() -> i32 {
+    if cfg!(target_os = "macos") {
+        92
+    } else {
+        84
+    }
 }

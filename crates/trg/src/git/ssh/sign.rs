@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use tracing::field::Empty;
 use tracing::Instrument;
 
-use super::agent::{self, AgentError, AgentSigning};
+use super::agent::{self, AgentSigning};
 use super::constants::{SIGNATURE_SUFFIX, SSH_KEYGEN};
 use super::key_file::{KeyFile, KeyFileError};
 use super::request::{RequestError, SignRequest};
@@ -74,7 +74,7 @@ fn read_input(file: &Path) -> Result<Vec<u8>, SignError> {
     })
 }
 
-fn write_signature(output: &Path, armored: &str) -> std::io::Result<()> {
+fn write_signature(output: &Path, armored: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(output, armored)
 }
 
@@ -202,7 +202,7 @@ impl SshSigner {
             let attempt = match address {
                 SignerAddress::Transit(transit) => self.transit(signer, transit, request, file, output, message).await,
                 SignerAddress::SshAgent(socket) => {
-                    agent_attempt(socket.path(), signer, key_file, request, file, output)
+                    agent_attempt(socket.path(), signer, key_file, request, message, output)
                 }
             };
             match attempt {
@@ -344,25 +344,35 @@ fn agent_attempt(
     signer: &Signer,
     key_file: &KeyFile,
     request: &SignRequest,
-    file: &Path,
+    message: &[u8],
     output: &Path,
 ) -> Attempt {
     let signed = agent::require_key(socket, signer.public_key()).and_then(|()| {
-        if output.exists() {
-            std::fs::remove_file(output).map_err(AgentError::Spawn)?;
-        }
         agent::sign(&AgentSigning {
             socket,
             namespace: request.namespace.as_str(),
             key_file: key_file.path(),
             options: request.options.raw(),
-            file,
+            message,
         })
     });
-    match signed {
-        Ok(()) => Attempt::Signed,
-        Err(e) if e.allows_fallback() => Attempt::Declined(e.to_string()),
-        Err(e) => Attempt::Stopped(e.to_string()),
+    let armored = match signed {
+        Ok(armored) => armored,
+        Err(e) if e.allows_fallback() => return Attempt::Declined(e.to_string()),
+        Err(e) => return Attempt::Stopped(e.to_string()),
+    };
+    match write_signature(output, &armored) {
+        Ok(()) => {
+            say(&format!("Write signature to {}", output.display()));
+            Attempt::Signed
+        }
+        Err(e) => Attempt::Stopped(
+            SignError::Output {
+                path: output.to_path_buf(),
+                source: e,
+            }
+            .to_string(),
+        ),
     }
 }
 

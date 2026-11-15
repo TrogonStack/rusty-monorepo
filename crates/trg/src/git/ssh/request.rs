@@ -5,7 +5,9 @@
 //! vocabulary to it, so this reads exactly that vocabulary and nothing more.
 //! `trg git ssh sign` is handed git's arguments untouched and reads them here.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use super::sshsig::{EmptyNamespaceError, HashAlgorithm, Namespace};
@@ -159,11 +161,33 @@ fn parse_sign(args: &[OsString]) -> Result<SignRequest, RequestError> {
                 value_of("-Y", &text[2..], &mut args)?;
             }
             _ if text.starts_with("-n") => namespace = Some(value_of("-n", &text[2..], &mut args)?),
-            _ if text.starts_with("-f") => key_file = Some(PathBuf::from(value_of("-f", &text[2..], &mut args)?)),
+            _ if text.starts_with("-f") => key_file = Some(PathBuf::from(path_value_of(arg, &mut args)?)),
             _ if text.starts_with("-O") => options.push(value_of("-O", &text[2..], &mut args)?),
             _ if text.starts_with('-') && text.len() > 1 => return Err(RequestError::Unrecognized(text.into_owned())),
             _ => files.push(PathBuf::from(arg)),
         }
     }
     SignRequest::new(namespace, key_file, options, files)
+}
+
+/// The value of `-f`, kept as the operating system spelled it: a lossy
+/// conversion would name a different file.
+fn path_value_of(arg: &OsStr, args: &mut std::slice::Iter<'_, OsString>) -> Result<OsString, RequestError> {
+    if arg.len() == 2 {
+        return args
+            .next()
+            .cloned()
+            .ok_or_else(|| RequestError::Unrecognized("-f".to_string()));
+    }
+    Ok(after_flag(arg))
+}
+
+#[cfg(unix)]
+fn after_flag(arg: &OsStr) -> OsString {
+    OsStr::from_bytes(&arg.as_bytes()[2..]).to_os_string()
+}
+
+#[cfg(not(unix))]
+fn after_flag(arg: &OsStr) -> OsString {
+    OsString::from(&arg.to_string_lossy()[2..])
 }
