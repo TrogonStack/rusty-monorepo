@@ -26,12 +26,14 @@
 //! from the first word of an info string and drops the rest, so highlighting is
 //! unaffected and the marker never renders.
 
+mod constants;
+use constants::FLOORS;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::evals::{parse_eval_suite, EvalCase};
-use super::graders::CaseGrader;
+use super::super::evals::{parse_eval_suite, EvalCase};
+use super::super::graders::CaseGrader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -214,18 +216,6 @@ fn check_parses_as_grader(block: &Block, value: &Value) {
         );
     }
 }
-
-/// How many blocks of each kind the docs held when this harness was written.
-///
-/// A harness that silently stops recognising examples passes for the wrong reason, and
-/// would keep passing as they rotted. Counting per kind rather than in total is what
-/// catches the shape of a suite, a case or a grader changing underneath the inference:
-/// every block would still be valid JSON, and none of them would still be checked.
-const FLOORS: [(&str, Mode, usize); 3] = [
-    ("eval suites", Mode::Suite, 1),
-    ("eval cases", Mode::Case, 7),
-    ("graders", Mode::Grader, 12),
-];
 
 #[test]
 fn every_documented_json_example_still_parses() {

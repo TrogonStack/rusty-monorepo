@@ -5,6 +5,9 @@
 //! backend's arguments name the secret it addresses and, for the keychain's
 //! `add-generic-password`, carry the secret itself.
 
+mod constants;
+pub(super) use constants::TIMEOUT;
+use constants::{KNOWN_METHODS, NONZERO_EXIT, OTHER_METHOD, SIGNALED};
 use std::process::ExitStatus;
 
 use opentelemetry_semantic_conventions::attribute::{
@@ -15,24 +18,6 @@ use tracing::field::Empty;
 
 use super::{BackendKind, SecretsError};
 use crate::telemetry::semconv::trg::{SECRETS_BACKEND_KIND, SECRETS_OPERATION};
-
-/// `error.type` for a child process that exited with a status other than 0,
-/// the same value the root span records for `trg`'s own exit.
-const NONZERO_EXIT: &str = "nonzero_exit";
-
-/// `error.type` for a child process killed before it reported a status.
-const SIGNALED: &str = "signaled";
-
-/// `error.type` for a child process that outlived its budget.
-pub(super) const TIMEOUT: &str = "timeout";
-
-/// Methods the HTTP conventions name; anything else is reported as `_OTHER`
-/// with the original kept beside it.
-const KNOWN_METHODS: [&str; 9] = [
-    "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
-];
-
-const OTHER_METHOD: &str = "_OTHER";
 
 /// Marks `span` failed with a low-cardinality `error_type`.
 pub(crate) fn record_error(span: &tracing::Span, error_type: &str) {
@@ -181,44 +166,4 @@ impl HttpSpan {
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
-    use crate::telemetry::testing::CapturedTrace;
-
-    /// Fails if any of `needles` appears anywhere a span could carry it: its
-    /// name, an attribute, an event, or its status.
-    #[track_caller]
-    pub(crate) fn assert_never_recorded(trace: &CapturedTrace, needles: &[&str]) {
-        assert!(!trace.spans.is_empty(), "nothing was captured to scan");
-        for span in &trace.spans {
-            let mut carried = vec![span.name.to_string(), format!("{:?}", span.status)];
-            for kv in &span.attributes {
-                carried.push(kv.key.to_string());
-                carried.push(kv.value.to_string());
-            }
-            for event in span.events.iter() {
-                carried.push(event.name.to_string());
-                for kv in &event.attributes {
-                    carried.push(kv.key.to_string());
-                    carried.push(kv.value.to_string());
-                }
-            }
-            for needle in needles {
-                for text in &carried {
-                    assert!(
-                        !text.contains(needle),
-                        "span {:?} carries {needle:?} in {text:?}",
-                        span.name
-                    );
-                }
-            }
-        }
-    }
-
-    pub(crate) fn current_thread<F: std::future::Future>(work: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("a current-thread runtime")
-            .block_on(work)
-    }
-}
+pub(crate) mod testing;

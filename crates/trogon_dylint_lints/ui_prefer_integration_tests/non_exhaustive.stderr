@@ -1,0 +1,27 @@
+warning: test `public_factory_and_field_can_move` does not require private implementation access
+  --> $DIR/non_exhaustive.rs:59:8
+   |
+LL |     fn public_factory_and_field_can_move() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+   = note: `#[warn(prefer_integration_tests)]` on by default
+
+warning: test `public_open_pattern_can_move` does not require private implementation access
+  --> $DIR/non_exhaustive.rs:64:8
+   |
+LL |     fn public_open_pattern_can_move() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: test `ordinary_variant_can_move` does not require private implementation access
+  --> $DIR/non_exhaustive.rs:70:8
+   |
+LL |     fn ordinary_variant_can_move() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: 3 warnings emitted
+

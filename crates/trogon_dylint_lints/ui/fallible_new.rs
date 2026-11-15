@@ -108,7 +108,7 @@ impl Registry {
     }
 
     // Explicitly allowed at the site: must NOT fire.
-    #[allow(fallible_new)]
+    #[allow(fallible_new, reason = "this fixture isolates constructor panic checks and explicit exceptions")]
     fn new_allowed(raw: &str) -> Self {
         Self {
             slots: vec![raw.parse::<u16>().unwrap()],
@@ -163,7 +163,7 @@ impl Connection {
 // The test-support module family is scaffolding, so a constructor declared
 // directly in one is exempt whether it sits in an `impl` or at module scope:
 // must NOT fire.
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this single-file fixture isolates constructor panic checks")]
 mod mocks {
     pub struct StubPort {
         port: u16,
