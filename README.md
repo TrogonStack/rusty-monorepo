@@ -16,6 +16,7 @@ A Rust-based monorepo for building multiple projects.
 - [`trogon_dylint_lints`](crates/trogon_dylint_lints/README.md): a [Dylint](https://github.com/trailofbits/dylint) library of Rust policy lints.
 - [`trogon_object_id`](crates/trogon_object_id/README.md): domain-specific prefixed identifiers with compile-time type and union checks.
 - [`trogon_uuid`](crates/trogon_uuid/README.md): static UUIDv5 identity recipes with typed inputs.
+- [`trogon_uuid_build`](crates/trogon_uuid_build/README.md): build-time Rust recipe generation from protobuf options.
 
 ## Licensing
 
