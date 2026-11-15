@@ -14,10 +14,11 @@ use tracing::field::Empty;
 use tracing::Instrument;
 
 use super::agent::{self, AgentError, AgentSigning};
-use super::constants::{SIGNATURE_SUFFIX, TRANSIT_KEY_TYPE};
+use super::constants::SIGNATURE_SUFFIX;
 use super::key_file::{KeyFile, KeyFileError};
 use super::request::{RequestError, SignRequest};
-use super::sshsig::{self, Ed25519Signature};
+use super::sshsig::{self, Signature};
+use super::transit_key;
 use crate::config::signers::{NoSignerForKeyError, PublicKey, Signer, SignerAddress, Signers, TransitAddress};
 use crate::config::{self, ConfigError};
 use crate::secrets::telemetry::record_error;
@@ -251,16 +252,27 @@ impl SshSigner {
         say(&format!("Signing file {}", file.display()));
         let data = sshsig::signed_data(&request.namespace, request.options.hash(), message);
         let raw = match backend
-            .transit_sign(address.mount.as_str(), address.key.as_str(), &data)
+            .transit_sign(
+                address.mount.as_str(),
+                address.key.as_str(),
+                &data,
+                transit_key::sign_parameters(signer.public_key()),
+            )
             .await
         {
             Ok(raw) => raw,
             Err(e) => return classify(&e),
         };
-        let signature = match Ed25519Signature::from_bytes(&raw) {
+        let signature = match Signature::new(signer.public_key(), &raw) {
             Ok(signature) => signature,
             Err(e) => return Attempt::Stopped(e.to_string()),
         };
+        if !sshsig::verify(signer.public_key(), &data, &signature) {
+            return Attempt::Stopped(
+                "the signature Transit returned does not verify against the signer's `public_key`, so it was not written"
+                    .to_string(),
+            );
+        }
         let armored = sshsig::armor(
             signer.public_key(),
             &request.namespace,
@@ -303,13 +315,7 @@ async fn check_key(backend: &OpenBaoBackend, address: &TransitAddress, expected:
         }
         Err(e) => return Err(classify(&e)),
     };
-    if found.key_type != TRANSIT_KEY_TYPE {
-        return Err(Attempt::Stopped(format!(
-            "the Transit key is of type `{}`, but only `{TRANSIT_KEY_TYPE}` can sign for git here",
-            found.key_type
-        )));
-    }
-    let actual = match PublicKey::from_key_bytes(&found.public_key) {
+    let actual = match transit_key::public_key(&found) {
         Ok(actual) => actual,
         Err(e) => return Err(Attempt::Stopped(e.to_string())),
     };

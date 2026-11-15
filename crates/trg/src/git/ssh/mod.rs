@@ -6,10 +6,12 @@
 
 pub mod agent;
 mod constants;
+mod der;
 pub mod key_file;
 pub mod request;
 pub mod sign;
 pub mod sshsig;
+mod transit_key;
 
 pub use constants::{PROGRAM_NAME, SSH_KEYGEN};
 pub use request::{detect, Invocation, SignRequest};

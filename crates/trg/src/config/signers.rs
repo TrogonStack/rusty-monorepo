@@ -18,7 +18,7 @@ use serde::Deserialize;
 use crate::secrets::openbao::expand_tilde;
 use crate::secrets::{BackendKind, SecretsSection};
 
-use constants::{DEFAULT_TRANSIT_MOUNT, ED25519, ED25519_KEY_LEN};
+use constants::{DEFAULT_TRANSIT_MOUNT, ED25519, ED25519_KEY_LEN, RSA, RSA_MAX_MODULUS_BYTES, RSA_MIN_MODULUS_BYTES};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PublicKeyError {
@@ -31,7 +31,7 @@ pub enum PublicKeyError {
     #[error("the key blob is not valid: {0}")]
     Blob(&'static str),
 
-    #[error("`{0}` keys are not supported: only ssh-ed25519 can be signed with here")]
+    #[error("`{0}` keys are not supported: only ssh-ed25519 and ssh-rsa can be signed with here")]
     Unsupported(String),
 }
 
@@ -39,11 +39,50 @@ pub enum PublicKeyError {
 ///
 /// The comment is left out on purpose: the same key is routinely written with a
 /// different comment in each place it is kept, and that must not make it a
-/// different key. Only Ed25519 is representable, so a key of any other type is
-/// refused when it is read instead of when it is first asked to sign.
+/// different key. Only Ed25519 and RSA are representable, so a key of any other
+/// type is refused when it is read instead of when it is first asked to sign.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct PublicKey {
-    key: [u8; ED25519_KEY_LEN],
+pub enum PublicKey {
+    Ed25519([u8; ED25519_KEY_LEN]),
+    Rsa(RsaPublicKey),
+}
+
+/// An RSA public key as big-endian integers without leading zeros, so the same
+/// key reads the same however it was encoded.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RsaPublicKey {
+    exponent: Vec<u8>,
+    modulus: Vec<u8>,
+}
+
+impl RsaPublicKey {
+    pub fn new(exponent: &[u8], modulus: &[u8]) -> Result<Self, PublicKeyError> {
+        let exponent = strip_leading_zeros(exponent);
+        let modulus = strip_leading_zeros(modulus);
+        if exponent.is_empty() {
+            return Err(PublicKeyError::Blob("empty RSA exponent"));
+        }
+        if !(RSA_MIN_MODULUS_BYTES..=RSA_MAX_MODULUS_BYTES).contains(&modulus.len()) {
+            return Err(PublicKeyError::Blob("RSA keys must be between 2048 and 8192 bits"));
+        }
+        Ok(Self {
+            exponent: exponent.to_vec(),
+            modulus: modulus.to_vec(),
+        })
+    }
+
+    pub fn exponent(&self) -> &[u8] {
+        &self.exponent
+    }
+
+    pub fn modulus(&self) -> &[u8] {
+        &self.modulus
+    }
+}
+
+fn strip_leading_zeros(bytes: &[u8]) -> &[u8] {
+    let zeros = bytes.iter().take_while(|&&b| b == 0).count();
+    &bytes[zeros..]
 }
 
 impl PublicKey {
@@ -53,42 +92,70 @@ impl PublicKey {
         let (Some(declared), Some(encoded)) = (fields.next(), fields.next()) else {
             return Err(PublicKeyError::Shape);
         };
-        if declared != ED25519 {
+        if declared != ED25519 && declared != RSA {
             return Err(PublicKeyError::Unsupported(declared.to_string()));
         }
         let blob = base64::decode(encoded).map_err(PublicKeyError::Encoding)?;
         let mut rest = blob.as_slice();
         let found = read_string(&mut rest).ok_or(PublicKeyError::Blob("truncated"))?;
-        if found != ED25519.as_bytes() {
+        if found != declared.as_bytes() {
             return Err(PublicKeyError::Unsupported(String::from_utf8_lossy(found).into_owned()));
         }
-        let key = read_string(&mut rest).ok_or(PublicKeyError::Blob("truncated"))?;
+        let key = if declared == ED25519 {
+            let key = read_string(&mut rest).ok_or(PublicKeyError::Blob("truncated"))?;
+            Self::from_ed25519_bytes(key)?
+        } else {
+            let exponent = read_string(&mut rest).ok_or(PublicKeyError::Blob("truncated"))?;
+            let modulus = read_string(&mut rest).ok_or(PublicKeyError::Blob("truncated"))?;
+            Self::Rsa(RsaPublicKey::new(exponent, modulus)?)
+        };
         if !rest.is_empty() {
             return Err(PublicKeyError::Blob("trailing bytes"));
         }
-        Self::from_key_bytes(key)
+        Ok(key)
     }
 
-    pub fn from_key_bytes(bytes: &[u8]) -> Result<Self, PublicKeyError> {
+    pub fn from_ed25519_bytes(bytes: &[u8]) -> Result<Self, PublicKeyError> {
         let key = <[u8; ED25519_KEY_LEN]>::try_from(bytes).or(Err(PublicKeyError::Blob("wrong key length")))?;
-        Ok(Self { key })
+        Ok(Self::Ed25519(key))
     }
 
-    pub fn key_bytes(&self) -> &[u8; ED25519_KEY_LEN] {
-        &self.key
+    /// The key type as it is written in a `.pub` file and in the blob.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Ed25519(_) => ED25519,
+            Self::Rsa(_) => RSA,
+        }
     }
 
     /// The wire form SSHSIG embeds: the type, then the key.
     pub fn blob(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(4 + ED25519.len() + 4 + ED25519_KEY_LEN);
-        put_string(&mut out, ED25519.as_bytes());
-        put_string(&mut out, &self.key);
+        let mut out = Vec::new();
+        put_string(&mut out, self.type_name().as_bytes());
+        match self {
+            Self::Ed25519(key) => put_string(&mut out, key),
+            Self::Rsa(key) => {
+                put_mpint(&mut out, key.exponent());
+                put_mpint(&mut out, key.modulus());
+            }
+        }
         out
     }
 
-    /// `ssh-ed25519 <base64>`, with no comment.
+    /// `<type> <base64>`, with no comment.
     pub fn to_line(&self) -> String {
-        format!("{ED25519} {}", base64::encode(&self.blob()))
+        format!("{} {}", self.type_name(), base64::encode(&self.blob()))
+    }
+}
+
+fn put_mpint(out: &mut Vec<u8>, bytes: &[u8]) {
+    if bytes.first().is_some_and(|b| b & 0x80 != 0) {
+        let mut padded = Vec::with_capacity(bytes.len() + 1);
+        padded.push(0);
+        padded.extend_from_slice(bytes);
+        put_string(out, &padded);
+    } else {
+        put_string(out, bytes);
     }
 }
 

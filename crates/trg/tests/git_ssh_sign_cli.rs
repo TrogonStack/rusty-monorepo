@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
-use ring::signature::Ed25519KeyPair;
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, RsaKeyPair, RSA_PKCS1_SHA512};
 use trg::config::signers::{base64, read_string};
 
 const TOKEN: &str = "test-token";
@@ -32,22 +33,47 @@ const TRANSIT_KEY: &str = "git-personal";
 struct Keypair {
     private: PathBuf,
     public_line: String,
+    rsa: bool,
 }
 
 impl Keypair {
     fn generate(dir: &Path, name: &str, kind: &str) -> Self {
+        Self::keygen(dir, name, &["-t", kind])
+    }
+
+    /// An RSA key written as PKCS#8, which is the form the fake Transit can
+    /// read back to sign with and which `ssh-keygen` and `ssh-add` still read.
+    fn generate_rsa(dir: &Path, name: &str, bits: u32) -> Self {
+        Self::keygen(dir, name, &["-t", "rsa", "-b", &bits.to_string(), "-m", "PKCS8"])
+    }
+
+    fn keygen(dir: &Path, name: &str, kind: &[&str]) -> Self {
         let private = dir.join(name);
         let status = Command::new("ssh-keygen")
-            .args(["-q", "-t", kind, "-N", "", "-C", "fixture", "-f"])
+            .args(["-q", "-N", "", "-C", "fixture"])
+            .args(kind)
+            .arg("-f")
             .arg(&private)
             .status()
             .unwrap();
-        assert!(status.success(), "ssh-keygen could not generate a {kind} key");
+        assert!(status.success(), "ssh-keygen could not generate a {kind:?} key");
         let public_line = std::fs::read_to_string(dir.join(format!("{name}.pub")))
             .unwrap()
             .trim()
             .to_string();
-        Self { private, public_line }
+        let rsa = public_line.starts_with("ssh-rsa ");
+        Self {
+            private,
+            public_line,
+            rsa,
+        }
+    }
+
+    /// The PKCS#8 document of an RSA key made by `generate_rsa`.
+    fn pkcs8(&self) -> Vec<u8> {
+        let text = std::fs::read_to_string(&self.private).unwrap();
+        let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
+        base64::decode(&body).unwrap()
     }
 
     fn public_file(&self) -> PathBuf {
@@ -74,6 +100,63 @@ impl Keypair {
     }
 }
 
+enum SigningKey {
+    Ed25519(Ed25519KeyPair),
+    Rsa(RsaKeyPair),
+}
+
+/// How a fake Transit misbehaves, for the tests that need it to.
+#[derive(Default, Clone, Copy)]
+struct Behavior {
+    /// Flip a bit of every signature it returns.
+    corrupt: bool,
+    /// Wait this long before answering anything.
+    stall: Option<Duration>,
+}
+
+fn der(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    if body.len() < 0x80 {
+        out.push(u8::try_from(body.len()).unwrap());
+    } else {
+        let bytes = body.len().to_be_bytes();
+        let skip = bytes.iter().take_while(|&&b| b == 0).count();
+        out.push(0x80 | u8::try_from(bytes.len() - skip).unwrap());
+        out.extend_from_slice(&bytes[skip..]);
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+/// The `-----BEGIN PUBLIC KEY-----` document Transit reports for an RSA key.
+fn spki_pem(public_line: &str) -> String {
+    let blob = base64::decode(public_line.split_whitespace().nth(1).unwrap()).unwrap();
+    let mut rest = blob.as_slice();
+    read_string(&mut rest).unwrap();
+    let exponent = read_string(&mut rest).unwrap().to_vec();
+    let modulus = read_string(&mut rest).unwrap().to_vec();
+    let numbers = [der(0x02, &modulus), der(0x02, &exponent)].concat();
+    let mut bits = vec![0u8];
+    bits.extend(der(0x30, &numbers));
+    let algorithm = der(
+        0x30,
+        &[
+            der(0x06, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]),
+            der(0x05, &[]),
+        ]
+        .concat(),
+    );
+    let document = der(0x30, &[algorithm, der(0x03, &bits)].concat());
+    let encoded = base64::encode(&document);
+    let mut pem = String::from("-----BEGIN PUBLIC KEY-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).unwrap());
+        pem.push('\n');
+    }
+    pem.push_str("-----END PUBLIC KEY-----\n");
+    pem
+}
+
 /// The part of Transit that signing talks to, answering from a real key.
 struct FakeTransit {
     addr: SocketAddr,
@@ -84,18 +167,24 @@ struct FakeTransit {
 impl FakeTransit {
     /// `advertised` is what `GET keys/<name>` reports, which a test can make
     /// differ from the key that actually signs.
-    fn start(signing: &Keypair, advertised: &str) -> Self {
-        let pair = Ed25519KeyPair::from_seed_unchecked(&signing.seed()).unwrap();
-        let advertised = advertised
-            .split_whitespace()
-            .nth(1)
-            .map(|b| base64::decode(b).unwrap())
-            .map(|blob| {
-                let mut rest = blob.as_slice();
-                read_string(&mut rest).unwrap();
-                read_string(&mut rest).unwrap().to_vec()
-            })
-            .unwrap();
+    fn start(signing: &Keypair, advertised: &Keypair) -> Self {
+        Self::start_with(signing, advertised, Behavior::default())
+    }
+
+    fn start_with(signing: &Keypair, advertised: &Keypair, behavior: Behavior) -> Self {
+        let pair = if signing.rsa {
+            SigningKey::Rsa(RsaKeyPair::from_pkcs8(&signing.pkcs8()).unwrap())
+        } else {
+            SigningKey::Ed25519(Ed25519KeyPair::from_seed_unchecked(&signing.seed()).unwrap())
+        };
+        let (key_type, public_key) = if advertised.rsa {
+            ("rsa-4096", spki_pem(&advertised.public_line))
+        } else {
+            let blob = base64::decode(advertised.public_line.split_whitespace().nth(1).unwrap()).unwrap();
+            let mut rest = blob.as_slice();
+            read_string(&mut rest).unwrap();
+            ("ed25519", base64::encode(read_string(&mut rest).unwrap()))
+        };
         let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
         let addr = server.server_addr().to_ip().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
@@ -103,6 +192,9 @@ impl FakeTransit {
         std::thread::spawn(move || {
             for mut request in worker_server.incoming_requests() {
                 counter.fetch_add(1, Ordering::SeqCst);
+                if let Some(stall) = behavior.stall {
+                    std::thread::sleep(stall);
+                }
                 let authorized = request
                     .headers()
                     .iter()
@@ -114,9 +206,9 @@ impl FakeTransit {
                     (
                         200,
                         serde_json::json!({"data": {
-                            "type": "ed25519",
+                            "type": key_type,
                             "latest_version": 1,
-                            "keys": {"1": {"public_key": base64::encode(&advertised)}},
+                            "keys": {"1": {"public_key": public_key}},
                         }})
                         .to_string(),
                     )
@@ -125,11 +217,30 @@ impl FakeTransit {
                     request.as_reader().read_to_string(&mut text).unwrap();
                     let input: serde_json::Value = serde_json::from_str(&text).unwrap();
                     let message = base64::decode(input["input"].as_str().unwrap()).unwrap();
-                    let signature = base64::encode(pair.sign(&message).as_ref());
-                    (
-                        200,
-                        serde_json::json!({"data": {"signature": format!("vault:v1:{signature}")}}).to_string(),
-                    )
+                    let asked = (input["hash_algorithm"].as_str(), input["signature_algorithm"].as_str());
+                    let mut signature = match &pair {
+                        SigningKey::Ed25519(pair) if asked == (None, None) => {
+                            Some(pair.sign(&message).as_ref().to_vec())
+                        }
+                        SigningKey::Rsa(pair) if asked == (Some("sha2-512"), Some("pkcs1v15")) => {
+                            let mut out = vec![0u8; pair.public().modulus_len()];
+                            pair.sign(&RSA_PKCS1_SHA512, &SystemRandom::new(), &message, &mut out)
+                                .unwrap();
+                            Some(out)
+                        }
+                        _ => None,
+                    };
+                    if let (Some(bytes), true) = (signature.as_mut(), behavior.corrupt) {
+                        bytes[0] ^= 0x01;
+                    }
+                    match signature {
+                        Some(bytes) => (
+                            200,
+                            serde_json::json!({"data": {"signature": format!("vault:v1:{}", base64::encode(&bytes))}})
+                                .to_string(),
+                        ),
+                        None => (400, r#"{"errors":["unexpected signing parameters"]}"#.to_string()),
+                    }
                 } else {
                     (404, r#"{"errors":[]}"#.to_string())
                 };
@@ -251,8 +362,16 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_key(|dir| Keypair::generate(dir, "id", "ed25519"))
+    }
+
+    fn rsa() -> Self {
+        Self::with_key(|dir| Keypair::generate_rsa(dir, "id", 4096))
+    }
+
+    fn with_key(make: impl FnOnce(&Path) -> Keypair) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let key = Keypair::generate(dir.path(), "id", "ed25519");
+        let key = make(dir.path());
         let trg = Command::cargo_bin("trg").unwrap().get_program().to_owned();
         let program = dir.path().join("trg-git-ssh-sign");
         symlink(trg, &program).unwrap();
@@ -274,9 +393,13 @@ impl Fixture {
     }
 
     fn backend(&self, name: &str, addr: SocketAddr) -> String {
+        self.backend_timing_out_after(name, addr, 3000)
+    }
+
+    fn backend_timing_out_after(&self, name: &str, addr: SocketAddr, milliseconds: u64) -> String {
         format!(
             "[secrets.backends.{name}]\nkind = \"openbao\"\naddr = \"http://{addr}\"\nmount = \"secret\"\n\
-             path_prefix = \"trg\"\nowner = \"me\"\ntoken_file = \"{}\"\ntimeout_ms = 3000\n\n",
+             path_prefix = \"trg\"\nowner = \"me\"\ntoken_file = \"{}\"\ntimeout_ms = {milliseconds}\n\n",
             self.path("token").display()
         )
     }
@@ -351,7 +474,7 @@ fn transit_signer(fixture: &Fixture, backend: &str, fallbacks: &str) -> String {
 #[test]
 fn a_transit_signature_verifies_with_ssh_keygen() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -388,7 +511,7 @@ fn a_transit_signature_verifies_with_ssh_keygen() {
 #[test]
 fn the_hash_algorithm_option_is_honoured() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -418,7 +541,7 @@ fn the_hash_algorithm_option_is_honoured() {
 #[test]
 fn a_private_key_path_is_read_through_its_pub_sibling() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -446,7 +569,7 @@ fn a_private_key_path_is_read_through_its_pub_sibling() {
 #[test]
 fn the_clap_command_signs_the_same_way() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -474,7 +597,7 @@ fn the_clap_command_signs_the_same_way() {
 fn a_key_no_signer_declares_is_refused_with_the_declared_names() {
     let fixture = Fixture::new();
     let other = Keypair::generate(fixture.dir.path(), "other", "ed25519");
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -536,7 +659,7 @@ fn an_unreachable_transit_falls_through_to_the_agent_and_says_so() {
 #[test]
 fn rejected_credentials_fall_through_to_the_agent() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     let agent = RealAgent::start(fixture.dir.path(), Some(&fixture.key));
     std::fs::write(fixture.path("token"), "a-different-token").unwrap();
     fixture.write_config(&format!(
@@ -564,7 +687,7 @@ fn rejected_credentials_fall_through_to_the_agent() {
 fn a_transit_key_that_is_not_the_declared_key_stops_without_falling_through() {
     let fixture = Fixture::new();
     let other = Keypair::generate(fixture.dir.path(), "other", "ed25519");
-    let transit = FakeTransit::start(&other, &other.public_line);
+    let transit = FakeTransit::start(&other, &other);
     let agent = RealAgent::start(fixture.dir.path(), Some(&fixture.key));
     fixture.write_config(&format!(
         "{}{}",
@@ -598,7 +721,7 @@ fn a_transit_key_that_is_not_the_declared_key_stops_without_falling_through() {
 #[test]
 fn an_agent_primary_answers_without_asking_transit() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     let agent = RealAgent::start(fixture.dir.path(), Some(&fixture.key));
     fixture.write_config(&format!(
         "{}{}",
@@ -631,7 +754,7 @@ fn an_agent_primary_answers_without_asking_transit() {
 #[test]
 fn a_missing_agent_socket_falls_through_to_transit() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -663,7 +786,7 @@ fn a_missing_agent_socket_falls_through_to_transit() {
 #[test]
 fn an_agent_that_does_not_hold_the_key_falls_through_to_transit() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     let agent = RealAgent::start(fixture.dir.path(), None);
     fixture.write_config(&format!(
         "{}{}",
@@ -691,7 +814,7 @@ fn an_agent_that_does_not_hold_the_key_falls_through_to_transit() {
 #[test]
 fn a_denied_agent_signature_is_never_routed_around() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     let socket = denying_agent(fixture.dir.path(), &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
@@ -724,7 +847,7 @@ fn a_denied_agent_signature_is_never_routed_around() {
 #[test]
 fn verify_modes_are_ssh_keygens_own_answer() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -792,7 +915,7 @@ fn verify_modes_are_ssh_keygens_own_answer() {
 #[test]
 fn failures_exit_as_ssh_keygen_does() {
     let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
         "{}{}",
         fixture.backend("homelab", transit.addr),
@@ -837,15 +960,8 @@ fn failures_exit_as_ssh_keygen_does() {
     }
 }
 
-#[test]
-fn git_signs_and_verifies_a_commit_through_the_program() {
-    let fixture = Fixture::new();
-    let transit = FakeTransit::start(&fixture.key, &fixture.key.public_line);
-    fixture.write_config(&format!(
-        "{}{}",
-        fixture.backend("homelab", transit.addr),
-        transit_signer(&fixture, "homelab", "")
-    ));
+/// Commit with `signing_key` as git is given it, then ask git to verify.
+fn commit_and_verify(fixture: &Fixture, signing_key: &str) -> String {
     let repo = fixture.path("repo");
     std::fs::create_dir(&repo).unwrap();
     let git = |args: &[&str]| {
@@ -861,7 +977,7 @@ fn git_signs_and_verifies_a_commit_through_the_program() {
             .arg("-c")
             .arg(format!("gpg.ssh.program={}", fixture.program.display()))
             .arg("-c")
-            .arg(format!("user.signingkey=key::{}", fixture.key.public_line))
+            .arg(format!("user.signingkey={signing_key}"))
             .arg("-c")
             .arg(format!(
                 "gpg.ssh.allowedSignersFile={}",
@@ -878,7 +994,6 @@ fn git_signs_and_verifies_a_commit_through_the_program() {
         output
     };
     git(&["init", "-q", "-b", "feature"]);
-
     git(&[
         "commit",
         "-q",
@@ -887,12 +1002,179 @@ fn git_signs_and_verifies_a_commit_through_the_program() {
         "-m",
         "signed without a private key",
     ]);
-    let verified = git(&["verify-commit", "HEAD"]);
+    String::from_utf8_lossy(&git(&["verify-commit", "HEAD"]).stderr).into_owned()
+}
+
+#[test]
+fn git_signs_and_verifies_a_commit_through_the_program() {
+    let fixture = Fixture::new();
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend("homelab", transit.addr),
+        transit_signer(&fixture, "homelab", "")
+    ));
+
+    let verified = commit_and_verify(&fixture, &format!("key::{}", fixture.key.public_line));
 
     assert!(
-        String::from_utf8_lossy(&verified.stderr).contains("Good \"git\" signature"),
-        "git did not report a good signature: {}",
-        String::from_utf8_lossy(&verified.stderr)
+        verified.contains("Good \"git\" signature"),
+        "git did not report a good signature: {verified}"
+    );
+}
+
+#[test]
+fn an_rsa_transit_key_signs_a_commit_given_as_a_bare_literal_key() {
+    let fixture = Fixture::rsa();
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend("homelab", transit.addr),
+        transit_signer(&fixture, "homelab", "")
+    ));
+
+    let verified = commit_and_verify(&fixture, &fixture.key.public_line);
+
+    assert!(
+        verified.contains("Good \"git\" signature"),
+        "git did not report a good signature: {verified}"
+    );
+    assert!(transit.requests() > 0, "Transit was never asked");
+}
+
+#[test]
+fn an_rsa_signature_is_an_rsa_sha2_512_signature() {
+    let fixture = Fixture::rsa();
+    let transit = FakeTransit::start(&fixture.key, &fixture.key);
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend("homelab", transit.addr),
+        transit_signer(&fixture, "homelab", "")
+    ));
+    let payload = fixture.payload("signed with rsa\n");
+
+    let output = fixture.sign_file(&payload);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let signature = fixture.path("payload.sig");
+    assert!(
+        fixture.verifies(&payload, &signature),
+        "ssh-keygen rejected the RSA signature"
+    );
+    let text = std::fs::read_to_string(&signature).unwrap();
+    let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
+    let blob = base64::decode(&body).unwrap();
+    assert!(
+        blob.windows(b"rsa-sha2-512".len()).any(|w| w == b"rsa-sha2-512"),
+        "the signature type is not rsa-sha2-512"
+    );
+}
+
+#[test]
+fn a_signature_that_does_not_verify_is_never_written_or_routed_around() {
+    for fixture in [Fixture::new(), Fixture::rsa()] {
+        let transit = FakeTransit::start_with(
+            &fixture.key,
+            &fixture.key,
+            Behavior {
+                corrupt: true,
+                ..Behavior::default()
+            },
+        );
+        let agent = RealAgent::start(fixture.dir.path(), Some(&fixture.key));
+        fixture.write_config(&format!(
+            "{}{}",
+            fixture.backend("homelab", transit.addr),
+            transit_signer(
+                &fixture,
+                "homelab",
+                &format!(", fallbacks = [{{ ssh_agent = \"{}\" }}]", agent.socket.display())
+            )
+        ));
+        let payload = fixture.payload("tampered in transit\n");
+
+        let output = fixture.sign_file(&payload);
+
+        assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
+        let messages = stderr(&output);
+        assert!(
+            messages.contains("does not verify"),
+            "the bad signature is not reported: {messages}"
+        );
+        assert!(
+            !messages.contains("warning"),
+            "a bad signature must not fall through: {messages}"
+        );
+        assert!(
+            !fixture.path("payload.sig").exists(),
+            "a signature that does not verify was written"
+        );
+    }
+}
+
+#[test]
+fn a_transit_that_stops_answering_is_given_up_on_at_the_configured_timeout() {
+    let fixture = Fixture::new();
+    let transit = FakeTransit::start_with(
+        &fixture.key,
+        &fixture.key,
+        Behavior {
+            stall: Some(Duration::from_secs(20)),
+            ..Behavior::default()
+        },
+    );
+    let agent = RealAgent::start(fixture.dir.path(), Some(&fixture.key));
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend_timing_out_after("homelab", transit.addr, 500),
+        transit_signer(
+            &fixture,
+            "homelab",
+            &format!(", fallbacks = [{{ ssh_agent = \"{}\" }}]", agent.socket.display())
+        )
+    ));
+    let payload = fixture.payload("slow transit\n");
+    let started = Instant::now();
+
+    let output = fixture.sign_file(&payload);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "signing waited on a Transit that never answered"
+    );
+    assert!(
+        stderr(&output).contains("warning") && stderr(&output).contains("did not answer in time"),
+        "the timeout is not reported: {}",
+        stderr(&output)
+    );
+    assert!(
+        fixture.verifies(&payload, &fixture.path("payload.sig")),
+        "ssh-keygen rejected the fallback signature"
+    );
+}
+
+#[test]
+fn an_rsa_transit_key_falls_back_to_an_agent_holding_the_same_key() {
+    let fixture = Fixture::rsa();
+    let agent = RealAgent::start(fixture.dir.path(), Some(&fixture.key));
+    fixture.write_config(&format!(
+        "{}{}",
+        fixture.backend("homelab", closed_port_addr()),
+        transit_signer(
+            &fixture,
+            "homelab",
+            &format!(", fallbacks = [{{ ssh_agent = \"{}\" }}]", agent.socket.display())
+        )
+    ));
+    let payload = fixture.payload("rsa through the agent\n");
+
+    let output = fixture.sign_file(&payload);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        fixture.verifies(&payload, &fixture.path("payload.sig")),
+        "ssh-keygen rejected the agent's RSA signature"
     );
 }
 
@@ -942,8 +1224,8 @@ fn configuration_errors_are_reported_at_load() {
         &format!("{backend}{}", signer("one", &ecdsa.public_line, &valid)),
     );
     assert!(
-        unsupported.contains("only ssh-ed25519"),
-        "non-ed25519 key: {unsupported}"
+        unsupported.contains("only ssh-ed25519 and ssh-rsa"),
+        "unsupported key type: {unsupported}"
     );
 
     let undeclared = load_failure(

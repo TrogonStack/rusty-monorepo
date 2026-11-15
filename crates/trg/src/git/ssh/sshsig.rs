@@ -8,11 +8,12 @@
 
 use sha2::{Digest, Sha256, Sha512};
 
+use super::der;
 use crate::config::signers::{base64, put_string, PublicKey};
 
 use super::constants::{
-    ARMOR_BEGIN, ARMOR_COLUMNS, ARMOR_END, ED25519_SIGNATURE_LEN, SIGNATURE_TYPE, SSHSIG_MAGIC as MAGIC,
-    SSHSIG_VERSION as VERSION,
+    ARMOR_BEGIN, ARMOR_COLUMNS, ARMOR_END, ED25519_SIGNATURE_LEN, RSA_SIGNATURE_TYPE, SIGNATURE_TYPE,
+    SSHSIG_MAGIC as MAGIC, SSHSIG_VERSION as VERSION,
 };
 
 /// How the message is reduced before it is signed.
@@ -71,25 +72,63 @@ impl Namespace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("a signature must be {ED25519_SIGNATURE_LEN} bytes, got {0}")]
-pub struct SignatureLengthError(usize);
+#[error("a signature for this key must be {expected} bytes, got {got}")]
+pub struct SignatureLengthError {
+    expected: usize,
+    got: usize,
+}
 
-/// An Ed25519 signature, which is always the same length.
+/// A raw signature made for one public key, so its length is already known to
+/// fit that key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Ed25519Signature([u8; ED25519_SIGNATURE_LEN]);
+pub struct Signature(Vec<u8>);
 
-impl Ed25519Signature {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SignatureLengthError> {
-        <[u8; ED25519_SIGNATURE_LEN]>::try_from(bytes)
-            .map(Self)
-            .or(Err(SignatureLengthError(bytes.len())))
+impl Signature {
+    pub fn new(key: &PublicKey, bytes: &[u8]) -> Result<Self, SignatureLengthError> {
+        let expected = match key {
+            PublicKey::Ed25519(_) => ED25519_SIGNATURE_LEN,
+            PublicKey::Rsa(rsa) => rsa.modulus().len(),
+        };
+        if bytes.len() == expected {
+            Ok(Self(bytes.to_vec()))
+        } else {
+            Err(SignatureLengthError {
+                expected,
+                got: bytes.len(),
+            })
+        }
+    }
+}
+
+fn signature_type(key: &PublicKey) -> &'static str {
+    match key {
+        PublicKey::Ed25519(_) => SIGNATURE_TYPE,
+        PublicKey::Rsa(_) => RSA_SIGNATURE_TYPE,
+    }
+}
+
+/// Whether `signature` is `key`'s signature over `data`.
+///
+/// Used on what a remote signer returned, before it is written anywhere: a
+/// signature that does not verify cannot be told apart from a forgery.
+pub fn verify(key: &PublicKey, data: &[u8], signature: &Signature) -> bool {
+    match key {
+        PublicKey::Ed25519(bytes) => ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, bytes)
+            .verify(data, &signature.0)
+            .is_ok(),
+        PublicKey::Rsa(rsa) => ring::signature::UnparsedPublicKey::new(
+            &ring::signature::RSA_PKCS1_2048_8192_SHA512,
+            der::rsa_public_key(rsa),
+        )
+        .verify(data, &signature.0)
+        .is_ok(),
     }
 }
 
 /// The bytes the signer must sign for `message`.
 ///
-/// Ed25519 signs these directly, with no further hashing, which is why a
-/// Transit key is asked to sign them as they are.
+/// Ed25519 signs these directly, and RSA hashes them once as part of its
+/// padding, so a Transit key is asked to sign them as they are.
 pub fn signed_data(namespace: &Namespace, hash: HashAlgorithm, message: &[u8]) -> Vec<u8> {
     let mut out = Vec::from(&MAGIC[..]);
     put_string(&mut out, namespace.as_str().as_bytes());
@@ -100,9 +139,9 @@ pub fn signed_data(namespace: &Namespace, hash: HashAlgorithm, message: &[u8]) -
 }
 
 /// The armored signature `ssh-keygen -Y sign` writes to `<file>.sig`.
-pub fn armor(key: &PublicKey, namespace: &Namespace, hash: HashAlgorithm, signature: &Ed25519Signature) -> String {
+pub fn armor(key: &PublicKey, namespace: &Namespace, hash: HashAlgorithm, signature: &Signature) -> String {
     let mut inner = Vec::new();
-    put_string(&mut inner, SIGNATURE_TYPE.as_bytes());
+    put_string(&mut inner, signature_type(key).as_bytes());
     put_string(&mut inner, &signature.0);
 
     let mut blob = Vec::from(&MAGIC[..]);

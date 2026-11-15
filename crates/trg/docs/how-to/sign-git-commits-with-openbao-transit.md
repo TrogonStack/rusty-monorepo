@@ -16,7 +16,10 @@ You need:
 - `ssh-keygen` on your `PATH`. `trg` hands it every `-Y` mode other than
   `sign`, so verification keeps working.
 
-## 1. Create an Ed25519 Transit key
+## 1. Create a Transit key
+
+`trg` signs with `ed25519`, `rsa-2048`, `rsa-3072` and `rsa-4096` Transit keys.
+Transit holds the private half, so the key never needs to be exportable.
 
 ```sh
 bao write transit/keys/git-personal type=ed25519
@@ -33,6 +36,11 @@ bao write transit/keys/git-personal/import type=ed25519 \
 ```
 
 See the OpenBao Transit import documentation for how to wrap the key.
+
+An RSA key is declared the same way, with its `ssh-rsa` line as the
+`public_key`. `trg` reads the key Transit reports and refuses to sign unless it
+is the declared one. An RSA signature is made as `rsa-sha2-512`: `trg` asks
+Transit for `hash_algorithm=sha2-512` with `signature_algorithm=pkcs1v15`.
 
 ## 2. Declare the signer
 
@@ -86,6 +94,10 @@ git config --global user.signingkey "key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF
 git config --global commit.gpgsign true
 ```
 
+Git treats a `user.signingkey` that starts with `ssh-` as the key itself, so
+the `key::` prefix is optional. Both forms work, and so does the path of a
+`.pub` file, or of a private key that has a `.pub` beside it.
+
 Git also needs an allowed signers file to verify:
 
 ```sh
@@ -105,6 +117,56 @@ The same signing code is reachable without the symlink:
 trg git ssh sign -n git -f ~/.ssh/id_ed25519.pub notes.txt
 ```
 
+## Replace a bash `gpg.ssh.program`
+
+A script that signs with a Transit key and falls back to 1Password usually
+holds an RSA key imported into Transit without export, and sets a bare
+`ssh-rsa` line as `user.signingkey`:
+
+```sh
+bao write transit/keys/git-personal/import type=rsa-4096 \
+  ciphertext=@wrapped-key.b64
+```
+
+The same setup in `trg` is one signer. Its `public_key` is that bare line, and
+its fallback is the 1Password agent socket, which is the socket the
+`op-ssh-sign` helper talks to:
+
+```toml
+[secrets.backends.homelab]
+kind = "openbao"
+addr = "https://bao.example.com:8200"
+mount = "secret"
+path_prefix = "trg"
+owner = "me"
+token_file = "~/.config/trg/bao-token"
+timeout_ms = 3000
+
+[git.ssh.signers.personal]
+public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCdemZz7dZLzntCMvrefRlIe2SCoGoU/wKMc/IFx6FvlIr9cdCl9q+CkaaJ0n3mvmDhVHkWYCWfe8F6P3jjOAy+w+pp6q7yoBFX88rGSafRoP2VUuaqGt+JWYiGY3hHVHzmFXqqSW4dqMZEM7raO6ui9iRet3nqT2CQqOvw3bdO18+iEEjQ2MSAFIKgtoEB28QQPiJeSTmJGie6ry+/UOa9YOQRQlII3SQ0cqxDROLTI1Cjy82epDzinBN5zNeC1Fe0XThaT238OjegNe8C0oOaE0GcT3R3NAyYWzVAvL61fjT5bEkN9Y8/nQIk1yZ1teGd+oW8izP4OUpAC6WfP3DNVv2kmvvwTAPo1fjKcu4jvXg2siMOlImsrr7fLqE83gqm6BSZuMQ0AybwHIht869c1k7De/obxfZFzfzj/Ld/EfTE1/uWcdebiepKJ8z50HLSMyxz+8HZHtCclC1HkP30wbLkbURPnw8Xx8xlAatSZjUHtJLA53lQQM/+TXWx3sz2ZpRIZXs7fnwWZqIgwTPRQAELz4WhLy0adzDTLMh4nVaVcn61nH1p/EKHAQ34Zl1uoPtXTVHUT2nYi8Lh95gODrcM4/eyUfKEPYitRtWWjJhnaXLKlLsK1oeon+hYyPmgnXMRTMY8JCmUBuuIRpwYo+zNY07M2SkXV58RJsVorw== docs-example"
+signer = { backend = "homelab", transit_key = "git-personal", fallbacks = [
+  { ssh_agent = "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock" },
+] }
+```
+
+Then point git at `trg` and keep the key line you already have:
+
+```sh
+git config --global gpg.ssh.program trg-git-ssh-sign
+git config --global user.signingkey "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCdemZz7dZLzntCMvrefRlIe2SCoGoU/wKMc/IFx6FvlIr9cdCl9q+CkaaJ0n3mvmDhVHkWYCWfe8F6P3jjOAy+w+pp6q7yoBFX88rGSafRoP2VUuaqGt+JWYiGY3hHVHzmFXqqSW4dqMZEM7raO6ui9iRet3nqT2CQqOvw3bdO18+iEEjQ2MSAFIKgtoEB28QQPiJeSTmJGie6ry+/UOa9YOQRQlII3SQ0cqxDROLTI1Cjy82epDzinBN5zNeC1Fe0XThaT238OjegNe8C0oOaE0GcT3R3NAyYWzVAvL61fjT5bEkN9Y8/nQIk1yZ1teGd+oW8izP4OUpAC6WfP3DNVv2kmvvwTAPo1fjKcu4jvXg2siMOlImsrr7fLqE83gqm6BSZuMQ0AybwHIht869c1k7De/obxfZFzfzj/Ld/EfTE1/uWcdebiepKJ8z50HLSMyxz+8HZHtCclC1HkP30wbLkbURPnw8Xx8xlAatSZjUHtJLA53lQQM/+TXWx3sz2ZpRIZXs7fnwWZqIgwTPRQAELz4WhLy0adzDTLMh4nVaVcn61nH1p/EKHAQ34Zl1uoPtXTVHUT2nYi8Lh95gODrcM4/eyUfKEPYitRtWWjJhnaXLKlLsK1oeon+hYyPmgnXMRTMY8JCmUBuuIRpwYo+zNY07M2SkXV58RJsVorw== docs-example"
+```
+
+Verification modes go to `ssh-keygen`, the `-U` flag git adds for a literal key
+is accepted, and the progress lines `ssh-keygen` prints are printed too.
+
+## How long it waits
+
+An OpenBao backend gives up on a request after its `timeout_ms`, which is
+`5000` unless the backend sets it, and a connection after at most `2000`. A
+Transit that stops answering therefore costs one timeout before the next
+address is tried, and the warning says it did not answer in time. Lower
+`timeout_ms` on the backend if the fallback should take over sooner.
+
 ## What happens when a signer fails
 
 An address falls through to the next only when it could not be asked, never
@@ -115,11 +177,17 @@ request signed by another key holder behind their back.
 |---|---|---|
 | Transit | Backend unreachable, timeout, or a transport error | Falls through |
 | Transit | HTTP 403, so the token was rejected | Falls through |
-| Transit | Key missing, not `ed25519`, or its public key differs from `public_key` | Stops |
+| Transit | Key missing, not an `ed25519` or RSA key, or its public key differs from `public_key` | Stops |
 | Transit | Malformed response | Stops |
+| Transit | The signature does not verify against `public_key` | Stops, and no `.sig` is written |
 | SSH agent | Socket missing or connection refused | Falls through |
 | SSH agent | Key not listed by the agent | Falls through |
 | SSH agent | Signing fails after the key was listed, such as a denied prompt | Stops |
+
+`trg` checks every Transit signature against `public_key` before it writes
+`<file>.sig`, so a signature that was damaged or made by another key never
+reaches git. This is not retried on another address, because a signer that
+returns a wrong answer should be looked at, not routed around.
 
 When a fallback signs, `trg` prints a warning on stderr that names the signer,
 why the earlier address failed, and which address answered.

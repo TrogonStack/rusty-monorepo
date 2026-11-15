@@ -13,16 +13,27 @@ use super::{Absence, OpenBaoBackend};
 use crate::config::signers::base64;
 use crate::secrets::{SecretPath, SecretsError};
 
+/// How a key type wants to be asked to sign, where its default is not enough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignParameters {
+    pub hash_algorithm: &'static str,
+    pub signature_algorithm: &'static str,
+}
+
 #[derive(Serialize)]
 struct SignBody {
     input: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash_algorithm: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_algorithm: Option<&'static str>,
 }
 
 /// What `GET <mount>/keys/<name>` says about the version that signs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitPublicKey {
     pub key_type: String,
-    pub public_key: Vec<u8>,
+    pub public_key: String,
 }
 
 impl OpenBaoBackend {
@@ -44,11 +55,19 @@ impl OpenBaoBackend {
     }
 
     /// The raw signature the engine produced over `message`.
-    pub async fn transit_sign(&self, mount: &str, name: &str, message: &[u8]) -> Result<Vec<u8>, SecretsError> {
+    pub async fn transit_sign(
+        &self,
+        mount: &str,
+        name: &str,
+        message: &[u8],
+        parameters: Option<SignParameters>,
+    ) -> Result<Vec<u8>, SecretsError> {
         let anchor = anchor(mount, name, "sign");
         let url = format!("{}/v1/{mount}/sign/{name}", self.addr);
         let body = serde_json::to_value(SignBody {
             input: base64::encode(message),
+            hash_algorithm: parameters.map(|p| p.hash_algorithm),
+            signature_algorithm: parameters.map(|p| p.signature_algorithm),
         })
         .map_err(|e| malformed(&anchor, &e.to_string()))?;
         let answered = self
@@ -98,10 +117,10 @@ fn parse_public_key(body: &Value, anchor: &SecretPath) -> Result<TransitPublicKe
         .and_then(|version| version.get("public_key"))
         .and_then(Value::as_str)
         .ok_or_else(|| malformed(anchor, "response carries no public key for the latest version"))?;
-    let Ok(public_key) = base64::decode(encoded) else {
-        return Err(malformed(anchor, "the public key in the response is not base64"));
-    };
-    Ok(TransitPublicKey { key_type, public_key })
+    Ok(TransitPublicKey {
+        key_type,
+        public_key: encoded.to_string(),
+    })
 }
 
 fn parse_signature(body: &Value, anchor: &SecretPath) -> Result<Vec<u8>, SecretsError> {

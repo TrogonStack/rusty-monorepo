@@ -689,15 +689,22 @@ declared names.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `public_key` | string | yes | An `ssh-ed25519` public key line. Another key type is rejected at load, and so is a key another signer already declares. |
+| `public_key` | string | yes | An `ssh-ed25519` or `ssh-rsa` public key line. An RSA key must be 2048 to 8192 bits. Another key type is rejected at load, and so is a key another signer already declares. |
 | `signer` | address | yes | The address tried first, with optional `fallbacks`. |
 
 An address is one of two shapes.
 
 | Shape | Fields | Meaning |
 |---|---|---|
-| Transit | `backend`, `transit_key`, `transit_mount` | Signs with an OpenBao Transit key. `backend` names a declared `kind = "openbao"` backend and supplies its address, token and CA. `transit_mount` defaults to `transit`. |
+| Transit | `backend`, `transit_key`, `transit_mount` | Signs with an OpenBao Transit key of type `ed25519`, `rsa-2048`, `rsa-3072` or `rsa-4096`. `backend` names a declared `kind = "openbao"` backend and supplies its address, token, CA and `timeout_ms`. `transit_mount` defaults to `transit`. |
 | SSH agent | `ssh_agent` | Signs with the agent listening on this socket path. A leading `~` is expanded. |
+
+An Ed25519 key is signed with Transit's defaults. An RSA key is signed with
+`hash_algorithm = "sha2-512"` and `signature_algorithm = "pkcs1v15"`, which
+makes an `rsa-sha2-512` SSH signature. The public key of an RSA Transit key is
+a PEM `SubjectPublicKeyInfo`, which `trg` converts to the SSH form to compare
+it with `public_key`. A Transit request that is not answered within the
+backend's `timeout_ms` counts as unreachable.
 
 Only the primary address takes `fallbacks`: a non-empty array of addresses
 tried in order, and the order may start with either shape. A fallback cannot
@@ -716,8 +723,9 @@ be asked or has declined, never when it answered with a refusal.
 |---|---|---|
 | Transit | Backend unreachable, timeout, or a transport error | Falls through |
 | Transit | HTTP 403, so the token was rejected | Falls through |
-| Transit | Transit key is missing, is not `ed25519`, or its public key differs from `public_key` | Stops |
+| Transit | Transit key is missing, is not an `ed25519` or RSA key, or its public key differs from `public_key` | Stops |
 | Transit | Malformed response | Stops |
+| Transit | The signature does not verify against `public_key`, so no `.sig` is written | Stops |
 | SSH agent | Socket missing or connection refused | Falls through |
 | SSH agent | Key not listed by the agent | Falls through |
 | SSH agent | Signing fails after the key was listed, such as a denied approval prompt | Stops |
