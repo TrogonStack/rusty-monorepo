@@ -24,6 +24,13 @@ impl RawClaims {
         Self::from_validated(value.as_str())
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Member-name validation intentionally maps to RawClaimsError::EmptyName after the raw parser checks the only rejected condition"
+        )
+    )]
     pub(crate) fn from_validated(text: &str) -> Result<Self, RawClaimsError> {
         let text = text.trim();
         if !text.starts_with('{') {
@@ -81,6 +88,13 @@ impl RawClaims {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        discarded_error_source,
+        reason = "Malformed member-name escapes intentionally share the raw scanner InvalidJson category without retaining token material"
+    )
+)]
 fn member_name(key: &str) -> Result<Cow<'_, str>, RawClaimsError> {
     if key.contains('\\') {
         return serde_json::from_str::<String>(key)

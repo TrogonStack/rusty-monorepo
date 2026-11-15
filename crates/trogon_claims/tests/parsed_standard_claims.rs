@@ -1,5 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "json")]
+use trogon_claims::ingest::IngestClaims;
+#[cfg(feature = "json")]
+use trogon_claims::{Issuer, PrincipalKey, RawClaims, SubjectId};
+
 use trogon_claims::{
     Claim, ClaimLookupError, ClaimText, ClaimType, ClaimValue, DynamicClaims, NumericDate, ParsedStandardClaims,
     ScopeName, WellKnownClaim,
@@ -168,9 +173,6 @@ fn present_empty_collections_remain_distinct_from_absent_collections() {
 
 #[cfg(feature = "json")]
 fn from_json(body: &str) -> DynamicClaims {
-    use trogon_claims::ingest::IngestClaims;
-    use trogon_claims::{Issuer, PrincipalKey, RawClaims, SubjectId};
-
     let raw = RawClaims::from_slice(body.as_bytes()).unwrap();
     let key = PrincipalKey::new(
         Issuer::try_new("local").unwrap(),
