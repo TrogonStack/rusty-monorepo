@@ -166,6 +166,26 @@ fn typed_uuid_operations_and_owned_text_need_no_extra_allocations() {
         let direct_text = without_allocations(|| DirectTextId::try_from_owned(raw).expect("direct owned raw"));
         assert_eq!(direct_text.as_raw().as_ptr(), pointer, "direct text keeps its buffer");
 
+        #[cfg(feature = "template")]
+        {
+            struct Identity;
+            impl trogon_object_id::UuidTemplate for Identity {
+                type Input<'a> = &'a str;
+                const NAMESPACE: Uuid = Uuid::NAMESPACE_DNS;
+                fn uuid5(input: Self::Input<'_>) -> Uuid {
+                    trogon_uuid::uuid5(&Self::NAMESPACE, input.as_bytes())
+                }
+            }
+
+            #[derive(trogon_object_id::ObjectId)]
+            #[object_id(prefix = "recipe", template = Identity)]
+            #[repr(transparent)]
+            struct RecipeId(Uuid);
+            let generated =
+                without_allocations(|| RecipeId::from_identity(black_box("example.org")).expect("typed UUID recipe"));
+            assert_eq!(generated.payload().get_version_num(), 5, "recipe preserves UUIDv5");
+        }
+
         #[cfg(feature = "serde")]
         without_allocations(|| {
             let mut bytes = [0_u8; 64];

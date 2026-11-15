@@ -65,6 +65,11 @@
           "type": "toml",
           "path": "/crates/trogon_uuid_build/Cargo.toml",
           "jsonpath": "$.dependencies.trogon_uuid.version"
+        },
+        {
+          "type": "toml",
+          "path": "/crates/trogon_object_id/Cargo.toml",
+          "jsonpath": "$.dependencies.trogon_uuid.version"
         }
       ],
       "initial-version": "0.1.0"
