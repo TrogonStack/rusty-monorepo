@@ -36,6 +36,13 @@ where
 {
     type Rejection = Unauthenticated;
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Anonymous principals use the credential outcome as the stable public rejection category."
+        )
+    )]
     async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
         let principal = parts
             .extensions

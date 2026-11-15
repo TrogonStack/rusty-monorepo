@@ -21,6 +21,13 @@ where
 {
     type Rejection = StatusCode;
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "This explicit masking boundary hides every extractor rejection behind the same not-found response."
+        )
+    )]
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         T::from_request_parts(parts, state)
             .await
