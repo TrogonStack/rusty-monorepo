@@ -1,0 +1,59 @@
+warning: test `reexported_api` does not require private implementation access
+  --> $DIR/public_helpers.rs:34:8
+   |
+LL |     fn reexported_api() { assert_eq!(super::hidden::exported(), 7); }
+   |        ^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+   = note: `#[warn(prefer_integration_tests)]` on by default
+
+warning: test `helper_chain` does not require private implementation access
+  --> $DIR/public_helpers.rs:36:8
+   |
+LL |     fn helper_chain() { assert_eq!(chained_helper(), 7); }
+   |        ^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: test `trait_contract` does not require private implementation access
+  --> $DIR/public_helpers.rs:40:8
+   |
+LL |     fn trait_contract() { assert_eq!(super::Api { value: 7 }.value(), 7); }
+   |        ^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: test `public_field_pattern` does not require private implementation access
+  --> $DIR/public_helpers.rs:42:8
+   |
+LL |     fn public_field_pattern() {
+   |        ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: test `test_fixture` does not require private implementation access
+  --> $DIR/public_helpers.rs:47:8
+   |
+LL |     fn test_fixture() { assert_eq!(Fixture { value: 0 }.run(), 7); }
+   |        ^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: test `closure_public_contract` does not require private implementation access
+  --> $DIR/public_helpers.rs:49:8
+   |
+LL |     fn closure_public_contract() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: test `recursive_helper_without_private_dependency` does not require private implementation access
+  --> $DIR/public_helpers.rs:54:8
+   |
+LL |     fn recursive_helper_without_private_dependency() {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+
+warning: 7 warnings emitted
+

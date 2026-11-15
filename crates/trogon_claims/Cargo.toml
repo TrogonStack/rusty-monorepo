@@ -17,6 +17,7 @@ spicedb = ["dep:prost", "dep:prost-types", "trogon_claims_syntax/spicedb", "trog
 axum = ["dep:axum-core", "dep:http"]
 
 [lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(dylint_lib, values("trogon_dylint_lints"))'] }
 warnings = "deny"
 
 [lints.clippy]

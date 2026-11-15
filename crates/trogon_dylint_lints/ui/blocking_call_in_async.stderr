@@ -1,0 +1,91 @@
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:9:5
+   |
+LL |     std::thread::sleep(Duration::ZERO);
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+   = note: `#[warn(blocking_call_in_async)]` on by default
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:10:5
+   |
+LL |     std::thread::park();
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:11:5
+   |
+LL |     std::thread::park_timeout(Duration::ZERO);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:12:5
+   |
+LL |     pause_thread(Duration::ZERO);
+   |     ^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:16:13
+   |
+LL |     let _ = std::fs::read("fixture");
+   |             ^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:17:13
+   |
+LL |     let _ = read_text("fixture");
+   |             ^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:18:13
+   |
+LL |     let _ = std::fs::write("fixture", b"fixture");
+   |             ^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:28:9
+   |
+LL |         std::thread::sleep(Duration::ZERO);
+   |         ^^^^^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:34:9
+   |
+LL |         std::thread::sleep(Duration::ZERO);
+   |         ^^^^^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:39:30
+   |
+LL |     let _callback = async || std::thread::sleep(Duration::ZERO);
+   |                              ^^^^^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: blocking call runs directly in an async body
+  --> $DIR/blocking_call_in_async.rs:49:9
+   |
+LL |     (|| std::thread::sleep(Duration::ZERO))();
+   |         ^^^^^^^^^^^^^^^^^^
+   |
+   = help: use an async operation or move the blocking work into a dedicated blocking worker
+
+warning: 11 warnings emitted
+

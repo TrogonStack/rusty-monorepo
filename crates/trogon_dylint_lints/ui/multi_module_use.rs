@@ -25,7 +25,7 @@ use {std::rc::Rc, std::sync::Arc};
 use std::{cell::{Cell, RefCell}, convert::Infallible, time::{Duration, Instant}};
 
 // `#[allow]` at the site must suppress the lint.
-#[allow(multi_module_use)]
+#[allow(multi_module_use, reason = "this fixture validates an explicit import-layout exception")]
 use std::{any::Any, borrow::Cow};
 
 fn main() {}

@@ -1,0 +1,11 @@
+warning: test `public_contract` does not require private implementation access
+  --> $DIR/custom_library.rs:11:8
+   |
+LL |     fn public_contract() { assert!(super::exported()); }
+   |        ^^^^^^^^^^^^^^^
+   |
+   = help: move this test to the crate's `tests/` directory beside `src/`, and import the public API through the crate name
+   = note: `#[warn(prefer_integration_tests)]` on by default
+
+warning: 1 warning emitted
+

@@ -123,6 +123,13 @@ impl NumericDate {
         Ok(Self { secs, nanos })
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Timestamp constructor failures intentionally share the stable public NumericDateError::OutOfRange category"
+        )
+    )]
     pub fn try_from_lexical(text: &str) -> Result<Self, NumericDateError> {
         let (negative, magnitude, fraction) = Decimal::parse(text)?.split()?;
         let (secs, nanos) = match (negative, fraction) {
