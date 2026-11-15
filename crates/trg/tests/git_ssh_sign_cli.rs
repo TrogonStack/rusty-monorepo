@@ -375,13 +375,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let key = make(dir.path());
         let trg = Command::cargo_bin("trg").unwrap().get_program().to_owned();
-        let program = dir.path().join("git-ssh-sign");
-        std::fs::write(
-            &program,
-            format!("#!/bin/sh\nexec \"{}\" git ssh sign \"$@\"\n", trg.display()),
-        )
-        .unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/git-ssh-sign.sh");
         let config_home = dir.path().join("config");
         std::fs::create_dir_all(config_home.join("trg")).unwrap();
         std::fs::write(dir.path().join("token"), TOKEN).unwrap();
@@ -618,6 +612,7 @@ fn the_pass_through_file_is_what_git_runs_for_other_modes() {
     std::fs::write(&signature, "not a signature\n").unwrap();
 
     let output = Command::new(&fixture.program)
+        .env("TRG_BIN", &fixture.trg)
         .args(["-Y", "check-novalidate", "-n", "git", "-s"])
         .arg(&signature)
         .stdin(std::fs::File::open(&payload).unwrap())
@@ -901,6 +896,7 @@ fn verify_modes_are_ssh_keygens_own_answer() {
 
     let through = |program: &Path, prefix: &[&str], args: &[&str], stdin: &Path| {
         Command::new(program)
+            .env("TRG_BIN", &fixture.trg)
             .args(prefix)
             .args(args)
             .stdin(std::fs::File::open(stdin).unwrap())
@@ -1012,6 +1008,7 @@ fn commit_and_verify(fixture: &Fixture, signing_key: &str) -> String {
             .env("XDG_CONFIG_HOME", &fixture.config_home)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("TRG_BIN", &fixture.trg)
             .env_remove("SSH_AUTH_SOCK")
             .args(["-c", "core.hooksPath=/dev/null"])
             .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"])
