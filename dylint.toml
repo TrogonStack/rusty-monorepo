@@ -1,0 +1,5 @@
+[trogon_dylint_lints]
+profile = "portable"
+
+[doc_hidden_access]
+owned_crates = ["trogon_claims"]

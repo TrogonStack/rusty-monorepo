@@ -41,7 +41,7 @@ fn local_shadow() {
 }
 
 // Explicitly allowed at the site: must NOT fire.
-#[allow(std_env_access)]
+#[allow(std_env_access, reason = "this fixture validates an explicit environment-reader exception")]
 fn allowed() {
     let _ = std::env::var("NATS_URL");
 }

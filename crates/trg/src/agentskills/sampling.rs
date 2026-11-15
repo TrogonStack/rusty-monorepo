@@ -102,6 +102,13 @@ impl fmt::Display for AttemptCount {
 impl FromStr for AttemptCount {
     type Err = String;
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "The established command-line parser contract returns a field-specific String validation message instead of a source-bearing error"
+        )
+    )]
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let draws: u32 = value
             .trim()
@@ -112,79 +119,4 @@ impl FromStr for AttemptCount {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The default is the whole point of the type: a pass has to sample by default,
-    /// because an operator who never passes the flag is exactly the one reading a single
-    /// draw as if it were a measurement.
-    #[test]
-    fn a_pass_samples_a_cell_more_than_once_by_default() {
-        assert_eq!(AttemptCount::default().count(), 3);
-        assert!(!AttemptCount::default().is_single());
-    }
-
-    #[test]
-    fn a_cell_nobody_draws_is_refused() {
-        assert!(AttemptCount::parse(0).is_err());
-        assert_eq!(AttemptCount::parse(1).unwrap(), AttemptCount::single());
-    }
-
-    #[test]
-    fn an_attempt_count_is_parsed_from_the_command_line_form() {
-        assert_eq!("5".parse::<AttemptCount>().unwrap().count(), 5);
-        assert!("0".parse::<AttemptCount>().is_err());
-        assert!("some".parse::<AttemptCount>().is_err());
-    }
-
-    #[test]
-    fn every_draw_of_a_cell_is_numbered_and_counted() {
-        let three = AttemptCount::recommended();
-        assert_eq!(three.draws().collect::<Vec<_>>(), vec![1, 2, 3]);
-        assert_eq!(three.runs_for(4), 12);
-        assert_eq!(AttemptCount::single().runs_for(4), 4);
-    }
-}
-
-#[cfg(test)]
-mod schema_agrees_with_the_parser {
-    use super::*;
-
-    fn validator() -> jsonschema::Validator {
-        jsonschema::validator_for(&serde_json::to_value(schemars::schema_for!(AttemptCount)).unwrap()).unwrap()
-    }
-
-    #[test]
-    fn the_schema_refuses_every_value_deserialize_refuses() {
-        let validator = validator();
-        for refused in [
-            serde_json::json!(0),
-            serde_json::json!(-1),
-            serde_json::json!(4294967296u64),
-            serde_json::json!("3"),
-            serde_json::json!(1.5),
-        ] {
-            assert!(
-                serde_json::from_value::<AttemptCount>(refused.clone()).is_err(),
-                "deserialize admitted {refused}"
-            );
-            assert!(!validator.is_valid(&refused), "the schema admitted {refused}");
-        }
-    }
-
-    #[test]
-    fn the_schema_admits_every_count_deserialize_admits() {
-        let validator = validator();
-        for admitted in [
-            serde_json::json!(1),
-            serde_json::json!(3),
-            serde_json::json!(4294967295u32),
-        ] {
-            assert!(
-                serde_json::from_value::<AttemptCount>(admitted.clone()).is_ok(),
-                "deserialize refused {admitted}"
-            );
-            assert!(validator.is_valid(&admitted), "the schema refused {admitted}");
-        }
-    }
-}
+mod tests;
