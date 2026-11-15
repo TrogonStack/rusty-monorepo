@@ -658,6 +658,73 @@ is `{ "applied": bool, "entries": [...] }`, where each entry carries `name`,
 `source`, and `targets`, one object per target with `target`, `status` and, on
 failure, `error`.
 
+## `[git.ssh.signers.<name>]`
+
+Declares who signs for a public key when git runs `trg` as its SSH signing
+program. See
+[Sign git commits with OpenBao Transit](../how-to/sign-git-commits-with-openbao-transit.md)
+for the setup.
+
+```toml
+[secrets.backends.homelab]
+kind = "openbao"
+addr = "https://bao.example.com:8200"
+mount = "secret"
+path_prefix = "trg"
+owner = "me"
+token_file = "~/.config/trg/bao-token"
+
+[git.ssh.signers.personal]
+public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF90u+fxY15X29x2s3wSRElNouutw3GGhm7A7ZE4UrAI docs-example"
+signer = { backend = "homelab", transit_key = "git-personal", fallbacks = [
+  { ssh_agent = "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock" },
+] }
+```
+
+The table name is a label for messages and telemetry: letters, digits, `-`
+and `_`. The signer for a request is the one whose `public_key` equals the key
+named by `-f`, comparing the key type and blob and ignoring the comment. There
+is no default signer: a key no signer declares is an error that lists the
+declared names.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `public_key` | string | yes | An `ssh-ed25519` public key line. Another key type is rejected at load, and so is a key another signer already declares. |
+| `signer` | address | yes | The address tried first, with optional `fallbacks`. |
+
+An address is one of two shapes.
+
+| Shape | Fields | Meaning |
+|---|---|---|
+| Transit | `backend`, `transit_key`, `transit_mount` | Signs with an OpenBao Transit key. `backend` names a declared `kind = "openbao"` backend and supplies its address, token and CA. `transit_mount` defaults to `transit`. |
+| SSH agent | `ssh_agent` | Signs with the agent listening on this socket path. A leading `~` is expanded. |
+
+Only the primary address takes `fallbacks`: a non-empty array of addresses
+tried in order, and the order may start with either shape. A fallback cannot
+carry `fallbacks` of its own.
+
+An address that is neither shape, an undeclared `backend`, a `backend` that is
+not an OpenBao backend, an empty `fallbacks` array and a nested `fallbacks`
+are all rejected when the config loads.
+
+### Fall-through
+
+A signer falls through to the next address only when the current one could not
+be asked or has declined, never when it answered with a refusal.
+
+| Address | Outcome | Next |
+|---|---|---|
+| Transit | Backend unreachable, timeout, or a transport error | Falls through |
+| Transit | HTTP 403, so the token was rejected | Falls through |
+| Transit | Transit key is missing, is not `ed25519`, or its public key differs from `public_key` | Stops |
+| Transit | Malformed response | Stops |
+| SSH agent | Socket missing or connection refused | Falls through |
+| SSH agent | Key not listed by the agent | Falls through |
+| SSH agent | Signing fails after the key was listed, such as a denied approval prompt | Stops |
+
+When a later address signs, `trg` writes a warning to stderr naming the signer,
+why each earlier address failed, and which address answered.
+
 ## Validation
 
 - `url` must resolve to a non-empty, non-whitespace string.

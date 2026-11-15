@@ -28,6 +28,8 @@ pub mod exit_code;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod fs;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
+pub mod git;
+#[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod oauth;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod output;

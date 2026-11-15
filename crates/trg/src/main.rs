@@ -1,3 +1,5 @@
+use std::os::unix::process::CommandExt as _;
+
 use tracing::Instrument;
 
 use trg::cli::Cli;
@@ -105,7 +107,46 @@ fn runtime_for(command: &Commands) -> tokio::runtime::Builder {
     }
 }
 
+/// Git runs `gpg.ssh.program` as `ssh-keygen -Y ...`, so when `trg` is started
+/// under the signing program's name it answers that vocabulary instead of its
+/// own command tree. Everything but `-Y sign` is replaced by the real
+/// `ssh-keygen`, which keeps its arguments, streams and exit status exactly.
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This is the signing program's own stderr, which git captures and shows; tracing must not replace that output"
+    )
+)]
+fn signing_program(invocation: trg::git::ssh::Invocation) -> std::process::ExitCode {
+    match invocation {
+        trg::git::ssh::Invocation::Passthrough(args) => {
+            let error = std::process::Command::new(trg::git::ssh::SSH_KEYGEN).args(args).exec();
+            eprintln!("could not run `ssh-keygen`: {error}");
+            std::process::ExitCode::from(255)
+        }
+        trg::git::ssh::Invocation::Sign(request) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a tokio runtime");
+            let status = runtime.block_on(async {
+                let telemetry = trg::telemetry::init(trg::telemetry::CommandIdentity::new("git ssh sign"));
+                let status = trg::git::ssh::run(request).instrument(telemetry.root_span()).await;
+                telemetry.shutdown(ExitCode::from_success(status == 0));
+                status
+            });
+            runtime.shutdown_background();
+            std::process::ExitCode::from(status)
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(invocation) = trg::git::ssh::detect(&args) {
+        return signing_program(invocation);
+    }
     let (cli, command_identity) = Cli::parse_with_command_identity();
     let runtime = runtime_for(&cli.command).enable_all().build().expect("a tokio runtime");
     let code = runtime.block_on(run(cli, command_identity));
@@ -151,6 +192,7 @@ async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> Exi
                     ExitCode::Failed
                 }
             }),
+            Commands::Git { command } => Outcome::Exit(command.handle().await),
             Commands::Exec { command } => match command {
                 ExecCommands::Run(args) => match wire_exec(&args.name).await {
                     Ok(loaded) => Outcome::Exec(trg::commands::exec::run(loaded, &args)),
