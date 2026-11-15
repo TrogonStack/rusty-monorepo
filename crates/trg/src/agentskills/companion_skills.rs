@@ -67,10 +67,14 @@ impl<'de> Deserialize<'de> for CompanionSkill {
     }
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum CompanionFailure {
-    #[error("companion skill '{declared}' is not a skill directory: {detail}")]
-    NotASkill { declared: String, detail: String },
+#[derive(Debug, Error)]
+pub enum CompanionError {
+    #[error("companion skill '{declared}' is not a skill directory: {source}")]
+    NotASkill {
+        declared: String,
+        #[source]
+        source: super::errors::SkillError,
+    },
     #[error(
         "companion skills '{first}' and '{second}' both stage as '{directory}', so one would \
          overwrite the other and the run would be handed fewer skills to choose between than \
@@ -123,26 +127,26 @@ pub fn resolve_companions(
     skill_path: &Path,
     companions: &[CompanionSkill],
     reserved: &[StagedSkillDir],
-) -> Result<Vec<StagedCompanion>, CompanionFailure> {
+) -> Result<Vec<StagedCompanion>, CompanionError> {
     let mut claimed: BTreeMap<String, String> = BTreeMap::new();
     let mut staged = Vec::with_capacity(companions.len());
 
     for companion in companions {
         let source = companion.resolve_in(skill_path);
-        let props = validate_skill(fs, &source).map_err(|error| CompanionFailure::NotASkill {
+        let props = validate_skill(fs, &source).map_err(|error| CompanionError::NotASkill {
             declared: companion.as_str().to_string(),
-            detail: error.to_string(),
+            source: error,
         })?;
 
         let directory = StagedSkillDir::companion(&props.name);
         if reserved.iter().any(|taken| taken.as_str() == directory.as_str()) {
-            return Err(CompanionFailure::ShadowsSkillUnderTest {
+            return Err(CompanionError::ShadowsSkillUnderTest {
                 declared: companion.as_str().to_string(),
                 directory: directory.as_str().to_string(),
             });
         }
         if let Some(first) = claimed.insert(directory.as_str().to_string(), companion.as_str().to_string()) {
-            return Err(CompanionFailure::Collides {
+            return Err(CompanionError::Collides {
                 first,
                 second: companion.as_str().to_string(),
                 directory: directory.as_str().to_string(),
@@ -237,132 +241,5 @@ fn slash_path(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fs::RealFS;
-
-    fn write_skill(dir: &Path, name: &str, description: &str) {
-        std::fs::create_dir_all(dir).expect("create skill dir");
-        std::fs::write(
-            dir.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: {description}\n---\n\nBody.\n"),
-        )
-        .expect("write SKILL.md");
-    }
-
-    fn under_test() -> Vec<StagedSkillDir> {
-        vec![StagedSkillDir::companion("skill-under-test")]
-    }
-
-    #[test]
-    fn a_companion_skill_must_stay_inside_the_skill_directory_the_trust_gate_admitted() {
-        assert!(CompanionSkill::parse("evals/companions/other").is_ok());
-        assert!(CompanionSkill::parse("/etc/passwd").is_err());
-        assert!(CompanionSkill::parse("../elsewhere").is_err());
-        assert!(CompanionSkill::parse("   ").is_err());
-    }
-
-    #[test]
-    fn a_companion_resolves_to_the_shared_parent_the_unannounced_skill_uses() {
-        let skill = tempfile::tempdir().expect("temp dir");
-        write_skill(
-            &skill.path().join("companions/other-skill"),
-            "other-skill",
-            "Does other work.",
-        );
-
-        let staged = resolve_companions(
-            &RealFS,
-            skill.path(),
-            &[CompanionSkill::parse("companions/other-skill").expect("valid path")],
-            &under_test(),
-        )
-        .expect("a valid companion resolves");
-
-        assert_eq!(staged.len(), 1);
-        assert_eq!(staged[0].directory().as_str(), "skills/other-skill/");
-    }
-
-    #[test]
-    fn a_companion_directory_that_is_not_a_skill_is_refused_by_name() {
-        let skill = tempfile::tempdir().expect("temp dir");
-        std::fs::create_dir_all(skill.path().join("companions/empty")).expect("create dir");
-
-        let failure = resolve_companions(
-            &RealFS,
-            skill.path(),
-            &[CompanionSkill::parse("companions/empty").expect("valid path")],
-            &under_test(),
-        )
-        .expect_err("a directory with no SKILL.md is not a skill");
-
-        assert!(
-            failure.to_string().contains("companions/empty"),
-            "the refusal has to name the companion: {failure}"
-        );
-    }
-
-    #[test]
-    fn two_companions_that_stage_as_one_directory_are_refused_rather_than_one_overwriting_the_other() {
-        let skill = tempfile::tempdir().expect("temp dir");
-        write_skill(&skill.path().join("a/same-name"), "same-name", "One of two.");
-        write_skill(&skill.path().join("b/same-name"), "same-name", "The other of two.");
-
-        let failure = resolve_companions(
-            &RealFS,
-            skill.path(),
-            &[
-                CompanionSkill::parse("a/same-name").expect("valid path"),
-                CompanionSkill::parse("b/same-name").expect("valid path"),
-            ],
-            &under_test(),
-        )
-        .expect_err("two companions cannot share a staged directory");
-
-        assert!(matches!(failure, CompanionFailure::Collides { .. }), "{failure}");
-    }
-
-    #[test]
-    fn a_companion_that_would_land_on_the_skill_under_test_is_refused() {
-        let skill = tempfile::tempdir().expect("temp dir");
-        write_skill(
-            &skill.path().join("companions/skill-under-test"),
-            "skill-under-test",
-            "Wears the name of the skill being measured.",
-        );
-
-        let failure = resolve_companions(
-            &RealFS,
-            skill.path(),
-            &[CompanionSkill::parse("companions/skill-under-test").expect("valid path")],
-            &under_test(),
-        )
-        .expect_err("a companion cannot replace the skill under test");
-
-        assert!(
-            matches!(failure, CompanionFailure::ShadowsSkillUnderTest { .. }),
-            "{failure}"
-        );
-    }
-
-    #[test]
-    fn a_case_that_declares_no_companion_has_no_digest_to_key_on() {
-        let skill = tempfile::tempdir().expect("temp dir");
-
-        assert_eq!(companion_digest(skill.path(), &[]).expect("no companions"), None);
-    }
-
-    #[test]
-    fn editing_a_companion_changes_the_digest_the_cache_key_is_built_from() {
-        let skill = tempfile::tempdir().expect("temp dir");
-        let companion = skill.path().join("companions/other-skill");
-        write_skill(&companion, "other-skill", "Does other work.");
-        let declared = [CompanionSkill::parse("companions/other-skill").expect("valid path")];
-
-        let before = companion_digest(skill.path(), &declared).expect("digest");
-        write_skill(&companion, "other-skill", "Does other work, described differently.");
-        let after = companion_digest(skill.path(), &declared).expect("digest");
-
-        assert_ne!(before, after, "a changed companion must not reuse a run made before it");
-    }
-}
+#[path = "companion_skills_tests.rs"]
+mod tests;

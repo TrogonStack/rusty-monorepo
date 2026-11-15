@@ -4,7 +4,7 @@ use crate::exit_code::ExitCode;
 use crate::fs::FileSystem;
 use crate::output::{print_json, OutputFormat};
 use clap::Args;
-use serde_json::json;
+use serde::Serialize;
 
 use super::{resolve_skill_path, SkillLocations};
 
@@ -23,6 +23,13 @@ pub struct ToPromptArgs {
 }
 
 impl ToPromptArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         let mut skills = Vec::new();
         let mut failed: Vec<String> = Vec::new();
@@ -64,17 +71,28 @@ impl ToPromptArgs {
             // stderr. Otherwise a prompt built from three skills and a prompt
             // built from two of them plus a failure are the same document, and a
             // caller reading only stdout cannot tell which it got.
-            let document = json!({
-                "prompt": prompt,
-                "skills": skills
+            #[derive(Serialize)]
+            struct PromptSkillDocument<'a> {
+                name: &'a str,
+                location: &'a Option<String>,
+            }
+            #[derive(Serialize)]
+            struct PromptDocument<'a> {
+                prompt: &'a str,
+                skills: Vec<PromptSkillDocument<'a>>,
+                failed: &'a [String],
+            }
+            let document = PromptDocument {
+                prompt: &prompt,
+                skills: skills
                     .iter()
-                    .map(|skill| json!({
-                        "name": skill.properties.name,
-                        "location": skill.location,
-                    }))
-                    .collect::<Vec<_>>(),
-                "failed": failed,
-            });
+                    .map(|skill| PromptSkillDocument {
+                        name: &skill.properties.name,
+                        location: &skill.location,
+                    })
+                    .collect(),
+                failed: &failed,
+            };
             return print_json(&document, code);
         }
 
@@ -83,57 +101,5 @@ impl ToPromptArgs {
     }
 }
 
-/// A prompt that is missing a skill the caller asked for.
-///
-/// The command still prints the skills it could read, so the only thing
-/// separating a complete prompt from a short one is the exit code. It has to
-/// say so under either format, since `--output-format text` is what a shell
-/// script redirecting stdout to a file uses.
 #[cfg(test)]
-mod partial_reads {
-    use super::*;
-    use crate::fs::testutil::MemFS;
-    use std::path::PathBuf;
-
-    fn skill(fs: &MemFS, name: &str) {
-        fs.insert(
-            format!("{name}/SKILL.md"),
-            format!("---\nname: {name}\ndescription: The {name} skill.\n---\n\n# {name}\n"),
-        );
-    }
-
-    fn run(fs: &MemFS, paths: &[&str], output_format: OutputFormat) -> ExitCode {
-        ToPromptArgs {
-            skills: SkillLocations::new(paths.iter().map(PathBuf::from).collect()),
-            output_format,
-        }
-        .handle(fs)
-    }
-
-    #[test]
-    fn every_skill_read_is_a_success() {
-        let fs = MemFS::new();
-        skill(&fs, "alpha");
-        skill(&fs, "beta");
-
-        assert_eq!(run(&fs, &["alpha", "beta"], OutputFormat::Text), ExitCode::Success);
-        assert_eq!(run(&fs, &["alpha", "beta"], OutputFormat::Json), ExitCode::Success);
-    }
-
-    #[test]
-    fn one_unreadable_skill_fails_under_either_format() {
-        let fs = MemFS::new();
-        skill(&fs, "alpha");
-
-        assert_eq!(run(&fs, &["alpha", "missing"], OutputFormat::Text), ExitCode::Failed);
-        assert_eq!(run(&fs, &["alpha", "missing"], OutputFormat::Json), ExitCode::Failed);
-    }
-
-    #[test]
-    fn no_readable_skill_fails_under_either_format() {
-        let fs = MemFS::new();
-
-        assert_eq!(run(&fs, &["missing"], OutputFormat::Text), ExitCode::Failed);
-        assert_eq!(run(&fs, &["missing"], OutputFormat::Json), ExitCode::Failed);
-    }
-}
+mod tests;

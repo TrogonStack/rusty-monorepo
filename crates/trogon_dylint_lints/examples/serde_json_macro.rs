@@ -63,7 +63,10 @@ fn typed_payload(code: i32) -> Value {
 // Test-support modules build fixture payloads, not production ones, so the
 // whole family is exempt. (`inline_module_block` is allowed here because a
 // fixture is a single file.)
-#[allow(inline_module_block)]
+#[allow(
+    inline_module_block,
+    reason = "this single-file fixture isolates JSON payload checks"
+)]
 mod test_support {
     use serde_json::{Value, json};
 

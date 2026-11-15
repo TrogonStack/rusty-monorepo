@@ -82,7 +82,7 @@ fn read_before_replacing(value: &str) -> Result<u32, AppError> {
     })
 }
 
-// Stringifying reads the error: out of scope.
+// Stringifying reads the error but loses its typed cause: fires.
 fn stringified(value: &str) -> Result<u32, AppError> {
     parse(value).map_err(|error| AppError::Message(error.to_string()))
 }

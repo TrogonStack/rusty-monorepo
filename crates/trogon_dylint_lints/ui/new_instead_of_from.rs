@@ -183,14 +183,14 @@ impl Build for Built {
 struct Allowed(String);
 
 impl Allowed {
-    #[allow(new_instead_of_from)]
+    #[allow(new_instead_of_from, reason = "this fixture isolates conversion constructor checks and exceptions")]
     fn new(value: String) -> Self {
         Self(value)
     }
 }
 
 // The test-support module family is exempt: must NOT fire.
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this single-file fixture isolates conversion constructor checks")]
 mod tests {
     pub struct Sample(String);
 

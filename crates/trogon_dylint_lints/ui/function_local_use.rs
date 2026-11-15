@@ -36,7 +36,7 @@ fn nested() {
 }
 
 // Explicitly allowed at the site: must NOT be linted.
-#[allow(function_local_use)]
+#[allow(function_local_use, reason = "this fixture validates an explicit function-local import exception")]
 fn allowed() {
     use std::fmt::Write;
     let mut out = String::new();

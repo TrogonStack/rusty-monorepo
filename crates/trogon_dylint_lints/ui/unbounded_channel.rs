@@ -27,7 +27,7 @@ fn local_shadow() {
 }
 
 // Explicitly allowed at the site: must NOT fire.
-#[allow(unbounded_channel)]
+#[allow(unbounded_channel, reason = "this single-file fixture isolates channel capacity checks and exceptions")]
 fn allowed() {
     let _ = mpsc::channel::<u8>();
 }
@@ -36,7 +36,7 @@ fn allowed() {
 // as one wired up anywhere else. Fires.
 // A queue built by the test-support module family is scaffolding: must NOT
 // fire.
-#[allow(inline_module_block)]
+#[allow(inline_module_block, reason = "this single-file fixture isolates channel capacity checks and exceptions")]
 mod mocks {
     use std::sync::mpsc;
 

@@ -9,4 +9,4 @@ rust = { version = "stable", components = ["rustfmt", "clippy"] }
 "cargo:dylint-link" = { version = "6.3.0", locked = true }
 
 [tasks]
-check = { depends = ["check:format", "check:clippy", "check:test"] }
+check = { depends = ["check:format", "check:clippy", "check:test", "lints:run"] }
