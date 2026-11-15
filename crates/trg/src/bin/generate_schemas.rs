@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use schemars::generate::SchemaSettings;
 use schemars::transform::{RemoveRefSiblings, ReplaceBoolSchemas};
 use schemars::JsonSchema;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 
 use trg::agentskills::benchmark::BenchmarkDocument;
 use trg::agentskills::compare::ComparisonRecord;
@@ -55,6 +55,13 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+    )
+)]
 fn write_schema<T: JsonSchema>(dir: &Path, file_name: &str, title: &str) -> std::io::Result<()> {
     let mut replace_bools = ReplaceBoolSchemas::default();
     replace_bools.skip_additional_properties = true;
@@ -71,10 +78,10 @@ fn write_schema<T: JsonSchema>(dir: &Path, file_name: &str, title: &str) -> std:
         }
         reordered.insert(
             "$id".to_string(),
-            json!(format!("https://trogonstack.dev/schemas/trg/{file_name}")),
+            Value::String(format!("https://trogonstack.dev/schemas/trg/{file_name}")),
         );
         map.remove("title");
-        reordered.insert("title".to_string(), json!(title));
+        reordered.insert("title".to_string(), Value::String(title.to_owned()));
         for (k, v) in map.iter() {
             reordered.insert(k.clone(), v.clone());
         }

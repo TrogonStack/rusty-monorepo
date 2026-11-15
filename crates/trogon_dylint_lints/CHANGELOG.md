@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.3.1...trogon_dylint_lints@v0.4.0) (2026-11-07)
+
+
+### Features
+
+* **dylint:** Enforce safer async and error boundaries ([#353](https://github.com/TrogonStack/rusty-monorepo/issues/353)) ([f34562b](https://github.com/TrogonStack/rusty-monorepo/commit/f34562b9edf0067fdbaa00df6380bd6a8cb0ad3d))
+
 ## [0.3.1](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.3.0...trogon_dylint_lints@v0.3.1) (2026-10-29)
 
 
