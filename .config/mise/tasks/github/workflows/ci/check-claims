@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description = "Check the claims feature matrix and dependency budget"
+set -euo pipefail
+cd "${MISE_PROJECT_ROOT:?}"
+mise run claims:check
