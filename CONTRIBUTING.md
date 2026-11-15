@@ -41,6 +41,11 @@ active. Keep deliberate exceptions local and state their technical reason in
 `cfg_attr(dylint_lib = "trogon_dylint_lints", expect(rule, reason = "..."))`.
 CI runs the workspace checks alongside the lint library's UI tests.
 
+## Licensing
+
+New Rust crates inherit the [workspace licensing policy](README.md#licensing)
+with `license.workspace = true` and include a matching `LICENSE` file.
+
 ## Commit Messages
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):

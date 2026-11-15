@@ -1,6 +1,9 @@
 [workspace]
-members = ["crates/trg"]
+members = ["crates/trg", "crates/trogon_object_id", "crates/trogon_object_id_derive"]
 resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(dylint_lib, values("trogon_dylint_lints"))'] }
