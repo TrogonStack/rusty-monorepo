@@ -1,7 +1,10 @@
-//! Optional SpiceDB subject mapping and authorization request values.
+//! Optional literal macros with validated runtime and const constructors.
 //!
 //! Credential verification and resource authorization remain caller responsibilities.
 
+#[doc(hidden)]
+#[cfg(feature = "macros")]
+pub mod __private;
 mod actor_error;
 mod actor_issuer;
 mod actor_key;
@@ -59,6 +62,8 @@ mod ingested;
 mod issuer;
 mod jwk;
 mod kind;
+#[cfg(feature = "macros")]
+mod macros;
 mod name_claim_type;
 mod numeric_date;
 #[cfg(feature = "spicedb")]

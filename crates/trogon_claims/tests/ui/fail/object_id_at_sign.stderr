@@ -1,0 +1,5 @@
+error: object_id "a@b": invalid character '@' at byte 1 (allowed: [a-zA-Z0-9/_|\-=+])
+ --> tests/ui/fail/object_id_at_sign.rs:4:24
+  |
+4 |     let _ = object_id!("a@b");
+  |                        ^^^^^
