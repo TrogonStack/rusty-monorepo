@@ -2,9 +2,6 @@ use std::ffi::OsString;
 
 use clap::{Args, Subcommand};
 
-use crate::exit_code::ExitCode;
-use crate::git::ssh::{self, Invocation};
-
 #[derive(Subcommand)]
 pub enum GitCommands {
     /// Git signing over SSH
@@ -31,17 +28,4 @@ pub struct SignArgs {
     /// The `ssh-keygen` arguments, passed through as given
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "SSH_KEYGEN_ARGS")]
     pub args: Vec<OsString>,
-}
-
-impl GitCommands {
-    pub async fn handle(self) -> ExitCode {
-        match self {
-            Self::Ssh {
-                command: SshCommands::Sign(args),
-            } => match ssh::read(&args.args) {
-                Invocation::Sign(request) => ExitCode::from_success(ssh::run(request).await == 0),
-                Invocation::Passthrough(args) => ExitCode::from_success(ssh::pass_through(&args) == 0),
-            },
-        }
-    }
 }
