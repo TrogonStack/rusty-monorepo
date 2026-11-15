@@ -4,6 +4,9 @@
 set -euo pipefail
 source "${MISE_PROJECT_ROOT:?}/.config/mise/lib/lints.sh"
 cd "$MISE_PROJECT_ROOT/crates/trogon_dylint_lints"
+# Select the pinned nightly for Cargo and its test subprocesses.
 channel="$(lints_toolchain)"
-# mise's stable pin outranks the crate toolchain unless rustup selects it.
-rustup run "$channel" cargo test --locked
+host="$(rustup run "$channel" rustc -vV | sed -n 's/^host: //p')"
+runner_key="CARGO_TARGET_$(printf '%s' "$host" | tr '[:lower:]-' '[:upper:]_')_RUNNER"
+export "$runner_key=../../.config/mise/lib/lints-test-runner.sh"
+lints_cargo test --locked

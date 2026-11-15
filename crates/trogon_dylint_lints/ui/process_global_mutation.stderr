@@ -1,0 +1,66 @@
+warning: process-global state is mutated in test code
+  --> $DIR/process_global_mutation.rs:9:14
+   |
+LL |     unsafe { std::env::set_var("LINT_FIXTURE_KEY", "fixture") };
+   |              ^^^^^^^^^^^^^^^^^
+   |
+   = help: inject environment or working-directory state, or run the mutation in an isolated subprocess
+   = note: a test-local lock does not protect other code in the process that reads this state
+   = note: `#[warn(process_global_mutation_in_tests)]` on by default
+
+warning: process-global state is mutated in test code
+  --> $DIR/process_global_mutation.rs:10:14
+   |
+LL |     unsafe { std::env::remove_var("LINT_FIXTURE_KEY") };
+   |              ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: inject environment or working-directory state, or run the mutation in an isolated subprocess
+   = note: a test-local lock does not protect other code in the process that reads this state
+
+warning: process-global state is mutated in test code
+  --> $DIR/process_global_mutation.rs:11:13
+   |
+LL |     let _ = std::env::set_current_dir(".");
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: inject environment or working-directory state, or run the mutation in an isolated subprocess
+   = note: a test-local lock does not protect other code in the process that reads this state
+
+warning: process-global state is mutated in test code
+  --> $DIR/process_global_mutation.rs:16:14
+   |
+LL |     unsafe { set_variable("LINT_FIXTURE_KEY", "fixture") };
+   |              ^^^^^^^^^^^^
+   |
+   = help: inject environment or working-directory state, or run the mutation in an isolated subprocess
+   = note: a test-local lock does not protect other code in the process that reads this state
+
+warning: process-global state is mutated in test code
+  --> $DIR/process_global_mutation.rs:17:14
+   |
+LL |     unsafe { remove_variable("LINT_FIXTURE_KEY") };
+   |              ^^^^^^^^^^^^^^^
+   |
+   = help: inject environment or working-directory state, or run the mutation in an isolated subprocess
+   = note: a test-local lock does not protect other code in the process that reads this state
+
+warning: process-global state is mutated in test code
+  --> $DIR/process_global_mutation.rs:18:13
+   |
+LL |     let _ = change_directory(".");
+   |             ^^^^^^^^^^^^^^^^
+   |
+   = help: inject environment or working-directory state, or run the mutation in an isolated subprocess
+   = note: a test-local lock does not protect other code in the process that reads this state
+
+warning: process-global state is mutated in test code
+  --> $DIR/process_global_mutation.rs:28:18
+   |
+LL |         unsafe { std::env::remove_var("LINT_FIXTURE_KEY") };
+   |                  ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: inject environment or working-directory state, or run the mutation in an isolated subprocess
+   = note: a test-local lock does not protect other code in the process that reads this state
+
+warning: 7 warnings emitted
+

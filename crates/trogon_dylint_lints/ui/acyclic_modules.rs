@@ -3,7 +3,7 @@
 
 // A single-file fixture has to spell its module tree inline, which
 // `inline_module_block` forbids in real code and which is irrelevant here.
-#![allow(dead_code, inline_module_block, unused_imports)]
+#![allow(dead_code, inline_module_block, unused_imports, reason = "this single-file fixture keeps sibling graphs together to isolate cycles")]
 
 // Mutual dependency between two crate-root siblings, closing across
 // grandchildren: `payments::checkout` reaches into `server::auth`, and

@@ -1,0 +1,59 @@
+error: `function_local_use` suppressed by `allow` without a stated reason
+  --> $DIR/policy_lint_suppression_without_reason.rs:4:1
+   |
+LL | #[allow(function_local_use, reason = "")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+   = note: `#[deny(policy_lint_suppression_without_reason)]` on by default
+
+error: `unbounded_channel` suppressed by `allow` without a stated reason
+  --> $DIR/policy_lint_suppression_without_reason.rs:7:1
+   |
+LL | #[allow(unbounded_channel, reason = " /t ")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+
+error: `inline_module_block` suppressed by `allow` without a stated reason
+  --> $DIR/policy_lint_suppression_without_reason.rs:10:48
+   |
+LL | #[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(inline_module_block, reason = " "))]
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+
+error: `function_local_use` suppressed by `allow` without a stated reason
+  --> $DIR/policy_lint_suppression_without_reason.rs:13:48
+   |
+LL | #[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(function_local_use))]
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+
+error: `function_local_use` suppressed by `allow` without a stated reason
+  --> $DIR/policy_lint_suppression_without_reason.rs:19:1
+   |
+LL | #[allow(function_local_use)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+
+error: `function_local_use` suppressed by `expect` without a stated reason
+  --> $DIR/policy_lint_suppression_without_reason.rs:22:1
+   |
+LL | #[expect(function_local_use, reason = " /t ")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+
+error: `function_local_use` suppressed by `expect` without a stated reason
+  --> $DIR/policy_lint_suppression_without_reason.rs:28:1
+   |
+LL | #[expect(function_local_use)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+
+error: aborting due to 7 previous errors
+
