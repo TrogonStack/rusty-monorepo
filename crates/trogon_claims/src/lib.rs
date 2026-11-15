@@ -173,8 +173,8 @@ pub use object_type::ObjectType;
 pub use outcome_error::OutcomeError;
 #[cfg(feature = "spicedb")]
 pub use param_name::ParamName;
-pub use principal::{Principal, SourcedClaim};
-pub use principal_builder::{PrimaryIdentityIndex, PrincipalBuildError, PrincipalBuilder};
+pub use principal::{PrimaryIdentityIndex, Principal, PrincipalBuildError, SourcedClaim};
+pub use principal_builder::PrincipalBuilder;
 pub use principal_key::PrincipalKey;
 pub use principal_kind::PrincipalKind;
 pub use prior_actor::PriorActor;

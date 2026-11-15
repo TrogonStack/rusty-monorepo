@@ -7,6 +7,13 @@ use crate::raw_claims::RawClaims;
 use crate::raw_json::{RawJson, RawKind};
 use crate::well_known_claim::WellKnownClaim;
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        discarded_error_source,
+        reason = "Registered claims expose InvalidStringOrUri without URI parser internals or claim contents"
+    )
+)]
 fn string_or_uri(raw: &RawJson) -> Result<(), ClaimValueError> {
     let text = raw
         .as_string()

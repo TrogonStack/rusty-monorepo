@@ -109,4 +109,5 @@ impl TryFrom<String> for ClaimType {
 }
 
 #[cfg(test)]
+#[path = "claim_type_tests.rs"]
 mod tests;
