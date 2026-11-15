@@ -660,10 +660,12 @@ failure, `error`.
 
 ## `[git.ssh.signers.<name>]`
 
-Declares who signs for a public key when git runs `trg` as its SSH signing
-program. See
+Declares who signs for a public key when git runs `trg git ssh sign` as its
+SSH signing program. Git execs `gpg.ssh.program` as one path without a shell,
+so it cannot carry arguments: point it at a small executable file that runs
+`exec trg git ssh sign "$@"`. See
 [Sign git commits with OpenBao Transit](../how-to/sign-git-commits-with-openbao-transit.md)
-for the setup.
+for the file and the rest of the setup.
 
 ```toml
 [secrets.backends.homelab]

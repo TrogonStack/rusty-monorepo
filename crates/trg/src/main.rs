@@ -1,5 +1,3 @@
-use std::os::unix::process::CommandExt as _;
-
 use tracing::Instrument;
 
 use trg::cli::Cli;
@@ -107,23 +105,23 @@ fn runtime_for(command: &Commands) -> tokio::runtime::Builder {
     }
 }
 
-/// Git runs `gpg.ssh.program` as `ssh-keygen -Y ...`, so when `trg` is started
-/// under the signing program's name it answers that vocabulary instead of its
-/// own command tree. Everything but `-Y sign` is replaced by the real
-/// `ssh-keygen`, which keeps its arguments, streams and exit status exactly.
-#[cfg_attr(
-    dylint_lib = "trogon_dylint_lints",
-    expect(
-        debug_remnants,
-        reason = "This is the signing program's own stderr, which git captures and shows; tracing must not replace that output"
-    )
-)]
-fn signing_program(invocation: trg::git::ssh::Invocation) -> std::process::ExitCode {
-    match invocation {
+/// The arguments after `git ssh sign`, when that is what `trg` was asked to
+/// run. They are git's own `ssh-keygen -Y ...` arguments, so they are read
+/// here and not by the command parser, which would reject what it does not
+/// know before `ssh-keygen` could answer it. A help flag is left to the parser.
+fn signing_arguments(args: &[std::ffi::OsString]) -> Option<&[std::ffi::OsString]> {
+    let [_, git, ssh, sign, rest @ ..] = args else {
+        return None;
+    };
+    let named = git == "git" && ssh == "ssh" && sign == "sign";
+    let help = rest.first().is_some_and(|a| a == "--help" || a == "-h");
+    (named && !help).then_some(rest)
+}
+
+fn signing_program(args: &[std::ffi::OsString]) -> std::process::ExitCode {
+    match trg::git::ssh::read(args) {
         trg::git::ssh::Invocation::Passthrough(args) => {
-            let error = std::process::Command::new(trg::git::ssh::SSH_KEYGEN).args(args).exec();
-            eprintln!("could not run `ssh-keygen`: {error}");
-            std::process::ExitCode::from(255)
+            std::process::ExitCode::from(trg::git::ssh::pass_through(&args))
         }
         trg::git::ssh::Invocation::Sign(request) => {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -144,8 +142,8 @@ fn signing_program(invocation: trg::git::ssh::Invocation) -> std::process::ExitC
 
 fn main() -> std::process::ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    if let Some(invocation) = trg::git::ssh::detect(&args) {
-        return signing_program(invocation);
+    if let Some(rest) = signing_arguments(&args) {
+        return signing_program(rest);
     }
     let (cli, command_identity) = Cli::parse_with_command_identity();
     let runtime = runtime_for(&cli.command).enable_all().build().expect("a tokio runtime");

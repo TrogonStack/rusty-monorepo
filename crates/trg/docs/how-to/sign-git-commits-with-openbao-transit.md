@@ -1,7 +1,7 @@
 # Sign git commits with OpenBao Transit
 
 Git signs a commit by running `gpg.ssh.program` as `ssh-keygen -Y sign`. This
-guide makes `trg` that program, so the signing key lives in an
+guide makes `trg git ssh sign` that program, so the signing key lives in an
 [OpenBao](https://openbao.org) Transit engine instead of on the machine, with
 an SSH agent such as 1Password's as the fallback (or the first choice).
 
@@ -78,18 +78,23 @@ signer = { ssh_agent = "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/ag
 ] }
 ```
 
-## 3. Name `trg` as the signing program
+## 3. Point git at `trg`
 
-Git runs the program directly, so give `trg` a name it answers to as the
-signing program:
+Git runs `gpg.ssh.program` as a single path, without a shell, so the setting
+cannot carry the arguments `trg git ssh sign`. Write a small executable file
+that adds them. Its name and location are yours to choose:
 
 ```sh
-ln -s "$(command -v trg)" ~/.local/bin/trg-git-ssh-sign
+#!/bin/sh
+exec trg git ssh sign "$@"
 ```
+
+Save it as `~/.local/bin/git-ssh-sign`, make it executable with
+`chmod +x ~/.local/bin/git-ssh-sign`, and point git at it:
 
 ```sh
 git config --global gpg.format ssh
-git config --global gpg.ssh.program trg-git-ssh-sign
+git config --global gpg.ssh.program ~/.local/bin/git-ssh-sign
 git config --global user.signingkey "key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF90u+fxY15X29x2s3wSRElNouutw3GGhm7A7ZE4UrAI"
 git config --global commit.gpgsign true
 ```
@@ -111,7 +116,7 @@ git commit --allow-empty -S -m "signed through Transit"
 git verify-commit HEAD
 ```
 
-The same signing code is reachable without the symlink:
+The same signing code can be run by hand, with or without `-Y sign`:
 
 ```sh
 trg git ssh sign -n git -f ~/.ssh/id_ed25519.pub notes.txt
@@ -149,15 +154,19 @@ signer = { backend = "homelab", transit_key = "git-personal", fallbacks = [
 ] }
 ```
 
-Then point git at `trg` and keep the key line you already have:
+Then point git at a pass-through file as in step 3, and keep the key line you
+already have:
 
 ```sh
-git config --global gpg.ssh.program trg-git-ssh-sign
+git config --global gpg.ssh.program ~/.local/bin/git-ssh-sign
 git config --global user.signingkey "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCdemZz7dZLzntCMvrefRlIe2SCoGoU/wKMc/IFx6FvlIr9cdCl9q+CkaaJ0n3mvmDhVHkWYCWfe8F6P3jjOAy+w+pp6q7yoBFX88rGSafRoP2VUuaqGt+JWYiGY3hHVHzmFXqqSW4dqMZEM7raO6ui9iRet3nqT2CQqOvw3bdO18+iEEjQ2MSAFIKgtoEB28QQPiJeSTmJGie6ry+/UOa9YOQRQlII3SQ0cqxDROLTI1Cjy82epDzinBN5zNeC1Fe0XThaT238OjegNe8C0oOaE0GcT3R3NAyYWzVAvL61fjT5bEkN9Y8/nQIk1yZ1teGd+oW8izP4OUpAC6WfP3DNVv2kmvvwTAPo1fjKcu4jvXg2siMOlImsrr7fLqE83gqm6BSZuMQ0AybwHIht869c1k7De/obxfZFzfzj/Ld/EfTE1/uWcdebiepKJ8z50HLSMyxz+8HZHtCclC1HkP30wbLkbURPnw8Xx8xlAatSZjUHtJLA53lQQM/+TXWx3sz2ZpRIZXs7fnwWZqIgwTPRQAELz4WhLy0adzDTLMh4nVaVcn61nH1p/EKHAQ34Zl1uoPtXTVHUT2nYi8Lh95gODrcM4/eyUfKEPYitRtWWjJhnaXLKlLsK1oeon+hYyPmgnXMRTMY8JCmUBuuIRpwYo+zNY07M2SkXV58RJsVorw== docs-example"
 ```
 
-Verification modes go to `ssh-keygen`, the `-U` flag git adds for a literal key
-is accepted, and the progress lines `ssh-keygen` prints are printed too.
+`trg git ssh sign` takes the arguments git gives `ssh-keygen`. Every `-Y` mode
+other than `sign`, such as `verify` and `find-principals`, is run by the real
+`ssh-keygen` with the same arguments, streams and exit status. The `-U` flag git
+adds for a literal key is accepted, and the progress lines `ssh-keygen` prints
+are printed too.
 
 ## How long it waits
 

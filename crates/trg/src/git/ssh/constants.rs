@@ -1,8 +1,5 @@
 use std::time::Duration;
 
-/// The name `trg` answers to when git runs it as the signing program.
-pub const PROGRAM_NAME: &str = "trg-git-ssh-sign";
-
 pub const SSH_KEYGEN: &str = "ssh-keygen";
 
 pub const SIGNATURE_SUFFIX: &str = ".sig";

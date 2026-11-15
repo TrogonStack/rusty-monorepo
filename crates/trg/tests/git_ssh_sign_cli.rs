@@ -14,7 +14,7 @@
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -356,6 +356,8 @@ fn denying_agent(dir: &Path, key: &Keypair) -> PathBuf {
 struct Fixture {
     dir: tempfile::TempDir,
     key: Keypair,
+    trg: PathBuf,
+    /// The pass-through file a user writes, which is what git is pointed at.
     program: PathBuf,
     config_home: PathBuf,
 }
@@ -373,8 +375,13 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let key = make(dir.path());
         let trg = Command::cargo_bin("trg").unwrap().get_program().to_owned();
-        let program = dir.path().join("trg-git-ssh-sign");
-        symlink(trg, &program).unwrap();
+        let program = dir.path().join("git-ssh-sign");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\nexec \"{}\" git ssh sign \"$@\"\n", trg.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config_home = dir.path().join("config");
         std::fs::create_dir_all(config_home.join("trg")).unwrap();
         std::fs::write(dir.path().join("token"), TOKEN).unwrap();
@@ -383,6 +390,7 @@ impl Fixture {
         Self {
             dir,
             key,
+            trg: trg.into(),
             program,
             config_home,
         }
@@ -423,7 +431,8 @@ impl Fixture {
     }
 
     fn sign(&self, args: &[&str]) -> Output {
-        Command::new(&self.program)
+        Command::new(&self.trg)
+            .args(["git", "ssh", "sign"])
             .args(args)
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env_remove("SSH_AUTH_SOCK")
@@ -567,7 +576,7 @@ fn a_private_key_path_is_read_through_its_pub_sibling() {
 }
 
 #[test]
-fn the_clap_command_signs_the_same_way() {
+fn without_dash_y_the_flags_still_sign() {
     let fixture = Fixture::new();
     let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(
@@ -577,20 +586,52 @@ fn the_clap_command_signs_the_same_way() {
     ));
     let payload = fixture.payload("through clap\n");
 
-    let output = Command::cargo_bin("trg")
-        .unwrap()
-        .args(["git", "ssh", "sign", "-n", "git", "-f"])
-        .arg(fixture.key.public_file())
-        .arg(&payload)
-        .env("XDG_CONFIG_HOME", &fixture.config_home)
-        .output()
-        .unwrap();
+    let key = fixture.key.public_file();
+    let output = fixture.sign(&["-n", "git", "-f", key.to_str().unwrap(), payload.to_str().unwrap()]);
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         fixture.verifies(&payload, &fixture.path("payload.sig")),
         "ssh-keygen rejected the signature"
     );
+}
+
+#[test]
+fn help_is_answered_by_the_command_and_not_handed_to_ssh_keygen() {
+    let fixture = Fixture::new();
+
+    let output = fixture.sign(&["--help"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("gpg.ssh.program") && help.contains("SSH_KEYGEN_ARGS"),
+        "the help does not describe the command: {help}"
+    );
+}
+
+#[test]
+fn the_pass_through_file_is_what_git_runs_for_other_modes() {
+    let fixture = Fixture::new();
+    let payload = fixture.payload("not signed\n");
+    let signature = fixture.path("payload.sig");
+    std::fs::write(&signature, "not a signature\n").unwrap();
+
+    let output = Command::new(&fixture.program)
+        .args(["-Y", "check-novalidate", "-n", "git", "-s"])
+        .arg(&signature)
+        .stdin(std::fs::File::open(&payload).unwrap())
+        .output()
+        .unwrap();
+    let theirs = Command::new("ssh-keygen")
+        .args(["-Y", "check-novalidate", "-n", "git", "-s"])
+        .arg(&signature)
+        .stdin(std::fs::File::open(&payload).unwrap())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), theirs.status.code(), "{}", stderr(&output));
+    assert_ne!(output.status.code(), Some(0), "a garbage signature must not check out");
 }
 
 #[test]
@@ -858,8 +899,9 @@ fn verify_modes_are_ssh_keygens_own_answer() {
     let signature = fixture.path("payload.sig");
     let allowed = fixture.path("allowed_signers");
 
-    let through = |program: &Path, args: &[&str], stdin: &Path| {
+    let through = |program: &Path, prefix: &[&str], args: &[&str], stdin: &Path| {
         Command::new(program)
+            .args(prefix)
             .args(args)
             .stdin(std::fs::File::open(stdin).unwrap())
             .output()
@@ -901,8 +943,8 @@ fn verify_modes_are_ssh_keygens_own_answer() {
         vec!["-Y", "check-novalidate", "-n", "git", "-s", signature.to_str().unwrap()],
     ];
     for args in cases {
-        let ours = through(&fixture.program, &args, &payload);
-        let theirs = through(Path::new("ssh-keygen"), &args, &payload);
+        let ours = through(&fixture.trg, &["git", "ssh", "sign"], &args, &payload);
+        let theirs = through(Path::new("ssh-keygen"), &[], &args, &payload);
         assert_eq!(
             ours.status.code(),
             theirs.status.code(),
@@ -1006,7 +1048,7 @@ fn commit_and_verify(fixture: &Fixture, signing_key: &str) -> String {
 }
 
 #[test]
-fn git_signs_and_verifies_a_commit_through_the_program() {
+fn git_signs_and_verifies_a_commit_through_a_pass_through_file() {
     let fixture = Fixture::new();
     let transit = FakeTransit::start(&fixture.key, &fixture.key);
     fixture.write_config(&format!(

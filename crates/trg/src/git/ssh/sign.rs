@@ -7,14 +7,16 @@
 //! An address that answered wrongly, or that holds the key and declined to sign,
 //! stops the attempt, so no other address can be used to get around a refusal.
 
+use std::ffi::OsString;
 use std::io::Write;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 
 use tracing::field::Empty;
 use tracing::Instrument;
 
 use super::agent::{self, AgentError, AgentSigning};
-use super::constants::SIGNATURE_SUFFIX;
+use super::constants::{SIGNATURE_SUFFIX, SSH_KEYGEN};
 use super::key_file::{KeyFile, KeyFileError};
 use super::request::{RequestError, SignRequest};
 use super::sshsig::{self, Signature};
@@ -411,6 +413,14 @@ fn say(line: &str) {
 fn prompt(text: &str) {
     eprint!("{text}");
     std::io::stderr().flush().ok();
+}
+
+/// Replace this process with the real `ssh-keygen`, which keeps the arguments,
+/// streams and exit status exactly. Only a failure to start it returns.
+pub fn pass_through(args: &[OsString]) -> u8 {
+    let error = std::process::Command::new(SSH_KEYGEN).args(args).exec();
+    say(&format!("could not run `{SSH_KEYGEN}`: {error}"));
+    255
 }
 
 /// Sign one request and report the way the signing program does.

@@ -3,13 +3,11 @@
 //!
 //! Git runs `gpg.ssh.program` directly and speaks only the `ssh-keygen -Y`
 //! vocabulary to it, so this reads exactly that vocabulary and nothing more.
-//! The same request is built from the `trg git ssh sign` flags, so the two
-//! entry points cannot disagree about what a signature is.
+//! `trg git ssh sign` is handed git's arguments untouched and reads them here.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
-use super::constants::PROGRAM_NAME;
 use super::sshsig::{EmptyNamespaceError, HashAlgorithm, Namespace};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -97,7 +95,7 @@ impl SignRequest {
     }
 }
 
-/// How `trg` was invoked when its name is the signing program's.
+/// What `trg git ssh sign` was asked to do with the arguments git gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
     Sign(Result<SignRequest, RequestError>),
@@ -105,18 +103,13 @@ pub enum Invocation {
     Passthrough(Vec<OsString>),
 }
 
-/// Reads a command line as the signing program, or `None` when `trg` was run
-/// under its own name and the ordinary command tree applies.
-pub fn detect(args: &[OsString]) -> Option<Invocation> {
-    let program = std::path::Path::new(args.first()?).file_name()?;
-    if program != OsStr::new(PROGRAM_NAME) {
-        return None;
+/// Reads the arguments as `ssh-keygen` would. A command line with no `-Y` is
+/// a sign, so the flags can be typed by hand.
+pub fn read(args: &[OsString]) -> Invocation {
+    match mode(args).as_deref() {
+        None | Some("sign") => Invocation::Sign(parse_sign(args)),
+        Some(_) => Invocation::Passthrough(args.to_vec()),
     }
-    let rest = &args[1..];
-    Some(match mode(rest).as_deref() {
-        Some("sign") => Invocation::Sign(parse_sign(rest)),
-        _ => Invocation::Passthrough(rest.to_vec()),
-    })
 }
 
 /// The value of `-Y`, in either `-Y sign` or `-Ysign` spelling.

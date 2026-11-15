@@ -1,9 +1,9 @@
-use std::path::PathBuf;
+use std::ffi::OsString;
 
 use clap::{Args, Subcommand};
 
 use crate::exit_code::ExitCode;
-use crate::git::ssh::{self, SignRequest};
+use crate::git::ssh::{self, Invocation};
 
 #[derive(Subcommand)]
 pub enum GitCommands {
@@ -16,34 +16,21 @@ pub enum GitCommands {
 
 #[derive(Subcommand)]
 pub enum SshCommands {
-    /// Sign files the way `ssh-keygen -Y sign` does, with a declared signer
+    /// Stand in for `ssh-keygen -Y ...` as git's `gpg.ssh.program`
     ///
-    /// The signer is the `[git.ssh.signers.<name>]` whose `public_key` is the
-    /// key in `--key-file`. Each file is signed to `<file>.sig`.
+    /// Takes the arguments git passes. `-Y sign -n <namespace> -f <key> [-U]
+    /// [-O <option>]... <file>...` signs with the `[git.ssh.signers.<name>]`
+    /// whose `public_key` is the key in `-f`, writing `<file>.sig`; without
+    /// `-Y` the same flags sign too. Every other `-Y` mode is run by the real
+    /// `ssh-keygen` with the same arguments.
     Sign(SignArgs),
 }
 
 #[derive(Args)]
 pub struct SignArgs {
-    /// What the signature is for, such as `git`
-    #[arg(short = 'n', long)]
-    pub namespace: String,
-
-    /// A public key file, or a private key path with a `.pub` beside it
-    #[arg(short = 'f', long = "key-file")]
-    pub key_file: PathBuf,
-
-    /// Accepted for `ssh-keygen` compatibility; the signer decides how to sign
-    #[arg(short = 'U')]
-    pub use_agent: bool,
-
-    /// An `ssh-keygen` option, such as `hashalg=sha256`
-    #[arg(short = 'O', long = "option")]
-    pub options: Vec<String>,
-
-    /// The files to sign
-    #[arg(required = true)]
-    pub files: Vec<PathBuf>,
+    /// The `ssh-keygen` arguments, passed through as given
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "SSH_KEYGEN_ARGS")]
+    pub args: Vec<OsString>,
 }
 
 impl GitCommands {
@@ -51,10 +38,10 @@ impl GitCommands {
         match self {
             Self::Ssh {
                 command: SshCommands::Sign(args),
-            } => {
-                let request = SignRequest::new(Some(args.namespace), Some(args.key_file), args.options, args.files);
-                ExitCode::from_success(ssh::run(request).await == 0)
-            }
+            } => match ssh::read(&args.args) {
+                Invocation::Sign(request) => ExitCode::from_success(ssh::run(request).await == 0),
+                Invocation::Passthrough(args) => ExitCode::from_success(ssh::pass_through(&args) == 0),
+            },
         }
     }
 }
