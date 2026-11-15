@@ -1,6 +1,6 @@
 # trogon_claims
 
-Immutable identities, actor chains, authentication context and proof binding.
+Principal composition and typed authentication refinements.
 
 Credential verification and resource authorization remain caller responsibilities.
 All optional features are disabled by default.
