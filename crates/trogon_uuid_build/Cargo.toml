@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 prost-reflect = "0.16.5"
 thiserror = { workspace = true }
-syn = "2.0"
+syn = "3.0"
 quote = "1.0"
 proc-macro2 = "1.0"
 trogon_uuid = { version = "0.1.0", path = "../trogon_uuid" }
