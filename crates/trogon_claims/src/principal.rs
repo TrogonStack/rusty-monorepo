@@ -1,10 +1,41 @@
+use thiserror::Error;
+
 use crate::claim::Claim;
 use crate::claim_set::ClaimSet;
 use crate::claim_type::ClaimType;
 use crate::dynamic_claims::DynamicClaims;
 use crate::identity::{AuthenticatedIdentity, Identity};
-use crate::principal_builder::{PrimaryIdentityIndex, PrincipalBuildError};
 use crate::role_name::RoleName;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum PrincipalBuildError {
+    #[error("a principal with multiple identities requires an explicit primary selection")]
+    MissingPrimary,
+    #[error("primary index {index} is outside the {len} identities")]
+    PrimaryOutOfRange { index: usize, len: usize },
+    #[error("the designated primary identity is anonymous")]
+    PrimaryAnonymous,
+}
+
+/// A caller-selected identity position, validated against a principal at use.
+///
+/// ```compile_fail
+/// use trogon_claims::{DynamicClaims, Identity, PrincipalBuilder};
+/// let _ = PrincipalBuilder::new(Identity::<DynamicClaims>::Anonymous).primary(0);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PrimaryIdentityIndex(usize);
+
+impl PrimaryIdentityIndex {
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
 
 #[derive(Debug)]
 pub struct Principal<C: ClaimSet = DynamicClaims> {

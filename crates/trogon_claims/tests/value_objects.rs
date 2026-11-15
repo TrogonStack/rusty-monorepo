@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use trogon_claims::{
     Audience, AuthenticationType, ClaimPropertyKey, ClaimText, ClaimType, ClaimValue, ClientId, Issuer, PrincipalKind,
@@ -100,7 +101,6 @@ fn well_known_claims_round_trip_through_their_spelling() {
 
 #[test]
 fn claim_value_types_are_pinned_per_variant() {
-    use std::time::Duration;
     let text = ClaimValue::from(ClaimText::from("x"));
     assert_eq!(text.value_type(), Some("http://www.w3.org/2001/XMLSchema#string"));
     assert_eq!(

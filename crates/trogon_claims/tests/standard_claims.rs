@@ -1,7 +1,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "json")]
+use trogon_claims::ingest::IngestClaims;
+#[cfg(feature = "json")]
+use trogon_claims::{Issuer, PrincipalKey, RawClaims, SubjectId};
+
 use trogon_claims::{
-    Claim, ClaimLookupError, ClaimText, ClaimValue, DynamicClaims, NumericDate, ScopeName, WellKnownClaim,
+    Claim, ClaimLookupError, ClaimText, ClaimValue, DynamicClaims, NumericDate, ScopeName, Timestamp, UtcOffset,
+    WellKnownClaim,
 };
 
 fn claim(name: WellKnownClaim, value: ClaimValue) -> Claim {
@@ -67,9 +73,6 @@ fn standard_collections_keep_scopes_roles_and_groups_distinct() {
 
 #[cfg(feature = "json")]
 fn from_json(body: &str) -> DynamicClaims {
-    use trogon_claims::ingest::IngestClaims;
-    use trogon_claims::{Issuer, PrincipalKey, RawClaims, SubjectId};
-
     let raw = RawClaims::from_slice(body.as_bytes()).unwrap();
     let key = PrincipalKey::new(
         Issuer::try_new("https://issuer.example.com").unwrap(),
@@ -159,8 +162,6 @@ fn text_boolean_and_name_claims_have_no_implicit_coercions_or_fallbacks() {
 
 #[test]
 fn timestamp_views_preserve_the_instant_instead_of_applying_the_display_offset() {
-    use trogon_claims::{Timestamp, UtcOffset};
-
     let timestamp = Timestamp::try_new(100, 125_000_000, UtcOffset::try_from_minutes(60).unwrap()).unwrap();
     let claims = DynamicClaims::from_claims(vec![claim(WellKnownClaim::Iat, ClaimValue::Timestamp(timestamp))]);
     assert_eq!(

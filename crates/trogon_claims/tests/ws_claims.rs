@@ -2,6 +2,8 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+#[cfg(feature = "ws-claims")]
+use trogon_claims::constants::*;
 use trogon_claims::{ClaimType, WellKnownClaim};
 
 fn hash(value: &ClaimType) -> u64 {
@@ -106,7 +108,6 @@ fn core_discriminants_and_order_remain_stable() {
 #[cfg(feature = "ws-claims")]
 #[test]
 fn ws_constants_variants_and_discriminants_remain_stable() {
-    use trogon_claims::constants::*;
     for (known, name, discriminant) in [
         (WellKnownClaim::WsAuthenticationInstant, WS_AUTHENTICATION_INSTANT, 26),
         (WellKnownClaim::WsAuthenticationMethod, WS_AUTHENTICATION_METHOD, 27),
