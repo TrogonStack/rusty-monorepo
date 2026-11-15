@@ -1,4 +1,4 @@
-//! Validated scalar claim values and protocol syntax.
+//! Immutable claims, validated selectors and typed standard-claim views.
 //!
 //! Credential verification and resource authorization remain caller responsibilities.
 
@@ -6,36 +6,56 @@ mod audience;
 mod authentication_method;
 mod authentication_type;
 mod civil;
+mod claim;
+mod claim_lookup_error;
 mod claim_property_key;
+mod claim_set;
 mod claim_text;
+mod claim_type;
+mod claim_value;
 mod client_id;
 pub mod constants;
+mod dynamic_claims;
 mod errors;
 mod group_name;
 mod issuer;
+mod name_claim_type;
 mod numeric_date;
 mod principal_kind;
+mod role_claim_type;
 mod role_name;
 mod scope;
+mod standard_claims;
 mod subject_id;
 mod timestamp;
 mod unsigned63;
 mod utc_offset;
 mod value_object;
+mod well_known_claim;
 pub use audience::Audience;
 pub use authentication_method::AuthenticationMethod;
 pub use authentication_type::AuthenticationType;
+pub use claim::{Claim, ClaimBuilder};
+pub use claim_lookup_error::ClaimLookupError;
 pub use claim_property_key::ClaimPropertyKey;
+pub use claim_set::{ClaimSet, HasRoles};
 pub use claim_text::ClaimText;
+pub use claim_type::ClaimType;
+pub use claim_value::ClaimValue;
 pub use client_id::ClientId;
+pub use dynamic_claims::DynamicClaims;
 pub use errors::{NumericDateError, TimestampError, Unsigned63Error, UtcOffsetError, ValueKind, ValueObjectError};
 pub use group_name::{GroupName, GroupNameError};
 pub use issuer::Issuer;
+pub use name_claim_type::NameClaimType;
 pub use numeric_date::NumericDate;
 pub use principal_kind::PrincipalKind;
+pub use role_claim_type::RoleClaimType;
 pub use role_name::RoleName;
 pub use scope::{ScopeName, ScopeNameError, ScopeSet};
+pub use standard_claims::{ParsedStandardClaims, StandardClaims};
 pub use subject_id::SubjectId;
 pub use timestamp::Timestamp;
 pub use unsigned63::Unsigned63;
 pub use utc_offset::UtcOffset;
+pub use well_known_claim::WellKnownClaim;
