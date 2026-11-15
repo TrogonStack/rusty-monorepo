@@ -1,0 +1,2 @@
+error: invalid trogon_dylint_lints configuration: toml error: invalid type: unit variant, expected string only in `profile`
+

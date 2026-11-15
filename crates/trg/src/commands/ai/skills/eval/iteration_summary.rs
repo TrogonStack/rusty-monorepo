@@ -157,6 +157,13 @@ pub struct IterationSummaryArgs {
 }
 
 impl IterationSummaryArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let options = IterationSummaryOptions {
             failed_runs: self.failed_runs,

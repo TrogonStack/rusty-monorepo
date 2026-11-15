@@ -49,7 +49,7 @@ fn local_shadow() {
 }
 
 // Explicitly allowed at the site: must NOT fire.
-#[allow(debug_remnants)]
+#[allow(debug_remnants, reason = "this fixture validates an explicit diagnostic-output exception")]
 fn allowed() {
     std::println!("deliberate output");
 }

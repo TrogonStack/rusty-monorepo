@@ -7,8 +7,10 @@
 //! pipes the reader threads never see end of file, so the timeout that was supposed to
 //! bound the run never returns at all.
 
+use std::os::unix::process::CommandExt;
+mod constants;
 use crate::exit_code::TerminationSignal;
-use crate::telemetry::INTERRUPT_FLUSH_TIMEOUT;
+use constants::{FLUSH_WAIT, MAX_TRACKED_GROUPS, TERMINATION_GRACE};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
@@ -18,18 +20,6 @@ use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
-/// How long a group is given to exit on its own before it is killed outright.
-///
-/// Long enough for a harness to finish flushing the transcript it was in the middle of
-/// writing, which is the artifact the timed-out run is diagnosed from.
-const TERMINATION_GRACE: Duration = Duration::from_millis(500);
-
-/// Process groups currently running a harness.
-///
-/// A fixed array of atomics rather than a lock: the termination handler runs in signal
-/// context, where taking a lock the interrupted thread already holds deadlocks the
-/// process. Slot value `0` means free.
-const MAX_TRACKED_GROUPS: usize = 64;
 static TRACKED_GROUPS: [AtomicI32; MAX_TRACKED_GROUPS] = [const { AtomicI32::new(0) }; MAX_TRACKED_GROUPS];
 
 static INSTALL_HANDLER: Once = Once::new();
@@ -44,11 +34,6 @@ static TERMINATING: AtomicBool = AtomicBool::new(false);
 static WAKE_WATCHER: AtomicI32 = AtomicI32::new(-1);
 static WATCHER_DONE: AtomicI32 = AtomicI32::new(-1);
 
-/// How long the handler holds the signal back for the watcher before re-raising it
-/// regardless, so an unreachable collector or a lock the interrupted thread holds can
-/// delay the exit but never prevent it.
-const FLUSH_WAIT: Duration = Duration::from_millis(INTERRUPT_FLUSH_TIMEOUT.as_millis() as u64 + 500);
-
 /// Make the child the leader of its own process group, so its descendants can be
 /// addressed as one.
 ///
@@ -57,7 +42,6 @@ const FLUSH_WAIT: Duration = Duration::from_millis(INTERRUPT_FLUSH_TIMEOUT.as_mi
 /// controlling terminal is stopped with `SIGTTIN` rather than given the keystrokes, and a
 /// stopped harness is indistinguishable from a working one to anything watching it exit.
 pub fn lead_own_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
@@ -351,115 +335,5 @@ pub fn process_is_alive(pid: i32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn disposition(signal: i32) -> libc::sighandler_t {
-        // SAFETY: `sigaction` is a plain C struct for which all zeroes is a valid value.
-        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
-        assert_eq!(
-            // SAFETY: `current` is a live local, and a null new-action pointer only queries the disposition.
-            unsafe { libc::sigaction(signal, std::ptr::null(), &mut current) },
-            0,
-            "sigaction query"
-        );
-        current.sa_sigaction
-    }
-
-    fn set_disposition(signal: i32, handler: libc::sighandler_t) {
-        // SAFETY: `sigaction` is a plain C struct for which all zeroes is a valid value.
-        let mut wanted: libc::sigaction = unsafe { std::mem::zeroed() };
-        wanted.sa_sigaction = handler;
-        // SAFETY: `wanted` is a live, initialized `sigaction`, and a null old-action pointer is accepted.
-        unsafe {
-            libc::sigemptyset(&mut wanted.sa_mask);
-            assert_eq!(
-                libc::sigaction(signal, &wanted, std::ptr::null_mut()),
-                0,
-                "sigaction set"
-            );
-        }
-    }
-
-    /// `nohup trg ...` asks for a hangup to be ignored. Answering it with a handler that
-    /// kills every harness and re-raises is the opposite of what was asked for.
-    #[test]
-    fn a_signal_the_process_was_told_to_ignore_stays_ignored() {
-        let restore = disposition(libc::SIGHUP);
-
-        set_disposition(libc::SIGHUP, libc::SIG_IGN);
-        handle_unless_ignored(libc::SIGHUP);
-        let over_ignored = disposition(libc::SIGHUP);
-
-        set_disposition(libc::SIGHUP, libc::SIG_DFL);
-        handle_unless_ignored(libc::SIGHUP);
-        let over_default = disposition(libc::SIGHUP);
-
-        set_disposition(libc::SIGHUP, restore);
-
-        assert_eq!(over_ignored, libc::SIG_IGN, "an ignored hangup must be left ignored");
-        assert_eq!(
-            over_default, on_termination as *const () as libc::sighandler_t,
-            "a hangup nobody spoke for still has to take the harnesses down"
-        );
-    }
-
-    const SIGNAL_CHILD: &str = "TRG_TEST_TERMINATION_CHILD";
-
-    /// The body of [`a_termination_signal_kills_the_harnesses_and_exits_with_its_status`],
-    /// run in a child copy of this test binary. A no-op in an ordinary test run.
-    #[test]
-    fn termination_child() {
-        if std::env::var_os(SIGNAL_CHILD).is_none() {
-            return;
-        }
-        let mut command = Command::new("sleep");
-        command.arg("30");
-        lead_own_group(&mut command);
-        let mut child = command.spawn().expect("spawn sleep");
-        let _group = ProcessGroupGuard::led_by(&child);
-        println!("harness={}", child.id());
-        std::io::stdout().flush().expect("flush stdout");
-        let _ = child.wait();
-    }
-
-    #[test]
-    fn a_termination_signal_kills_the_harnesses_and_exits_with_its_status() {
-        use std::io::BufRead;
-        use std::os::unix::process::ExitStatusExt;
-
-        let mut child = Command::new(std::env::current_exe().expect("test binary"))
-            .args([
-                "--exact",
-                "agentskills::runner::group::tests::termination_child",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(SIGNAL_CHILD, "1")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn child test");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let harness: i32 = std::io::BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-            .find_map(|line| line.split_once("harness=").map(|(_, pid)| pid.trim().to_string()))
-            .expect("child reports its harness")
-            .parse()
-            .expect("a pid");
-
-        // SAFETY: `kill` takes no pointers, and the target is the child this test spawned.
-        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-        let status = child.wait().expect("child exits");
-
-        assert_eq!(status.signal(), Some(libc::SIGTERM), "{status:?}");
-        let gone = (0..100).any(|_| {
-            if !process_is_alive(harness) {
-                return true;
-            }
-            thread::sleep(Duration::from_millis(20));
-            false
-        });
-        assert!(gone, "the harness outlived the signal");
-    }
-}
+#[path = "group_tests.rs"]
+mod tests;

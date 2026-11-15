@@ -1,5 +1,5 @@
 // edition:2024
-#![allow(dead_code, constant_outside_constants_module)]
+#![allow(dead_code, constant_outside_constants_module, reason = "this fixture isolates literal assertions from constant placement")]
 
 use std::marker::PhantomData;
 

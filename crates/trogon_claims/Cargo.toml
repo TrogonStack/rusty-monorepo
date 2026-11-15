@@ -12,7 +12,7 @@ default = []
 ws-claims = []
 
 [lints.rust]
-unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("json", "axum", "macros", "serde"))'] }
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(feature, values("json", "axum", "macros", "serde"))', 'cfg(dylint_lib, values("trogon_dylint_lints"))'] }
 warnings = "deny"
 
 [lints.clippy]
