@@ -1218,6 +1218,21 @@ fn configuration_errors_are_reported_at_load() {
         "duplicate key: {duplicate}"
     );
 
+    let mut fields = key.split_whitespace();
+    let bare = format!("{} {}", fields.next().unwrap(), fields.next().unwrap());
+    let recommented = load_failure(
+        &fixture,
+        &format!(
+            "{backend}{}{}",
+            signer("one", &format!("{bare} laptop"), &valid),
+            signer("two", &format!("{bare} desktop"), &valid)
+        ),
+    );
+    assert!(
+        recommented.contains("repeats the public key"),
+        "a key that differs only by comment is the same key: {recommented}"
+    );
+
     let ecdsa = Keypair::generate(fixture.dir.path(), "ecdsa", "ecdsa");
     let unsupported = load_failure(
         &fixture,
