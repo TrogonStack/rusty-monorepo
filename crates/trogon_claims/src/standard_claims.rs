@@ -52,6 +52,18 @@ pub struct ParsedStandardClaims<'a> {
     groups: Option<Vec<GroupName>>,
 }
 
+impl DynamicClaims {
+    pub fn standard(&self) -> StandardClaims<'_> {
+        StandardClaims { claims: self }
+    }
+
+    /// Parses the supported standard claims before exposing their typed values.
+    /// Raw and custom claims remain available on this collection.
+    pub fn parse_standard(&self) -> Result<ParsedStandardClaims<'_>, ClaimLookupError> {
+        self.standard().try_parse()
+    }
+}
+
 impl<'a> StandardClaims<'a> {
     pub fn try_parse(self) -> Result<ParsedStandardClaims<'a>, ClaimLookupError> {
         Ok(ParsedStandardClaims {
@@ -170,6 +182,13 @@ impl<'a> StandardClaims<'a> {
             .transpose()
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     pub fn issuer(&self) -> Result<Option<Issuer>, ClaimLookupError> {
         self.text(WellKnownClaim::Iss)?
             .map(|text| {
@@ -180,6 +199,13 @@ impl<'a> StandardClaims<'a> {
             .transpose()
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     pub fn subject(&self) -> Result<Option<SubjectId>, ClaimLookupError> {
         self.text(WellKnownClaim::Sub)?
             .map(|text| {
@@ -217,6 +243,13 @@ impl<'a> StandardClaims<'a> {
             .transpose()
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     pub fn audiences(&self) -> Result<Option<Vec<Audience>>, ClaimLookupError> {
         self.collection(WellKnownClaim::Aud, true, |value| match value {
             ClaimValue::Text(text) => {
@@ -230,6 +263,13 @@ impl<'a> StandardClaims<'a> {
         })
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     fn numeric_date(&self, claim: WellKnownClaim) -> Result<Option<NumericDate>, ClaimLookupError> {
         self.single(claim)?
             .map(|value| match value {
@@ -277,6 +317,13 @@ impl<'a> StandardClaims<'a> {
         })
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     pub fn client_id(&self) -> Result<Option<ClientId>, ClaimLookupError> {
         self.text(WellKnownClaim::ClientId)?
             .map(|text| {
@@ -287,6 +334,13 @@ impl<'a> StandardClaims<'a> {
             .transpose()
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     pub fn scopes(&self) -> Result<Option<ScopeSet>, ClaimLookupError> {
         self.text(WellKnownClaim::Scope)?
             .map(|text| {
@@ -297,6 +351,13 @@ impl<'a> StandardClaims<'a> {
             .transpose()
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     pub fn roles(&self) -> Result<Option<Vec<RoleName>>, ClaimLookupError> {
         self.collection(WellKnownClaim::Roles, false, |value| match value {
             ClaimValue::Text(text) => {
@@ -310,6 +371,13 @@ impl<'a> StandardClaims<'a> {
         })
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "Typed validation failures intentionally become the stable claim-specific ClaimLookupError::InvalidValue category"
+        )
+    )]
     pub fn groups(&self) -> Result<Option<Vec<GroupName>>, ClaimLookupError> {
         self.collection(WellKnownClaim::Groups, false, |value| match value {
             ClaimValue::Text(text) => {
