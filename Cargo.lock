@@ -2953,6 +2953,8 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "fluent-uri",
+ "prost",
+ "prost-types",
  "serde_json",
  "thiserror 2.0.21",
  "trogon_claims_syntax",

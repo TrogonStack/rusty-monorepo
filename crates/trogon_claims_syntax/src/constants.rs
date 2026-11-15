@@ -1,3 +1,21 @@
+#[cfg(feature = "spicedb")]
+pub const OBJECT_ID_MAX_BYTES: usize = 1024;
+#[cfg(feature = "spicedb")]
+pub const OBJECT_TYPE_MAX_BYTES: usize = 128;
+#[cfg(feature = "spicedb")]
+pub const TYPE_INNER_SEGMENT_MAX_BYTES: usize = 63;
+#[cfg(feature = "spicedb")]
+pub const TYPE_FINAL_SEGMENT_MAX_BYTES: usize = 64;
+#[cfg(feature = "spicedb")]
+pub const SEGMENT_MIN_BYTES: usize = 3;
 pub const OIDC_SUBJECT_MAX_BYTES: usize = 255;
+#[cfg(feature = "spicedb")]
+pub const WILDCARD_BYTE: u8 = b'*';
 pub const CLIENT_ID_MIN_BYTE: u8 = 0x20;
 pub const CLIENT_ID_MAX_BYTE: u8 = 0x7E;
+#[cfg(feature = "spicedb")]
+pub const OBJECT_ID_ALPHABET: &str = "[a-zA-Z0-9/_|\\-=+]";
+#[cfg(feature = "spicedb")]
+pub const RELATION_NAME_MAX_BYTES: usize = 64;
+#[cfg(feature = "spicedb")]
+pub const PARAM_NAME_MAX_BYTES: usize = 64;
