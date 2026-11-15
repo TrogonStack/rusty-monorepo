@@ -53,6 +53,16 @@
         }
       ],
       "initial-version": "0.1.0"
+    },
+    "crates/trogon_uuid": {
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='trogon_uuid')].version"
+        }
+      ],
+      "initial-version": "0.1.0"
     }
   },
   "plugins": [
