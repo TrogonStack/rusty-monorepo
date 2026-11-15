@@ -1,8 +1,6 @@
 use crate::claim::Claim;
-use crate::claim_lookup_error::ClaimLookupError;
 use crate::claim_set::ClaimSet;
 use crate::claim_type::ClaimType;
-use crate::standard_claims::{ParsedStandardClaims, StandardClaims};
 
 #[cfg(feature = "json")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,16 +18,6 @@ pub struct DynamicClaims {
 }
 
 impl DynamicClaims {
-    pub fn standard(&self) -> StandardClaims<'_> {
-        StandardClaims { claims: self }
-    }
-
-    /// Parses the supported standard claims before exposing their typed values.
-    /// Raw and custom claims remain available on this collection.
-    pub fn parse_standard(&self) -> Result<ParsedStandardClaims<'_>, ClaimLookupError> {
-        self.standard().try_parse()
-    }
-
     pub fn from_claims(claims: Vec<Claim>) -> Self {
         Self {
             claims,
