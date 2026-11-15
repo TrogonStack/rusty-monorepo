@@ -115,6 +115,13 @@ fn main() -> std::process::ExitCode {
     code.into()
 }
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+    )
+)]
 async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> ExitCode {
     let telemetry = trg::telemetry::init(command_identity);
     let root_span = telemetry.root_span();

@@ -10,7 +10,10 @@
 // Dylint lints; only the driver compiletest runs does.
 #![allow(unknown_lints)]
 
-#[allow(inline_module_block)]
+#[allow(
+    inline_module_block,
+    reason = "this single-file fixture isolates test-context JSON exemptions"
+)]
 #[cfg(test)]
 mod fixture_data {
     use serde_json::{Value, json};

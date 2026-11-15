@@ -3,7 +3,8 @@ use clippy_utils::res::MaybeDef;
 use clippy_utils::sym;
 use clippy_utils::ty::implements_trait;
 use clippy_utils::visitors::is_local_used;
-use rustc_hir::{BindingMode, Expr, ExprKind, PatKind};
+use rustc_hir::def::{DefKind, Res};
+use rustc_hir::{BindingMode, Expr, ExprKind, HirId, PatKind, StructTailExpr};
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
@@ -57,8 +58,6 @@ pub(crate) fn check_expr<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
     );
 }
 
-/// The span of the closure parameter that `map_err` receives and never reads,
-/// with the error type it drops.
 fn discarded_parameter<'tcx>(
     cx: &LateContext<'tcx>,
     receiver: &'tcx Expr<'tcx>,
@@ -79,7 +78,86 @@ fn discarded_parameter<'tcx>(
         PatKind::Binding(BindingMode::NONE, hir_id, _, None) if !is_local_used(cx, body.value, hir_id) => {
             Some((param.pat.span, error))
         }
+        PatKind::Binding(BindingMode::NONE, hir_id, _, None) if is_error(cx, error) => {
+            stringified_parameter(cx, body.value, hir_id).map(|span| (span, error))
+        }
         _ => None,
+    }
+}
+
+fn stringified_parameter<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>, parameter: HirId) -> Option<Span> {
+    if expr.span.from_expansion() {
+        return None;
+    }
+
+    if let Some(receiver) = to_string_receiver(cx, expr)
+        && is_parameter(cx, receiver, parameter)
+    {
+        return Some(expr.span);
+    }
+
+    match expr.kind {
+        ExprKind::Call(callee, arguments) => {
+            let ExprKind::Path(qpath) = callee.kind else {
+                return None;
+            };
+            if !matches!(cx.qpath_res(&qpath, callee.hir_id), Res::Def(DefKind::Ctor(..), _)) {
+                return None;
+            }
+            stringified_arguments(cx, arguments.iter(), parameter)
+        }
+        ExprKind::Struct(_, fields, StructTailExpr::None) => {
+            stringified_arguments(cx, fields.iter().map(|field| field.expr), parameter)
+        }
+        ExprKind::Block(block, _) if block.stmts.is_empty() => {
+            block.expr.and_then(|tail| stringified_parameter(cx, tail, parameter))
+        }
+        _ => None,
+    }
+}
+
+fn stringified_arguments<'tcx>(
+    cx: &LateContext<'tcx>,
+    arguments: impl Iterator<Item = &'tcx Expr<'tcx>>,
+    parameter: HirId,
+) -> Option<Span> {
+    let mut stringification = None;
+    for argument in arguments {
+        if is_local_used(cx, argument, parameter) {
+            // A separate use may retain the typed cause beside its display text.
+            stringification = Some(stringified_parameter(cx, argument, parameter)?);
+        }
+    }
+    stringification
+}
+
+fn to_string_receiver<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> Option<&'tcx Expr<'tcx>> {
+    let (method, receiver) = match expr.kind {
+        ExprKind::MethodCall(_, receiver, [], _) => (cx.typeck_results().type_dependent_def_id(expr.hir_id)?, receiver),
+        ExprKind::Call(callee, [receiver]) => {
+            let ExprKind::Path(qpath) = callee.kind else {
+                return None;
+            };
+            let Res::Def(_, method) = cx.qpath_res(&qpath, callee.hir_id) else {
+                return None;
+            };
+            (method, receiver)
+        }
+        _ => return None,
+    };
+
+    cx.tcx
+        .is_diagnostic_item(sym::to_string_method, method)
+        .then_some(receiver)
+}
+
+fn is_parameter(cx: &LateContext<'_>, expr: &Expr<'_>, parameter: HirId) -> bool {
+    match expr.kind {
+        ExprKind::Path(qpath) => matches!(cx.qpath_res(&qpath, expr.hir_id), Res::Local(local) if local == parameter),
+        ExprKind::AddrOf(_, _, inner) | ExprKind::DropTemps(inner) | ExprKind::Use(inner, _) => {
+            is_parameter(cx, inner, parameter)
+        }
+        _ => false,
     }
 }
 

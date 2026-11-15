@@ -83,6 +83,16 @@ LL |             slots: raw.split(',').map(|slot| slot.parse::<u16>().unwrap()).
    = help: return `Result<Self, _>` and propagate the failure with `?`, renaming the constructor to `try_new` (or `try_new_*`) when an infallible one stays beside it, or move the fallible work out to the caller
    = note: if the panic is an invariant the caller cannot break, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(fallible_new, reason = "..."))]`
 
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/fallible_new.rs:73:55
+   |
+LL |         let slot = raw.parse::<u16>().map_err(|error| error.to_string())?;
+   |                                                       ^^^^^^^^^^^^^^^^^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+   = note: `#[warn(discarded_error_source)]` on by default
+
 error: constructor `new` can panic, and its signature gives the caller no failure to handle
   --> $DIR/fallible_new.rs:150:14
    |
@@ -97,5 +107,14 @@ LL |             port: raw.parse::<u16>().unwrap(),
    = help: return `Result<Self, _>` and propagate the failure with `?`, renaming the constructor to `try_new` (or `try_new_*`) when an infallible one stays beside it, or move the fallible work out to the caller
    = note: if the panic is an invariant the caller cannot break, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(fallible_new, reason = "..."))]`
 
-error: aborting due to 7 previous errors
+warning: the original error is discarded instead of being carried as a source
+  --> $DIR/fallible_new.rs:158:55
+   |
+LL |         let port = raw.parse::<u16>().map_err(|error| error.to_string())?;
+   |                                                       ^^^^^^^^^^^^^^^^^
+   |
+   = help: store the error in the new one, for example `Variant(#[source] E)` with `.map_err(Variant)`, so the cause stays reachable through `Error::source`
+   = note: if dropping the error is deliberate, opt out at the site with `#[cfg_attr(dylint_lib = "trogon_dylint_lints", expect(discarded_error_source, reason = "..."))]`
+
+error: aborting due to 7 previous errors; 2 warnings emitted
 

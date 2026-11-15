@@ -1,0 +1,13 @@
+[package]
+name = "uuid-build-portability-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+recipes = { package = "trogon_uuid", path = "../../../trogon_uuid", default-features = false }
+
+[build-dependencies]
+builder = { package = "trogon_uuid_build", path = "../.." }

@@ -54,6 +54,13 @@ pub struct ScalingArgs {
 }
 
 impl ScalingArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self, _fs: &impl FileSystem) -> ExitCode {
         let document = match build_scaling_document(&self.report_dirs, self.failed_runs) {
             Ok(document) => document,
@@ -91,6 +98,13 @@ impl ScalingArgs {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+    )
+)]
 fn print_human_summary(document: &ScalingDocument) {
     println!("Model scaling across {} bundles:", document.bundles.len());
     for step in &document.steps {
@@ -100,6 +114,13 @@ fn print_human_summary(document: &ScalingDocument) {
     print_step(&document.end_to_end);
 }
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+    )
+)]
 fn print_step(step: &ScalingStep) {
     println!(
         "  {} -> {}: {}",
@@ -143,16 +164,5 @@ fn describe_verdict(verdict: &ScalingVerdict) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn help_includes_examples() {
-        let help = ScalingArgs::augment_args(clap::Command::new("scaling").about("scaling"))
-            .render_long_help()
-            .to_string();
-        assert!(help.contains("Examples:"), "missing Examples section:\n{help}");
-        assert!(help.contains("--fail-on-regression"));
-        assert!(help.contains("--failed-runs"));
-    }
-}
+#[path = "scaling_tests.rs"]
+mod tests;

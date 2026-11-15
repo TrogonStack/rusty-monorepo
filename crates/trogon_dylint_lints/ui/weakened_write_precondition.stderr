@@ -1,3 +1,12 @@
+error: `weakened_write_precondition` suppressed by `allow` without a stated reason
+  --> $DIR/weakened_write_precondition.rs:56:5
+   |
+LL |     #[allow(weakened_write_precondition)]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: state the technical reason for this exception in a nonempty `reason = "..."`
+   = note: `#[deny(policy_lint_suppression_without_reason)]` on by default
+
 error: `WRITE_PRECONDITION` is `WritePrecondition::Any`, so the append is unconditional
   --> $DIR/weakened_write_precondition.rs:32:5
    |
@@ -26,5 +35,5 @@ LL |     const WRITE_PRECONDITION: WritePrecondition = WritePrecondition::Any;
    = help: the `allow` silencing this carries no `reason`, so the choice is turned off rather than argued
    = help: if appending unconditionally is deliberate, argue it in place: `#[cfg_attr(dylint_lib = "trogon_dylint_lints", allow(weakened_write_precondition, reason = "..."))]`
 
-error: aborting due to 3 previous errors
+error: aborting due to 4 previous errors
 
