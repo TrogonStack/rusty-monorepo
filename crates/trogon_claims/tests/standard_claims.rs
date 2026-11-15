@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use trogon_claims::{
-    Claim, ClaimLookupError, ClaimText, ClaimValue, DynamicClaims, NumericDate, ScopeName, WellKnownClaim,
+    Claim, ClaimLookupError, ClaimText, ClaimValue, DynamicClaims, NumericDate, ScopeName, Timestamp, UtcOffset,
+    WellKnownClaim,
 };
 
 fn claim(name: WellKnownClaim, value: ClaimValue) -> Claim {
@@ -159,8 +160,6 @@ fn text_boolean_and_name_claims_have_no_implicit_coercions_or_fallbacks() {
 
 #[test]
 fn timestamp_views_preserve_the_instant_instead_of_applying_the_display_offset() {
-    use trogon_claims::{Timestamp, UtcOffset};
-
     let timestamp = Timestamp::try_new(100, 125_000_000, UtcOffset::try_from_minutes(60).unwrap()).unwrap();
     let claims = DynamicClaims::from_claims(vec![claim(WellKnownClaim::Iat, ClaimValue::Timestamp(timestamp))]);
     assert_eq!(
