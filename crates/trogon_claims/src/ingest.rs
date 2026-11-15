@@ -1,4 +1,8 @@
+mod actor;
+mod confirmation;
+mod context;
 mod ingest_claims;
+mod ingest_identity;
 mod introspection;
 mod jwt;
 mod jwt_claims;

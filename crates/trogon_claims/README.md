@@ -1,13 +1,13 @@
 # trogon_claims
 
-Raw JSON claims, compact JWT payload parsing, introspection and generic claim projection.
+Identity ingestion with bounded actor chains and explicit typed claim selection.
 
 Credential verification and resource authorization remain caller responsibilities.
 All optional features are disabled by default.
 
 ## Features
 
-- `json`: raw JSON, JWT payloads, introspection and claim projection.
+- `json`: raw JSON, JWT payloads, introspection and claim projection with identity ingestion.
 
 ## Consuming the crates
 
