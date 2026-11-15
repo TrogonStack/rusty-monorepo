@@ -1,6 +1,9 @@
 //! Spans, evaluation events and counters for grading, and the CLI client span
 //! every eval subcommand that starts a helper process records it under.
 
+mod constants;
+pub(crate) use constants::CASE_SCORE_EVALUATION;
+use constants::{NONZERO_EXIT, SIGNALED, SPAWN_FAILED};
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
@@ -24,13 +27,6 @@ use crate::telemetry::semconv::trg::{
 };
 use crate::telemetry::{ContentCapture, LOGS_ONLY_TARGET};
 
-const NONZERO_EXIT: &str = "nonzero_exit";
-const SIGNALED: &str = "signaled";
-const SPAWN_FAILED: &str = "spawn_failed";
-
-/// The name of the case-level evaluation that carries a run's `case_score`.
-pub(crate) const CASE_SCORE_EVALUATION: &str = "case_score";
-
 pub(crate) fn record_error(span: &tracing::Span, error_type: &str) {
     span.record(ERROR_TYPE, error_type);
     span.record("otel.status_code", "ERROR");
@@ -40,7 +36,7 @@ pub(crate) fn eval_error_type(error: &EvalError) -> &'static str {
     match error {
         EvalError::Io(_) => "io",
         EvalError::Json(_) => "json",
-        EvalError::Validation(_) => "validation",
+        EvalError::Validation(_) | EvalError::Feedback(_) => "validation",
     }
 }
 
@@ -272,100 +268,8 @@ pub(crate) fn count_assertion(result: &AssertionGradeResult, grader_kind: &str) 
 }
 
 #[cfg(test)]
-pub(crate) mod testing {
-    use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-    use opentelemetry_sdk::logs::{InMemoryLogExporter, SdkLogRecord, SdkLoggerProvider};
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
-    use tracing_subscriber::prelude::*;
-
-    use crate::telemetry::testing::CapturedTrace;
-
-    /// Like [`crate::telemetry::testing::capture`], also keeping the log records the tracing bridge
-    /// turned events into. Both layers carry the filters `trg` exports through, so what
-    /// reaches each signal here is what reaches it in a real process.
-    pub(crate) fn capture_with_logs<T>(work: impl FnOnce() -> T) -> (T, CapturedTrace, Vec<SdkLogRecord>) {
-        crate::telemetry::testing::consult_every_dispatcher();
-        let spans = InMemorySpanExporter::default();
-        let tracer_provider = SdkTracerProvider::builder().with_simple_exporter(spans.clone()).build();
-        let logs = InMemoryLogExporter::default();
-        let logger_provider = SdkLoggerProvider::builder().with_simple_exporter(logs.clone()).build();
-        let subscriber = tracing_subscriber::registry()
-            .with(
-                tracing_opentelemetry::layer()
-                    .with_tracer(tracer_provider.tracer("trg"))
-                    .with_filter(crate::telemetry::trace_filter()),
-            )
-            .with(OpenTelemetryTracingBridge::new(&logger_provider).with_filter(crate::telemetry::log_filter()));
-        let output = tracing::subscriber::with_default(subscriber, work);
-        let _ = tracer_provider.force_flush();
-        let _ = logger_provider.force_flush();
-        let trace = CapturedTrace {
-            spans: spans
-                .get_finished_spans()
-                .expect("in-memory exporter is never shut down here"),
-        };
-        let records = logs
-            .get_emitted_logs()
-            .expect("in-memory exporter is never shut down here")
-            .into_iter()
-            .map(|log| log.record)
-            .collect();
-        (output, trace, records)
-    }
-}
+pub(crate) mod testing;
 
 #[cfg(test)]
-mod tests {
-    use super::testing::capture_with_logs;
-    use super::*;
-
-    fn evaluation() -> Evaluation<'static> {
-        Evaluation {
-            name: "contains",
-            label: Some("fail"),
-            score: Some(0.0),
-            explanation: Some("the answer quoted the customer's address"),
-            grader_kind: Some("contains"),
-            case_id: "case",
-            run_id: Some("run"),
-            provenance: Provenance::Live,
-        }
-    }
-
-    #[test]
-    fn an_event_only_evaluation_carries_its_explanation_on_the_log_and_nothing_onto_the_span() {
-        let ((), trace, logs) = capture_with_logs(|| {
-            tracing::info_span!("grade").in_scope(|| evaluation().emit(None, ContentCapture::EventOnly));
-        });
-
-        let grade = trace.span("grade").expect("grade span exported");
-        assert!(
-            grade.events.is_empty(),
-            "an evaluation never becomes a span event: {:?}",
-            grade.events
-        );
-        assert!(grade
-            .attributes
-            .iter()
-            .all(|kv| kv.key.as_str() != GEN_AI_EVALUATION_EXPLANATION));
-
-        let record = logs
-            .iter()
-            .find(|record| record.event_name() == Some("gen_ai.evaluation.result"))
-            .expect("the evaluation reaches the logs signal");
-        let explanation = record
-            .attributes_iter()
-            .find(|(key, _)| key.as_str() == GEN_AI_EVALUATION_EXPLANATION)
-            .map(|(_, value)| format!("{value:?}"));
-        assert!(
-            explanation.is_some_and(|value| value.contains("the customer's address")),
-            "the log record keeps the explanation event capture allows"
-        );
-        assert_eq!(
-            record.trace_context().map(|context| context.span_id),
-            Some(grade.span_context.span_id()),
-            "the log record still correlates with the span it was emitted under"
-        );
-    }
-}
+#[path = "telemetry_tests.rs"]
+mod tests;

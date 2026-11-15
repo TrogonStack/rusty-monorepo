@@ -21,6 +21,13 @@ pub struct ReadPropertiesArgs {
 }
 
 impl ReadPropertiesArgs {
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            debug_remnants,
+            reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+        )
+    )]
     pub fn handle(self, fs: &impl FileSystem) -> ExitCode {
         let skill_path = self.skill.resolve();
         let props = match crate::agentskills::parser::read_properties(fs, &skill_path) {
@@ -40,6 +47,13 @@ impl ReadPropertiesArgs {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "trogon_dylint_lints",
+    expect(
+        debug_remnants,
+        reason = "This function renders the CLI response or an operator action on its designated stream; tracing must not replace that output"
+    )
+)]
 fn print_properties(props: &SkillProperties) {
     println!("Name:        {}", props.name);
     println!("Description: {}", props.description);

@@ -1,0 +1,18 @@
+[package]
+name = "trogon_uuid"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Static UUIDv5 identity recipes with borrowed typed inputs"
+repository = "https://github.com/TrogonStack/rusty-monorepo"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+uuid = { version = "1.26", default-features = false, features = ["v5"] }
+sha1_smol = { version = "1.0", default-features = false }
+
+[dev-dependencies]
+stats_alloc = "0.1.10"
