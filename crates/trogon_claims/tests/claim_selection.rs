@@ -1,5 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(feature = "json")]
+use trogon_claims::{DynamicClaims, IngestProfile, RawClaims};
+
 use trogon_claims::{
     AuthenticationType, Claim, ClaimText, ClaimType, ClaimValue, Identity, IdentityBuilder, Issuer, NameClaimType,
     Principal, RoleClaimType, RoleName, WellKnownClaim,
@@ -195,8 +198,6 @@ fn manually_constructed_role_lists_match_json_ingest_queries() {
 #[cfg(feature = "json")]
 #[test]
 fn malformed_json_role_arrays_do_not_grant_partial_membership() {
-    use trogon_claims::{IngestProfile, RawClaims};
-
     let profile = IngestProfile::new(
         AuthenticationType::try_new("jwt").unwrap(),
         NameClaimType::new(WellKnownClaim::Sub.into()),
@@ -224,8 +225,6 @@ fn malformed_json_role_arrays_do_not_grant_partial_membership() {
 
 #[cfg(feature = "json")]
 fn ingest(name: WellKnownClaim, role: WellKnownClaim, username: Option<&str>) -> Identity {
-    use trogon_claims::{DynamicClaims, IngestProfile, RawClaims};
-
     let mut payload = serde_json::json!({
         "iss": "https://issuer.example.com",
         "sub": "user-42",

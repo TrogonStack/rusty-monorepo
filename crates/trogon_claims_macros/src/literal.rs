@@ -22,4 +22,5 @@ pub(crate) fn string_value(text: &str) -> Result<String, &'static str> {
 }
 
 #[cfg(test)]
+#[path = "literal_tests.rs"]
 mod tests;
