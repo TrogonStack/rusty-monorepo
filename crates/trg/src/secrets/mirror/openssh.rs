@@ -71,7 +71,9 @@ impl std::fmt::Debug for SourceKey {
 }
 
 pub fn parse(text: &str) -> Result<SourceKey, SourceKeyError> {
-    let mut body = String::new();
+    // Sized for the whole input, so pushing the base64 lines can never
+    // reallocate and leave an unzeroed copy of the key behind.
+    let mut body = Zeroizing::new(String::with_capacity(text.len()));
     let mut inside = false;
     let mut closed = false;
     for line in text.lines().map(str::trim) {
@@ -104,7 +106,8 @@ pub fn parse(text: &str) -> Result<SourceKey, SourceKeyError> {
     if count != 1 {
         return Err(SourceKeyError::Malformed("it must hold exactly one key"));
     }
-    let _public_blob = next_string(&mut rest)?;
+    let mut public_blob = next_string(&mut rest)?;
+    let public_type = next_string(&mut public_blob)?;
     let mut private = next_string(&mut rest)?;
 
     let (check_a, check_b) = (next_u32(&mut private)?, next_u32(&mut private)?);
@@ -112,10 +115,28 @@ pub fn parse(text: &str) -> Result<SourceKey, SourceKeyError> {
         return Err(SourceKeyError::Malformed("the check integers differ"));
     }
     let key_type = next_string(&mut private)?;
-    match key_type {
+    // The algorithm is named from the public blob, which is not secret. The
+    // private section is never quoted, so a container whose two sections
+    // disagree is refused with words that carry nothing from either.
+    if key_type != public_type {
+        return Err(SourceKeyError::Malformed(
+            "the public and private sections name different key types",
+        ));
+    }
+    match public_type {
         SSH_TYPE_ED25519 => ed25519(&mut private),
         SSH_TYPE_RSA => rsa(&mut private),
-        other => Err(SourceKeyError::Unsupported(String::from_utf8_lossy(other).into_owned())),
+        other => Err(SourceKeyError::Unsupported(algorithm_name(other))),
+    }
+}
+
+/// An algorithm name from the public blob, safe to print: anything that is
+/// not a short run of printable ASCII is replaced rather than echoed.
+fn algorithm_name(name: &[u8]) -> String {
+    if !name.is_empty() && name.len() <= 64 && name.iter().all(u8::is_ascii_graphic) {
+        String::from_utf8_lossy(name).into_owned()
+    } else {
+        "an unrecognised algorithm".to_string()
     }
 }
 
@@ -166,8 +187,8 @@ fn rsa(private: &mut &[u8]) -> Result<SourceKey, SourceKeyError> {
         4096 => "rsa-4096",
         bits => return Err(SourceKeyError::RsaSize(bits)),
     };
-    let dp = Zeroizing::new(modulo(d, &minus_one(p)));
-    let dq = Zeroizing::new(modulo(d, &minus_one(q)));
+    let dp = modulo(d, &minus_one(p));
+    let dq = modulo(d, &minus_one(q));
     let components = KeyPairComponents {
         public_key: PublicKeyComponents { n, e },
         d,
@@ -181,10 +202,13 @@ fn rsa(private: &mut &[u8]) -> Result<SourceKey, SourceKeyError> {
     let document = aws_lc_rs::encoding::AsDer::<aws_lc_rs::encoding::Pkcs8V1Der>::as_der(&pair)
         .or(Err(SourceKeyError::Inconsistent))?;
     let public = RsaPublicKey::new(e, n).or(Err(SourceKeyError::Inconsistent))?;
+    // The copy has exactly its length as capacity, so boxing it moves the
+    // allocation instead of reallocating and leaving the old one behind.
+    let mut copy = Zeroizing::new(document.as_ref().to_vec());
     Ok(SourceKey {
         public: PublicKey::Rsa(public),
         transit_type,
-        pkcs8: SecretSlice::from(document.as_ref().to_vec()),
+        pkcs8: SecretSlice::from(std::mem::take(&mut *copy)),
     })
 }
 
@@ -194,8 +218,8 @@ fn strip(bytes: &[u8]) -> &[u8] {
 }
 
 /// `value - 1` for an odd value, as big-endian bytes.
-fn minus_one(value: &[u8]) -> Vec<u8> {
-    let mut out = strip(value).to_vec();
+fn minus_one(value: &[u8]) -> Zeroizing<Vec<u8>> {
+    let mut out = Zeroizing::new(strip(value).to_vec());
     for byte in out.iter_mut().rev() {
         if *byte == 0 {
             *byte = 0xff;
@@ -210,13 +234,13 @@ fn minus_one(value: &[u8]) -> Vec<u8> {
 /// `value mod modulus` over big-endian bytes, one bit at a time. The CRT
 /// exponents are the only arithmetic the container leaves undone, and a key
 /// is imported rarely enough that a few thousand byte-wide steps cost nothing.
-fn modulo(value: &[u8], modulus: &[u8]) -> Vec<u8> {
+fn modulo(value: &[u8], modulus: &[u8]) -> Zeroizing<Vec<u8>> {
     let modulus = strip(modulus);
     if modulus.is_empty() {
-        return Vec::new();
+        return Zeroizing::new(Vec::new());
     }
     let width = modulus.len() + 1;
-    let mut padded = vec![0u8; width];
+    let mut padded = Zeroizing::new(vec![0u8; width]);
     padded[width - modulus.len()..].copy_from_slice(modulus);
     let mut rem = Zeroizing::new(vec![0u8; width]);
     for byte in value {
@@ -229,7 +253,7 @@ fn modulo(value: &[u8], modulus: &[u8]) -> Vec<u8> {
             }
             if rem.as_slice() >= padded.as_slice() {
                 let mut borrow = 0i16;
-                for (cell, sub) in rem.iter_mut().zip(&padded).rev() {
+                for (cell, sub) in rem.iter_mut().zip(padded.iter()).rev() {
                     let mut diff = i16::from(*cell) - i16::from(*sub) - borrow;
                     borrow = i16::from(diff < 0);
                     if diff < 0 {
@@ -240,7 +264,7 @@ fn modulo(value: &[u8], modulus: &[u8]) -> Vec<u8> {
             }
         }
     }
-    strip(&rem).to_vec()
+    Zeroizing::new(strip(&rem).to_vec())
 }
 
 #[cfg(test)]
