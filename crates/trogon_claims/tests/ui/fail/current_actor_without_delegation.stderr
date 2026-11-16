@@ -1,0 +1,13 @@
+error[E0599]: the method `current_actor` exists for struct `AuthenticatedPrincipal<_>`, but its trait bounds were not satisfied
+ --> tests/ui/fail/current_actor_without_delegation.rs:8:25
+  |
+8 |         let _ = wrapper.current_actor();
+  |                         ^^^^^^^^^^^^^ method cannot be called on `AuthenticatedPrincipal<_>` due to unsatisfied trait bounds
+  |
+ ::: src/refinement.rs
+  |
+  | pub struct Refined<K = Unclassified, D = AnyDelegation, B = AnyBinding>(PhantomData<Markers<K, D, B>>);
+  | ----------------------------------------------------------------------- doesn't satisfy `<_ as Refinement>::Delegation = Delegated`
+  |
+  = note: the following trait bounds were not satisfied:
+          `<Refined as Refinement>::Delegation = trogon_claims::Delegated`

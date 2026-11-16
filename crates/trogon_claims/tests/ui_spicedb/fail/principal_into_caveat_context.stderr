@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui_spicedb/fail/principal_into_caveat_context.rs:13:28
+   |
+13 |     let _ = caveat_context(&principal);
+   |             -------------- ^^^^^^^^^^ expected `Struct`, found `&Principal<_>`
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected struct `prost_types::Struct`
+           found reference `&Principal<_>`
+note: function defined here
+  --> tests/ui_spicedb/fail/principal_into_caveat_context.rs:4:4
+   |
+ 4 | fn caveat_context<T>(value: T) -> Struct
+   |    ^^^^^^^^^^^^^^    --------

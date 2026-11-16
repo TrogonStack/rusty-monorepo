@@ -1,0 +1,5 @@
+error[E0599]: no method named `thumbprint` found for reference `&Binding` in the current scope
+ --> tests/ui/fail/unbound_binding_thumbprint.rs:8:35
+  |
+8 |         let _ = wrapper.binding().thumbprint();
+  |                                   ^^^^^^^^^^ method not found in `&Binding`
