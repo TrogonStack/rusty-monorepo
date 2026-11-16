@@ -2,6 +2,10 @@ use std::time::Duration;
 
 pub const SSH_KEYGEN: &str = "ssh-keygen";
 
+/// The `ssh-keygen` options that take a value, from its `getopt` string, so a
+/// value is never mistaken for an option.
+pub const SSH_KEYGEN_VALUE_OPTIONS: &[u8] = b"CDEFIMNOPRVWYZabfgjmnrstwz";
+
 pub const SIGNATURE_SUFFIX: &str = ".sig";
 
 pub const SSHSIG_MAGIC: &[u8; 6] = b"SSHSIG";

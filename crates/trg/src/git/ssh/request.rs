@@ -10,6 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use super::constants::SSH_KEYGEN_VALUE_OPTIONS;
 use super::sshsig::{EmptyNamespaceError, HashAlgorithm, Namespace};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -115,18 +116,34 @@ pub fn read(args: &[OsString]) -> Invocation {
 }
 
 /// The value of `-Y`, in either `-Y sign` or `-Ysign` spelling.
+///
+/// Options are read the way `getopt` reads them: clustered flags are split,
+/// and the value of an option that takes one is skipped, so `-f -Yverify`
+/// names a key file rather than a mode.
 fn mode(args: &[OsString]) -> Option<String> {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
-        let text = arg.to_str()?;
-        if text == "--" {
+        let bytes = arg.as_encoded_bytes();
+        if bytes == b"--" {
             return None;
         }
-        if text == "-Y" {
-            return args.next()?.to_str().map(str::to_string);
-        }
-        if let Some(value) = text.strip_prefix("-Y") {
-            return Some(value.to_string());
+        let Some(cluster) = bytes.strip_prefix(b"-").filter(|rest| !rest.is_empty()) else {
+            continue;
+        };
+        for (index, &option) in cluster.iter().enumerate() {
+            if !SSH_KEYGEN_VALUE_OPTIONS.contains(&option) {
+                continue;
+            }
+            let attached = &cluster[index + 1..];
+            let value = if attached.is_empty() {
+                args.next()?.as_encoded_bytes()
+            } else {
+                attached
+            };
+            if option == b'Y' {
+                return Some(String::from_utf8_lossy(value).into_owned());
+            }
+            break;
         }
     }
     None
@@ -191,3 +208,7 @@ fn after_flag(arg: &OsStr) -> OsString {
 fn after_flag(arg: &OsStr) -> OsString {
     OsString::from(&arg.to_string_lossy()[2..])
 }
+
+#[cfg(test)]
+#[path = "request_tests.rs"]
+mod tests;
