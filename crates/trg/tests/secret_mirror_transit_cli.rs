@@ -37,6 +37,9 @@ struct Held {
     imported: bool,
     exportable: bool,
     allow_plaintext_backup: bool,
+    /// The latest version was imported as a public key alone: it reads back
+    /// as a public key and refuses to sign.
+    public_only: bool,
     versions: u32,
 }
 
@@ -202,6 +205,7 @@ impl FakeOpenBao {
                             imported: true,
                             exportable: false,
                             allow_plaintext_backup: false,
+                            public_only: false,
                             versions: 1,
                         });
                         (204, String::new())
@@ -217,10 +221,27 @@ impl FakeOpenBao {
                             refusal("the import_version endpoint can only be used with an imported key")
                         }
                         Some(held) => {
+                            // OpenBao completes a public-only latest version
+                            // in place when the private key is its pair, and
+                            // versions the key otherwise.
+                            let completes = held.public_only
+                                && transit_public_key(&held.key_type, &pkcs8)
+                                    == transit_public_key(&held.key_type, &held.pkcs8);
+                            if !completes {
+                                held.versions += 1;
+                            }
                             held.pkcs8 = pkcs8;
-                            held.versions += 1;
+                            held.public_only = false;
                             (204, String::new())
                         }
+                    }
+                } else if url == format!("/v1/transit/sign/{TRANSIT_KEY}") {
+                    match state.held.as_ref() {
+                        None => json(404, serde_json::json!({"errors": []})),
+                        Some(held) if held.public_only => {
+                            refusal("requested version for signing does not contain a private part")
+                        }
+                        Some(_) => json(200, serde_json::json!({"data": {"signature": "vault:v1:AAAA"}})),
                     }
                 } else {
                     json(404, serde_json::json!({"errors": []}))
@@ -243,8 +264,27 @@ impl FakeOpenBao {
             imported: false,
             exportable: false,
             allow_plaintext_backup: false,
+            public_only: false,
             versions: 1,
         });
+    }
+
+    /// Turn the held key's latest version into one holding only its public
+    /// half, the way a `public_key` import leaves it.
+    fn make_public_only(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.held.as_mut().expect("a key is held").public_only = true;
+    }
+
+    fn can_sign(&self) -> bool {
+        !self
+            .state
+            .lock()
+            .unwrap()
+            .held
+            .as_ref()
+            .expect("a key is held")
+            .public_only
     }
 
     /// Mark the held key as one whose private half can leave Transit.
@@ -557,10 +597,65 @@ fn leaky_key_is_refused(exportable: bool, allow_plaintext_backup: bool, words: &
             text.contains("failed        git-key -> transit/keys/git-personal"),
             "a refusal is a failure, in a dry run too: {text}"
         );
-        assert!(!text.contains("would update        git-key"), "{text}");
+        assert!(!text.contains("would update  git-key"), "{text}");
     }
     assert_eq!(bao.import_versions(), 0);
     assert_eq!(bao.wrapping_fetches(), 1, "nothing was wrapped for the refused runs");
+}
+
+#[test]
+fn a_transit_key_holding_only_the_public_half_is_completed_not_called_up_to_date() {
+    let fixture = Fixture::new();
+    let key = SshKey::ed25519(fixture.dir.path(), "id");
+    let bao = FakeOpenBao::start(&key.pem);
+    fixture.openbao_config(bao.addr, MIRROR);
+    assert!(fixture.mirror(&["apply"]).status.success());
+    bao.make_public_only();
+    assert!(!bao.can_sign());
+
+    let dry = fixture.mirror(&[]);
+    assert!(dry.status.success(), "{}", everything(&dry));
+    assert!(
+        stdout(&dry).contains("would update  git-key"),
+        "the same public key is not the same key: {}",
+        stdout(&dry)
+    );
+    assert!(!bao.can_sign(), "a dry run writes nothing");
+
+    let output = fixture.mirror(&["apply"]);
+
+    assert!(output.status.success(), "{}", everything(&output));
+    assert!(
+        stdout(&output).contains("updated       git-key"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(bao.can_sign(), "the private half must be in Transit now");
+    let (_, pkcs8, versions) = bao.held().unwrap();
+    assert_eq!(versions, 1, "completing a public-only version adds none");
+    assert_eq!(bao.import_versions(), 1);
+    assert_no_key_material(&output, &key, Some(&pkcs8));
+
+    let again = fixture.mirror(&["apply"]);
+    assert!(stdout(&again).contains("up to date"), "{}", stdout(&again));
+    assert_eq!(bao.import_versions(), 1);
+}
+
+#[test]
+fn a_public_only_key_that_can_leave_transit_is_still_refused() {
+    let fixture = Fixture::new();
+    let key = SshKey::ed25519(fixture.dir.path(), "id");
+    let bao = FakeOpenBao::start(&key.pem);
+    fixture.openbao_config(bao.addr, MIRROR);
+    assert!(fixture.mirror(&["apply"]).status.success());
+    bao.make_public_only();
+    bao.make_leaky(true, false);
+
+    let output = fixture.mirror(&["apply"]);
+
+    assert!(!output.status.success(), "{}", everything(&output));
+    assert!(everything(&output).contains("is exportable"), "{}", everything(&output));
+    assert_eq!(bao.import_versions(), 0);
 }
 
 #[test]

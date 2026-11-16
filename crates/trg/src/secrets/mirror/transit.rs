@@ -2,7 +2,9 @@
 //!
 //! Transit never gives a private key back, so the two sides are compared by
 //! public key: the one the source key implies and the one Transit reports for
-//! its newest version. Equal means in sync. A missing Transit key is imported;
+//! its newest version. Equal means in sync, provided that version can sign: a
+//! version imported as a public key alone reports the same public key and is
+//! completed with the private one. A missing Transit key is imported;
 //! a different one gets the source key as a new version, which OpenBao only
 //! allows on a key that was itself imported.
 
@@ -27,6 +29,7 @@ pub(super) async fn sync(
     };
     let (mount, name) = (target.mount.as_str(), target.key.as_str());
 
+    let mut completes_public_only = false;
     let held = bao
         .transit_public_key(mount, name)
         .await
@@ -41,7 +44,13 @@ pub(super) async fn sync(
                 });
             }
             let current = transit_key::public_key(found).map_err(MirrorError::TransitKey)?;
-            if &current == key.public() {
+            // The same public key is not enough: OpenBao accepts a public
+            // key alone, and such a version can verify but never sign. Only
+            // the engine can say which it is (see `transit_signs`), and when
+            // it holds just the public half, importing the private key
+            // completes that version in place.
+            completes_public_only = &current == key.public();
+            if completes_public_only && bao.transit_signs(mount, name).await.map_err(MirrorError::TargetRead)? {
                 return Ok(MirrorOutcome::UpToDate);
             }
             // A version is added to the existing key, so the key must be one
@@ -79,6 +88,11 @@ pub(super) async fn sync(
         .map_err(MirrorError::TargetRead)?
         .and_then(|found| transit_key::public_key(&found).ok());
     if back.as_ref() != Some(key.public()) {
+        return Err(MirrorError::ReadbackMismatch);
+    }
+    // The public key was already right, so only a signature shows that the
+    // private half arrived.
+    if completes_public_only && !bao.transit_signs(mount, name).await.map_err(MirrorError::TargetRead)? {
         return Err(MirrorError::ReadbackMismatch);
     }
     Ok(match outcome {
