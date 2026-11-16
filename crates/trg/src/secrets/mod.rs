@@ -46,7 +46,7 @@ pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBa
 pub use keychain::{KeychainBackend, KeychainReference};
 pub use mirror::{
     Fingerprint, Mirror, MirrorConfig, MirrorConfigError, MirrorError, MirrorName, MirrorNameError, MirrorOutcome,
-    MirrorTarget, TargetOutcomes,
+    MirrorTarget, RawMirrorTarget, TargetOutcomes,
 };
 pub use named::{NamedSecretConfig, NamedSecretError, SecretName, SecretNameError};
 pub use onepassword::{

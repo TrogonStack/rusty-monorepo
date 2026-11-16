@@ -12,7 +12,7 @@ pub mod key_file;
 pub mod request;
 pub mod sign;
 pub mod sshsig;
-mod transit_key;
+pub mod transit_key;
 
 pub use request::{read, Invocation, SignRequest};
 pub use sign::{pass_through, run, SignError, SshSigner};

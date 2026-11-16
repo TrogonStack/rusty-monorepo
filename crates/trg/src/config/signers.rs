@@ -336,6 +336,11 @@ impl TransitKeyName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// `None` unless the text is a single URL-safe segment.
+    pub fn parse(text: &str) -> Option<Self> {
+        is_segment(text).then(|| Self(text.to_string()))
+    }
 }
 
 /// A Transit mount, which may be nested (`team/transit`).
@@ -345,6 +350,18 @@ pub struct TransitMount(String);
 impl TransitMount {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// `None` unless every `/`-separated part is a URL-safe segment.
+    pub fn parse(text: &str) -> Option<Self> {
+        text.split('/').all(is_segment).then(|| Self(text.to_string()))
+    }
+}
+
+impl Default for TransitMount {
+    /// The mount Transit is enabled at unless told otherwise.
+    fn default() -> Self {
+        Self(DEFAULT_TRANSIT_MOUNT.to_string())
     }
 }
 

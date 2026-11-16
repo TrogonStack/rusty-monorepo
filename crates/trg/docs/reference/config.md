@@ -614,7 +614,23 @@ targets = [
 | Field     | Type          | Required | Notes                                                       |
 | --------- | ------------- | -------- | ----------------------------------------------------------- |
 | `source`  | table         | yes      | Addressed like a var: `backend` plus `ref`, or `path` and `key`, by the backend's kind. |
-| `targets` | array of tables | yes    | At least one, each the same shape, in a backend of kind `keychain` or `openbao`. |
+| `targets` | array of tables | yes    | At least one. Each is addressed like a var, in a backend of kind `keychain` or `openbao`, or is a Transit key: `{ backend, transit_key }` with an optional `transit_mount`. |
+
+A Transit target takes these fields and none of `path`, `key` or `ref`:
+
+| Field           | Required | Notes                                                              |
+| --------------- | -------- | ------------------------------------------------------------------ |
+| `backend`       | yes      | A declared backend of kind `openbao`. Any other kind is rejected when the config loads. |
+| `transit_key`   | yes      | The Transit key name, one segment of `[A-Za-z0-9._-]`.             |
+| `transit_mount` | no       | The Transit mount, `transit` by default. May nest with `/`.         |
+
+```toml trg-example=fragment
+[secrets.mirrors.git-personal]
+source = { backend = "personal", ref = "op://Engineering/git-signing/private key?ssh-format=openssh" }
+targets = [
+  { backend = "homelab", transit_key = "git-personal", transit_mount = "transit" },
+]
+```
 
 Unknown fields are rejected, so a singular `target` is an error. The name is
 what the table is declared under, limited to ASCII letters, digits, `-` and
@@ -653,7 +669,26 @@ source value is refused for every target of the mirror. After a write the
 target is read back and must match. Exit status is nonzero if any target
 failed.
 
-A text line is `<status> <name> -> <path>#<key> (<backend>)`. The JSON output
+A Transit target is not read back as a value. The source must be an
+unencrypted OpenSSH private key (`ssh-ed25519`, or `ssh-rsa` of 2048, 3072 or
+4096 bits). `trg` compares the public key it implies with the public key of
+the Transit key's latest version, then:
+
+| Transit key             | Result                                                                 |
+| ----------------------- | ---------------------------------------------------------------------- |
+| Missing                 | Imported with `transit/keys/<name>/import`, non-exportable, plaintext backup disallowed. |
+| Holds the source key    | Up to date, nothing is sent.                                           |
+| Holds a different key   | The source key is added with `transit/keys/<name>/import_version`.     |
+
+The requests are `GET <mount>/wrapping_key`, `GET <mount>/keys/<name>`, and
+`POST <mount>/keys/<name>/import` or `.../import_version`. A key cannot change
+type, so a source of another type than the Transit key is refused before
+anything is sent. OpenBao only versions a key that was itself imported, and its
+refusal is shown as the target's error. Without `apply` a Transit target
+reports what it would do and writes nothing.
+
+A text line is `<status> <name> -> <path>#<key> (<backend>)`, or
+`<status> <name> -> <mount>/keys/<name> (<backend>)` for a Transit target. The JSON output
 is `{ "applied": bool, "entries": [...] }`, where each entry carries `name`,
 `source`, and `targets`, one object per target with `target`, `status` and, on
 failure, `error`.
@@ -1041,6 +1076,9 @@ trg exec run --name claude -- --resume
 | `` no secret named `<name>` is declared; declared: ... `` | `trg secret get --name` named a secret with no `[secrets.vars.<name>]` table. |
 | `` `[secrets.mirrors.<name>]`: `targets` must name at least one target `` | A mirror declares an empty `targets` array. |
 | `` `[secrets.mirrors.<name>]`: target backend `<backend>` is of kind `<kind>`, which `trg` only reads from `` | A mirror's target names a `onepassword` backend. |
+| `` `[secrets.mirrors.<name>]`: backend `<backend>` is of kind `<kind>`, but a Transit key needs an `openbao` backend `` | A Transit target names a backend that is not of kind `openbao`. |
+| `` `[secrets.mirrors.<name>]`: a Transit target is `{ backend, transit_key }` ... and cannot also carry `path`, `key` or `ref` `` | A Transit target also carries a var's address fields. |
+| `` `[secrets.mirrors.<name>]`: a Transit target needs `transit_key` `` | A target sets `transit_mount` without `transit_key`. |
 | `` `[secrets.mirrors.<name>]`: the source and a target are the same address `` | The source and one target address the same value. |
 | `` `[secrets.mirrors.<name>]`: target key `source` is reserved `` | A mirror's target key is `source`, which holds the reference the value came from. |
 | `` `[secrets.mirrors.<name>]`: target ... is listed more than once `` | A mirror lists the same target twice. |

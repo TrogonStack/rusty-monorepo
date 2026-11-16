@@ -513,7 +513,7 @@ async fn mirror_all(registry: &Registry, mirror_args: &MirrorArgs) -> Result<Exi
                     .zip(results)
                     .map(|(target, result)| {
                         let mut out = serde_json::Map::new();
-                        out.insert("target".to_string(), Value::String(target.var().to_string()));
+                        out.insert("target".to_string(), Value::String(target.address()));
                         match result {
                             Ok(outcome) => out.insert("status".to_string(), Value::String(outcome.label().to_string())),
                             Err(e) => {

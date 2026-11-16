@@ -110,6 +110,33 @@ A target that fails does not stop the others, of its mirror or of the ones
 after it, and the exit code is nonzero if any did. A source that cannot be read
 fails every target of its mirror.
 
+## Mirror an SSH key into an OpenBao Transit key
+
+A target can also be a Transit key, addressed the way a git signer addresses
+one: `backend` and `transit_key`, with an optional `transit_mount` that is
+`transit` unless set. The backend must be of kind `openbao`, which is checked
+when the config loads. The source must be an unencrypted OpenSSH private key,
+so a 1Password reference ends in `?ssh-format=openssh`:
+
+```toml trg-example=fragment
+[secrets.mirrors.git-personal]
+source = { backend = "personal", ref = "op://Engineering/git-signing/private key?ssh-format=openssh" }
+targets = [
+  { backend = "homelab", transit_key = "git-personal" },
+]
+```
+
+The key is imported into Transit encrypted for the wrapping key OpenBao
+publishes, and is created non-exportable. A missing Transit key is imported, one
+that already holds the source key is up to date, and one that holds a different
+key gets the source key as a new version. That last step only works for a
+Transit key that was itself imported, and OpenBao's refusal is shown if not.
+`ssh-ed25519` and `ssh-rsa` keys of 2048, 3072 and 4096 bits are supported. A
+Transit target holds no value `trg` can read back, so it is compared by public
+key and nothing is written to it besides the key. See
+[Sign git commits with OpenBao Transit](sign-git-commits-with-openbao-transit.md#or-mirror-a-key-you-already-have)
+for the signer that uses it.
+
 ## Read the mirrored value
 
 The target is an ordinary entry, so a var reads it like any other:

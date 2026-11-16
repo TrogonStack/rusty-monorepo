@@ -86,12 +86,12 @@ impl OpenBaoBackend {
     }
 }
 
-fn anchor(mount: &str, name: &str, verb: &str) -> SecretPath {
+pub(super) fn anchor(mount: &str, name: &str, verb: &str) -> SecretPath {
     SecretPath::parse(&format!("{mount}/{verb}/{name}"))
         .unwrap_or_else(|_| SecretPath::parse("transit").expect("a static path is valid"))
 }
 
-fn malformed(anchor: &SecretPath, cause: &str) -> SecretsError {
+pub(super) fn malformed(anchor: &SecretPath, cause: &str) -> SecretsError {
     SecretsError::Malformed {
         path: anchor.clone(),
         cause: cause.to_string(),

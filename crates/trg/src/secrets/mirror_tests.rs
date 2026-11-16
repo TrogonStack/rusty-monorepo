@@ -526,3 +526,129 @@ fn an_unknown_field_in_a_mirror_is_rejected() {
 
     assert!(toml::from_str::<SecretsSection>(text).is_err());
 }
+
+const TRANSIT_SECTION: &str = r#"
+        [backends.src]
+        kind = "keychain"
+
+        [backends.dst]
+        kind = "keychain"
+
+        [backends.bao]
+        kind = "openbao"
+        addr = "https://bao.example.com"
+        mount = "secret"
+        path_prefix = "trg"
+        owner = "me"
+        token_file = "/nonexistent/token"
+    "#;
+
+fn with_transit_targets(targets: &str) -> String {
+    format!(
+        r#"{TRANSIT_SECTION}
+            [mirrors.git-key]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{targets}]
+        "#
+    )
+}
+
+#[test]
+fn a_transit_target_resolves_with_the_default_mount() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal" }"#);
+
+    let mirrors = section(&text).resolve_mirrors().expect("mirrors");
+
+    let target = &mirrors[0].targets()[0];
+    assert_eq!(target.backend(), "bao");
+    assert_eq!(target.describe(), "transit/keys/git-personal (bao)");
+}
+
+#[test]
+fn a_transit_target_may_name_its_mount() {
+    let text =
+        with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal", transit_mount = "team/signing" }"#);
+
+    let mirrors = section(&text).resolve_mirrors().expect("mirrors");
+
+    assert_eq!(
+        mirrors[0].targets()[0].describe(),
+        "team/signing/keys/git-personal (bao)"
+    );
+}
+
+#[test]
+fn a_transit_target_on_a_backend_that_is_not_openbao_is_refused_at_load() {
+    let text = with_transit_targets(r#"{ backend = "dst", transit_key = "git-personal" }"#);
+
+    let err = resolve_err(&text);
+
+    assert!(matches!(err, MirrorConfigError::TransitNotOpenbao { .. }), "{err}");
+    assert!(err.to_string().contains("[secrets.mirrors.git-key]"), "{err}");
+    assert!(err.to_string().contains("openbao"), "{err}");
+}
+
+#[test]
+fn a_transit_target_on_an_undeclared_backend_lists_the_declared_ones() {
+    let text = with_transit_targets(r#"{ backend = "nowhere", transit_key = "git-personal" }"#);
+
+    let err = resolve_err(&text);
+
+    assert!(
+        matches!(err, MirrorConfigError::UndeclaredTransitBackend { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("bao"), "{err}");
+}
+
+#[test]
+fn a_transit_target_cannot_also_be_a_value_address() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal", path = "a", key = "k" }"#);
+
+    assert!(matches!(resolve_err(&text), MirrorConfigError::MixedTarget { .. }));
+}
+
+#[test]
+fn a_transit_mount_without_a_key_is_refused() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_mount = "signing" }"#);
+
+    assert!(matches!(
+        resolve_err(&text),
+        MirrorConfigError::MissingTransitKey { .. }
+    ));
+}
+
+#[test]
+fn a_transit_key_with_a_bad_segment_is_refused() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_key = "../escape" }"#);
+
+    let err = resolve_err(&text);
+
+    assert!(matches!(err, MirrorConfigError::TransitSegment { .. }), "{err}");
+}
+
+#[test]
+fn a_transit_key_listed_twice_is_refused() {
+    let text = with_transit_targets(
+        r#"{ backend = "bao", transit_key = "git-personal" }, { backend = "bao", transit_key = "git-personal" }"#,
+    );
+
+    assert!(matches!(resolve_err(&text), MirrorConfigError::RepeatedTarget { .. }));
+}
+
+#[test]
+fn two_mirrors_may_not_write_the_same_transit_key() {
+    let text = format!(
+        r#"{TRANSIT_SECTION}
+            [mirrors.a]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{{ backend = "bao", transit_key = "git-personal" }}]
+
+            [mirrors.b]
+            source = {{ backend = "src", path = "b", key = "k" }}
+            targets = [{{ backend = "bao", transit_key = "git-personal" }}]
+        "#
+    );
+
+    assert!(matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }));
+}
