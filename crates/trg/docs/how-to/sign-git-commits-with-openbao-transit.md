@@ -23,12 +23,24 @@ Transit holds the private half, so the key never needs to be exportable.
 
 ```sh
 bao write transit/keys/git-personal type=ed25519
-bao read -field=keys transit/keys/git-personal
 ```
 
-Convert the `public_key` it reports to an `ssh-ed25519` line, or reuse a key
-you already have. To sign with an existing key, such as one held in 1Password,
-import it instead of creating one. This is a manual step `trg` does not do:
+Transit reports an Ed25519 public key as its 32 raw bytes in base64. Wrap them
+in the SSH key format to get the `ssh-ed25519` line the rest of this guide
+uses:
+
+```sh
+raw=$(bao read -format=json transit/keys/git-personal | jq -r '.data.keys["1"].public_key')
+echo "ssh-ed25519 $( { printf '\000\000\000\013ssh-ed25519\000\000\000\040'; printf '%s' "$raw" | base64 -d; } | base64 | tr -d '\n')"
+```
+
+That line replaces the example key everywhere below: in `public_key`, in
+`user.signingkey` and in the allowed signers entry. A signer whose
+`public_key` is not the Transit key refuses to sign and says which key
+Transit holds.
+
+To sign with an existing key, such as one held in 1Password, import it instead
+of creating one. This is a manual step `trg` does not do:
 
 ```sh
 bao write transit/keys/git-personal/import type=ed25519 \
@@ -59,6 +71,12 @@ signer = { backend = "homelab", transit_key = "git-personal", fallbacks = [
   { ssh_agent = "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock" },
 ] }
 ```
+
+An `ssh_agent` address signs only when the agent holds the private key for
+`public_key`. A key generated in Transit never leaves it, so no agent can hold
+it: with a generated key, leave the agent out. An agent fallback needs the
+same key on both sides, which means importing a key the agent already holds
+into Transit, as step 1 describes.
 
 To prefer the agent and keep Transit as the fallback, swap the order:
 
