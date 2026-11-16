@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.15.0...trg@v0.16.0) (2026-11-16)
+
+
+### Features
+
+* **trg:** Mirror an SSH key into an OpenBao Transit key ([#380](https://github.com/TrogonStack/rusty-monorepo/issues/380)) ([b7d2827](https://github.com/TrogonStack/rusty-monorepo/commit/b7d282739e0705ec9e3dbdd208af3767aa9f4bfa))
+
 ## [0.15.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.2...trg@v0.15.0) (2026-11-16)
 
 
