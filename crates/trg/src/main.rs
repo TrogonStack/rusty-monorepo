@@ -3,6 +3,7 @@ use tracing::Instrument;
 use trg::cli::Cli;
 use trg::commands::ai::AiCommands;
 use trg::commands::exec::{ExecCommands, PreparedLaunch};
+use trg::commands::git::{GitCommands, SshCommands};
 use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
@@ -105,8 +106,45 @@ fn runtime_for(command: &Commands) -> tokio::runtime::Builder {
     }
 }
 
+/// Git runs `gpg.ssh.program` as `ssh-keygen -Y ...` and reads its exit
+/// status as `ssh-keygen`'s, so this answers with `ssh-keygen`'s statuses
+/// rather than `trg`'s, and replaces itself with the real `ssh-keygen` for
+/// every mode but signing before any runtime or telemetry starts.
+fn signing_program(
+    args: &[std::ffi::OsString],
+    command_identity: trg::telemetry::CommandIdentity,
+) -> std::process::ExitCode {
+    match trg::git::ssh::read(args) {
+        trg::git::ssh::Invocation::Passthrough(args) => {
+            std::process::ExitCode::from(trg::git::ssh::pass_through(&args))
+        }
+        trg::git::ssh::Invocation::Sign(request) => {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a tokio runtime");
+            let status = runtime.block_on(async {
+                let telemetry = trg::telemetry::init(command_identity);
+                let status = trg::git::ssh::run(request).instrument(telemetry.root_span()).await;
+                telemetry.shutdown(ExitCode::from_success(status == 0));
+                status
+            });
+            runtime.shutdown_background();
+            std::process::ExitCode::from(status)
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let (cli, command_identity) = Cli::parse_with_command_identity();
+    let cli = match cli.command {
+        Commands::Git {
+            command: GitCommands::Ssh {
+                command: SshCommands::Sign(sign),
+            },
+        } => return signing_program(&sign.args, command_identity),
+        command => Cli { command },
+    };
     let runtime = runtime_for(&cli.command).enable_all().build().expect("a tokio runtime");
     let code = runtime.block_on(run(cli, command_identity));
     // A blocking task still parked on I/O, such as an OAuth callback listener,
@@ -151,6 +189,7 @@ async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> Exi
                     ExitCode::Failed
                 }
             }),
+            Commands::Git { .. } => unreachable!("git signing is answered in `main` with ssh-keygen's exit statuses"),
             Commands::Exec { command } => match command {
                 ExecCommands::Run(args) => match wire_exec(&args.name).await {
                     Ok(loaded) => Outcome::Exec(trg::commands::exec::run(loaded, &args)),

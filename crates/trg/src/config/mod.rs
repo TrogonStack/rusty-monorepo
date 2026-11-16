@@ -17,6 +17,7 @@
 //! them concatenated in order. Inline `{ env = "..." }` and a secret table are
 //! both allowed inside that array.
 
+pub mod signers;
 mod var;
 
 use std::collections::HashMap;
@@ -32,6 +33,7 @@ pub use var::{
 };
 
 use crate::secrets::{MirrorConfigError, SecretsSection};
+use signers::{GitSection, SignerConfigError, Signers};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -84,6 +86,9 @@ pub enum ConfigError {
 
     #[error("{0}")]
     Mirror(#[from] MirrorConfigError),
+
+    #[error("{0}")]
+    Signer(#[from] SignerConfigError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +117,7 @@ impl ConfigError {
             Self::UnknownExecEntry { .. } => "unknown_exec_entry",
             Self::SecretVar(_) => "secret_var",
             Self::Mirror(_) => "mirror",
+            Self::Signer(_) => "signer",
         }
     }
 }
@@ -137,6 +143,8 @@ struct FileRoot {
     secrets: Option<SecretsSection>,
     #[serde(default)]
     exec: Option<HashMap<String, ExecEntryRaw>>,
+    #[serde(default)]
+    git: Option<GitSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -425,7 +433,27 @@ fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
     secrets.check_named()?;
+    check_signers(root.git.as_ref(), &secrets)?;
     Ok(secrets)
+}
+
+/// The `[git.ssh.signers]` tables, against the declared backends.
+pub fn load_signers() -> Result<(Signers, SecretsSection), ConfigError> {
+    traced_load(|| load_signers_at(&trg_config_path()))
+}
+
+fn load_signers_at(path: &Path) -> Result<(Signers, SecretsSection), ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|e| read_error(path, e))?;
+    let root: FileRoot = toml::from_str(&text)?;
+    let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
+    secrets.check_named()?;
+    let signers = check_signers(root.git.as_ref(), &secrets)?;
+    Ok((signers, secrets))
+}
+
+fn check_signers(git: Option<&GitSection>, secrets: &SecretsSection) -> Result<Signers, SignerConfigError> {
+    git.map_or_else(|| Ok(Signers::default()), |git| git.resolve(secrets))
 }
 
 /// A config that exists but cannot be read is a different problem from one that
@@ -474,6 +502,7 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigErr
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
     secrets.check_named()?;
+    check_signers(root.git.as_ref(), &secrets)?;
     let mut servers = root
         .mcp
         .and_then(|m| (!m.servers.is_empty()).then_some(m.servers))
@@ -503,6 +532,7 @@ fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
     secrets.check_named()?;
+    check_signers(root.git.as_ref(), &secrets)?;
     let mut entries = root
         .exec
         .and_then(|e| (!e.is_empty()).then_some(e))

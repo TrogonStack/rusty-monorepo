@@ -2970,6 +2970,8 @@ version = "0.14.2"
 dependencies = [
  "assert_cmd",
  "async-trait",
+ "aws-lc-rs",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "gray_matter",

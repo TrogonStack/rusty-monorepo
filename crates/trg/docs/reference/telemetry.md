@@ -130,11 +130,13 @@ Shared by every command that loads config or resolves secrets.
 | `fetch secrets` | `trg.secrets.var.count` |
 | `fetch secret` | `trg.secrets.backend.name`, `trg.secrets.backend.kind`, `trg.secrets.var.count` |
 | `resolve secret` | `trg.secrets.answered_by`, `trg.secrets.fallback.used` |
+| `sign git ssh signature` | `trg.git.ssh.signer.name`, `trg.secrets.answered_by`, `trg.secrets.fallback.used`, `error.type` |
 | `security`, `op` (CLIENT) | The child process attributes, plus `trg.secrets.backend.kind` and `trg.secrets.operation` |
 | `{method} {url.template}` (CLIENT, OpenBao) | `http.request.method`, `url.template`, `server.address`, `server.port`, `http.response.status_code`, `trg.secrets.backend.kind`, `error.type` (the status code when `>= 400`) |
 
-OpenBao URL templates are `/v1/sys/health`, `/v1/{mount}/data/{path}`, and
-`/v1/{mount}/metadata/{path}`. A non-standard HTTP method is recorded as
+OpenBao URL templates are `/v1/sys/health`, `/v1/{mount}/data/{path}`,
+`/v1/{mount}/metadata/{path}`, `/v1/{mount}/keys/{name}`, and
+`/v1/{mount}/sign/{name}`. A non-standard HTTP method is recorded as
 `_OTHER` with `http.request.method_original`, and the span name starts with
 `HTTP`.
 
@@ -551,6 +553,7 @@ Attributes in the `trg.*` namespace.
 | `trg.secrets.answered_by` | string | The `[secrets.backends.<name>]` entry that answered a read that lists fallbacks |
 | `trg.secrets.fallback.used` | bool | Whether an address other than the first answered |
 | `trg.secrets.operation` | string | The fixed backend CLI subcommand, never its arguments |
+| `trg.git.ssh.signer.name` | string | The `[git.ssh.signers.<name>]` table a signature was made for. Never a key or a path |
 | `trg.secrets.var.count` | int | Config vars one fetch served |
 | `trg.eval.skill.revision` | string | Content hash of the skill revision |
 | `trg.eval.scenarios` | string | Scenarios covered, comma-separated in suite order |

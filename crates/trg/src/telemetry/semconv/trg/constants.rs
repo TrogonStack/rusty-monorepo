@@ -183,3 +183,6 @@ pub const EVAL_REPORT_ID: &str = "trg.eval.report.id";
 /// Counter: graded assertions, split by `gen_ai.evaluation.score.label` and
 /// `trg.eval.grader.kind`.
 pub const EVAL_ASSERTIONS_METRIC: &str = "trg.eval.assertions";
+
+/// The `[git.ssh.signers.<name>]` table a signature was made for.
+pub const GIT_SSH_SIGNER_NAME: &str = "trg.git.ssh.signer.name";

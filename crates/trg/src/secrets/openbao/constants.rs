@@ -15,3 +15,7 @@ pub const HEALTH_ROUTE: UrlTemplate = UrlTemplate::new("/v1/sys/health");
 pub const DATA_ROUTE: UrlTemplate = UrlTemplate::new("/v1/{mount}/data/{path}");
 
 pub const METADATA_ROUTE: UrlTemplate = UrlTemplate::new("/v1/{mount}/metadata/{path}");
+
+pub const TRANSIT_KEY_ROUTE: UrlTemplate = UrlTemplate::new("/v1/{mount}/keys/{name}");
+
+pub const TRANSIT_SIGN_ROUTE: UrlTemplate = UrlTemplate::new("/v1/{mount}/sign/{name}");

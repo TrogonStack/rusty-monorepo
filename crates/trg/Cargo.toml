@@ -19,6 +19,8 @@ serde_json = { workspace = true }
 gray_matter = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+base64 = "0.22"
 tokio = { workspace = true }
 toml = { workspace = true }
 secrecy = { workspace = true }
