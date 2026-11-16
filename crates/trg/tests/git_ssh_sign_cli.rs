@@ -24,9 +24,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, RsaKeyPair, RSA_PKCS1_SHA512};
-use trg::config::signers::{base64, read_string};
+use trg::config::signers::read_string;
 
 const TOKEN: &str = "test-token";
 const TRANSIT_KEY: &str = "git-personal";
@@ -74,7 +76,7 @@ impl Keypair {
     fn pkcs8(&self) -> Vec<u8> {
         let text = std::fs::read_to_string(&self.private).unwrap();
         let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
-        base64::decode(&body).unwrap()
+        BASE64.decode(&body).unwrap()
     }
 
     fn public_file(&self) -> PathBuf {
@@ -85,7 +87,7 @@ impl Keypair {
     fn seed(&self) -> [u8; 32] {
         let text = std::fs::read_to_string(&self.private).unwrap();
         let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
-        let raw = base64::decode(&body).unwrap();
+        let raw = BASE64.decode(&body).unwrap();
         let mut rest = &raw[b"openssh-key-v1\0".len()..];
         for _ in 0..3 {
             read_string(&mut rest).unwrap();
@@ -131,7 +133,7 @@ fn der(tag: u8, body: &[u8]) -> Vec<u8> {
 
 /// The `-----BEGIN PUBLIC KEY-----` document Transit reports for an RSA key.
 fn spki_pem(public_line: &str) -> String {
-    let blob = base64::decode(public_line.split_whitespace().nth(1).unwrap()).unwrap();
+    let blob = BASE64.decode(public_line.split_whitespace().nth(1).unwrap()).unwrap();
     let mut rest = blob.as_slice();
     read_string(&mut rest).unwrap();
     let exponent = read_string(&mut rest).unwrap().to_vec();
@@ -148,7 +150,7 @@ fn spki_pem(public_line: &str) -> String {
         .concat(),
     );
     let document = der(0x30, &[algorithm, der(0x03, &bits)].concat());
-    let encoded = base64::encode(&document);
+    let encoded = BASE64.encode(&document);
     let mut pem = String::from("-----BEGIN PUBLIC KEY-----\n");
     for line in encoded.as_bytes().chunks(64) {
         pem.push_str(std::str::from_utf8(line).unwrap());
@@ -181,10 +183,12 @@ impl FakeTransit {
         let (key_type, public_key) = if advertised.rsa {
             ("rsa-4096", spki_pem(&advertised.public_line))
         } else {
-            let blob = base64::decode(advertised.public_line.split_whitespace().nth(1).unwrap()).unwrap();
+            let blob = BASE64
+                .decode(advertised.public_line.split_whitespace().nth(1).unwrap())
+                .unwrap();
             let mut rest = blob.as_slice();
             read_string(&mut rest).unwrap();
-            ("ed25519", base64::encode(read_string(&mut rest).unwrap()))
+            ("ed25519", BASE64.encode(read_string(&mut rest).unwrap()))
         };
         let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
         let addr = server.server_addr().to_ip().unwrap();
@@ -217,7 +221,7 @@ impl FakeTransit {
                     let mut text = String::new();
                     request.as_reader().read_to_string(&mut text).unwrap();
                     let input: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    let message = base64::decode(input["input"].as_str().unwrap()).unwrap();
+                    let message = BASE64.decode(input["input"].as_str().unwrap()).unwrap();
                     let asked = (input["hash_algorithm"].as_str(), input["signature_algorithm"].as_str());
                     let mut signature = match &pair {
                         SigningKey::Ed25519(pair) if asked == (None, None) => {
@@ -237,7 +241,7 @@ impl FakeTransit {
                     match signature {
                         Some(bytes) => (
                             200,
-                            serde_json::json!({"data": {"signature": format!("vault:v1:{}", base64::encode(&bytes))}})
+                            serde_json::json!({"data": {"signature": format!("vault:v1:{}", BASE64.encode(&bytes))}})
                                 .to_string(),
                         ),
                         None => (400, r#"{"errors":["unexpected signing parameters"]}"#.to_string()),
@@ -317,7 +321,7 @@ fn denying_agent(dir: &Path, key: &Keypair) -> PathBuf {
     let listener = UnixListener::bind(&socket).unwrap();
     let blob = {
         let b64 = key.public_line.split_whitespace().nth(1).unwrap();
-        base64::decode(b64).unwrap()
+        BASE64.decode(b64).unwrap()
     };
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -1221,7 +1225,7 @@ fn an_rsa_signature_is_an_rsa_sha2_512_signature() {
     );
     let text = std::fs::read_to_string(&signature).unwrap();
     let body: String = text.lines().filter(|l| !l.starts_with("-----")).collect();
-    let blob = base64::decode(&body).unwrap();
+    let blob = BASE64.decode(&body).unwrap();
     assert!(
         blob.windows(b"rsa-sha2-512".len()).any(|w| w == b"rsa-sha2-512"),
         "the signature type is not rsa-sha2-512"

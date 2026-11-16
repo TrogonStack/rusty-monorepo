@@ -10,8 +10,9 @@ use serde_json::Value;
 
 use super::constants::{TRANSIT_KEY_ROUTE, TRANSIT_SIGN_ROUTE};
 use super::{Absence, OpenBaoBackend};
-use crate::config::signers::base64;
 use crate::secrets::{SecretPath, SecretsError};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 /// How a key type wants to be asked to sign, where its default is not enough.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +66,7 @@ impl OpenBaoBackend {
         let anchor = anchor(mount, name, "sign");
         let url = format!("{}/v1/{mount}/sign/{name}", self.addr);
         let body = serde_json::to_value(SignBody {
-            input: base64::encode(message),
+            input: BASE64.encode(message),
             hash_algorithm: parameters.map(|p| p.hash_algorithm),
             signature_algorithm: parameters.map(|p| p.signature_algorithm),
         })
@@ -138,5 +139,7 @@ fn parse_signature(body: &Value, anchor: &SecretPath) -> Result<Vec<u8>, Secrets
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return Err(malformed(anchor, shape));
     }
-    base64::decode(encoded).or(Err(malformed(anchor, "the signature is not base64")))
+    BASE64
+        .decode(encoded)
+        .or(Err(malformed(anchor, "the signature is not base64")))
 }

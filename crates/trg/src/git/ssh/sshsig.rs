@@ -9,7 +9,9 @@
 use sha2::{Digest, Sha256, Sha512};
 
 use super::der;
-use crate::config::signers::{base64, put_string, PublicKey};
+use crate::config::signers::{put_string, PublicKey};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 use super::constants::{
     ARMOR_BEGIN, ARMOR_COLUMNS, ARMOR_END, ED25519_SIGNATURE_LEN, RSA_SIGNATURE_TYPE, SIGNATURE_TYPE,
@@ -152,7 +154,7 @@ pub fn armor(key: &PublicKey, namespace: &Namespace, hash: HashAlgorithm, signat
     put_string(&mut blob, hash.name().as_bytes());
     put_string(&mut blob, &inner);
 
-    let encoded = base64::encode(&blob);
+    let encoded = BASE64.encode(&blob);
     let mut out = String::with_capacity(encoded.len() + encoded.len() / ARMOR_COLUMNS + 80);
     out.push_str(ARMOR_BEGIN);
     out.push('\n');

@@ -6,8 +6,10 @@
 
 use super::constants::{TRANSIT_ED25519, TRANSIT_RSA_HASH, TRANSIT_RSA_PREFIX, TRANSIT_RSA_SCHEME};
 use super::der::{self, DerError};
-use crate::config::signers::{base64, PublicKey, PublicKeyError};
+use crate::config::signers::{PublicKey, PublicKeyError};
 use crate::secrets::openbao::{SignParameters, TransitPublicKey};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TransitKeyError {
@@ -29,7 +31,7 @@ pub enum TransitKeyError {
 /// The public key a Transit key signs as.
 pub fn public_key(found: &TransitPublicKey) -> Result<PublicKey, TransitKeyError> {
     if found.key_type == TRANSIT_ED25519 {
-        let bytes = base64::decode(&found.public_key).or(Err(TransitKeyError::Encoding))?;
+        let bytes = BASE64.decode(&found.public_key).or(Err(TransitKeyError::Encoding))?;
         return Ok(PublicKey::from_ed25519_bytes(&bytes)?);
     }
     if found.key_type.starts_with(TRANSIT_RSA_PREFIX) {

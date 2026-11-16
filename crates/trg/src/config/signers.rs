@@ -6,9 +6,10 @@
 //! an address is either an OpenBao Transit key or an SSH agent socket, in
 //! whatever order the operator prefers.
 
-pub mod base64;
 mod constants;
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -95,7 +96,7 @@ impl PublicKey {
         if declared != ED25519 && declared != RSA {
             return Err(PublicKeyError::Unsupported(declared.to_string()));
         }
-        let blob = base64::decode(encoded).map_err(PublicKeyError::Encoding)?;
+        let blob = BASE64.decode(encoded).map_err(PublicKeyError::Encoding)?;
         let mut rest = blob.as_slice();
         let found = read_string(&mut rest).ok_or(PublicKeyError::Blob("truncated"))?;
         if found != declared.as_bytes() {
@@ -144,7 +145,7 @@ impl PublicKey {
 
     /// `<type> <base64>`, with no comment.
     pub fn to_line(&self) -> String {
-        format!("{} {}", self.type_name(), base64::encode(&self.blob()))
+        format!("{} {}", self.type_name(), BASE64.encode(self.blob()))
     }
 }
 

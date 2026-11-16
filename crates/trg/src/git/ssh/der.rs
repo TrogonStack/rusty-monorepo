@@ -8,7 +8,9 @@
 use super::constants::{
     DER_BIT_STRING, DER_INTEGER, DER_LONG_FORM, DER_NULL, DER_OID, DER_SEQUENCE, PEM_FENCE, RSA_ENCRYPTION_OID,
 };
-use crate::config::signers::{base64, PublicKeyError, RsaPublicKey};
+use crate::config::signers::{PublicKeyError, RsaPublicKey};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DerError {
@@ -66,7 +68,7 @@ pub fn rsa_from_spki_pem(pem: &str) -> Result<RsaPublicKey, DerError> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with(PEM_FENCE))
         .collect();
-    let der = base64::decode(&body).or(Err(DerError::Pem))?;
+    let der = BASE64.decode(&body).or(Err(DerError::Pem))?;
 
     let mut spki = Reader(&der);
     let info = spki.element(DER_SEQUENCE)?;
