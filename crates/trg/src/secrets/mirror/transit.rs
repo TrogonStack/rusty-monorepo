@@ -44,6 +44,15 @@ pub(super) async fn sync(
             if &current == key.public() {
                 return Ok(MirrorOutcome::UpToDate);
             }
+            // A version is added to the existing key, so the key must be one
+            // the private half cannot leave. A dry run fails the same way,
+            // since it could never be applied.
+            if found.exportable || found.allow_plaintext_backup {
+                return Err(MirrorError::TransitKeyExposed {
+                    exportable: found.exportable,
+                    allow_plaintext_backup: found.allow_plaintext_backup,
+                });
+            }
             MirrorOutcome::WouldUpdate
         }
     };

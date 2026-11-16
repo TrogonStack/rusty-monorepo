@@ -35,7 +35,20 @@ struct SignBody {
 pub struct TransitPublicKey {
     pub key_type: String,
     pub public_key: String,
+    /// Whether the key may be exported, which lets whoever may read the
+    /// export path take the private half back out.
+    pub exportable: bool,
+    /// Whether the key may be backed up in the clear, with the same effect.
+    pub allow_plaintext_backup: bool,
 }
+
+/// The words OpenBao answers a `sign` with when the version it was asked to
+/// sign with holds only a public key
+/// (`sdk/helper/keysutil/policy.go`, `SignWithOptions`).
+const PUBLIC_ONLY_ANSWER: &str = "does not contain a private part";
+
+/// What `sign` is asked to sign when it is a probe. Any bytes would do.
+const PROBE_MESSAGE: &[u8] = b"trg mirror: does this key version hold a private half";
 
 impl OpenBaoBackend {
     /// The public half of the version of a Transit key that signs, or `None`
@@ -53,6 +66,23 @@ impl OpenBaoBackend {
             |body| parse_public_key(&body, &anchor),
         )
         .await
+    }
+
+    /// Whether the version of a Transit key that signs holds its private half.
+    ///
+    /// The key read never says: it prints a public key for every version
+    /// whether or not the private half is there (`pathPolicyRead` fills
+    /// `public_key` from `FormattedPublicKey`, which an import of only a public
+    /// key sets too). The one reliable answer is to ask the engine to sign
+    /// something harmless: a version without a private half refuses in the
+    /// words of [`PUBLIC_ONLY_ANSWER`], and every other failure, a denied
+    /// `sign` included, is passed up rather than guessed at.
+    pub async fn transit_signs(&self, mount: &str, name: &str) -> Result<bool, SecretsError> {
+        match self.transit_sign(mount, name, PROBE_MESSAGE, None).await {
+            Ok(_) => Ok(true),
+            Err(SecretsError::Transport(message)) if message.contains(PUBLIC_ONLY_ANSWER) => Ok(false),
+            Err(other) => Err(other),
+        }
     }
 
     /// The raw signature the engine produced over `message`.
@@ -118,9 +148,12 @@ fn parse_public_key(body: &Value, anchor: &SecretPath) -> Result<TransitPublicKe
         .and_then(|version| version.get("public_key"))
         .and_then(Value::as_str)
         .ok_or_else(|| malformed(anchor, "response carries no public key for the latest version"))?;
+    let flag = |field: &str| data.get(field).and_then(Value::as_bool).unwrap_or(false);
     Ok(TransitPublicKey {
         key_type,
         public_key: encoded.to_string(),
+        exportable: flag("exportable"),
+        allow_plaintext_backup: flag("allow_plaintext_backup"),
     })
 }
 

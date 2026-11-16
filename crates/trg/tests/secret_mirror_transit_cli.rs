@@ -35,6 +35,8 @@ struct Held {
     key_type: String,
     pkcs8: Vec<u8>,
     imported: bool,
+    exportable: bool,
+    allow_plaintext_backup: bool,
     versions: u32,
 }
 
@@ -176,6 +178,8 @@ impl FakeOpenBao {
                             serde_json::json!({"data": {
                                 "type": held.key_type,
                                 "latest_version": held.versions,
+                                "exportable": held.exportable,
+                                "allow_plaintext_backup": held.allow_plaintext_backup,
                                 "keys": {held.versions.to_string(): {
                                     "public_key": transit_public_key(&held.key_type, &held.pkcs8),
                                 }},
@@ -196,6 +200,8 @@ impl FakeOpenBao {
                             key_type: body["type"].as_str().unwrap().to_string(),
                             pkcs8,
                             imported: true,
+                            exportable: false,
+                            allow_plaintext_backup: false,
                             versions: 1,
                         });
                         (204, String::new())
@@ -235,8 +241,18 @@ impl FakeOpenBao {
             key_type: "ed25519".to_string(),
             pkcs8: document.as_ref().to_vec(),
             imported: false,
+            exportable: false,
+            allow_plaintext_backup: false,
             versions: 1,
         });
+    }
+
+    /// Mark the held key as one whose private half can leave Transit.
+    fn make_leaky(&self, exportable: bool, allow_plaintext_backup: bool) {
+        let mut state = self.state.lock().unwrap();
+        let held = state.held.as_mut().expect("a key is held");
+        held.exportable = exportable;
+        held.allow_plaintext_backup = allow_plaintext_backup;
     }
 
     fn set_source(&self, source: &str) {
@@ -518,6 +534,43 @@ fn a_key_openbao_generated_itself_cannot_be_versioned_and_the_refusal_is_shown()
         "OpenBao's own words must reach the operator: {text}"
     );
     assert_no_key_material(&output, &key, None);
+}
+
+fn leaky_key_is_refused(exportable: bool, allow_plaintext_backup: bool, words: &str) {
+    let fixture = Fixture::new();
+    let first = SshKey::ed25519(fixture.dir.path(), "first");
+    let second = SshKey::ed25519(fixture.dir.path(), "second");
+    let bao = FakeOpenBao::start(&first.pem);
+    fixture.openbao_config(bao.addr, MIRROR);
+    assert!(fixture.mirror(&["apply"]).status.success());
+    bao.make_leaky(exportable, allow_plaintext_backup);
+    bao.set_source(&second.pem);
+
+    for args in [&["apply"][..], &[][..]] {
+        let output = fixture.mirror(args);
+
+        assert!(!output.status.success(), "{args:?}: {}", everything(&output));
+        let text = everything(&output);
+        assert!(text.contains(words), "{text}");
+        assert!(text.contains("new `transit_key` name"), "{text}");
+        assert!(
+            text.contains("failed        git-key -> transit/keys/git-personal"),
+            "a refusal is a failure, in a dry run too: {text}"
+        );
+        assert!(!text.contains("would update        git-key"), "{text}");
+    }
+    assert_eq!(bao.import_versions(), 0);
+    assert_eq!(bao.wrapping_fetches(), 1, "nothing was wrapped for the refused runs");
+}
+
+#[test]
+fn an_exportable_key_is_not_given_a_new_version() {
+    leaky_key_is_refused(true, false, "is exportable");
+}
+
+#[test]
+fn a_key_allowing_plaintext_backup_is_not_given_a_new_version() {
+    leaky_key_is_refused(false, true, "allows plaintext backup");
 }
 
 #[test]

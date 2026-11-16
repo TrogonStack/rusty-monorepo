@@ -25,7 +25,10 @@ use tracing::Instrument;
 
 use super::telemetry::record_error;
 use super::vars::{self, VarFetchError};
-use super::{Backend, BackendConfig, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError, SecretsSection};
+use super::{
+    Backend, BackendConfig, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError,
+    SecretsSection,
+};
 use crate::config::signers::{TransitKeyName, TransitMount};
 use crate::config::{FetchedSecrets, RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
 use crate::git::ssh::transit_key::TransitKeyError;
@@ -596,8 +599,25 @@ pub enum MirrorError {
     )]
     TransitTypeChange { held: String, wanted: &'static str },
 
+    #[error(
+        "the Transit key {}, so a new version of it would be a private key that can be taken back out of Transit; mirror into a new `transit_key` name instead",
+        exposure(*exportable, *allow_plaintext_backup)
+    )]
+    TransitKeyExposed {
+        exportable: bool,
+        allow_plaintext_backup: bool,
+    },
+
     #[error("the key could not be wrapped for Transit: {0}")]
     Wrap(#[source] WrapError),
+}
+
+fn exposure(exportable: bool, allow_plaintext_backup: bool) -> &'static str {
+    match (exportable, allow_plaintext_backup) {
+        (true, true) => "is exportable and allows plaintext backup",
+        (true, false) => "is exportable",
+        _ => "allows plaintext backup",
+    }
 }
 
 impl MirrorError {
@@ -613,6 +633,7 @@ impl MirrorError {
             Self::TransitNeedsOpenbao { .. } => "backend_config",
             Self::TransitKey(_) => "transit_key",
             Self::TransitTypeChange { .. } => "transit_type_change",
+            Self::TransitKeyExposed { .. } => "transit_key_exposed",
             Self::Wrap(_) => "wrap",
         }
     }

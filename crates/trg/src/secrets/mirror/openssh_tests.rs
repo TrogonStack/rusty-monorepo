@@ -149,7 +149,10 @@ fn sections_naming_different_types_are_refused_without_quoting_either_private_by
 fn a_public_algorithm_name_that_is_not_printable_is_not_echoed() {
     let text = container_naming(b"evil\x1b[31m", b"evil\x1b[31m", b"SECRETMARKER");
     let err = parse(&text).expect_err("refused");
-    assert_eq!(err, SourceKeyError::Unsupported("an unrecognised algorithm".to_string()));
+    assert_eq!(
+        err,
+        SourceKeyError::Unsupported("an unrecognised algorithm".to_string())
+    );
 }
 
 /// Every buffer that carries secret bytes between steps wipes itself on drop.
