@@ -39,15 +39,66 @@ That line replaces the example key everywhere below: in `public_key`, in
 `public_key` is not the Transit key refuses to sign and says which key
 Transit holds.
 
-To sign with an existing key, such as one held in 1Password, import it instead
-of creating one. This is a manual step `trg` does not do:
+### Or mirror a key you already have
 
-```sh
-bao write transit/keys/git-personal/import type=ed25519 \
-  ciphertext=@wrapped-key.b64
+To sign with an existing key, such as one held in 1Password, let `trg secret
+mirror` import it into Transit instead of creating one. That leaves the same
+key in Transit and in the agent, which is what an agent fallback needs.
+
+Declare the Transit key as a mirror target, the way a signer addresses it, and
+read the source key in OpenSSH format with `?ssh-format=openssh`:
+
+```toml
+[secrets.backends.personal]
+kind = "onepassword"
+account = "my.1password.com"
+
+[secrets.backends.homelab]
+kind = "openbao"
+addr = "https://bao.example.com:8200"
+mount = "secret"
+path_prefix = "trg"
+owner = "me"
+token_file = "~/.config/trg/bao-token"
+
+[secrets.mirrors.git-personal]
+source = { backend = "personal", ref = "op://Engineering/git-signing/private key?ssh-format=openssh" }
+targets = [
+  { backend = "homelab", transit_key = "git-personal" },
+]
 ```
 
-See the OpenBao Transit import documentation for how to wrap the key.
+```sh
+trg secret mirror
+trg secret mirror apply
+```
+
+```text
+would create  git-personal -> transit/keys/git-personal (homelab)
+1 target: 0 up to date, 1 would create, 0 would update, 0 failed; run `trg secret mirror apply` to write
+```
+
+The token needs `read` on `transit/wrapping_key` and `transit/keys/<name>`,
+and `update` on `transit/keys/<name>/import` (and `import_version` to change
+the key later). `trg` fetches the wrapping key, encrypts the private key for
+it so the key is never sent in the clear, and creates the Transit key as
+non-exportable with plaintext backup disallowed. It supports `ssh-ed25519` and
+`ssh-rsa` keys of 2048, 3072 or 4096 bits, which become `ed25519`,
+`rsa-2048`, `rsa-3072` and `rsa-4096`. An ECDSA key, or one protected by a
+passphrase, is refused. The `transit_mount` field names a mount other than
+`transit`.
+
+Transit never gives a private key back, so the mirror compares public keys. A
+Transit key that already holds the source key is reported as up to date and is
+not touched. When the source key changes, the new key is added as a new version
+of the Transit key, and signing switches to it. OpenBao only allows that for a
+key that was itself imported, so a key made by `bao write transit/keys/...`
+cannot be replaced this way: OpenBao's refusal is shown as the target's error,
+and the fix is to mirror into a new `transit_key`. A key can also not change
+type, so an `ed25519` Transit key does not take an RSA source.
+
+See [Mirror a secret into another backend](mirror-a-secret-into-another-backend.md)
+for the rest of how mirrors behave.
 
 An RSA key is declared the same way, with its `ssh-rsa` line as the
 `public_key`. `trg` reads the key Transit reports and refuses to sign unless it
@@ -75,7 +126,7 @@ signer = { backend = "homelab", transit_key = "git-personal", fallbacks = [
 An `ssh_agent` address signs only when the agent holds the private key for
 `public_key`. A key generated in Transit never leaves it, so no agent can hold
 it: with a generated key, leave the agent out. An agent fallback needs the
-same key on both sides, which means importing a key the agent already holds
+same key on both sides, which means mirroring a key the agent already holds
 into Transit, as step 1 describes.
 
 To prefer the agent and keep Transit as the fallback, swap the order:
@@ -150,12 +201,9 @@ trg git ssh sign -n git -f ~/.ssh/id_ed25519.pub notes.txt
 
 A script that signs with a Transit key and falls back to 1Password usually
 holds an RSA key imported into Transit without export, and sets a bare
-`ssh-rsa` line as `user.signingkey`:
-
-```sh
-bao write transit/keys/git-personal/import type=rsa-4096 \
-  ciphertext=@wrapped-key.b64
-```
+`ssh-rsa` line as `user.signingkey`. [Mirror that key](#or-mirror-a-key-you-already-have)
+to import it the same way, as `rsa-4096` and non-exportable, without wrapping
+it by hand.
 
 The same setup in `trg` is one signer. Its `public_key` is that bare line, and
 its fallback is the 1Password agent socket, which is the socket the
