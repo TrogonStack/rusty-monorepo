@@ -25,9 +25,9 @@ use tracing::Instrument;
 
 use super::telemetry::record_error;
 use super::vars::{self, VarFetchError};
-use super::{Backend, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError, SecretsSection};
+use super::{Backend, BackendConfig, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError, SecretsSection};
 use crate::config::signers::{TransitKeyName, TransitMount};
-use crate::config::{RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
+use crate::config::{FetchedSecrets, RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
 use crate::git::ssh::transit_key::TransitKeyError;
 use crate::secrets::openbao::WrapError;
 use crate::telemetry::semconv::trg::SECRETS_BACKEND_NAME;
@@ -184,6 +184,12 @@ pub struct ValueTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransitTarget {
     backend: String,
+    /// Which OpenBao the backend reaches: its `addr` as `OpenBaoBackend::new`
+    /// normalizes it, so two backends naming one server share a value. A
+    /// backend whose `addr` cannot be read without the environment it is
+    /// declared against falls back to `backend:<name>`, which no address
+    /// spells.
+    endpoint: String,
     key: TransitKeyName,
     mount: TransitMount,
 }
@@ -354,7 +360,7 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
                 MirrorTarget::Value(target) => target,
                 MirrorTarget::Transit(target) => {
                     let at = (
-                        target.backend.clone(),
+                        target.endpoint.clone(),
                         target.mount.as_str().to_string(),
                         target.key.as_str().to_string(),
                     );
@@ -508,8 +514,17 @@ fn resolve_transit(
         None => TransitMount::default(),
         Some(mount) => TransitMount::parse(mount).ok_or_else(|| segment("transit_mount", mount))?,
     };
+    let endpoint = match secrets.backends.get(&raw.backend) {
+        Some(BackendConfig::Openbao(config)) => config
+            .addr
+            .resolve_bootstrap(&FetchedSecrets::new())
+            .map(|addr| addr.trim_end_matches('/').to_string())
+            .unwrap_or_else(|_| format!("backend:{}", raw.backend)),
+        _ => format!("backend:{}", raw.backend),
+    };
     Ok(TransitTarget {
         backend: raw.backend.clone(),
+        endpoint,
         key,
         mount,
     })

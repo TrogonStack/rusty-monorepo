@@ -636,6 +636,45 @@ fn a_transit_key_listed_twice_is_refused() {
     assert!(matches!(resolve_err(&text), MirrorConfigError::RepeatedTarget { .. }));
 }
 
+fn two_bao_mirrors(second_addr: &str, second_mount: &str) -> String {
+    format!(
+        r#"{TRANSIT_SECTION}
+            [backends.bao2]
+            kind = "openbao"
+            addr = "{second_addr}"
+            mount = "secret"
+            path_prefix = "trg"
+            owner = "me"
+            token_file = "/nonexistent/token"
+
+            [mirrors.a]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{{ backend = "bao", transit_key = "git-personal" }}]
+
+            [mirrors.b]
+            source = {{ backend = "src", path = "b", key = "k" }}
+            targets = [{{ backend = "bao2", transit_key = "git-personal", transit_mount = "{second_mount}" }}]
+        "#
+    )
+}
+
+#[test]
+fn two_backends_reaching_one_server_share_a_transit_key() {
+    let text = two_bao_mirrors("https://bao.example.com/", "transit");
+
+    assert!(matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }));
+}
+
+#[test]
+fn two_backends_on_different_servers_or_mounts_do_not_share_a_transit_key() {
+    section(&two_bao_mirrors("https://other.example.com", "transit"))
+        .resolve_mirrors()
+        .expect("a different server is a different key");
+    section(&two_bao_mirrors("https://bao.example.com/", "signing"))
+        .resolve_mirrors()
+        .expect("a different mount is a different key");
+}
+
 #[test]
 fn two_mirrors_may_not_write_the_same_transit_key() {
     let text = format!(
