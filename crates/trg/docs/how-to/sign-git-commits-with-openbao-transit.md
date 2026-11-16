@@ -95,7 +95,27 @@ of the Transit key, and signing switches to it. OpenBao only allows that for a
 key that was itself imported, so a key made by `bao write transit/keys/...`
 cannot be replaced this way: OpenBao's refusal is shown as the target's error,
 and the fix is to mirror into a new `transit_key`. A key can also not change
-type, so an `ed25519` Transit key does not take an RSA source.
+type, so an `ed25519` Transit key does not take an RSA source. A key whose
+`exportable` or `allow_plaintext_backup` was turned on is refused too, in a dry
+run as well, because a new version would be a private key that can be taken
+back out; mirror into a new `transit_key` name instead.
+
+A Transit key that holds only the public half of the source key, which OpenBao
+allows to be imported, is not reported as up to date even though its public key
+matches. The mirror finds out by asking the engine to sign a short probe
+message, so the token it runs with needs `update` on `<mount>/sign/<key>` as
+well as `read` on `<mount>/keys/<key>`. When the engine says it has no private
+half, the mirror imports the private key into that version.
+
+#### After rotating the source key
+
+Rotating the source key and running the mirror updates Transit only. The
+signer's `public_key` in `trg`'s config, git's `user.signingkey` and the entry
+in your `allowed_signers` file still name the old key, so update all three to
+the new `ssh-ed25519` or `ssh-rsa` line. Until you do, signing stops with a
+public key mismatch: `trg` compares the key Transit reports with the configured
+`public_key` and, by design, does not fall back to the old one or to another
+signer.
 
 See [Mirror a secret into another backend](mirror-a-secret-into-another-backend.md)
 for the rest of how mirrors behave.

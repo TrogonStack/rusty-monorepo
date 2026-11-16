@@ -636,6 +636,20 @@ fn a_transit_key_listed_twice_is_refused() {
     assert!(matches!(resolve_err(&text), MirrorConfigError::RepeatedTarget { .. }));
 }
 
+/// The rotation caveat lives in prose only, so keep it from being edited away.
+#[test]
+fn the_signing_how_to_says_what_to_update_after_rotating_the_mirrored_key() {
+    let doc = include_str!("../../docs/how-to/sign-git-commits-with-openbao-transit.md");
+    let section = doc
+        .split("#### After rotating the source key")
+        .nth(1)
+        .expect("a rotation section");
+    let section = section.split("\n#").next().unwrap_or(section);
+    for needed in ["public_key", "user.signingkey", "allowed_signers", "mismatch", "does not fall back"] {
+        assert!(section.contains(needed), "the rotation section must mention `{needed}`");
+    }
+}
+
 fn two_bao_mirrors(second_addr: &str, second_mount: &str) -> String {
     format!(
         r#"{TRANSIT_SECTION}
