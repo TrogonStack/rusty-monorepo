@@ -238,6 +238,16 @@ impl FakeOpenBao {
                 } else if url == format!("/v1/transit/sign/{TRANSIT_KEY}") {
                     match state.held.as_ref() {
                         None => json(404, serde_json::json!({"errors": []})),
+                        // The token's policy pins RSA signing to the parameters
+                        // `trg git ssh sign` uses, the way a constrained policy
+                        // does, so a probe without them is denied.
+                        Some(held)
+                            if held.key_type.starts_with("rsa")
+                                && (body["hash_algorithm"] != "sha2-512"
+                                    || body["signature_algorithm"] != "pkcs1v15") =>
+                        {
+                            json(403, serde_json::json!({ "errors": ["permission denied"] }))
+                        }
                         Some(held) if held.public_only => {
                             refusal("requested version for signing does not contain a private part")
                         }
@@ -480,7 +490,11 @@ fn an_rsa_key_is_imported_with_its_size_as_the_type() {
     // The public key Transit reports for it is the source's, so a second run
     // finds nothing to do.
     let again = fixture.mirror(&["apply"]);
-    assert!(stdout(&again).contains("up to date"), "{}", everything(&again));
+    assert!(
+        stdout(&again).contains("1 up to date, 0 created, 0 updated, 0 failed"),
+        "{}",
+        everything(&again)
+    );
     assert_eq!(bao.imports().len(), 1);
 }
 
@@ -514,7 +528,11 @@ fn a_key_transit_already_holds_is_up_to_date_and_not_imported_again() {
     let output = fixture.mirror(&["apply"]);
 
     assert!(output.status.success(), "{}", everything(&output));
-    assert!(stdout(&output).contains("up to date"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("1 up to date, 0 created, 0 updated, 0 failed"),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(bao.imports().len(), 1);
     assert_eq!(bao.import_versions(), 0);
     assert_eq!(bao.wrapping_fetches(), 1);
@@ -633,7 +651,11 @@ fn a_transit_key_holding_only_the_public_half_is_completed_not_called_up_to_date
     assert_no_key_material(&output, &key, Some(&pkcs8));
 
     let again = fixture.mirror(&["apply"]);
-    assert!(stdout(&again).contains("up to date"), "{}", stdout(&again));
+    assert!(
+        stdout(&again).contains("1 up to date, 0 created, 0 updated, 0 failed"),
+        "{}",
+        stdout(&again)
+    );
     assert_eq!(bao.import_versions(), 1);
 }
 

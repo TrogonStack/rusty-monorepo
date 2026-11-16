@@ -521,7 +521,7 @@ fn resolve_transit(
         Some(BackendConfig::Openbao(config)) => config
             .addr
             .resolve_bootstrap(&FetchedSecrets::new())
-            .map(|addr| addr.trim_end_matches('/').to_string())
+            .map(|addr| canonical_endpoint(&addr))
             .unwrap_or_else(|_| format!("backend:{}", raw.backend)),
         _ => format!("backend:{}", raw.backend),
     };
@@ -531,6 +531,15 @@ fn resolve_transit(
         key,
         mount,
     })
+}
+
+/// The server an OpenBao address reaches, spelled one way: the host
+/// lowercased and a default port dropped, as URL parsing does, and no trailing
+/// `/`. An address that does not parse is compared as written.
+fn canonical_endpoint(addr: &str) -> String {
+    reqwest::Url::parse(addr)
+        .map(|url| url.as_str().trim_end_matches('/').to_string())
+        .unwrap_or_else(|_| addr.trim_end_matches('/').to_string())
 }
 
 /// What a mirror did, or in a dry run what it would do.

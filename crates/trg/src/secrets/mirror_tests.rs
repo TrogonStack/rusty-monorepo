@@ -651,6 +651,8 @@ fn the_signing_how_to_says_what_to_update_after_rotating_the_mirrored_key() {
         "allowed_signers",
         "mismatch",
         "does not fall back",
+        "keep the old",
+        "valid-before",
     ] {
         assert!(section.contains(needed), "the rotation section must mention `{needed}`");
     }
@@ -683,6 +685,18 @@ fn two_backends_reaching_one_server_share_a_transit_key() {
     let text = two_bao_mirrors("https://bao.example.com/", "transit");
 
     assert!(matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }));
+}
+
+#[test]
+fn a_default_port_or_another_host_case_still_reaches_the_same_server() {
+    for addr in ["https://bao.example.com:443", "https://BAO.Example.com"] {
+        let text = two_bao_mirrors(addr, "transit");
+
+        assert!(
+            matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }),
+            "`{addr}` reaches the same server as `https://bao.example.com`"
+        );
+    }
 }
 
 #[test]

@@ -50,7 +50,12 @@ pub(super) async fn sync(
             // it holds just the public half, importing the private key
             // completes that version in place.
             completes_public_only = &current == key.public();
-            if completes_public_only && bao.transit_signs(mount, name).await.map_err(MirrorError::TargetRead)? {
+            if completes_public_only
+                && bao
+                    .transit_signs(mount, name, transit_key::sign_parameters(key.public()))
+                    .await
+                    .map_err(MirrorError::TargetRead)?
+            {
                 return Ok(MirrorOutcome::UpToDate);
             }
             // A version is added to the existing key, so the key must be one
@@ -92,7 +97,12 @@ pub(super) async fn sync(
     }
     // The public key was already right, so only a signature shows that the
     // private half arrived.
-    if completes_public_only && !bao.transit_signs(mount, name).await.map_err(MirrorError::TargetRead)? {
+    if completes_public_only
+        && !bao
+            .transit_signs(mount, name, transit_key::sign_parameters(key.public()))
+            .await
+            .map_err(MirrorError::TargetRead)?
+    {
         return Err(MirrorError::ReadbackMismatch);
     }
     Ok(match outcome {

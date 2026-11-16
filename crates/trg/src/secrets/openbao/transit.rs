@@ -69,8 +69,16 @@ impl OpenBaoBackend {
     /// something harmless: a version without a private half refuses in the
     /// words of [`PUBLIC_ONLY_ANSWER`], and every other failure, a denied
     /// `sign` included, is passed up rather than guessed at.
-    pub async fn transit_signs(&self, mount: &str, name: &str) -> Result<bool, SecretsError> {
-        match self.transit_sign(mount, name, PROBE_MESSAGE, None).await {
+    ///
+    /// The probe sends the same `parameters` a signature for this key would,
+    /// since a policy may allow `sign` only with them.
+    pub async fn transit_signs(
+        &self,
+        mount: &str,
+        name: &str,
+        parameters: Option<SignParameters>,
+    ) -> Result<bool, SecretsError> {
+        match self.transit_sign(mount, name, PROBE_MESSAGE, parameters).await {
             Ok(_) => Ok(true),
             Err(SecretsError::Transport(message)) if message.contains(PUBLIC_ONLY_ANSWER) => Ok(false),
             Err(other) => Err(other),
