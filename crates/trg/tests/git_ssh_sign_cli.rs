@@ -24,10 +24,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
+use aws_lc_rs::rand::SystemRandom;
+use aws_lc_rs::signature::{Ed25519KeyPair, RsaKeyPair, RSA_PKCS1_SHA512};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use ring::rand::SystemRandom;
-use ring::signature::{Ed25519KeyPair, RsaKeyPair, RSA_PKCS1_SHA512};
 use trg::config::signers::read_string;
 
 const TOKEN: &str = "test-token";
@@ -228,7 +228,7 @@ impl FakeTransit {
                             Some(pair.sign(&message).as_ref().to_vec())
                         }
                         SigningKey::Rsa(pair) if asked == (Some("sha2-512"), Some("pkcs1v15")) => {
-                            let mut out = vec![0u8; pair.public().modulus_len()];
+                            let mut out = vec![0u8; pair.public_modulus_len()];
                             pair.sign(&RSA_PKCS1_SHA512, &SystemRandom::new(), &message, &mut out)
                                 .unwrap();
                             Some(out)

@@ -115,11 +115,13 @@ fn signature_type(key: &PublicKey) -> &'static str {
 /// signature that does not verify cannot be told apart from a forgery.
 pub fn verify(key: &PublicKey, data: &[u8], signature: &Signature) -> bool {
     match key {
-        PublicKey::Ed25519(bytes) => ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, bytes)
-            .verify(data, &signature.0)
-            .is_ok(),
-        PublicKey::Rsa(rsa) => ring::signature::UnparsedPublicKey::new(
-            &ring::signature::RSA_PKCS1_2048_8192_SHA512,
+        PublicKey::Ed25519(bytes) => {
+            aws_lc_rs::signature::UnparsedPublicKey::new(&aws_lc_rs::signature::ED25519, bytes)
+                .verify(data, &signature.0)
+                .is_ok()
+        }
+        PublicKey::Rsa(rsa) => aws_lc_rs::signature::UnparsedPublicKey::new(
+            &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA512,
             der::rsa_public_key(rsa),
         )
         .verify(data, &signature.0)
