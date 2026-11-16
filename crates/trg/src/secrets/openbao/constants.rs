@@ -36,3 +36,11 @@ pub const PEM_FENCE: &str = "-----";
 
 /// The hash both OAEP and its MGF1 use, which is what Transit assumes.
 pub const OAEP_HASH_FUNCTION: &str = "SHA256";
+
+/// The words OpenBao answers a `sign` with when the version it was asked to
+/// sign with holds only a public key
+/// (`sdk/helper/keysutil/policy.go`, `SignWithOptions`).
+pub const PUBLIC_ONLY_ANSWER: &str = "does not contain a private part";
+
+/// What `sign` is asked to sign when it is a probe. Any bytes would do.
+pub const PROBE_MESSAGE: &[u8] = b"trg mirror: does this key version hold a private half";

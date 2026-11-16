@@ -8,7 +8,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::constants::{TRANSIT_KEY_ROUTE, TRANSIT_SIGN_ROUTE};
+use super::constants::{PROBE_MESSAGE, PUBLIC_ONLY_ANSWER, TRANSIT_KEY_ROUTE, TRANSIT_SIGN_ROUTE};
 use super::{Absence, OpenBaoBackend};
 use crate::secrets::{SecretPath, SecretsError};
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -41,14 +41,6 @@ pub struct TransitPublicKey {
     /// Whether the key may be backed up in the clear, with the same effect.
     pub allow_plaintext_backup: bool,
 }
-
-/// The words OpenBao answers a `sign` with when the version it was asked to
-/// sign with holds only a public key
-/// (`sdk/helper/keysutil/policy.go`, `SignWithOptions`).
-const PUBLIC_ONLY_ANSWER: &str = "does not contain a private part";
-
-/// What `sign` is asked to sign when it is a probe. Any bytes would do.
-const PROBE_MESSAGE: &[u8] = b"trg mirror: does this key version hold a private half";
 
 impl OpenBaoBackend {
     /// The public half of the version of a Transit key that signs, or `None`

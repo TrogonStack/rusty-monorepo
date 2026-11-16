@@ -645,7 +645,13 @@ fn the_signing_how_to_says_what_to_update_after_rotating_the_mirrored_key() {
         .nth(1)
         .expect("a rotation section");
     let section = section.split("\n#").next().unwrap_or(section);
-    for needed in ["public_key", "user.signingkey", "allowed_signers", "mismatch", "does not fall back"] {
+    for needed in [
+        "public_key",
+        "user.signingkey",
+        "allowed_signers",
+        "mismatch",
+        "does not fall back",
+    ] {
         assert!(section.contains(needed), "the rotation section must mention `{needed}`");
     }
 }

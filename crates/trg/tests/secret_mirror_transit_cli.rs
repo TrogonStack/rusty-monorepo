@@ -582,7 +582,7 @@ fn leaky_key_is_refused(exportable: bool, allow_plaintext_backup: bool, words: &
     let second = SshKey::ed25519(fixture.dir.path(), "second");
     let bao = FakeOpenBao::start(&first.pem);
     fixture.openbao_config(bao.addr, MIRROR);
-    assert!(fixture.mirror(&["apply"]).status.success());
+    assert!(fixture.mirror(&["apply"]).status.success(), "the first import");
     bao.make_leaky(exportable, allow_plaintext_backup);
     bao.set_source(&second.pem);
 
@@ -599,7 +599,7 @@ fn leaky_key_is_refused(exportable: bool, allow_plaintext_backup: bool, words: &
         );
         assert!(!text.contains("would update  git-key"), "{text}");
     }
-    assert_eq!(bao.import_versions(), 0);
+    assert_eq!(bao.import_versions(), 0, "a refused key is never versioned");
     assert_eq!(bao.wrapping_fetches(), 1, "nothing was wrapped for the refused runs");
 }
 
@@ -625,11 +625,7 @@ fn a_transit_key_holding_only_the_public_half_is_completed_not_called_up_to_date
     let output = fixture.mirror(&["apply"]);
 
     assert!(output.status.success(), "{}", everything(&output));
-    assert!(
-        stdout(&output).contains("updated       git-key"),
-        "{}",
-        stdout(&output)
-    );
+    assert!(stdout(&output).contains("updated       git-key"), "{}", stdout(&output));
     assert!(bao.can_sign(), "the private half must be in Transit now");
     let (_, pkcs8, versions) = bao.held().unwrap();
     assert_eq!(versions, 1, "completing a public-only version adds none");
