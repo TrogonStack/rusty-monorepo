@@ -110,12 +110,17 @@ half, the mirror imports the private key into that version.
 #### After rotating the source key
 
 Rotating the source key and running the mirror updates Transit only. The
-signer's `public_key` in `trg`'s config, git's `user.signingkey` and the entry
-in your `allowed_signers` file still name the old key, so update all three to
-the new `ssh-ed25519` or `ssh-rsa` line. Until you do, signing stops with a
-public key mismatch: `trg` compares the key Transit reports with the configured
-`public_key` and, by design, does not fall back to the old one or to another
-signer.
+signer's `public_key` in `trg`'s config and git's `user.signingkey` still name
+the old key, so set both to the new `ssh-ed25519` or `ssh-rsa` line. Until you
+do, signing stops with a public key mismatch: `trg` compares the key Transit
+reports with the configured `public_key` and, by design, does not fall back to
+the old one or to another signer.
+
+In your `allowed_signers` file, add an entry for the new key and keep the old
+one, so commits signed before the rotation still verify. To stop trusting the
+old key for new signatures, give its entry a `valid-before` date instead of
+deleting it. Remove the old entry only when you revoke the key, for example
+after it leaked, and accept that commits it signed no longer verify.
 
 See [Mirror a secret into another backend](mirror-a-secret-into-another-backend.md)
 for the rest of how mirrors behave.
