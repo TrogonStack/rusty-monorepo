@@ -331,8 +331,10 @@ the ID to that recipe without repeating namespace or template strings.
 `From<Uuid>` wraps the recipe output directly. The compatibility convenience
 `from_identity` receives the recipe's associated input type and wraps its UUID
 through the same checked constructor. Neither path enables random generation
-or an allocator. Generated recipes can come from
-`trogon_uuid_build`; protobuf descriptors remain a build-time dependency.
+or an allocator. Generated recipes can come from the
+[Trogon protoc plugin](https://github.com/TrogonStack/protoc-gen/tree/main/cmd/protoc-gen-trogon)
+with `language=rust,features=uuid`. Protobuf options are read by the plugin,
+not by the runtime.
 
 A binding selects the convenience constructor; it does not restrict the other
 checked constructors to UUIDs from that recipe. UUID syntax alone cannot prove
@@ -352,8 +354,8 @@ This crate preserves the upstream prefixed wire format, configurable separators,
 text validation and typed enums. It strengthens raw-value bounds,
 control-character handling, declaration validation and enum prefix collision checks.
 Compact UUIDs canonicalize text. Ecto and Phoenix integrations remain specific
-to Elixir. This runtime has no protobuf dependency; `trogon_uuid_build` reads
-UUID options from protobuf descriptors during code generation.
+to Elixir. This runtime has no protobuf dependency. The Trogon protoc plugin
+reads UUID options during code generation.
 
 The runtime is `#![no_std]` with `default = []`. Its baseline metadata, errors,
 wrapper, borrowed parsing dispatch, formatting and custom compact payloads need

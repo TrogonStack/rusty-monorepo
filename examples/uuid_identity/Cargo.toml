@@ -12,8 +12,5 @@ workspace = true
 trogon_uuid = { path = "../../crates/trogon_uuid", default-features = false }
 trogon_object_id = { path = "../../crates/trogon_object_id", default-features = false, features = ["macros", "template"] }
 
-[build-dependencies]
-trogon_uuid_build = { path = "../../crates/trogon_uuid_build" }
-
 [dev-dependencies]
 stats_alloc = "0.1.10"

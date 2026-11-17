@@ -4,8 +4,8 @@ Static UUIDv5 identity recipes with borrowed typed inputs. The crate reuses
 [`uuid::Uuid`](https://docs.rs/uuid/latest/uuid/struct.Uuid.html) and has no
 protobuf runtime dependency. The runtime is `#![no_std]` and requires neither
 `std` nor a global allocator. UUID and hashing dependency defaults are disabled;
-UUIDv5 enables no random or time generation backend. Host build tooling remains
-a separate crate.
+UUIDv5 enables no random or time generation backend. Protobuf recipe generation
+runs in a separate protoc plugin.
 
 ## Derive a UUID from exact bytes
 
@@ -47,9 +47,11 @@ No escaping, separators, or Unicode normalization are inserted automatically.
 
 ## Use a compiled recipe
 
-The build-time adapter `trogon_uuid_build` reads protobuf descriptors and emits
-ordinary Rust types implementing `UuidTemplate`. Generated recipes embed their
-resolved namespaces and render their inputs without a runtime template parser.
+The [Trogon protoc plugin](https://github.com/TrogonStack/protoc-gen/tree/main/cmd/protoc-gen-trogon)
+reads protobuf options and emits ordinary Rust types implementing `UuidTemplate`.
+Select `language=rust,features=uuid`; Rust-specific options use the `rs_` prefix.
+Generated recipes embed their resolved namespaces and render their inputs
+without a runtime template parser.
 The same trait also supports handwritten recipes:
 
 ```rust

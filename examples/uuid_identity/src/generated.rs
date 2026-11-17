@@ -1,1 +1,1 @@
-include!(concat!(env!("OUT_DIR"), "/identities.rs"));
+include!("identity.uuid.rs");

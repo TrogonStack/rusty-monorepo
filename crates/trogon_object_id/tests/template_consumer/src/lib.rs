@@ -1,9 +1,9 @@
 #![no_std]
 
-use example::generated::{SkuIdentityV1, SkuIdentityV1Input};
+use example::generated::{SkuIdentityVersionV1, SkuIdentityVersionV1Input};
 
 #[derive(ids::ObjectId)]
-#[object_id(prefix = "direct", template = SkuIdentityV1)]
+#[object_id(prefix = "direct", template = SkuIdentityVersionV1)]
 #[repr(transparent)]
 struct Direct(ids::Uuid);
 
@@ -13,12 +13,12 @@ enum Either {
 }
 
 pub fn exercise() -> bool {
-    let id = Direct::from_identity(SkuIdentityV1Input {
+    let id = Direct::from_identity(SkuIdentityVersionV1Input {
         warehouse_id: "warehouse-17",
         sku_code: "ABC-123",
     })
     .expect("typed identity");
-    let example = example::SkuId::from_identity(SkuIdentityV1Input {
+    let example = example::SkuId::from_identity(SkuIdentityVersionV1Input {
         warehouse_id: "warehouse-17",
         sku_code: "ABC-123",
     })

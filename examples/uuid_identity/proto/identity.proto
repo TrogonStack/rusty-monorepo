@@ -21,22 +21,11 @@ enum SkuIdentityVersion {
   }];
   STATIC_TEMPLATE = 5 [(trogon.uuid.v1.enum_value).format = { template: "singleton" }];
   REPEATED_TEMPLATE = 6 [(trogon.uuid.v1.enum_value).format = { template: "ключ/{sku_code}/{sku_code}" }];
-  MISSING_FORMAT = 7;
-  BAD_UUID = 8 [(trogon.uuid.v1.enum_value).format = {
-    namespace: { uuid: "not-a-uuid" }
-    template: "{sku_code}"
-  }];
-  BAD_TEMPLATE = 9 [(trogon.uuid.v1.enum_value).format = { template: "{sku-code}" }];
-  EMPTY_NAMESPACE = 10 [(trogon.uuid.v1.enum_value).format = {
-    namespace: {}
-    template: "{sku_code}"
-  }];
   EMPTY_TEMPLATE = 11 [(trogon.uuid.v1.enum_value).format = {}];
 }
 
-enum MissingNamespaceVersion {
-  MISSING_NAMESPACE_UNSPECIFIED = 0;
-  MISSING_NAMESPACE_V1 = 1 [(trogon.uuid.v1.enum_value).format = { template: "{sku_code}" }];
+enum OverrideIdentityVersion {
+  OVERRIDE_IDENTITY_VERSION_UNSPECIFIED = 0;
   OVERRIDE_WITHOUT_DEFAULT = 2 [(trogon.uuid.v1.enum_value).format = {
     namespace: { uuid: "550e8400-e29b-41d4-a716-446655440000" }
     template: "{sku_code}"
