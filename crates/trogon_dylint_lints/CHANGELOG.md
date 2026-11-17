@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.4.0...trogon_dylint_lints@v0.5.0) (2026-11-17)
+
+
+### Features
+
+* **dylint:** Prefer integration tests for public behavior ([#363](https://github.com/TrogonStack/rusty-monorepo/issues/363)) ([89f374f](https://github.com/TrogonStack/rusty-monorepo/commit/89f374fc8768b164b8f6b76e7bba4e2e9b0f48e2))
+* **trogon_claims:** Establish typed values and shared syntax ([#342](https://github.com/TrogonStack/rusty-monorepo/issues/342)) ([15120d3](https://github.com/TrogonStack/rusty-monorepo/commit/15120d3318a28aecedb4d138168e216151e4d5c1))
+
+
+### Bug Fixes
+
+* **dylint:** Avoid false positives on diagnostic assertions ([#356](https://github.com/TrogonStack/rusty-monorepo/issues/356)) ([9c6892e](https://github.com/TrogonStack/rusty-monorepo/commit/9c6892e6e79b938d14a19f2f3b8c8d85093d076d))
+
 ## [0.4.0](https://github.com/TrogonStack/rusty-monorepo/compare/trogon_dylint_lints@v0.3.1...trogon_dylint_lints@v0.4.0) (2026-11-07)
 
 
