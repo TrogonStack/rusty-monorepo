@@ -80,7 +80,7 @@ so a consuming workspace names the published tag:
 ```toml
 [workspace.metadata.dylint]
 libraries = [
-  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.4.0", pattern = "crates/trogon_dylint_lints" }, # x-release-please-version
+  { git = "https://github.com/TrogonStack/rusty-monorepo", tag = "trogon_dylint_lints@v0.5.0", pattern = "crates/trogon_dylint_lints" }, # x-release-please-version
 ]
 ```
 
