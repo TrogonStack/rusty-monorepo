@@ -1789,16 +1789,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prost-reflect"
-version = "0.16.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01b80ea363c31af2de2b92e3c07ed1156628f7838c4afb4df75ee78a37fedbd1"
-dependencies = [
- "prost",
- "prost-types",
-]
-
-[[package]]
 name = "prost-types"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3073,19 +3063,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trogon_uuid_build"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "prost",
- "prost-reflect",
- "quote",
- "syn 2.0.117",
- "thiserror 2.0.21",
- "trogon_uuid",
-]
-
-[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3193,7 +3170,6 @@ dependencies = [
  "stats_alloc",
  "trogon_object_id",
  "trogon_uuid",
- "trogon_uuid_build",
 ]
 
 [[package]]

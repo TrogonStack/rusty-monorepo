@@ -4,7 +4,7 @@ use std::alloc::System;
 use std::hint::black_box;
 
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
-use uuid_identity_example::generated::{SkuIdentityV1, SkuIdentityV1Input};
+use uuid_identity_example::generated::{SkuIdentityVersionV1, SkuIdentityVersionV1Input};
 use uuid_identity_example::SkuId;
 
 #[global_allocator]
@@ -20,11 +20,11 @@ fn generated_recipe_and_bound_object_id_do_not_allocate() {
     );
 
     let measured = Region::new(GLOBAL);
-    let input = SkuIdentityV1Input {
+    let input = SkuIdentityVersionV1Input {
         warehouse_id: black_box("warehouse-17"),
         sku_code: black_box("ABC-123"),
     };
-    let uuid = black_box(SkuIdentityV1::uuid5(black_box(input)));
+    let uuid = black_box(SkuIdentityVersionV1::uuid5(black_box(input)));
     let id = black_box(SkuId::from_identity(black_box(input)).expect("valid generated UUID"));
     let delta = measured.change();
     assert_eq!(
