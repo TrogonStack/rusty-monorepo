@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.16.0...trg@v0.16.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **trg:** Harden Transit mirror targets ([#382](https://github.com/TrogonStack/rusty-monorepo/issues/382)) ([238d2c6](https://github.com/TrogonStack/rusty-monorepo/commit/238d2c6808886b7b5daeebd0c45849b55621328c))
+
 ## [0.16.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.15.0...trg@v0.16.0) (2026-11-16)
 
 
