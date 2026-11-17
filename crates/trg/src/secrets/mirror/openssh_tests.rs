@@ -101,8 +101,68 @@ fn modulo_matches_integer_arithmetic() {
 
 #[test]
 fn minus_one_borrows_across_bytes() {
-    assert_eq!(minus_one(&[0x01, 0x00]), vec![0x00, 0xff]);
-    assert_eq!(minus_one(&[0x00, 0x05]), vec![0x04]);
+    assert_eq!(minus_one(&[0x01, 0x00]).as_slice(), &[0x00, 0xff]);
+    assert_eq!(minus_one(&[0x00, 0x05]).as_slice(), &[0x04]);
+}
+
+/// A container whose sections carry the given type names and whose private
+/// section holds a marker that must never be quoted.
+fn container_naming(public_type: &[u8], private_type: &[u8], marker: &[u8]) -> String {
+    let mut blob = Vec::new();
+    put_string(&mut blob, public_type);
+    put_string(&mut blob, b"public-part");
+
+    let mut private = Vec::new();
+    private.extend_from_slice(&7u32.to_be_bytes());
+    private.extend_from_slice(&7u32.to_be_bytes());
+    put_string(&mut private, private_type);
+    put_string(&mut private, marker);
+
+    let mut raw = OPENSSH_MAGIC.to_vec();
+    put_string(&mut raw, OPENSSH_CIPHER_NONE);
+    put_string(&mut raw, b"none");
+    put_string(&mut raw, b"");
+    raw.extend_from_slice(&1u32.to_be_bytes());
+    put_string(&mut raw, &blob);
+    put_string(&mut raw, &private);
+    format!("{OPENSSH_FENCE_BEGIN}\n{}\n{OPENSSH_FENCE_END}\n", BASE64.encode(&raw))
+}
+
+#[test]
+fn an_unsupported_algorithm_is_named_from_the_public_blob() {
+    let text = container_naming(b"ecdsa-sha2-nistp256", b"ecdsa-sha2-nistp256", b"SECRETMARKER");
+    let err = parse(&text).expect_err("refused");
+    assert_eq!(err, SourceKeyError::Unsupported("ecdsa-sha2-nistp256".to_string()));
+}
+
+#[test]
+fn sections_naming_different_types_are_refused_without_quoting_either_private_bytes() {
+    let text = container_naming(b"ecdsa-sha2-nistp256", b"PRIVATE-TYPE-MARKER", b"SECRETMARKER");
+    let err = parse(&text).expect_err("refused");
+    assert!(matches!(err, SourceKeyError::Malformed(_)), "{err:?}");
+    let shown = format!("{err} {err:?}");
+    assert!(!shown.contains("PRIVATE-TYPE-MARKER"), "{shown}");
+    assert!(!shown.contains("SECRETMARKER"), "{shown}");
+}
+
+#[test]
+fn a_public_algorithm_name_that_is_not_printable_is_not_echoed() {
+    let text = container_naming(b"evil\x1b[31m", b"evil\x1b[31m", b"SECRETMARKER");
+    let err = parse(&text).expect_err("refused");
+    assert_eq!(
+        err,
+        SourceKeyError::Unsupported("an unrecognised algorithm".to_string())
+    );
+}
+
+/// Every buffer that carries secret bytes between steps wipes itself on drop.
+/// Checked by type, since a freed allocation cannot be inspected soundly.
+#[test]
+fn rsa_intermediates_are_zeroizing_buffers() {
+    fn wiped(_: &Zeroizing<Vec<u8>>) {}
+    wiped(&minus_one(&[0x01, 0x00]));
+    wiped(&modulo(&[0x05], &[0x07]));
+    wiped(&modulo(&[0x05], &[]));
 }
 
 #[test]

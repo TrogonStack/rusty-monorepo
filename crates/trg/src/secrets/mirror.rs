@@ -25,9 +25,12 @@ use tracing::Instrument;
 
 use super::telemetry::record_error;
 use super::vars::{self, VarFetchError};
-use super::{Backend, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError, SecretsSection};
+use super::{
+    Backend, BackendConfig, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError,
+    SecretsSection,
+};
 use crate::config::signers::{TransitKeyName, TransitMount};
-use crate::config::{RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
+use crate::config::{FetchedSecrets, RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
 use crate::git::ssh::transit_key::TransitKeyError;
 use crate::secrets::openbao::WrapError;
 use crate::telemetry::semconv::trg::SECRETS_BACKEND_NAME;
@@ -184,6 +187,12 @@ pub struct ValueTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransitTarget {
     backend: String,
+    /// Which OpenBao the backend reaches: its `addr` as `OpenBaoBackend::new`
+    /// normalizes it, so two backends naming one server share a value. A
+    /// backend whose `addr` cannot be read without the environment it is
+    /// declared against falls back to `backend:<name>`, which no address
+    /// spells.
+    endpoint: String,
     key: TransitKeyName,
     mount: TransitMount,
 }
@@ -354,7 +363,7 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
                 MirrorTarget::Value(target) => target,
                 MirrorTarget::Transit(target) => {
                     let at = (
-                        target.backend.clone(),
+                        target.endpoint.clone(),
                         target.mount.as_str().to_string(),
                         target.key.as_str().to_string(),
                     );
@@ -508,11 +517,29 @@ fn resolve_transit(
         None => TransitMount::default(),
         Some(mount) => TransitMount::parse(mount).ok_or_else(|| segment("transit_mount", mount))?,
     };
+    let endpoint = match secrets.backends.get(&raw.backend) {
+        Some(BackendConfig::Openbao(config)) => config
+            .addr
+            .resolve_bootstrap(&FetchedSecrets::new())
+            .map(|addr| canonical_endpoint(&addr))
+            .unwrap_or_else(|_| format!("backend:{}", raw.backend)),
+        _ => format!("backend:{}", raw.backend),
+    };
     Ok(TransitTarget {
         backend: raw.backend.clone(),
+        endpoint,
         key,
         mount,
     })
+}
+
+/// The server an OpenBao address reaches, spelled one way: the host
+/// lowercased and a default port dropped, as URL parsing does, and no trailing
+/// `/`. An address that does not parse is compared as written.
+fn canonical_endpoint(addr: &str) -> String {
+    reqwest::Url::parse(addr)
+        .map(|url| url.as_str().trim_end_matches('/').to_string())
+        .unwrap_or_else(|_| addr.trim_end_matches('/').to_string())
 }
 
 /// What a mirror did, or in a dry run what it would do.
@@ -581,8 +608,25 @@ pub enum MirrorError {
     )]
     TransitTypeChange { held: String, wanted: &'static str },
 
+    #[error(
+        "the Transit key {}, so a new version of it would be a private key that can be taken back out of Transit; mirror into a new `transit_key` name instead",
+        exposure(*exportable, *allow_plaintext_backup)
+    )]
+    TransitKeyExposed {
+        exportable: bool,
+        allow_plaintext_backup: bool,
+    },
+
     #[error("the key could not be wrapped for Transit: {0}")]
     Wrap(#[source] WrapError),
+}
+
+fn exposure(exportable: bool, allow_plaintext_backup: bool) -> &'static str {
+    match (exportable, allow_plaintext_backup) {
+        (true, true) => "is exportable and allows plaintext backup",
+        (true, false) => "is exportable",
+        _ => "allows plaintext backup",
+    }
 }
 
 impl MirrorError {
@@ -598,6 +642,7 @@ impl MirrorError {
             Self::TransitNeedsOpenbao { .. } => "backend_config",
             Self::TransitKey(_) => "transit_key",
             Self::TransitTypeChange { .. } => "transit_type_change",
+            Self::TransitKeyExposed { .. } => "transit_key_exposed",
             Self::Wrap(_) => "wrap",
         }
     }

@@ -133,7 +133,10 @@ key gets the source key as a new version. That last step only works for a
 Transit key that was itself imported, and OpenBao's refusal is shown if not.
 `ssh-ed25519` and `ssh-rsa` keys of 2048, 3072 and 4096 bits are supported. A
 Transit target holds no value `trg` can read back, so it is compared by public
-key and nothing is written to it besides the key. See
+key and nothing is written to it besides the key, plus a signed probe that
+tells a complete key from one holding only a public half. After a rotation, the
+signer's `public_key`, `user.signingkey` and `allowed_signers` must follow; the
+signing guide covers it. See
 [Sign git commits with OpenBao Transit](sign-git-commits-with-openbao-transit.md#or-mirror-a-key-you-already-have)
 for the signer that uses it.
 
