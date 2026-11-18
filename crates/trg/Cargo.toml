@@ -20,7 +20,7 @@ gray_matter = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
-base64 = "0.22"
+base64 = "0.23"
 tokio = { workspace = true }
 toml = { workspace = true }
 secrecy = { workspace = true }
@@ -44,7 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 regex = { workspace = true }
-jsonschema = { version = "0.49", optional = true }
+jsonschema = { version = "0.52", optional = true }
 schemars = { workspace = true }
 libc = { workspace = true }
 opentelemetry = "0.33"
@@ -68,5 +68,5 @@ path = "src/bin/generate_schemas.rs"
 [dev-dependencies]
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
-jsonschema = "0.49"
+jsonschema = "0.52"
 opentelemetry_sdk = { version = "0.33", features = ["testing", "trace", "metrics", "logs"] }
