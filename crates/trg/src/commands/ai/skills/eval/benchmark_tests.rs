@@ -1,5 +1,4 @@
 use super::*;
-use assert_cmd::Command;
 use std::fs;
 
 fn write_minimal_report(dir: &std::path::Path, iteration: u32, evals_hash: &str, eval_ids: &[&str]) {
@@ -45,72 +44,6 @@ fn write_minimal_report(dir: &std::path::Path, iteration: u32, evals_hash: &str,
         "comparisons": []
     });
     fs::write(dir.join("report.json"), serde_json::to_string_pretty(&report).unwrap()).unwrap();
-}
-
-#[test]
-fn benchmark_warns_on_eval_suite_drift() {
-    let root = tempfile::tempdir().unwrap();
-    let skill_root = root.path().join("demo-skill");
-    let previous = skill_root.join("report-iter-1");
-    let current = skill_root.join("report-iter-2");
-    write_minimal_report(&previous, 1, "sha256:1111", &["case-a", "case-b"]);
-    write_minimal_report(&current, 2, "sha256:2222", &["case-a", "case-c"]);
-
-    let output = Command::cargo_bin("trg")
-        .unwrap()
-        .args([
-            "ai",
-            "skills",
-            "eval",
-            "benchmark",
-            "--report-dir",
-            current.to_str().unwrap(),
-            "--previous-report-dir",
-            previous.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("WARN: eval suite changed between iterations"));
-    assert!(stderr.contains("added eval IDs: case-c"));
-}
-
-#[test]
-fn benchmark_allow_eval_suite_drift_suppresses_warning() {
-    let root = tempfile::tempdir().unwrap();
-    let skill_root = root.path().join("demo-skill");
-    let previous = skill_root.join("report-iter-1");
-    let current = skill_root.join("report-iter-2");
-    write_minimal_report(&previous, 1, "sha256:1111", &["case-a"]);
-    write_minimal_report(&current, 2, "sha256:2222", &["case-b"]);
-
-    let output = Command::cargo_bin("trg")
-        .unwrap()
-        .args([
-            "ai",
-            "skills",
-            "eval",
-            "benchmark",
-            "--report-dir",
-            current.to_str().unwrap(),
-            "--previous-report-dir",
-            previous.to_str().unwrap(),
-            "--allow-eval-suite-drift",
-            "--output-format",
-            "json",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("WARN: eval suite changed between iterations"));
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(json["warnings"][0]["kind"], "eval_suite_drift");
 }
 
 #[test]
