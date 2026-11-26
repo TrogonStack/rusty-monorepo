@@ -864,6 +864,9 @@ fn fx(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolCon
                 builder.end_turn(at, failed.then_some(StepFailure::TurnFailed));
             }
             Some("tool_output") | None => {}
+            // Operational text is the runtime's own notice, not model output, so it is no
+            // sign that a model call is under way.
+            Some("text_chunk") if string_at(observation, "origin").as_deref() != Some("assistant") => {}
             Some(_) => {
                 fx_model_call_under_way(builder);
                 builder.extend_turn(at);

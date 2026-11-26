@@ -355,6 +355,9 @@ pub struct RunEnvironment {
     config_home: Option<RecordedConfigHome>,
     /// Held apart because, unlike `vars`, they reach the harness under `Inherited` too.
     telemetry_vars: BTreeMap<String, String>,
+    /// The key variables the harness's own profile names. They are credentials whatever
+    /// they are called, so `env.json` leaves them out by name rather than by suffix.
+    declared_credential_vars: Vec<String>,
     forwards_traces: bool,
     codex_otel: Option<CodexOtelConfig>,
 }
@@ -413,6 +416,7 @@ impl RunEnvironment {
             .flat_map(CaseEnv::iter)
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
+        let declared_credential_vars = runner.declared_credential_vars(host);
 
         if matches!(policy, EnvironmentPolicy::Inherited) {
             let config_home = host_config_home_record(runner, host, basis)?;
@@ -424,15 +428,22 @@ impl RunEnvironment {
                 case_vars,
                 config_home,
                 telemetry_vars: BTreeMap::new(),
+                declared_credential_vars,
                 forwards_traces: false,
                 codex_otel: None,
             });
         }
 
-        let mut vars = allowlisted(runner, host);
+        let mut vars = allowlisted(runner, host, &declared_credential_vars);
 
         let config_home = if matches!(policy, EnvironmentPolicy::Isolated) {
-            let host_config_home = runner.config_home().resolve_on_host(host);
+            // Auth entries are linked to this path from inside the run's config home, so a
+            // relative one would resolve from there instead of from where trg was started.
+            let host_config_home = runner
+                .config_home()
+                .resolve_on_host(host)
+                .map(std::path::absolute)
+                .transpose()?;
 
             // The harness starts in its workspace, not where trg was started, so a relative
             // run directory would hand it a `HOME` and config home that resolve somewhere
@@ -468,6 +479,7 @@ impl RunEnvironment {
             case_vars,
             config_home,
             telemetry_vars: BTreeMap::new(),
+            declared_credential_vars,
             forwards_traces: false,
             codex_otel: None,
         })
@@ -505,7 +517,9 @@ impl RunEnvironment {
         self.vars
             .iter()
             .chain(&self.telemetry_vars)
-            .filter(|(key, _)| !is_secret_env_key(key) && !is_exporter_header_var(key))
+            .filter(|(key, _)| {
+                !is_secret_env_key(key) && !is_exporter_header_var(key) && !self.declared_credential_vars.contains(*key)
+            })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
@@ -530,7 +544,7 @@ fn host_config_home_record(
 /// the allowlist. Dropping it would not leave the config home alone: the harness would
 /// fall back to the default under `HOME`, which is neither the operator's config home nor
 /// a config home this run set up. `Isolated` overwrites the variable afterwards.
-fn allowlisted(runner: Runner, host: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+fn allowlisted(runner: Runner, host: &BTreeMap<String, String>, declared: &[String]) -> BTreeMap<String, String> {
     let locator = runner.credential_locator_var();
     let config_home_var = match runner.config_home() {
         HarnessConfigHome::Redirectable { var, .. } => Some(var),
@@ -543,11 +557,10 @@ fn allowlisted(runner: Runner, host: &BTreeMap<String, String>) -> BTreeMap<Stri
         .chain(locator.iter())
         .chain(config_home_var.iter())
         .copied()
-        .map(str::to_string)
-        .chain(runner.declared_credential_vars(host));
+        .chain(declared.iter().map(String::as_str));
 
     let mut vars: BTreeMap<String, String> = named
-        .filter_map(|name| host.get_key_value(&name))
+        .filter_map(|name| host.get_key_value(name))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
 

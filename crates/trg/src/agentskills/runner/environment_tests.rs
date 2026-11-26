@@ -399,6 +399,84 @@ fn a_scrubbed_fx_run_sees_the_key_its_declared_provider_names_and_nothing_else()
     assert!(!env.vars.contains_key("UNRELATED_KEY"));
 }
 
+/// A declared key variable is named by the operator, so it need not end in a suffix the
+/// name-based redaction knows; `env.json` must leave it out all the same.
+#[test]
+fn a_declared_key_is_handed_to_the_harness_but_never_recorded() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join("profile");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(
+        host_config_home.join("settings.json"),
+        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"FX_LOGIN"}}}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert(
+        "TROGONAI_AGENT_HOME".to_string(),
+        host_config_home.to_string_lossy().into_owned(),
+    );
+    host.insert("FX_LOGIN".to_string(), "secret".to_string());
+
+    for policy in [
+        EnvironmentPolicy::Scrubbed,
+        EnvironmentPolicy::Isolated,
+        EnvironmentPolicy::Inherited,
+    ] {
+        let env = RunEnvironment::prepare_from(Runner::Fx, &temp.path().join("run"), policy, None, &host).unwrap();
+        assert_eq!(
+            env.vars.get("FX_LOGIN").map(String::as_str),
+            Some("secret"),
+            "{policy:?}"
+        );
+        assert!(!env.recorded_vars().contains_key("FX_LOGIN"), "{policy:?}");
+    }
+}
+
+/// The AI Gateway key is linked from inside the run's config home, so a relative host
+/// config home has to be made absolute first or the link resolves to nothing.
+#[test]
+fn an_isolated_fx_run_links_the_key_of_a_relative_host_config_home() {
+    let test_name =
+        "agentskills::runner::environment::tests::an_isolated_fx_run_links_the_key_of_a_relative_host_config_home";
+    let child_marker = "TRG_TEST_RELATIVE_FX_HOME_CHILD";
+    if std::env::var_os(child_marker).is_none() {
+        let temp = tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(child_marker, "1")
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+        assert!(stdout.contains("relative fx home verified"), "{stdout}");
+        return;
+    }
+
+    std::fs::create_dir_all("profile").unwrap();
+    std::fs::write("profile/api-key", "gateway-key").unwrap();
+    let mut host = host();
+    host.insert("TROGONAI_AGENT_HOME".to_string(), "profile".to_string());
+
+    let env = RunEnvironment::prepare_from(
+        Runner::Fx,
+        Path::new("run-001"),
+        EnvironmentPolicy::Isolated,
+        None,
+        &host,
+    )
+    .unwrap();
+    let config_home = PathBuf::from(env.vars.get("TROGONAI_AGENT_HOME").unwrap());
+    assert_eq!(
+        std::fs::read_to_string(config_home.join("api-key")).unwrap(),
+        "gateway-key"
+    );
+    println!("relative fx home verified");
+}
+
 #[test]
 fn an_fx_profile_that_cannot_be_read_admits_no_declared_key() {
     let temp = tempdir().unwrap();

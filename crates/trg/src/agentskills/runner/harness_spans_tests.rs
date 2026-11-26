@@ -457,6 +457,18 @@ fn an_fx_run_that_never_reached_the_model_rebuilds_no_model_call() {
     assert_eq!(rebuilt.summary.response_model, None);
 }
 
+/// A runtime notice after the turn ended is not the model talking, so it must not open a
+/// model call the turn cap would then count.
+#[test]
+fn an_fx_operational_notice_is_no_model_call() {
+    let stdout = br#"{"protocol_version":1,"seq":1,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"assistant","text":"Done."}}
+{"protocol_version":1,"seq":2,"session_id":"s","turn_id":1,"event":{"type":"turn_finished","outcome":"completed"}}
+{"protocol_version":1,"seq":3,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"operational","text":"Saved session."}}
+"#;
+    let rebuilt = rebuild(Runner::Fx, stdout, None, ContentCapture::NoContent);
+    assert_eq!(chats(&rebuilt).len(), 1);
+}
+
 #[test]
 fn an_fx_tool_still_running_when_the_clock_ran_out_is_marked_timed_out() {
     let stdout = br#"{"protocol_version":1,"seq":1,"session_id":"s","turn_id":1,"event":{"type":"tool_started","call_id":"call_1","tool_name":"run_command","arguments_json":null}}
