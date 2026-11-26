@@ -493,6 +493,44 @@ fn an_isolated_trogonai_agent_run_links_the_key_of_a_relative_host_config_home()
     println!("relative trogonai-agent home verified");
 }
 
+/// A pi `models.json` reads a provider's key through `$NAME` or `${NAME}`, so the variable
+/// is the operator's choice; `$$` is a literal dollar sign and names nothing.
+#[test]
+fn a_pi_run_sees_the_variables_its_models_file_reads_and_nothing_else() {
+    let temp = tempdir().unwrap();
+    let config_dir = temp.path().join("pi");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("models.json"),
+        r#"{"providers":{"gateway":{"baseUrl":"https://gateway.example/v1","api":"openai-responses","apiKey":"$GATEWAY_KEY","headers":{"X-Team":"${TEAM_TOKEN}","X-Price":"$$5"}}}}"#,
+    )
+    .unwrap();
+    std::fs::write(config_dir.join("settings.json"), r#"{"defaultModel":"gateway/m"}"#).unwrap();
+
+    let mut host = host();
+    host.insert(
+        "PI_CODING_AGENT_DIR".to_string(),
+        config_dir.to_string_lossy().into_owned(),
+    );
+    host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
+    host.insert("TEAM_TOKEN".to_string(), "team".to_string());
+    host.insert("UNRELATED_KEY".to_string(), "other".to_string());
+
+    let run_dir = temp.path().join("run-001");
+    let env = RunEnvironment::prepare_from(Runner::Pi, &run_dir, EnvironmentPolicy::Isolated, None, &host).unwrap();
+    assert_eq!(env.vars.get("GATEWAY_KEY").map(String::as_str), Some("secret"));
+    assert_eq!(env.vars.get("TEAM_TOKEN").map(String::as_str), Some("team"));
+    assert!(!env.vars.contains_key("UNRELATED_KEY"));
+    assert!(!env.recorded_vars().contains_key("GATEWAY_KEY"));
+
+    let run_config = PathBuf::from(env.vars.get("PI_CODING_AGENT_DIR").unwrap());
+    assert!(run_config.join("models.json").exists());
+    assert!(
+        !run_config.join("settings.json").exists(),
+        "an isolated run keeps the routes and keys, not the operator's settings"
+    );
+}
+
 /// An opencode provider reads its key through `{env:NAME}` in the config, so the variable
 /// is the operator's choice and no fixed list could admit it.
 #[test]
@@ -597,6 +635,13 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
                 name: "OPENCODE_CONFIG_DIR".to_string(),
             },
         ),
+        (
+            Runner::Pi,
+            "/host/home/.pi/agent",
+            ConfigHomeBasis::Variable {
+                name: "PI_CODING_AGENT_DIR".to_string(),
+            },
+        ),
     ] {
         let temp = tempdir().unwrap();
         let env =
@@ -619,6 +664,7 @@ fn isolated_records_the_run_config_home_and_not_the_hosts() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ] {
         let temp = tempdir().unwrap();
         let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");

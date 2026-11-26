@@ -21,7 +21,8 @@ mod constants;
 
 pub use constants::RUN_HOME_DIR_NAME;
 use constants::{
-    CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, OPENCODE_CONFIG_FILE, PROCESS_VARS, TROGONAI_AGENT_SETTINGS_FILE,
+    CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, OPENCODE_CONFIG_FILE, PI_MODELS_FILE, PROCESS_VARS,
+    TROGONAI_AGENT_SETTINGS_FILE,
 };
 
 /// Where a harness keeps the per-user state that changes what its agent does: installed
@@ -189,6 +190,10 @@ impl Runner {
                 var: "OPENCODE_CONFIG_DIR",
                 dir_name: ".config/opencode",
             },
+            Self::Pi => HarnessConfigHome::Redirectable {
+                var: "PI_CODING_AGENT_DIR",
+                dir_name: ".pi/agent",
+            },
         }
     }
 
@@ -234,6 +239,14 @@ impl Runner {
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
             ],
+            // The keys pi's built-in providers read most often. A provider declared in
+            // `models.json` names its own variable, which `declared_credential_vars` adds.
+            Self::Pi => &[
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENROUTER_API_KEY",
+                "GEMINI_API_KEY",
+            ],
         }
     }
 
@@ -274,6 +287,14 @@ impl Runner {
                 .and_then(|home| std::fs::read_to_string(home.join(OPENCODE_CONFIG_FILE)).ok())
                 .map(|text| opencode_env_references(&text))
                 .unwrap_or_default(),
+            // A provider in `models.json` reads its key, or a header value, through `$NAME`
+            // or `${NAME}`, so every such reference is admitted.
+            Self::Pi => self
+                .config_home()
+                .resolve_on_host(host)
+                .and_then(|home| std::fs::read_to_string(home.join(PI_MODELS_FILE)).ok())
+                .map(|text| pi_env_references(&text))
+                .unwrap_or_default(),
             Self::ClaudeCode | Self::Codex | Self::CursorAgent => Vec::new(),
         }
     }
@@ -288,7 +309,7 @@ impl Runner {
     fn credential_locator_var(self) -> Option<&'static str> {
         match self {
             Self::ClaudeCode => Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
-            Self::Codex | Self::CursorAgent | Self::TrogonaiAgent | Self::OpenCode => None,
+            Self::Codex | Self::CursorAgent | Self::TrogonaiAgent | Self::OpenCode | Self::Pi => None,
         }
     }
 
@@ -323,6 +344,11 @@ impl Runner {
                 file: OPENCODE_CONFIG_FILE,
                 keep: &["provider", "model"],
             }],
+            // pi keeps its provider routes in `models.json` and the keys `/login` saves in
+            // `auth.json`, each holding nothing else; its `settings.json`, extensions, skills
+            // and prompt templates stay behind, so a run names its model with
+            // `--runner-model`.
+            Self::Pi => &[AuthEntry::Whole(PI_MODELS_FILE), AuthEntry::Whole("auth.json")],
         }
     }
 }
@@ -569,6 +595,31 @@ fn opencode_env_references(config: &str) -> Vec<String> {
         .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
         .map(str::to_string)
         .collect()
+}
+
+/// Every `NAME` a pi `models.json` reads through `$NAME` or `${NAME}`. `$$` is a literal
+/// dollar sign, not a reference.
+fn pi_env_references(config: &str) -> Vec<String> {
+    let is_name = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut names = Vec::new();
+    let mut rest = config;
+    while let Some(at) = rest.find('$') {
+        rest = &rest[at + 1..];
+        if let Some(after) = rest.strip_prefix('$') {
+            rest = after;
+            continue;
+        }
+        let (braced, body) = match rest.strip_prefix('{') {
+            Some(body) => (true, body),
+            None => (false, rest),
+        };
+        let name: String = body.chars().take_while(|c| is_name(*c)).collect();
+        let closed = !braced || body[name.len()..].starts_with('}');
+        if !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && closed {
+            names.push(name);
+        }
+    }
+    names
 }
 
 fn host_environment() -> BTreeMap<String, String> {

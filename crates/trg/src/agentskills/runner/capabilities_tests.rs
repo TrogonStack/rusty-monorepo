@@ -15,6 +15,7 @@ fn every_runner_answers_every_control() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ];
     let mut count = 0;
     for runner in runners {
@@ -23,7 +24,7 @@ fn every_runner_answers_every_control() {
             count += 1;
         }
     }
-    assert_eq!(count, 45);
+    assert_eq!(count, 54);
 
     assert_eq!(
         Runner::ClaudeCode.support(HarnessControl::ToolAllowlist),
@@ -209,6 +210,7 @@ fn every_driven_flag_is_carried_by_the_invocation_it_drives() {
                 super::super::trogonai_agent::build_args(None, PermissionGrant::Unrestricted, "do the thing")
             }
             Runner::OpenCode => super::super::opencode::build_args(None, PermissionGrant::Unrestricted, "do the thing"),
+            Runner::Pi => super::super::pi::build_args(None, "do the thing"),
         }
     };
 
@@ -218,6 +220,7 @@ fn every_driven_flag_is_carried_by_the_invocation_it_drives() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ] {
         let argv = argv_for(runner);
         for control in HarnessControl::ALL {
@@ -258,6 +261,7 @@ fn the_matrix_and_config_home_agree() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ] {
         let support = runner.support(HarnessControl::RunScopedConfigHome);
         match runner.config_home() {
@@ -279,6 +283,7 @@ fn the_matrix_and_pricing_agree() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ] {
         let reports_cost =
             runner.support(HarnessControl::CostReporting) == ControlSupport::Driven(ControlMechanism::Reported);
@@ -321,6 +326,7 @@ fn the_reference_table_matches_the_declaration() {
     assert_eq!(header_cells[3], "`cursor-agent`");
     assert_eq!(header_cells[4], "`trogonai-agent`");
     assert_eq!(header_cells[5], "`opencode`");
+    assert_eq!(header_cells[6], "`pi`");
 
     let runners_in_column_order = [
         Runner::ClaudeCode,
@@ -328,6 +334,7 @@ fn the_reference_table_matches_the_declaration() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ];
 
     let data_rows = &table_lines[2..];

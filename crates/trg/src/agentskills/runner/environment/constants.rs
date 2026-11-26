@@ -33,3 +33,5 @@ pub const CLOUD_CREDENTIAL_PREFIXES: &[&str] = &["AWS_", "GOOGLE_", "GCLOUD_", "
 pub const TROGONAI_AGENT_SETTINGS_FILE: &str = "settings.json";
 
 pub const OPENCODE_CONFIG_FILE: &str = "opencode.json";
+
+pub const PI_MODELS_FILE: &str = "models.json";

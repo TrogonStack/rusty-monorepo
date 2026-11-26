@@ -1459,6 +1459,7 @@ fn env_json_names_the_config_home_for_every_harness() {
         (Runner::CursorAgent, ".cursor"),
         (Runner::TrogonaiAgent, ".trogonai-agent"),
         (Runner::OpenCode, ".config/opencode"),
+        (Runner::Pi, ".pi/agent"),
     ] {
         let temp = tempdir().unwrap();
         let run_dir = temp.path().join("run-001");
@@ -1496,6 +1497,7 @@ fn env_json_names_the_run_config_home_when_isolated() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ] {
         let temp = tempdir().unwrap();
         let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");

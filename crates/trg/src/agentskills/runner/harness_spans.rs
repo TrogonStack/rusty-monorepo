@@ -20,7 +20,8 @@ use serde_json::Value;
 use super::stream::{StampedLine, StdoutTimeline};
 use super::Runner;
 use crate::agentskills::transcript::{
-    OPENCODE_ERROR_TYPE, OPENCODE_STEP_FINISH_TYPE, OPENCODE_STEP_START_TYPE, TROGONAI_AGENT_RESULT_TYPE,
+    pi_assistant_message, pi_stop_failed, OPENCODE_ERROR_TYPE, OPENCODE_STEP_FINISH_TYPE, OPENCODE_STEP_START_TYPE,
+    TROGONAI_AGENT_RESULT_TYPE,
 };
 use crate::agentskills::transcript_metrics::{ObservedToolCall, TranscriptMetrics, TurnCount};
 use crate::telemetry::semconv::generated::attributes::{
@@ -264,7 +265,7 @@ pub fn reconstruct(
 pub fn measure(runner: Runner, stdout: &[u8]) -> TranscriptMetrics {
     let reconstruction = reconstruct_for_measuring(runner, stdout);
     let peak_turn_input_tokens = match runner {
-        Runner::ClaudeCode | Runner::OpenCode => reconstruction
+        Runner::ClaudeCode | Runner::OpenCode | Runner::Pi => reconstruction
             .steps
             .iter()
             .filter_map(|step| match &step.kind {
@@ -352,6 +353,7 @@ impl LiveReconstruction {
             Runner::CursorAgent => cursor_agent(&mut self.builder, &mut self.cursor_model, event, at, self.content),
             Runner::TrogonaiAgent => trogonai_agent(&mut self.builder, event, at, self.content),
             Runner::OpenCode => opencode(&mut self.builder, &mut self.opencode_tool_seen, event, at, self.content),
+            Runner::Pi => pi(&mut self.builder, event, at, self.content),
         }
     }
 
@@ -970,6 +972,61 @@ fn opencode(builder: &mut StepBuilder, tool_seen: &mut bool, event: &Value, at: 
             builder.close_turn(None);
         }
         Some(OPENCODE_ERROR_TYPE) => builder.end_turn(at, Some(StepFailure::TurnFailed)),
+        _ => {}
+    }
+    builder.arrived(at);
+}
+
+/// pi opens every model call with `turn_start` and ends it with the assistant
+/// `message_end`, which carries that call's usage; the tools it asked for run after that,
+/// each between `tool_execution_start` and `tool_execution_end`. A call that stopped on an
+/// error or an abort is a failed one.
+fn pi(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolContent) {
+    if let Some(message) = pi_assistant_message(event) {
+        let usage = message.get("usage");
+        let count = |key: &str| usage.and_then(|usage| usage.get(key)).and_then(Value::as_u64);
+        if let Some(turn) = &mut builder.turn {
+            turn.usage = TurnUsage {
+                input: count("input"),
+                output: count("output"),
+                cache_read: count("cacheRead"),
+                cache_write: count("cacheWrite"),
+            };
+            if turn.response_model.is_none() {
+                turn.response_model = string_at(message, "model");
+            }
+            if turn.response_id.is_none() {
+                turn.response_id = string_at(message, "responseId");
+            }
+        }
+        builder.end_turn(at, pi_stop_failed(message).then_some(StepFailure::TurnFailed));
+        builder.arrived(at);
+        return;
+    }
+    match event_type(event) {
+        Some("turn_start") => builder.open_turn(None, at),
+        Some("tool_execution_start") => {
+            if let Some(call_id) = string_at(event, "toolCallId") {
+                let name = string_at(event, "toolName").unwrap_or_else(|| "unknown".to_string());
+                builder.open_tool(call_id, name, content.render(event.get("args")), at);
+            }
+        }
+        Some("tool_execution_end") => {
+            if let Some(call_id) = string_at(event, "toolCallId") {
+                let failure = event
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    .then_some(StepFailure::ToolError);
+                builder.close_tool(
+                    &call_id,
+                    || string_at(event, "toolName").unwrap_or_else(|| "unknown".to_string()),
+                    content.render(event.get("result")),
+                    failure,
+                    at,
+                );
+            }
+        }
         _ => {}
     }
     builder.arrived(at);

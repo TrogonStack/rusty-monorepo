@@ -31,6 +31,8 @@ mod harness_spans;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod opencode;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
+pub mod pi;
+#[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod stream;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub(crate) mod telemetry;
@@ -92,6 +94,7 @@ pub enum Runner {
     TrogonaiAgent,
     #[value(name = "opencode")]
     OpenCode,
+    Pi,
 }
 
 impl Runner {
@@ -102,6 +105,7 @@ impl Runner {
             Self::Codex => codex::run(request),
             Self::TrogonaiAgent => trogonai_agent::run(request),
             Self::OpenCode => opencode::run(request),
+            Self::Pi => pi::run(request),
         };
         // Run unconditionally, regardless of which backend ran or whether it succeeded,
         // failed, or timed out: the harness has exited either way, and the `mcp-launch`
@@ -127,15 +131,16 @@ impl Runner {
     /// The grant a run under this harness actually operates with, which is not always
     /// the one requested.
     ///
-    /// cursor-agent has exactly one non-interactive mode, `--force`, so any run under it
-    /// executes unrestricted no matter what an operator asked for; claude-code, codex, and
+    /// cursor-agent has exactly one non-interactive mode, `--force`, and pi has no permission
+    /// system at all, so any run under either executes unrestricted no matter what an
+    /// operator asked for; claude-code, codex, and
     /// trogonai-agent each offer a flag per grant, so they enforce exactly what was requested. This is
     /// the one place that answers what a run was actually allowed to do, so a report can
     /// say so rather than repeating the request back as if it were the outcome.
     pub fn effective_permission_grant(self, requested: PermissionGrant) -> PermissionGrant {
         match self {
             Self::ClaudeCode | Self::Codex | Self::TrogonaiAgent | Self::OpenCode => requested,
-            Self::CursorAgent => PermissionGrant::Unrestricted,
+            Self::CursorAgent | Self::Pi => PermissionGrant::Unrestricted,
         }
     }
 
@@ -160,6 +165,7 @@ impl Runner {
             Self::Codex => "codex",
             Self::TrogonaiAgent => "trogonai-agent",
             Self::OpenCode => "opencode",
+            Self::Pi => "pi",
         }
     }
 
@@ -171,9 +177,11 @@ impl Runner {
     pub fn pricing(self) -> HarnessPricing {
         match self {
             Self::ClaudeCode => HarnessPricing::Publishes,
-            Self::CursorAgent | Self::Codex | Self::TrogonaiAgent | Self::OpenCode => HarnessPricing::Silent {
-                harness: self.display_name().to_string(),
-            },
+            Self::CursorAgent | Self::Codex | Self::TrogonaiAgent | Self::OpenCode | Self::Pi => {
+                HarnessPricing::Silent {
+                    harness: self.display_name().to_string(),
+                }
+            }
         }
     }
 
@@ -184,6 +192,7 @@ impl Runner {
             Self::Codex => TranscriptFormat::CodexThreadJsonl,
             Self::TrogonaiAgent => TranscriptFormat::TrogonaiAgentStreamJson,
             Self::OpenCode => TranscriptFormat::OpenCodeJson,
+            Self::Pi => TranscriptFormat::PiJson,
         }
     }
 }
