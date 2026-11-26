@@ -6,8 +6,8 @@ use serde::Deserialize;
 
 use crate::secrets::onepassword::{OnePasswordReference, OpReferenceError};
 use crate::secrets::{
-    BackendKind, KeyError, KeychainReference, OpenbaoReference, PathError, SecretAddress, SecretKey, SecretPath,
-    SecretsSection,
+    BackendKind, GcpReference, GcpSecretId, GcpSecretIdError, KeyError, KeychainReference, OpenbaoReference, PathError,
+    SecretAddress, SecretKey, SecretPath, SecretsSection,
 };
 
 /// A secret declaration exactly as the file spelled it, before anything knows
@@ -170,6 +170,13 @@ impl VarSite {
         }
     }
 
+    fn secret_id_fix(&self, backend: &str) -> String {
+        match self {
+            Self::Table { .. } => format!(r#"replace with: {{ backend = "{backend}", path = "<secret-id>" }}"#),
+            Self::Flags => "use instead: --path <secret-id>".to_string(),
+        }
+    }
+
     fn path_key_fix(&self, backend: &str) -> String {
         match self {
             Self::Table { .. } => format!(r#"replace with: {{ backend = "{backend}", path = "...", key = "..." }}"#),
@@ -230,6 +237,27 @@ pub enum SecretVarError {
         backend: String,
         kind: BackendKind,
         missing: &'static str,
+    },
+
+    /// What a Secret Manager address may not be. One message for three
+    /// mistakes, because the fix is the same table in each: `path` holding the
+    /// secret id and nothing else.
+    #[error(
+        "{site} names backend `{backend}` of kind `{kind}`, which is addressed with `path` holding the secret id alone; {problem}\n  {}",
+        .site.secret_id_fix(.backend)
+    )]
+    SecretIdOnly {
+        site: VarSite,
+        backend: String,
+        kind: BackendKind,
+        problem: &'static str,
+    },
+
+    #[error("{site}: invalid `path`: {cause}")]
+    SecretId {
+        site: VarSite,
+        #[source]
+        cause: GcpSecretIdError,
     },
 
     #[error("{site}: `fallbacks` must list at least one address")]
@@ -334,6 +362,13 @@ impl SecretVar {
         if !self.address.backend_kind().is_writable() {
             return None;
         }
+        if let SecretAddress::GcpSecretManager(r) = &self.address {
+            return Some(format!(
+                "trg secret put --backend {} --path {}",
+                crate::shell::quote_for_shell(&self.backend),
+                crate::shell::quote_for_shell(r.secret().as_str())
+            ));
+        }
         let (path, key) = self.address.path_key()?;
         let q = crate::shell::quote_for_shell;
         Some(format!(
@@ -357,6 +392,12 @@ impl SecretVar {
         match &self.address {
             SecretAddress::Keychain(r) => RawSecretVar::path_key(self.backend.clone(), r.path(), r.key()),
             SecretAddress::Openbao(r) => RawSecretVar::path_key(self.backend.clone(), r.path(), r.key()),
+            SecretAddress::GcpSecretManager(r) => RawSecretVar {
+                backend: self.backend.clone(),
+                path: Some(r.secret().as_str().to_string()),
+                key: None,
+                reference: None,
+            },
             SecretAddress::OnePassword(r) => RawSecretVar {
                 backend: self.backend.clone(),
                 path: None,
@@ -480,6 +521,32 @@ fn parse_address(kind: BackendKind, raw: &RawSecretVar, site: &VarSite) -> Resul
                 BackendKind::Keychain => SecretAddress::Keychain(KeychainReference::new(path, key)),
                 _ => SecretAddress::Openbao(OpenbaoReference::new(path, key)),
             })
+        }
+        BackendKind::GcpSecretManager => {
+            let problem = if raw.reference.is_some() {
+                Some("`ref` is a 1Password spelling")
+            } else if raw.key.is_some() {
+                Some("`key` is not supported, because a secret version is one value with no fields")
+            } else if raw.path.is_none() {
+                Some("`path` is missing")
+            } else {
+                None
+            };
+            if let Some(problem) = problem {
+                return Err(SecretVarError::SecretIdOnly {
+                    site: site.clone(),
+                    backend: raw.backend.clone(),
+                    kind,
+                    problem,
+                });
+            }
+            let id = raw.path.as_deref().unwrap_or_default();
+            GcpSecretId::parse(id)
+                .map(|id| SecretAddress::GcpSecretManager(GcpReference::new(id)))
+                .map_err(|cause| SecretVarError::SecretId {
+                    site: site.clone(),
+                    cause,
+                })
         }
         BackendKind::OnePassword => {
             if raw.path.is_some() || raw.key.is_some() || raw.reference.is_none() {

@@ -26,7 +26,7 @@ fn put_args(key: &str) -> PutArgs {
             output_format: OutputFormat::Text,
         },
         path: "mcp/demo".to_string(),
-        key: key.to_string(),
+        key: Some(key.to_string()),
     }
 }
 
@@ -311,9 +311,16 @@ fn a_reference_and_a_path_cannot_be_given_together() {
 }
 
 #[test]
-fn half_of_a_path_and_key_address_is_refused() {
-    assert!(parse(&["get", "--backend", "local", "--path", "mcp/demo"]).is_err());
+fn a_key_with_no_path_is_refused() {
     assert!(parse(&["get", "--backend", "local", "--key", "token"]).is_err());
+}
+
+/// A path alone is the whole address of a Secret Manager secret, so which
+/// kinds may leave the key out is for the declared kind to say, not `clap`.
+#[test]
+fn a_path_with_no_key_is_left_to_the_declared_kind() {
+    assert!(parse(&["get", "--backend", "local", "--path", "mcp/demo"]).is_ok());
+    assert!(parse(&["put", "--backend", "local", "--path", "mcp/demo"]).is_ok());
 }
 
 #[test]

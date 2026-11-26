@@ -9,6 +9,9 @@ fn declaring(backends: &[(&str, &str)]) -> SecretsSection {
         if *kind == "onepassword" {
             text.push_str("account = \"my.1password.com\"\n");
         }
+        if *kind == "gcp_secret_manager" {
+            text.push_str("project = \"my-project\"\naccount = \"deployer@my-project.iam.gserviceaccount.com\"\n");
+        }
         if *kind == "openbao" {
             text.push_str(
                 "addr = \"https://bao.example\"\nmount = \"kv\"\npath_prefix = \"trg\"\nowner = \"me\"\ntoken_file = \"~/.t\"\n",
@@ -596,4 +599,58 @@ fn a_malformed_reference_is_a_config_error_naming_the_site() {
     let message = err.to_string();
     assert!(message.contains("[exec.acme.env] TOKEN"), "{message}");
     assert!(message.contains("must start with `op://`"), "{message}");
+}
+
+#[test]
+fn a_secret_manager_secret_is_addressed_by_its_id_alone() {
+    let var = resolve(
+        r#"{ backend = "gsm", path = "deploy-token" }"#,
+        &[("gsm", "gcp_secret_manager")],
+    )
+    .expect("resolves");
+    assert!(matches!(var.address(), SecretAddress::GcpSecretManager(_)));
+    assert_eq!(var.declaration(), r#"{ backend = "gsm", path = "deploy-token" }"#);
+    assert_eq!(
+        var.put_command().as_deref(),
+        Some("trg secret put --backend gsm --path deploy-token")
+    );
+}
+
+#[test]
+fn a_key_or_a_reference_is_refused_for_a_secret_manager_secret() {
+    for (table, problem) in [
+        (
+            r#"{ backend = "gsm", path = "deploy-token", key = "token" }"#,
+            "`key` is not supported",
+        ),
+        (
+            r#"{ backend = "gsm", ref = "op://Ops/deploy/TOKEN" }"#,
+            "`ref` is a 1Password spelling",
+        ),
+        (r#"{ backend = "gsm" }"#, "`path` is missing"),
+    ] {
+        let err = resolve(table, &[("gsm", "gcp_secret_manager")]).expect_err("refused");
+        let message = err.to_string();
+        assert!(message.contains("of kind `gcp_secret_manager`"), "{message}");
+        assert!(message.contains(problem), "{message}");
+        assert!(
+            message.contains(r#"replace with: { backend = "gsm", path = "<secret-id>" }"#),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn a_secret_id_that_is_not_one_is_refused_while_the_config_is_in_view() {
+    let err = resolve(
+        r#"{ backend = "gsm", path = "projects/p/secrets/s" }"#,
+        &[("gsm", "gcp_secret_manager")],
+    )
+    .expect_err("a resource name is not a secret id");
+    assert!(err.to_string().contains("invalid `path`"), "{err}");
+}
+
+#[test]
+fn a_secret_manager_secret_is_a_writable_kind() {
+    assert!(BackendKind::GcpSecretManager.is_writable());
 }

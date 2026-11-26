@@ -17,6 +17,7 @@
 
 use std::fmt;
 
+use super::gcp::GcpReference;
 use super::keychain::KeychainReference;
 use super::onepassword::OnePasswordReference;
 use super::openbao::OpenbaoReference;
@@ -27,6 +28,9 @@ use super::{BackendKind, SecretKey, SecretPath};
 pub enum SecretAddress {
     Keychain(KeychainReference),
     Openbao(OpenbaoReference),
+    /// The latest version of one Secret Manager secret. A secret holds one
+    /// value, so there is no key, and no vocabulary of its own beyond the id.
+    GcpSecretManager(GcpReference),
     /// Boxed because a secret reference carries three or four owned segments
     /// against the other kinds' two, and this address travels by value inside
     /// every `SecretVar`, which in turn sits inside the error types every read
@@ -49,6 +53,7 @@ impl SecretAddress {
             Self::Keychain(_) => BackendKind::Keychain,
             Self::Openbao(_) => BackendKind::Openbao,
             Self::OnePassword(_) => BackendKind::OnePassword,
+            Self::GcpSecretManager(_) => BackendKind::GcpSecretManager,
         }
     }
 
@@ -60,7 +65,7 @@ impl SecretAddress {
         match self {
             Self::Keychain(r) => Some((r.path(), r.key())),
             Self::Openbao(r) => Some((r.path(), r.key())),
-            Self::OnePassword(_) => None,
+            Self::OnePassword(_) | Self::GcpSecretManager(_) => None,
         }
     }
 }
@@ -71,6 +76,7 @@ impl fmt::Display for SecretAddress {
             Self::Keychain(r) => write!(f, "`{}` at `{}`", r.key(), r.path()),
             Self::Openbao(r) => write!(f, "`{}` at `{}`", r.key(), r.path()),
             Self::OnePassword(r) => write!(f, "`{r}`"),
+            Self::GcpSecretManager(r) => write!(f, "secret `{}`", r.secret()),
         }
     }
 }

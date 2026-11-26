@@ -26,7 +26,7 @@ use tracing::Instrument;
 use super::telemetry::record_error;
 use super::vars::{self, VarFetchError};
 use super::{
-    Backend, BackendConfig, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError,
+    Backend, BackendConfig, BackendError, BackendKind, GcpSecretId, SecretAddress, SecretKey, SecretPath, SecretsError,
     SecretsSection,
 };
 use crate::config::signers::{TransitKeyName, TransitMount};
@@ -51,6 +51,18 @@ pub struct Fingerprint {
 impl Fingerprint {
     pub fn of(value: &str) -> Self {
         let value = value.strip_suffix('\n').unwrap_or(value);
+        Self {
+            length: value.len(),
+            digest: Sha256::digest(value.as_bytes()).into(),
+        }
+    }
+
+    /// The fingerprint of every byte, trailing newline included.
+    ///
+    /// For a backend that stores bytes as given, where a value ending in a
+    /// newline (a PEM key) and the same value without it are two values, and
+    /// treating them as one would report as in sync a target that is not.
+    pub fn exact(value: &str) -> Self {
         Self {
             length: value.len(),
             digest: Sha256::digest(value.as_bytes()).into(),
@@ -183,6 +195,13 @@ pub struct ValueTarget {
     key: SecretKey,
 }
 
+/// A Secret Manager secret that receives a new version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretTarget {
+    var: SecretVar,
+    secret: GcpSecretId,
+}
+
 /// An OpenBao Transit key a private SSH key is imported into.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransitTarget {
@@ -201,6 +220,7 @@ pub struct TransitTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MirrorTarget {
     Value(ValueTarget),
+    Secret(SecretTarget),
     Transit(TransitTarget),
 }
 
@@ -208,6 +228,7 @@ impl MirrorTarget {
     pub fn backend(&self) -> &str {
         match self {
             Self::Value(t) => t.var.backend(),
+            Self::Secret(t) => t.var.backend(),
             Self::Transit(t) => &t.backend,
         }
     }
@@ -216,6 +237,7 @@ impl MirrorTarget {
     pub fn address(&self) -> String {
         match self {
             Self::Value(t) => t.var.to_string(),
+            Self::Secret(t) => t.var.to_string(),
             Self::Transit(t) => format!(
                 "Transit key `{}` (mount `{}`) from backend `{}`",
                 t.key.as_str(),
@@ -230,6 +252,7 @@ impl MirrorTarget {
     pub fn describe(&self) -> String {
         match self {
             Self::Value(t) => format!("{}#{} ({})", t.path, t.key, t.var.backend()),
+            Self::Secret(t) => format!("{} ({})", t.secret, t.var.backend()),
             Self::Transit(t) => format!("{}/keys/{} ({})", t.mount.as_str(), t.key.as_str(), t.backend),
         }
     }
@@ -252,7 +275,7 @@ pub enum MirrorConfigError {
     NoTargets { name: MirrorName },
 
     #[error(
-        "`[secrets.mirrors.{name}]`: target backend `{backend}` is of kind `{kind}`, which `trg` only reads from; mirror into a `keychain` or `openbao` backend"
+        "`[secrets.mirrors.{name}]`: target backend `{backend}` is of kind `{kind}`, which `trg` only reads from; mirror into a `keychain`, `openbao` or `gcp_secret_manager` backend"
     )]
     TargetNotWritable {
         name: MirrorName,
@@ -344,6 +367,7 @@ impl Mirror {
             SecretAddress::OnePassword(r) => r.to_string(),
             SecretAddress::Keychain(r) => format!("{}:{}#{}", self.source.backend(), r.path(), r.key()),
             SecretAddress::Openbao(r) => format!("{}:{}#{}", self.source.backend(), r.path(), r.key()),
+            SecretAddress::GcpSecretManager(r) => format!("{}:{}", self.source.backend(), r.secret()),
         }
     }
 }
@@ -361,6 +385,27 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
         for target in &mirror.targets {
             let target = match target {
                 MirrorTarget::Value(target) => target,
+                MirrorTarget::Secret(target) => {
+                    match claimed.get(&target.var) {
+                        Some(first) if first == name => {
+                            return Err(MirrorConfigError::RepeatedTarget {
+                                name: name.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        Some(first) => {
+                            return Err(MirrorConfigError::DuplicateTarget {
+                                name: name.clone(),
+                                first: first.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        None => {
+                            claimed.insert(target.var.clone(), name.clone());
+                        }
+                    }
+                    continue;
+                }
                 MirrorTarget::Transit(target) => {
                     let at = (
                         target.endpoint.clone(),
@@ -461,6 +506,13 @@ fn resolve_one(
                 name: name.clone(),
                 address: source.to_string(),
             });
+        }
+        if let SecretAddress::GcpSecretManager(r) = var.address() {
+            // A secret holds one value and records no origin beside it, so
+            // there is no `source` key to reserve and no path to share.
+            let secret = r.secret().clone();
+            targets.push(MirrorTarget::Secret(SecretTarget { var, secret }));
+            continue;
         }
         let Some((path, key)) = var.address().path_key() else {
             unreachable!("a writable kind is addressed by path and key")
@@ -673,6 +725,7 @@ where
         unreachable!("a fetch answers for every var it was asked about")
     };
     let wanted = Fingerprint::of(value.expose_secret());
+    let wanted_exact = Fingerprint::exact(value.expose_secret());
     if wanted.is_empty() {
         return Err(MirrorError::EmptySource);
     }
@@ -694,6 +747,11 @@ where
         let outcome = match (target, &key) {
             (MirrorTarget::Value(target), _) => {
                 sync_target(resolve, target, value, &wanted, &reference, apply)
+                    .instrument(span.clone())
+                    .await
+            }
+            (MirrorTarget::Secret(target), _) => {
+                sync_secret(resolve, target, value, &wanted_exact, apply)
                     .instrument(span.clone())
                     .await
             }
@@ -768,6 +826,69 @@ where
         .map_err(MirrorError::TargetWrite)?;
 
     verify_readback(&backend, target, wanted).await?;
+
+    Ok(match outcome {
+        MirrorOutcome::WouldCreate => MirrorOutcome::Created,
+        _ => MirrorOutcome::Updated,
+    })
+}
+
+/// Add a version to a Secret Manager secret when its latest one differs.
+///
+/// Compared byte for byte, since the store keeps bytes as given and a PEM
+/// key's final newline is part of it. The secret is never created: one that
+/// is missing is an error even in a dry run, because applying could not fix it.
+async fn sync_secret<F>(
+    resolve: &F,
+    target: &SecretTarget,
+    value: &SecretString,
+    wanted: &Fingerprint,
+    apply: bool,
+) -> Result<MirrorOutcome, MirrorError>
+where
+    F: Fn(&str) -> Result<Backend, BackendError>,
+{
+    let backend = resolve(target.var.backend()).map_err(|cause| MirrorError::TargetBackend {
+        name: target.var.backend().to_string(),
+        cause: Box::new(cause),
+    })?;
+    let held = backend
+        .get_secret(&target.secret)
+        .await
+        .map_err(MirrorError::TargetRead)?;
+    let outcome = match &held {
+        Some(held) if Fingerprint::exact(held.expose_secret()) == *wanted => return Ok(MirrorOutcome::UpToDate),
+        Some(_) => MirrorOutcome::WouldUpdate,
+        None => {
+            // Nothing readable is either a secret with no version yet or no
+            // secret at all, and only the first is something to fill.
+            if !backend
+                .secret_exists(&target.secret)
+                .await
+                .map_err(MirrorError::TargetRead)?
+            {
+                return Err(MirrorError::TargetRead(backend.missing_container(&target.secret)));
+            }
+            MirrorOutcome::WouldCreate
+        }
+    };
+    if !apply {
+        return Ok(outcome);
+    }
+
+    backend
+        .add_secret_version(&target.secret, value)
+        .await
+        .map_err(MirrorError::TargetWrite)?;
+
+    let back = backend
+        .get_secret(&target.secret)
+        .await
+        .map_err(MirrorError::TargetRead)?;
+    match back {
+        Some(back) if Fingerprint::exact(back.expose_secret()) == *wanted => {}
+        _ => return Err(MirrorError::ReadbackMismatch),
+    }
 
     Ok(match outcome {
         MirrorOutcome::WouldCreate => MirrorOutcome::Created,
