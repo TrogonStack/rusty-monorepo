@@ -103,7 +103,7 @@ case.
 Nothing is forwarded. `cursor-agent` has no way to take exporter settings, so
 `trg` rebuilds spans from its output as it does without the flag.
 
-### `fx`
+### `trogonai-agent`
 
 Nothing is forwarded. `trogonai-agent` exports no OpenTelemetry of its own, so
 `trg` rebuilds spans from its `stream-json` output as it does without the flag.

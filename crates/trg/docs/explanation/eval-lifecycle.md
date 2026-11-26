@@ -277,7 +277,7 @@ index, CLI workflow, and several policy defaults.
 | Docs layout aliases | Primary tree under `iteration-N/` | Canonical `runs/run-NNN/` plus symlink mirror and `alias-index.json` |
 | Skill integrity | Not in spec | SHA-256 before/after tamper detection |
 | CI metadata | Not in spec | Auto-captured from GitHub Actions env vars |
-| Runners | Spec-agnostic | Concrete adapters for cursor-agent, claude, codex, fx |
+| Runners | Spec-agnostic | Concrete adapters for cursor-agent, claude, codex, trogonai-agent |
 | Transcript format | Spec-defined | Raw runner stream-json (runner-specific) |
 | Eval ID type | String | String or non-negative integer |
 | Assertion IDs | Spec-defined | `<eval-case-id>:g<index>` pattern |

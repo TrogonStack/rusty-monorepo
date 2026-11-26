@@ -340,10 +340,10 @@ fn isolated_takes_the_login_out_of_a_settings_file_and_leaves_the_settings() {
     );
 }
 
-/// fx keeps the providers a run signs in through in the same `settings.json` as the
+/// trogonai-agent keeps the providers a run signs in through in the same `settings.json` as the
 /// permissions, hooks, and saved models an isolated run holds still.
 #[test]
-fn an_isolated_fx_run_keeps_only_the_route_it_signs_in_through() {
+fn an_isolated_trogonai_agent_run_keeps_only_the_route_it_signs_in_through() {
     let temp = tempdir().unwrap();
     let host_config_home = temp.path().join(".trogonai-agent");
     std::fs::create_dir_all(&host_config_home).unwrap();
@@ -357,7 +357,14 @@ fn an_isolated_fx_run_keeps_only_the_route_it_signs_in_through() {
     host.insert("HOME".to_string(), temp.path().to_string_lossy().into_owned());
 
     let run_dir = temp.path().join("run-001");
-    let env = RunEnvironment::prepare_from(Runner::Fx, &run_dir, EnvironmentPolicy::Isolated, None, &host).unwrap();
+    let env = RunEnvironment::prepare_from(
+        Runner::TrogonaiAgent,
+        &run_dir,
+        EnvironmentPolicy::Isolated,
+        None,
+        &host,
+    )
+    .unwrap();
 
     let config_home = PathBuf::from(env.vars.get("TROGONAI_AGENT_HOME").unwrap());
     assert!(config_home.starts_with(&run_dir));
@@ -375,7 +382,7 @@ fn an_isolated_fx_run_keeps_only_the_route_it_signs_in_through() {
 /// A provider the operator declared reads its key from a variable of the operator's
 /// choosing, so no fixed list could have admitted it.
 #[test]
-fn a_scrubbed_fx_run_sees_the_key_its_declared_provider_names_and_nothing_else() {
+fn a_scrubbed_trogonai_agent_run_sees_the_key_its_declared_provider_names_and_nothing_else() {
     let temp = tempdir().unwrap();
     let host_config_home = temp.path().join("profile");
     std::fs::create_dir_all(&host_config_home).unwrap();
@@ -393,7 +400,14 @@ fn a_scrubbed_fx_run_sees_the_key_its_declared_provider_names_and_nothing_else()
     host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
     host.insert("UNRELATED_KEY".to_string(), "other".to_string());
 
-    let env = RunEnvironment::prepare_from(Runner::Fx, temp.path(), EnvironmentPolicy::Scrubbed, None, &host).unwrap();
+    let env = RunEnvironment::prepare_from(
+        Runner::TrogonaiAgent,
+        temp.path(),
+        EnvironmentPolicy::Scrubbed,
+        None,
+        &host,
+    )
+    .unwrap();
 
     assert_eq!(env.vars.get("GATEWAY_KEY").map(String::as_str), Some("secret"));
     assert!(!env.vars.contains_key("UNRELATED_KEY"));
@@ -408,7 +422,7 @@ fn a_declared_key_is_handed_to_the_harness_but_never_recorded() {
     std::fs::create_dir_all(&host_config_home).unwrap();
     std::fs::write(
         host_config_home.join("settings.json"),
-        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"FX_LOGIN"}}}}"#,
+        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"TROGONAI_AGENT_LOGIN"}}}}"#,
     )
     .unwrap();
 
@@ -417,30 +431,31 @@ fn a_declared_key_is_handed_to_the_harness_but_never_recorded() {
         "TROGONAI_AGENT_HOME".to_string(),
         host_config_home.to_string_lossy().into_owned(),
     );
-    host.insert("FX_LOGIN".to_string(), "secret".to_string());
+    host.insert("TROGONAI_AGENT_LOGIN".to_string(), "secret".to_string());
 
     for policy in [
         EnvironmentPolicy::Scrubbed,
         EnvironmentPolicy::Isolated,
         EnvironmentPolicy::Inherited,
     ] {
-        let env = RunEnvironment::prepare_from(Runner::Fx, &temp.path().join("run"), policy, None, &host).unwrap();
+        let env =
+            RunEnvironment::prepare_from(Runner::TrogonaiAgent, &temp.path().join("run"), policy, None, &host).unwrap();
         assert_eq!(
-            env.vars.get("FX_LOGIN").map(String::as_str),
+            env.vars.get("TROGONAI_AGENT_LOGIN").map(String::as_str),
             Some("secret"),
             "{policy:?}"
         );
-        assert!(!env.recorded_vars().contains_key("FX_LOGIN"), "{policy:?}");
+        assert!(!env.recorded_vars().contains_key("TROGONAI_AGENT_LOGIN"), "{policy:?}");
     }
 }
 
 /// The AI Gateway key is linked from inside the run's config home, so a relative host
 /// config home has to be made absolute first or the link resolves to nothing.
 #[test]
-fn an_isolated_fx_run_links_the_key_of_a_relative_host_config_home() {
+fn an_isolated_trogonai_agent_run_links_the_key_of_a_relative_host_config_home() {
     let test_name =
-        "agentskills::runner::environment::tests::an_isolated_fx_run_links_the_key_of_a_relative_host_config_home";
-    let child_marker = "TRG_TEST_RELATIVE_FX_HOME_CHILD";
+        "agentskills::runner::environment::tests::an_isolated_trogonai_agent_run_links_the_key_of_a_relative_host_config_home";
+    let child_marker = "TRG_TEST_RELATIVE_TROGONAI_AGENT_HOME_CHILD";
     if std::env::var_os(child_marker).is_none() {
         let temp = tempdir().unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
@@ -452,7 +467,7 @@ fn an_isolated_fx_run_links_the_key_of_a_relative_host_config_home() {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
-        assert!(stdout.contains("relative fx home verified"), "{stdout}");
+        assert!(stdout.contains("relative trogonai-agent home verified"), "{stdout}");
         return;
     }
 
@@ -462,7 +477,7 @@ fn an_isolated_fx_run_links_the_key_of_a_relative_host_config_home() {
     host.insert("TROGONAI_AGENT_HOME".to_string(), "profile".to_string());
 
     let env = RunEnvironment::prepare_from(
-        Runner::Fx,
+        Runner::TrogonaiAgent,
         Path::new("run-001"),
         EnvironmentPolicy::Isolated,
         None,
@@ -474,11 +489,11 @@ fn an_isolated_fx_run_links_the_key_of_a_relative_host_config_home() {
         std::fs::read_to_string(config_home.join("api-key")).unwrap(),
         "gateway-key"
     );
-    println!("relative fx home verified");
+    println!("relative trogonai-agent home verified");
 }
 
 #[test]
-fn an_fx_profile_that_cannot_be_read_admits_no_declared_key() {
+fn a_trogonai_agent_profile_that_cannot_be_read_admits_no_declared_key() {
     let temp = tempdir().unwrap();
     let host_config_home = temp.path().join("profile");
     std::fs::create_dir_all(&host_config_home).unwrap();
@@ -491,7 +506,14 @@ fn an_fx_profile_that_cannot_be_read_admits_no_declared_key() {
     );
     host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
 
-    let env = RunEnvironment::prepare_from(Runner::Fx, temp.path(), EnvironmentPolicy::Scrubbed, None, &host).unwrap();
+    let env = RunEnvironment::prepare_from(
+        Runner::TrogonaiAgent,
+        temp.path(),
+        EnvironmentPolicy::Scrubbed,
+        None,
+        &host,
+    )
+    .unwrap();
 
     assert!(!env.vars.contains_key("GATEWAY_KEY"));
 }
@@ -523,7 +545,7 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
         ),
         (Runner::CursorAgent, "/host/home/.cursor", ConfigHomeBasis::HomeRelative),
         (
-            Runner::Fx,
+            Runner::TrogonaiAgent,
             "/host/home/.trogonai-agent",
             ConfigHomeBasis::Variable {
                 name: "TROGONAI_AGENT_HOME".to_string(),
@@ -545,7 +567,12 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
 
 #[test]
 fn isolated_records_the_run_config_home_and_not_the_hosts() {
-    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx] {
+    for runner in [
+        Runner::ClaudeCode,
+        Runner::Codex,
+        Runner::CursorAgent,
+        Runner::TrogonaiAgent,
+    ] {
         let temp = tempdir().unwrap();
         let run_dir = temp.path().join("run-001");
         let env = RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();

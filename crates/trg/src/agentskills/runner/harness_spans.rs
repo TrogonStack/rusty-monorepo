@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use super::stream::{StampedLine, StdoutTimeline};
 use super::Runner;
-use crate::agentskills::transcript::FX_RESULT_TYPE;
+use crate::agentskills::transcript::TROGONAI_AGENT_RESULT_TYPE;
 use crate::agentskills::transcript_metrics::{ObservedToolCall, TranscriptMetrics, TurnCount};
 use crate::telemetry::semconv::generated::attributes::{
     gen_ai_operation_name, GEN_AI_OPERATION_NAME, GEN_AI_PROVIDER_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_RESPONSE_ID,
@@ -257,7 +257,7 @@ pub fn reconstruct(
 
 /// Turn and tool counts for a run, read from its captured stdout. A turn's input
 /// counts only for a harness that reports usage per model call: codex reports one total
-/// per turn spanning every model call in it, fx one total for the whole run, and
+/// per turn spanning every model call in it, trogonai-agent one total for the whole run, and
 /// cursor-agent none at all.
 pub fn measure(runner: Runner, stdout: &[u8]) -> TranscriptMetrics {
     let reconstruction = reconstruct_for_measuring(runner, stdout);
@@ -270,7 +270,7 @@ pub fn measure(runner: Runner, stdout: &[u8]) -> TranscriptMetrics {
                 StepKind::Tool { .. } => None,
             })
             .max(),
-        Runner::Codex | Runner::CursorAgent | Runner::Fx => None,
+        Runner::Codex | Runner::CursorAgent | Runner::TrogonaiAgent => None,
     };
     let calls = reconstruction.steps.iter().filter_map(|step| match &step.kind {
         StepKind::Tool {
@@ -345,7 +345,7 @@ impl LiveReconstruction {
             Runner::ClaudeCode => claude_code(&mut self.builder, event, at, self.content),
             Runner::Codex => codex(&mut self.builder, &mut self.codex_turn, event, at, self.content),
             Runner::CursorAgent => cursor_agent(&mut self.builder, &mut self.cursor_model, event, at, self.content),
-            Runner::Fx => fx(&mut self.builder, event, at, self.content),
+            Runner::TrogonaiAgent => trogonai_agent(&mut self.builder, event, at, self.content),
         }
     }
 
@@ -809,20 +809,20 @@ fn cursor_agent(
 /// Opens the model call that is under way whenever no tool is: before the first tool,
 /// between tools, and after the last. It started when the line before this one arrived,
 /// which for the first call is when the harness started.
-fn fx_model_call_under_way(builder: &mut StepBuilder) {
+fn trogonai_agent_model_call_under_way(builder: &mut StepBuilder) {
     if builder.turn.is_none() && builder.tools.is_empty() {
         let start = builder.last_at;
         builder.open_turn(None, start);
     }
 }
 
-/// fx streams no event per model call, only the model's text and the tools it ran, so, as
+/// trogonai-agent streams no event per model call, only the model's text and the tools it ran, so, as
 /// for codex, every stretch of the run with no tool running is taken as one model call:
-/// the one that chose the next tools, or the one that ended the run. fx names the model
+/// the one that chose the next tools, or the one that ended the run. trogonai-agent names the model
 /// once, in its `result`, so the run's summary carries it and no single call does. Its
 /// usage is one total for the run, so no call carries a usage of its own either.
-fn fx(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolContent) {
-    if event_type(event) == Some(FX_RESULT_TYPE) {
+fn trogonai_agent(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolContent) {
+    if event_type(event) == Some(TROGONAI_AGENT_RESULT_TYPE) {
         builder.end_turn(at, None);
         builder.summary.response_model = string_at(event, "model")
             .filter(|model| !model.is_empty())
@@ -831,7 +831,7 @@ fn fx(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolCon
         match event_type(observation) {
             Some("tool_started") => {
                 if let Some(call_id) = string_at(observation, "call_id") {
-                    fx_model_call_under_way(builder);
+                    trogonai_agent_model_call_under_way(builder);
                     builder.end_turn(at, None);
                     let name = string_at(observation, "tool_name").unwrap_or_else(|| "unknown".to_string());
                     builder.open_tool(call_id, name, content.render(observation.get("arguments_json")), at);
@@ -868,7 +868,7 @@ fn fx(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolCon
             // sign that a model call is under way.
             Some("text_chunk") if string_at(observation, "origin").as_deref() != Some("assistant") => {}
             Some(_) => {
-                fx_model_call_under_way(builder);
+                trogonai_agent_model_call_under_way(builder);
                 builder.extend_turn(at);
             }
         }

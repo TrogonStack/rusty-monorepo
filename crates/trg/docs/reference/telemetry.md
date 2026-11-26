@@ -274,12 +274,12 @@ Its children:
 - the harness span below
 
 The harness span is a `CLIENT` span named `invoke_agent {agent}`, where the
-agent is `claude-code`, `codex`, `cursor-agent`, or `fx`.
+agent is `claude-code`, `codex`, `cursor-agent`, or `trogonai-agent`.
 
 | Attribute | Value |
 | --------- | ----- |
 | `gen_ai.operation.name` | `invoke_agent` |
-| `gen_ai.provider.name` | `anthropic`, `openai`, `cursor`, or `fx` |
+| `gen_ai.provider.name` | `anthropic`, `openai`, `cursor`, or `trogonai` |
 | `gen_ai.agent.name` | The agent name |
 | `gen_ai.request.model` | The model `trg` asked the harness for. Absent when no model was requested |
 | `gen_ai.response.model` | The model the harness reported |

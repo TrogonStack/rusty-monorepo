@@ -20,7 +20,7 @@ before keeping it.
 ## Prerequisites
 
 - A skill directory containing `SKILL.md`
-- An agent runner CLI (`claude-code`, `codex`, `cursor-agent`, or `fx`) for live runs
+- An agent runner CLI (`claude-code`, `codex`, `cursor-agent`, or `trogonai-agent`) for live runs
 
 ## 1. Scaffold
 

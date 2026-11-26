@@ -15,17 +15,17 @@ use crate::agentskills::evals::EvalError;
 use crate::agentskills::outputs::{cleanup_runner_temp_files, persist_final_markdown};
 use crate::agentskills::redact::redact_command_args;
 use crate::agentskills::report::PermissionGrant;
-use crate::agentskills::transcript::{fx_result_names_error, FX_RESULT_TYPE};
+use crate::agentskills::transcript::{trogonai_agent_result_names_error, TROGONAI_AGENT_RESULT_TYPE};
 
 pub fn check_available() -> Result<(), EvalError> {
     check_runner_version(PROGRAM, INSTALL_HINT)
 }
 
-/// Translate a grant into the `--permission-mode` value fx accepts.
+/// Translate a grant into the `--permission-mode` value trogonai-agent accepts.
 ///
 /// `auto` runs writes inside the workspace without asking and asks about anything it
 /// cannot resolve as safe; with no terminal to ask, `ask` denies those and hands the model
-/// the refusal, which is the closest fx comes to codex's `workspace-write`. `yolo` (fx's
+/// the refusal, which is the closest trogonai-agent comes to codex's `workspace-write`. `yolo` (trogonai-agent's
 /// full access) applies no permission rule at all.
 fn permission_mode(grant: PermissionGrant) -> &'static str {
     match grant {
@@ -40,12 +40,12 @@ fn permission_mode(grant: PermissionGrant) -> &'static str {
 ///
 /// The prompt follows `--`, so a prompt that happens to begin with a dash reaches the model
 /// as text instead of being refused as an unknown flag. The workspace is the working
-/// directory the command starts in; fx takes no flag naming it.
+/// directory the command starts in; trogonai-agent takes no flag naming it.
 pub(crate) fn build_args(model: Option<&str>, permission: PermissionGrant, prompt: &str) -> Vec<OsString> {
-    let sandbox_flag = Runner::Fx
+    let sandbox_flag = Runner::TrogonaiAgent
         .support(HarnessControl::SandboxLevels)
         .flag()
-        .expect("the capability matrix declares fx takes its sandbox level as a flag");
+        .expect("the capability matrix declares trogonai-agent takes its sandbox level as a flag");
     let mut args = vec![
         OsString::from("ask"),
         OsString::from("--output-format"),
@@ -64,7 +64,7 @@ pub(crate) fn build_args(model: Option<&str>, permission: PermissionGrant, promp
 }
 
 pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
-    let prepared = prepare_workspace(request, Runner::Fx)?;
+    let prepared = prepare_workspace(request, Runner::TrogonaiAgent)?;
 
     let args = build_args(request.runner_model, request.permission, &prepared.prompt);
 
@@ -86,12 +86,12 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
 
     prepared.environment.apply(&mut command);
 
-    let invocation = AgentInvocation::begin(Runner::Fx, request.runner_model);
+    let invocation = AgentInvocation::begin(Runner::TrogonaiAgent, request.runner_model);
     let captured = invocation.capture(&mut command, timeout_duration(request.timeout_secs), request.caps)?;
     let outcome = in_step("parse outcome", || {
         if let Some(cap) = captured.cap_reached {
             return Ok(budget_exhausted_outcome(
-                Runner::Fx,
+                Runner::TrogonaiAgent,
                 cap,
                 captured.duration_ms,
                 captured.exit_code,
@@ -99,7 +99,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         }
         if captured.timed_out {
             let timeout_ms = request.timeout_secs.unwrap_or(0).saturating_mul(1000);
-            return Ok(timeout_outcome(Runner::Fx, timeout_ms, captured.exit_code));
+            return Ok(timeout_outcome(Runner::TrogonaiAgent, timeout_ms, captured.exit_code));
         }
         Ok(parse_outcome(
             &captured.stdout,
@@ -113,7 +113,7 @@ pub fn run(request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         request.runner_model,
         HarnessTraces::exported(prepared.environment.harness_exports_traces()),
     );
-    persist_runner_io(Runner::Fx, request, &captured)?;
+    persist_runner_io(Runner::TrogonaiAgent, request, &captured)?;
 
     in_step("write outcome", || {
         if matches!(outcome.status, RunStatus::Completed) {
@@ -137,10 +137,10 @@ fn write_timing(request: &EvalRunRequest, outcome: &EvalRunOutcome) -> Result<()
     write_timing_file(&request.run_dir().join("timing.json"), outcome).map_err(RunnerError::from)
 }
 
-/// Read the run from the `result` object fx writes as its last line.
+/// Read the run from the `result` object trogonai-agent writes as its last line.
 ///
-/// fx reports no duration of its own, so the wall time trg measured stands in for it. A run
-/// failed when fx exited nonzero or its result names an `error`: fx writes the result line
+/// trogonai-agent reports no duration of its own, so the wall time trg measured stands in for it. A run
+/// failed when trogonai-agent exited nonzero or its result names an `error`: trogonai-agent writes the result line
 /// even for a run that never reached the model, such as a refused flag, so the line being
 /// present says nothing about success on its own.
 ///
@@ -149,7 +149,7 @@ fn write_timing(request: &EvalRunRequest, outcome: &EvalRunOutcome) -> Result<()
 /// fallback for a result that has no `final_output`.
 fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_code: Option<i32>) -> EvalRunOutcome {
     let Ok(text) = std::str::from_utf8(stdout) else {
-        return runner_failure_outcome(Runner::Fx, wall_ms, exit_code, String::new());
+        return runner_failure_outcome(Runner::TrogonaiAgent, wall_ms, exit_code, String::new());
     };
 
     // The result is the last line, so the stream is read from its end.
@@ -159,10 +159,10 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_code: Option<i32>) -> EvalRun
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| value.get("type").and_then(|v| v.as_str()) == Some(FX_RESULT_TYPE));
+        .find(|value| value.get("type").and_then(|v| v.as_str()) == Some(TROGONAI_AGENT_RESULT_TYPE));
 
     let Some(result) = result else {
-        return runner_failure_outcome(Runner::Fx, wall_ms, exit_code, String::new());
+        return runner_failure_outcome(Runner::TrogonaiAgent, wall_ms, exit_code, String::new());
     };
 
     let final_text = ["final_output", "output"]
@@ -171,18 +171,24 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_code: Option<i32>) -> EvalRun
         .unwrap_or_default()
         .to_string();
 
-    let failed = exit_code != Some(0) || fx_result_names_error(&result);
+    let failed = exit_code != Some(0) || trogonai_agent_result_names_error(&result);
     if failed {
-        return runner_failure_outcome(Runner::Fx, wall_ms, exit_code, final_text);
+        return runner_failure_outcome(Runner::TrogonaiAgent, wall_ms, exit_code, final_text);
     }
 
     let usage = result.get("usage").map(without_unreported_counts);
-    let tokens = HarnessTokenUsage::read(usage.as_ref(), Runner::Fx, USAGE_FIELDS);
+    let tokens = HarnessTokenUsage::read(usage.as_ref(), Runner::TrogonaiAgent, USAGE_FIELDS);
 
-    completed_outcome(wall_ms, exit_code, tokens, Runner::Fx.pricing().price(None), final_text)
+    completed_outcome(
+        wall_ms,
+        exit_code,
+        tokens,
+        Runner::TrogonaiAgent.pricing().price(None),
+        final_text,
+    )
 }
 
-/// fx writes a count the provider never reported as `null` rather than leaving it out:
+/// trogonai-agent writes a count the provider never reported as `null` rather than leaving it out:
 /// its own record keeps a missing count apart from a zero, and `null` is how it says the
 /// provider was silent. That is the absent count trg already has a reading for, not a
 /// garbled one, so it is dropped before the block is read. Any other value that is not a
@@ -196,5 +202,5 @@ fn without_unreported_counts(usage: &serde_json::Value) -> serde_json::Value {
 }
 
 #[cfg(test)]
-#[path = "fx_tests.rs"]
+#[path = "trogonai_agent_tests.rs"]
 mod tests;

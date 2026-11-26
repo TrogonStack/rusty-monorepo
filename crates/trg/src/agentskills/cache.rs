@@ -313,7 +313,7 @@ fn runner_program(runner: Runner) -> &'static str {
         Runner::Codex => "codex",
         Runner::ClaudeCode => "claude",
         Runner::CursorAgent => "cursor-agent",
-        Runner::Fx => "trogonai-agent",
+        Runner::TrogonaiAgent => "trogonai-agent",
     }
 }
 

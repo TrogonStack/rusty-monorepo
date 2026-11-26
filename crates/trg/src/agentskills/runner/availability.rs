@@ -33,8 +33,8 @@ impl RunnerUnavailable {
             Runner::CursorAgent => {
                 "install Cursor Agent CLI and ensure `cursor-agent` is on PATH (see docs/how-to/troubleshooting.md#runner-setup)"
             }
-            Runner::Fx => {
-                "install the fx agent and ensure `trogonai-agent` is on PATH (see docs/how-to/troubleshooting.md#runner-setup)"
+            Runner::TrogonaiAgent => {
+                "install `trogonai-agent` and ensure it is on PATH (see docs/how-to/troubleshooting.md#runner-setup)"
             }
         }
     }
@@ -46,7 +46,7 @@ impl Runner {
             Self::CursorAgent => "cursor-agent",
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
-            Self::Fx => "fx",
+            Self::TrogonaiAgent => "trogonai-agent",
         }
     }
 }

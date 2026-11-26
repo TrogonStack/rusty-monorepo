@@ -20,7 +20,7 @@ use crate::telemetry::ContentCapture;
 mod constants;
 
 pub use constants::RUN_HOME_DIR_NAME;
-use constants::{CLOUD_CREDENTIAL_PREFIXES, FX_SETTINGS_FILE, NETWORK_VARS, PROCESS_VARS};
+use constants::{CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, PROCESS_VARS, TROGONAI_AGENT_SETTINGS_FILE};
 
 /// Where a harness keeps the per-user state that changes what its agent does: installed
 /// skills, global instruction files, MCP servers, permission settings, and history.
@@ -179,7 +179,7 @@ impl Runner {
                 dir_name: ".codex",
             },
             Self::CursorAgent => HarnessConfigHome::HomeRelative { dir_name: ".cursor" },
-            Self::Fx => HarnessConfigHome::Redirectable {
+            Self::TrogonaiAgent => HarnessConfigHome::Redirectable {
                 var: "TROGONAI_AGENT_HOME",
                 dir_name: ".trogonai-agent",
             },
@@ -210,9 +210,9 @@ impl Runner {
                 "OPENAI_BASE_URL",
             ],
             Self::CursorAgent => &["CURSOR_API_KEY"],
-            // The keys fx's built-in routes read. A provider the operator declared names its
+            // The keys trogonai-agent's built-in routes read. A provider the operator declared names its
             // own variable, which `declared_credential_vars` adds.
-            Self::Fx => &[
+            Self::TrogonaiAgent => &[
                 "ANTHROPIC_API_KEY",
                 "OPENROUTER_API_KEY",
                 "OPENCODE_API_KEY",
@@ -226,19 +226,19 @@ impl Runner {
     /// The credential variables the host's own harness settings name, beyond the fixed
     /// list in `credential_vars`.
     ///
-    /// fx lets an operator declare a model provider whose key lives in any variable they
+    /// trogonai-agent lets an operator declare a model provider whose key lives in any variable they
     /// choose (`providers.<id>.auth.env` in its profile `settings.json`), so no fixed list
     /// can name it. Only a variable a declared provider names is admitted, which is the
-    /// variable fx would read for that provider anyway; the rest of the environment stays
+    /// variable trogonai-agent would read for that provider anyway; the rest of the environment stays
     /// cleared. A settings file that cannot be read admits nothing, so the run fails to
     /// authenticate rather than starting with a guess.
     fn declared_credential_vars(self, host: &BTreeMap<String, String>) -> Vec<String> {
         match self {
-            Self::Fx => {
+            Self::TrogonaiAgent => {
                 let Some(settings) = self
                     .config_home()
                     .resolve_on_host(host)
-                    .and_then(|home| std::fs::read_to_string(home.join(FX_SETTINGS_FILE)).ok())
+                    .and_then(|home| std::fs::read_to_string(home.join(TROGONAI_AGENT_SETTINGS_FILE)).ok())
                     .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
                 else {
                     return Vec::new();
@@ -266,7 +266,7 @@ impl Runner {
     fn credential_locator_var(self) -> Option<&'static str> {
         match self {
             Self::ClaudeCode => Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
-            Self::Codex | Self::CursorAgent | Self::Fx => None,
+            Self::Codex | Self::CursorAgent | Self::TrogonaiAgent => None,
         }
     }
 
@@ -281,14 +281,14 @@ impl Runner {
                 file: "cli-config.json",
                 keep: &["authInfo"],
             }],
-            // fx keeps its providers beside its permissions, hooks, MCP servers, and saved
+            // trogonai-agent keeps its providers beside its permissions, hooks, MCP servers, and saved
             // models in one `settings.json`. `providers` and `provider` are the route a run
             // signs in through, so they are the members kept; the saved model is not, so a run
             // names its model with `--runner-model`. `api-key` is the AI Gateway key `setup`
             // saves, a file holding nothing else.
-            Self::Fx => &[
+            Self::TrogonaiAgent => &[
                 AuthEntry::Reduced {
-                    file: FX_SETTINGS_FILE,
+                    file: TROGONAI_AGENT_SETTINGS_FILE,
                     keep: &["providers", "provider"],
                 },
                 AuthEntry::Whole("api-key"),

@@ -28,6 +28,6 @@ pub const NETWORK_VARS: &[&str] = &[
 /// hosted on a cloud provider rather than at its vendor's own endpoint.
 pub const CLOUD_CREDENTIAL_PREFIXES: &[&str] = &["AWS_", "GOOGLE_", "GCLOUD_", "AZURE_"];
 
-/// The profile settings file fx reads from its config home. It declares the providers a
+/// The profile settings file trogonai-agent reads from its config home. It declares the providers a
 /// run signs in through, beside everything an isolated run holds still.
-pub const FX_SETTINGS_FILE: &str = "settings.json";
+pub const TROGONAI_AGENT_SETTINGS_FILE: &str = "settings.json";

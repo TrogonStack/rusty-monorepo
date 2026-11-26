@@ -1,7 +1,7 @@
 use super::super::prompt::{SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
-/// The `type` fx gives the object that ends a `stream-json` run. Every line before it is an
+/// The `type` trogonai-agent gives the object that ends a `stream-json` run. Every line before it is an
 /// event envelope, which carries no top-level `type` of its own.
-pub const FX_RESULT_TYPE: &str = "result";
+pub const TROGONAI_AGENT_RESULT_TYPE: &str = "result";
 
 pub const NORMALIZED_TRANSCRIPT_FILE: &str = "events.json";
 

@@ -15,7 +15,7 @@ fn a_finished_run_reports_its_last_message_and_its_tokens() {
     assert_eq!(outcome.final_text, "The file says hello.");
     assert_eq!(
         outcome.duration_ms, 4321,
-        "fx reports no duration, so trg's wall time stands"
+        "trogonai-agent reports no duration, so trg's wall time stands"
     );
     assert_eq!(outcome.tokens.input_tokens(), Some(200));
     assert_eq!(outcome.tokens.output_tokens(), Some(40));
@@ -24,7 +24,11 @@ fn a_finished_run_reports_its_last_message_and_its_tokens() {
         outcome.tokens.cached_tokens(),
         Some(CacheTokens::parse(Some(80), None).unwrap())
     );
-    assert_eq!(outcome.cost.and_then(|cost| cost.usd()), None, "fx publishes no price");
+    assert_eq!(
+        outcome.cost.and_then(|cost| cost.usd()),
+        None,
+        "trogonai-agent publishes no price"
+    );
 }
 
 #[test]
@@ -44,7 +48,7 @@ fn a_count_the_provider_never_reported_is_absent_rather_than_unreadable() {
     assert_eq!(outcome.tokens.output_tokens(), None);
     assert!(
         outcome.tokens.unreadable().is_empty(),
-        "null is how fx says the provider was silent, not a garbled count"
+        "null is how trogonai-agent says the provider was silent, not a garbled count"
     );
 }
 
@@ -98,7 +102,7 @@ fn each_grant_becomes_its_own_permission_mode() {
     assert_eq!(mode_after_flag(PermissionGrant::WorkspaceWrite), OsString::from("auto"));
     assert_eq!(mode_after_flag(PermissionGrant::Unrestricted), OsString::from("yolo"));
     assert_eq!(
-        Runner::Fx.effective_permission_grant(PermissionGrant::WorkspaceWrite),
+        Runner::TrogonaiAgent.effective_permission_grant(PermissionGrant::WorkspaceWrite),
         PermissionGrant::WorkspaceWrite
     );
 }
