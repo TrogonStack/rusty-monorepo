@@ -1,9 +1,10 @@
+use std::path::Path;
+
 use tracing::Instrument;
 
 use trg::cli::Cli;
 use trg::commands::ai::AiCommands;
 use trg::commands::exec::{ExecCommands, PreparedLaunch};
-use trg::commands::git::{GitCommands, SshCommands};
 use trg::commands::mcp::{report_startup_failure, McpCommands, McpContext};
 use trg::commands::Commands;
 use trg::config;
@@ -37,9 +38,9 @@ enum WireError {
 /// load. So the commands that only touch stored credentials stop before the
 /// fetch: an unreachable backend takes the proxy down without also taking down
 /// the command that recovers from it.
-async fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
+async fn wire_mcp(config_path: &Path, command: &McpCommands) -> Result<McpContext, Box<WireError>> {
     let server_name = command.server_name().to_string();
-    let pending = config::load_mcp(&server_name).map_err(WireError::from)?;
+    let pending = config::load_mcp(config_path, &server_name).map_err(WireError::from)?;
     let registry = Registry::new(pending.secrets.clone());
 
     let backend = registry
@@ -69,16 +70,16 @@ async fn wire_mcp(command: &McpCommands) -> Result<McpContext, Box<WireError>> {
 /// `trg doctor` reads the config for the backends alone, since a config that
 /// declares one before declaring anything that uses it is still a config this
 /// command can answer about.
-fn wire_secrets() -> Result<Registry, Box<WireError>> {
-    let section = config::load_secrets().map_err(WireError::from)?;
+fn wire_secrets(config_path: &Path) -> Result<Registry, Box<WireError>> {
+    let section = config::load_secrets(config_path).map_err(WireError::from)?;
     Ok(Registry::new(section))
 }
 
 /// Resolve one `[exec.<name>]` entry, the same two-step shape as `wire_mcp`:
 /// the config is parsed and the entry located before a secrets backend needs
 /// to be reachable.
-async fn wire_exec(name: &str) -> Result<config::LoadedExec, Box<WireError>> {
-    let pending = config::load_exec(name).map_err(WireError::from)?;
+async fn wire_exec(config_path: &Path, name: &str) -> Result<config::LoadedExec, Box<WireError>> {
+    let pending = config::load_exec(config_path, name).map_err(WireError::from)?;
     let registry = Registry::new(pending.secrets.clone());
     let fetched = vars::fetch(&registry, &pending.secret_vars())
         .await
@@ -111,6 +112,7 @@ fn runtime_for(command: &Commands) -> tokio::runtime::Builder {
 /// rather than `trg`'s, and replaces itself with the real `ssh-keygen` for
 /// every mode but signing before any runtime or telemetry starts.
 fn signing_program(
+    config_path: &Path,
     args: &[std::ffi::OsString],
     command_identity: trg::telemetry::CommandIdentity,
 ) -> std::process::ExitCode {
@@ -125,7 +127,9 @@ fn signing_program(
                 .expect("a tokio runtime");
             let status = runtime.block_on(async {
                 let telemetry = trg::telemetry::init(command_identity);
-                let status = trg::git::ssh::run(request).instrument(telemetry.root_span()).await;
+                let status = trg::git::ssh::run(config_path, request)
+                    .instrument(telemetry.root_span())
+                    .await;
                 telemetry.shutdown(ExitCode::from_success(status == 0));
                 status
             });
@@ -137,14 +141,9 @@ fn signing_program(
 
 fn main() -> std::process::ExitCode {
     let (cli, command_identity) = Cli::parse_with_command_identity();
-    let cli = match cli.command {
-        Commands::Git {
-            command: GitCommands::Ssh {
-                command: SshCommands::Sign(sign),
-            },
-        } => return signing_program(&sign.args, command_identity),
-        command => Cli { command },
-    };
+    if let Some(args) = cli.ssh_signing_args() {
+        return signing_program(&cli.config_path(), args, command_identity);
+    }
     let runtime = runtime_for(&cli.command).enable_all().build().expect("a tokio runtime");
     let code = runtime.block_on(run(cli, command_identity));
     // A blocking task still parked on I/O, such as an OAuth callback listener,
@@ -161,6 +160,7 @@ fn main() -> std::process::ExitCode {
     )
 )]
 async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> ExitCode {
+    let config_path = &cli.config_path();
     let telemetry = trg::telemetry::init(command_identity);
     let root_span = telemetry.root_span();
 
@@ -171,18 +171,18 @@ async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> Exi
             Commands::Ai { command } => match command {
                 AiCommands::Skills { command } => Outcome::Exit(command.handle(&fs)),
             },
-            Commands::Mcp { command } => Outcome::Exit(match wire_mcp(&command).await {
+            Commands::Mcp { command } => Outcome::Exit(match wire_mcp(config_path, &command).await {
                 Ok(ctx) => command.handle(&ctx).await,
                 Err(e) => report_startup_failure(&command, &e).await,
             }),
-            Commands::Secret { command } => Outcome::Exit(match wire_secrets() {
+            Commands::Secret { command } => Outcome::Exit(match wire_secrets(config_path) {
                 Ok(registry) => command.handle(&registry).await,
                 Err(e) => {
                     eprintln!("{e}");
                     ExitCode::Failed
                 }
             }),
-            Commands::Doctor(args) => Outcome::Exit(match wire_secrets() {
+            Commands::Doctor(args) => Outcome::Exit(match wire_secrets(config_path) {
                 Ok(registry) => trg::commands::doctor::run(&registry, &args).await,
                 Err(e) => {
                     eprintln!("{e}");
@@ -191,14 +191,14 @@ async fn run(cli: Cli, command_identity: trg::telemetry::CommandIdentity) -> Exi
             }),
             Commands::Git { .. } => unreachable!("git signing is answered in `main` with ssh-keygen's exit statuses"),
             Commands::Exec { command } => match command {
-                ExecCommands::Run(args) => match wire_exec(&args.name).await {
+                ExecCommands::Run(args) => match wire_exec(config_path, &args.name).await {
                     Ok(loaded) => Outcome::Exec(trg::commands::exec::run(loaded, &args)),
                     Err(e) => {
                         eprintln!("{e}");
                         Outcome::Exit(ExitCode::Failed)
                     }
                 },
-                ExecCommands::List(args) => Outcome::Exit(trg::commands::exec::list(&args)),
+                ExecCommands::List(args) => Outcome::Exit(trg::commands::exec::list(config_path, &args)),
             },
         }
     }

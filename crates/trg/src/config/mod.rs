@@ -259,6 +259,8 @@ pub struct ResolvedMcpServer {
     pub http_headers: HashMap<HeaderName, SecretString>,
 }
 
+/// The config file read when neither `--config` nor `TRG_CONFIG` names one:
+/// `config.toml` in [`trg_config_dir`].
 pub fn trg_config_path() -> PathBuf {
     trg_config_dir().join("config.toml")
 }
@@ -390,12 +392,12 @@ fn sorted_distinct(vars: impl Iterator<Item = SecretRead>) -> Vec<SecretRead> {
     out
 }
 
-pub fn load_mcp(selected_name: &str) -> Result<PendingMcp, ConfigError> {
-    traced_load(|| load_mcp_at(&trg_config_path(), selected_name))
+pub fn load_mcp(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigError> {
+    traced_load(|| load_mcp_at(path, selected_name))
 }
 
-pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
-    traced_load(|| load_exec_at(&trg_config_path(), name))
+pub fn load_exec(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
+    traced_load(|| load_exec_at(path, name))
 }
 
 /// Every `[exec.<name>]` name declared in the config, sorted.
@@ -405,8 +407,8 @@ pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
 /// nothing to launch, and listing a config that declares nothing yet is not
 /// that — it is the ordinary state of a config nobody has written an entry
 /// into.
-pub fn list_exec_names() -> Result<Vec<String>, ConfigError> {
-    traced_load(|| list_exec_names_at(&trg_config_path()))
+pub fn list_exec_names(path: &Path) -> Result<Vec<String>, ConfigError> {
+    traced_load(|| list_exec_names_at(path))
 }
 
 fn list_exec_names_at(path: &Path) -> Result<Vec<String>, ConfigError> {
@@ -423,8 +425,8 @@ fn list_exec_names_at(path: &Path) -> Result<Vec<String>, ConfigError> {
 /// answer for a command that is about to talk to an MCP server and the wrong
 /// one for a command that only inspects a backend. Declaring a backend before
 /// declaring anything that uses it is an ordinary order to do things in.
-pub fn load_secrets() -> Result<SecretsSection, ConfigError> {
-    traced_load(|| load_secrets_at(&trg_config_path()))
+pub fn load_secrets(path: &Path) -> Result<SecretsSection, ConfigError> {
+    traced_load(|| load_secrets_at(path))
 }
 
 fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
@@ -438,8 +440,8 @@ fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
 }
 
 /// The `[git.ssh.signers]` tables, against the declared backends.
-pub fn load_signers() -> Result<(Signers, SecretsSection), ConfigError> {
-    traced_load(|| load_signers_at(&trg_config_path()))
+pub fn load_signers(path: &Path) -> Result<(Signers, SecretsSection), ConfigError> {
+    traced_load(|| load_signers_at(path))
 }
 
 fn load_signers_at(path: &Path) -> Result<(Signers, SecretsSection), ConfigError> {
