@@ -9,12 +9,21 @@ time.
 
 `trg` resolves the config path in this order:
 
-1. `$XDG_CONFIG_HOME/trg/config.toml`
-2. `$HOME/.config/trg/config.toml`
-3. `/.config/trg/config.toml`
+1. `--config <PATH>`, accepted by every command
+2. `$TRG_CONFIG`
+3. `$XDG_CONFIG_HOME/trg/config.toml`
+4. `$HOME/.config/trg/config.toml`
+5. `/.config/trg/config.toml`
+
+The flag wins over the environment variable, and the environment variable wins
+over the default location. A set but empty `TRG_CONFIG` still names a path, so
+it is an error rather than a way back to the default; unset it instead.
 
 The file is read on demand. If it is missing, commands that require it fail
-with a clear `config file not found at <path>` error.
+with a clear `config file not found at <path>` error. That holds for a path
+chosen with `--config` or `TRG_CONFIG` too: a path that does not exist is an
+error, and `trg` never falls back to the default location, since that would
+read a different file from the one you named.
 
 ## File layout
 

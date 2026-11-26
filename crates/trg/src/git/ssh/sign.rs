@@ -140,8 +140,8 @@ impl SshSigner {
         Self { signers, registry }
     }
 
-    pub fn load() -> Result<Self, ConfigError> {
-        let (signers, secrets) = config::load_signers()?;
+    pub fn load(config_path: &Path) -> Result<Self, ConfigError> {
+        let (signers, secrets) = config::load_signers(config_path)?;
         Ok(Self::new(signers, Registry::new(secrets)))
     }
 
@@ -436,10 +436,10 @@ pub fn pass_through(args: &[OsString]) -> u8 {
 /// Sign one request and report the way the signing program does.
 ///
 /// Returns the process status to exit with.
-pub async fn run(request: Result<SignRequest, RequestError>) -> u8 {
+pub async fn run(config_path: &Path, request: Result<SignRequest, RequestError>) -> u8 {
     let result = async {
         let request = request?;
-        let signer = SshSigner::load()?;
+        let signer = SshSigner::load(config_path)?;
         signer.sign(&request).await
     }
     .await;

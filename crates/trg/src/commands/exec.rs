@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 
 use clap::{Args, Subcommand};
 use serde::Serialize;
@@ -87,8 +88,8 @@ pub struct ExecListArgs {
 /// `trg exec list` — a plain config read, no secrets backend involved: the
 /// names are declared in the clear, only the values behind an entry's `env`
 /// are ever resolved through one.
-pub fn list(args: &ExecListArgs) -> ExitCode {
-    match config::list_exec_names() {
+pub fn list(config_path: &Path, args: &ExecListArgs) -> ExitCode {
+    match config::list_exec_names(config_path) {
         Ok(names) => report_names(&names, args.output_format),
         Err(e) => report_failure(&e.to_string(), args.output_format),
     }
