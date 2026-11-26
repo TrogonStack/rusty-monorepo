@@ -410,6 +410,69 @@ fn cursor_agent_turns_are_runs_of_assistant_events_named_by_the_init_model() {
     );
 }
 
+/// Shaped after a captured `trogonai-agent ask --output-format stream-json` run, with a
+/// second tool started alongside the first.
+const FX: &[u8] = br#"{"protocol_version":1,"seq":1,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"assistant","text":"Reading"}}
+{"protocol_version":1,"seq":2,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"assistant","text":" the file."}}
+{"protocol_version":1,"seq":3,"session_id":"s","turn_id":1,"event":{"type":"tool_started","call_id":"call_1","tool_name":"read_file","arguments_json":"{\"path\": \"notes.txt\"}"}}
+{"protocol_version":1,"seq":4,"session_id":"s","turn_id":1,"event":{"type":"tool_started","call_id":"call_2","tool_name":"run_command","arguments_json":"{\"command\": \"ls\"}"}}
+{"protocol_version":1,"seq":5,"session_id":"s","turn_id":1,"event":{"type":"tool_output","call_id":"call_1","text":"Working: read_file"}}
+{"protocol_version":1,"seq":6,"session_id":"s","turn_id":1,"event":{"type":"tool_finished","call_id":"call_1","outcome":"completed","result":"hello"}}
+{"protocol_version":1,"seq":7,"session_id":"s","turn_id":1,"event":{"type":"tool_finished","call_id":"call_2","outcome":"failed","result":"exit 1"}}
+{"protocol_version":1,"seq":8,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"assistant","text":"Done."}}
+{"type":"result","output":"Reading the file.\n\nDone.","final_output":"Done.","exit_code":0,"model":"gpt-6.2-astra","resolved_provider":null,"session_id":"","steps":1,"tool_calls":[{"name":"read_file","status":"ok"},{"name":"run_command","status":"error"}],"usage":{"input_tokens":200,"output_tokens":40,"cache_read_tokens":80}}
+"#;
+
+#[test]
+fn fx_tools_span_from_started_to_finished_and_a_failed_outcome_is_a_tool_error() {
+    let rebuilt = rebuild(Runner::Fx, FX, None, ContentCapture::NoContent);
+
+    let read = tool(&rebuilt, "read_file");
+    assert_eq!((read.start, read.end), (at(3), at(6)));
+    assert_eq!(read.failure, None);
+
+    let command = tool(&rebuilt, "run_command");
+    assert_eq!((command.start, command.end), (at(4), at(7)));
+    assert_eq!(command.failure, Some(StepFailure::ToolError));
+}
+
+#[test]
+fn fx_model_calls_are_the_stretches_with_no_tool_running() {
+    let rebuilt = rebuild(Runner::Fx, FX, Some("gpt-6.2-astra"), ContentCapture::NoContent);
+    let calls = chats(&rebuilt);
+    assert_eq!(calls.len(), 2, "one call chose both tools, one ended the run");
+    assert_eq!((calls[0].start, calls[0].end), (at(0), at(3)));
+    assert_eq!((calls[1].start, calls[1].end), (at(7), at(9)));
+    assert_eq!(calls[0].name(), "chat gpt-6.2-astra");
+    assert_eq!(rebuilt.summary.response_model.as_deref(), Some("gpt-6.2-astra"));
+    assert_eq!(rebuilt.summary.duration_ms, None, "fx reports no duration of its own");
+}
+
+#[test]
+fn an_fx_run_that_never_reached_the_model_rebuilds_no_model_call() {
+    let stdout = br#"{"output":"","final_output":"","exit_code":2,"model":"","resolved_provider":null,"session_id":"","steps":0,"tool_calls":[],"usage":{"input_tokens":null,"output_tokens":null},"error":"InvalidAskArgs","type":"result"}
+"#;
+    let rebuilt = rebuild(Runner::Fx, stdout, None, ContentCapture::NoContent);
+    assert!(rebuilt.steps.is_empty());
+    assert_eq!(rebuilt.summary.response_model, None);
+}
+
+#[test]
+fn an_fx_tool_still_running_when_the_clock_ran_out_is_marked_timed_out() {
+    let stdout = br#"{"protocol_version":1,"seq":1,"session_id":"s","turn_id":1,"event":{"type":"tool_started","call_id":"call_1","tool_name":"run_command","arguments_json":null}}
+"#;
+    let rebuilt = rebuild_ending(
+        Runner::Fx,
+        stdout,
+        None,
+        ContentCapture::NoContent,
+        StreamEnd::TimedOut(at(5)),
+    );
+    let command = tool(&rebuilt, "run_command");
+    assert_eq!(command.end, at(5));
+    assert_eq!(command.failure, Some(StepFailure::TimedOut));
+}
+
 fn exported(steps: &[HarnessStep]) -> (Vec<SpanData>, SpanData) {
     let exporter = InMemorySpanExporter::default();
     let provider = SdkTracerProvider::builder()
@@ -559,11 +622,14 @@ fn a_tool_called_again_with_the_same_arguments_counts_as_repeated() {
 }
 
 #[test]
-fn codex_and_cursor_report_no_per_turn_input() {
+fn codex_cursor_and_fx_report_no_per_turn_input() {
     assert_eq!(measure(Runner::Codex, CODEX).peak_turn_input_tokens, None);
     assert_eq!(measure(Runner::Codex, CODEX).tool_calls.get(), 3);
     assert_eq!(measure(Runner::CursorAgent, CURSOR).peak_turn_input_tokens, None);
     assert_eq!(measure(Runner::CursorAgent, CURSOR).tool_calls.get(), 2);
+    assert_eq!(measure(Runner::Fx, FX).peak_turn_input_tokens, None);
+    assert_eq!(measure(Runner::Fx, FX).tool_calls.get(), 2);
+    assert_eq!(measure(Runner::Fx, FX).turns.get(), 2);
 }
 
 #[test]
@@ -572,6 +638,7 @@ fn a_live_count_agrees_with_the_rebuilt_steps() {
         (Runner::ClaudeCode, CLAUDE),
         (Runner::Codex, CODEX),
         (Runner::CursorAgent, CURSOR),
+        (Runner::Fx, FX),
     ] {
         let rebuilt = rebuild(runner, stdout, None, ContentCapture::NoContent);
         let mut live = LiveReconstruction::counting(runner, at(0));

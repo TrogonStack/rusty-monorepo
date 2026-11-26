@@ -752,3 +752,101 @@ fn a_staging_record_written_without_a_skill_name_is_still_read() {
         }
     );
 }
+
+/// Shaped after a captured `trogonai-agent ask --output-format stream-json` run.
+const FX_STREAM: &[u8] = br#"{"protocol_version":1,"seq":1,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"assistant","text":"Reading "}}
+{"protocol_version":1,"seq":2,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"operational","text":"Retrying the provider"}}
+{"protocol_version":1,"seq":3,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"assistant","text":"the skill."}}
+{"protocol_version":1,"seq":4,"session_id":"s","turn_id":1,"event":{"type":"tool_started","call_id":"call_1","tool_name":"read_file","arguments_json":"{\"path\": \".skill/SKILL.md\"}"}}
+{"protocol_version":1,"seq":5,"session_id":"s","turn_id":1,"event":{"type":"tool_finished","call_id":"call_1","outcome":"completed","result":"..."}}
+{"protocol_version":1,"seq":6,"session_id":"s","turn_id":1,"event":{"type":"tool_started","call_id":"call_2","tool_name":"run_command","arguments_json":"{\"command\": \"cat ~/.trogonai-agent/settings.json\"}"}}
+{"protocol_version":1,"seq":7,"session_id":"s","turn_id":1,"event":{"type":"tool_finished","call_id":"call_2","outcome":"failed","result":"denied"}}
+{"protocol_version":1,"seq":8,"session_id":"s","turn_id":1,"event":{"type":"text_chunk","origin":"assistant","text":"Done."}}
+{"type":"result","output":"Reading the skill.\n\nDone.","final_output":"Done.","exit_code":0,"model":"gpt-6.2-astra","resolved_provider":null,"session_id":"","steps":1,"tool_calls":[],"usage":{"input_tokens":200,"output_tokens":40}}
+"#;
+
+#[test]
+fn fx_text_chunks_between_tool_calls_are_one_assistant_message() {
+    let transcript = TranscriptFormat::FxStreamJson.normalize(
+        "trogonai-agent",
+        &redact_transcript_bytes(FX_STREAM),
+        &WorkspaceBoundary::unknown(),
+    );
+
+    let texts: Vec<&str> = transcript
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            TranscriptEvent::AssistantText { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        vec!["Reading the skill.", "Done."],
+        "operational notices are the runtime's, not the model's"
+    );
+    assert_eq!(transcript.events.last(), Some(&TranscriptEvent::Terminal { ok: true }));
+}
+
+#[test]
+fn fx_tool_arguments_are_read_out_of_their_json_string() {
+    let workspace = tempfile::tempdir().unwrap();
+    let transcript = TranscriptFormat::FxStreamJson.normalize(
+        "trogonai-agent",
+        &redact_transcript_bytes(FX_STREAM),
+        &WorkspaceBoundary::at(workspace.path()),
+    );
+
+    assert_eq!(
+        transcript
+            .tool_sequence()
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read_file", "run_command"]
+    );
+    assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    assert_eq!(
+        transcript
+            .workspace_escapes
+            .iter()
+            .map(|escape| escape.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["~/.trogonai-agent/settings.json"],
+        "a shell command that names the host profile left the workspace"
+    );
+}
+
+#[test]
+fn an_fx_result_that_names_an_error_is_a_terminal_that_did_not_succeed() {
+    let stdout = br#"{"type":"result","output":"","final_output":"","exit_code":2,"model":"","steps":0,"tool_calls":[],"usage":{"input_tokens":null,"output_tokens":null},"error":"InvalidAskArgs"}
+"#;
+    let transcript = TranscriptFormat::FxStreamJson.normalize(
+        "trogonai-agent",
+        &redact_transcript_bytes(stdout),
+        &WorkspaceBoundary::unknown(),
+    );
+    assert_eq!(transcript.events, vec![TranscriptEvent::Terminal { ok: false }]);
+}
+
+/// fx names the skill its own `skill` tool loads in a `name` argument.
+#[test]
+fn an_fx_skill_tool_call_naming_the_staged_skill_is_native_engagement() {
+    let load = |skill: &str| {
+        let stdout = format!(
+            r#"{{"protocol_version":1,"seq":1,"session_id":"s","turn_id":1,"event":{{"type":"tool_started","call_id":"call_1","tool_name":"skill","arguments_json":"{{\"name\": \"{skill}\"}}"}}}}
+"#
+        );
+        TranscriptFormat::FxStreamJson
+            .normalize(
+                "trogonai-agent",
+                &redact_transcript_bytes(stdout.as_bytes()),
+                &WorkspaceBoundary::unknown(),
+            )
+            .staged_at(staged(SkillDisclosure::Unannounced))
+            .skill_engagement()
+    };
+    assert_eq!(load("demo-skill"), SkillEngagement::NativeSkillTool);
+    assert_eq!(load("some-installed-skill"), SkillEngagement::NotEngaged);
+}

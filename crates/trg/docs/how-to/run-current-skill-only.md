@@ -6,7 +6,7 @@ loaded, without spending tokens on baseline or old-skill scenarios.
 ## Prerequisites
 
 - A valid skill directory with `SKILL.md` and `evals/evals.json`
-- (Optional) An agent runner installed (`cursor-agent`, `claude`, or `codex`)
+- (Optional) An agent runner installed (`cursor-agent`, `claude`, `codex`, or `trogonai-agent` for `fx`)
 
 ## 1. Scaffold the report bundle
 

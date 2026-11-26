@@ -26,7 +26,7 @@ by the command's own output rather than by what you choose not to look at.
 - A skill directory whose eval suite passes [`eval verify --mode
   strict`](../reference/ai-skills-eval.md#eval-verify) and declares at least
   one `test`-split case
-- An agent runner CLI (`claude-code`, `codex`, or `cursor-agent`)
+- An agent runner CLI (`claude-code`, `codex`, `cursor-agent`, or `fx`)
 
 ## 1. Trust the graders before trusting a round
 

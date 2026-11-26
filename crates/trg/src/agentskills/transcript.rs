@@ -1,5 +1,5 @@
 mod constants;
-pub use constants::NORMALIZED_TRANSCRIPT_FILE;
+pub use constants::{FX_RESULT_TYPE, NORMALIZED_TRANSCRIPT_FILE};
 use constants::{INTERPRETER_FLAGS, STAGED_SKILL_DIRS};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -456,12 +456,15 @@ pub enum TranscriptFormat {
     AnthropicStreamJson,
     CursorStreamJson,
     CodexThreadJsonl,
+    FxStreamJson,
 }
 
 impl TranscriptFormat {
     pub fn tool_visibility(self) -> ToolVisibility {
         match self {
-            Self::AnthropicStreamJson | Self::CursorStreamJson | Self::CodexThreadJsonl => ToolVisibility::Observed,
+            Self::AnthropicStreamJson | Self::CursorStreamJson | Self::CodexThreadJsonl | Self::FxStreamJson => {
+                ToolVisibility::Observed
+            }
         }
     }
 
@@ -478,12 +481,19 @@ impl TranscriptFormat {
             Self::AnthropicStreamJson => normalize_stream_json(runner, stdout, boundary),
             Self::CursorStreamJson => normalize_cursor_stream_json(runner, stdout, boundary),
             Self::CodexThreadJsonl => normalize_codex_thread_jsonl(runner, stdout, boundary),
+            Self::FxStreamJson => normalize_fx_stream_json(runner, stdout, boundary),
         }
     }
 }
 
 fn terminal_ok_flag(value: &serde_json::Value) -> bool {
     !value.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// Whether an fx `result` names an `error`. fx writes the field as `null` on success, so
+/// its presence alone says nothing.
+pub fn fx_result_names_error(result: &serde_json::Value) -> bool {
+    result.get("error").is_some_and(|error| !error.is_null())
 }
 
 /// Accumulates normalized events and, in the same pass, the paths that left the
@@ -849,6 +859,66 @@ pub fn normalize_codex_thread_jsonl(
             _ => {}
         }
     }
+
+    builder.finish(runner, ToolVisibility::Observed)
+}
+
+/// Normalizes the fx `stream-json` event family.
+///
+/// Every line but the last is an envelope whose `event` carries the observation; the last
+/// is the run's `result`, which has a top-level `type` instead. fx streams assistant text
+/// in chunks as the model produces it, so consecutive chunks are joined into one
+/// `assistant_text` event, and a tool call or the end of the run is what separates two of
+/// them. A tool's arguments arrive as a JSON document in a string, which is parsed before
+/// its paths and commands are read.
+pub fn normalize_fx_stream_json(
+    runner: &str,
+    stdout: &RedactedTranscript,
+    boundary: &WorkspaceBoundary,
+) -> NormalizedTranscript {
+    const PATH_KEYS: &[&str] = &["path", "old_path", "new_path", "source", "destination"];
+    const COMMAND_KEYS: &[&str] = &["command"];
+    // `name` is the skill fx's own `skill` tool was asked to load.
+    const TEXT_KEYS: &[&str] = &["pattern", "query", "name"];
+
+    let mut builder = TranscriptBuilder::new(boundary);
+    let mut text = String::new();
+
+    for value in ndjson_values(stdout) {
+        if value.get("type").and_then(|v| v.as_str()) == Some(FX_RESULT_TYPE) {
+            builder.assistant_text(&std::mem::take(&mut text));
+            let ok = value.get("exit_code").and_then(|v| v.as_i64()) == Some(0) && !fx_result_names_error(&value);
+            builder.terminal(ok);
+            continue;
+        }
+        let Some(event) = value.get("event") else { continue };
+        match event.get("type").and_then(|v| v.as_str()) {
+            Some("text_chunk") => {
+                if event.get("origin").and_then(|v| v.as_str()) != Some("assistant") {
+                    continue;
+                }
+                if let Some(chunk) = event.get("text").and_then(|v| v.as_str()) {
+                    text.push_str(chunk);
+                }
+            }
+            Some("tool_started") => {
+                builder.assistant_text(&std::mem::take(&mut text));
+                let Some(tool) = event.get("tool_name").and_then(|v| v.as_str()).and_then(ToolName::new) else {
+                    continue;
+                };
+                let arguments = event
+                    .get("arguments_json")
+                    .and_then(|v| v.as_str())
+                    .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok());
+                builder.tool_call(
+                    tool,
+                    ToolArguments::from_object(arguments.as_ref(), PATH_KEYS, COMMAND_KEYS, TEXT_KEYS),
+                );
+            }
+            _ => {}
+        }
+    }
+    builder.assistant_text(&text);
 
     builder.finish(runner, ToolVisibility::Observed)
 }

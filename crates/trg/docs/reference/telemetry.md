@@ -274,19 +274,19 @@ Its children:
 - the harness span below
 
 The harness span is a `CLIENT` span named `invoke_agent {agent}`, where the
-agent is `claude-code`, `codex`, or `cursor-agent`.
+agent is `claude-code`, `codex`, `cursor-agent`, or `fx`.
 
 | Attribute | Value |
 | --------- | ----- |
 | `gen_ai.operation.name` | `invoke_agent` |
-| `gen_ai.provider.name` | `anthropic`, `openai`, or `cursor` |
+| `gen_ai.provider.name` | `anthropic`, `openai`, `cursor`, or `fx` |
 | `gen_ai.agent.name` | The agent name |
 | `gen_ai.request.model` | The model `trg` asked the harness for. Absent when no model was requested |
 | `gen_ai.response.model` | The model the harness reported |
 | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_write.input_tokens` | As reported by the harness |
 | `trg.eval.cost.usd` | As reported by the harness |
 | `trg.eval.harness.duration_ms`, `trg.eval.harness.api_duration_ms` | As reported by the harness |
-| `process.executable.name` | `claude`, `codex`, or `cursor-agent` |
+| `process.executable.name` | `claude`, `codex`, `cursor-agent`, or `trogonai-agent` |
 | `process.pid`, `process.exit.code` | The harness process |
 | `error.type` | `nonzero_exit`, `signaled`, `timeout`, `spawn_failed`, `io`, `invalid_output`, `unsupported_scenario`, `json`, or `harness_error` |
 
@@ -566,7 +566,7 @@ Attributes in the `trg.*` namespace.
 | `trg.eval.case.split` | string | `train`, `test`, or the case's split |
 | `trg.eval.scenario` | string | `with_skill`, `without_skill`, `old_skill` |
 | `trg.eval.model_config` | string | `--model-config` label |
-| `trg.eval.runner.kind` | string | `claude`, `codex`, `cursor-agent` |
+| `trg.eval.runner.kind` | string | `claude`, `codex`, `cursor-agent`, `trogonai-agent` |
 | `trg.eval.runner.version` | string | Harness version from the availability probe |
 | `trg.eval.runner.model` | string | Model the run resolved to |
 | `trg.eval.tool_grant` | string | Tool grant the run executed under |

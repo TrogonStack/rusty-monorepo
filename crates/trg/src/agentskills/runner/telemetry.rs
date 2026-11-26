@@ -151,13 +151,14 @@ impl CliProcessSpan {
 }
 
 impl Runner {
-    /// `gen_ai.provider.name` for the model behind this harness. cursor-agent routes to
-    /// several providers and names none on its stream, so it is reported as itself.
+    /// `gen_ai.provider.name` for the model behind this harness. cursor-agent and fx route
+    /// to several providers and name none on their streams, so each is reported as itself.
     pub fn gen_ai_provider(self) -> &'static str {
         match self {
             Self::ClaudeCode => gen_ai_provider_name::ANTHROPIC,
             Self::Codex => gen_ai_provider_name::OPENAI,
             Self::CursorAgent => "cursor",
+            Self::Fx => "fx",
         }
     }
 }

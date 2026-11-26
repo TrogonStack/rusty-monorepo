@@ -115,7 +115,7 @@ impl Runner {
         match self {
             Self::ClaudeCode => HarnessPassthrough::EnvVars,
             Self::Codex => HarnessPassthrough::CodexConfig,
-            Self::CursorAgent => HarnessPassthrough::Unsupported,
+            Self::CursorAgent | Self::Fx => HarnessPassthrough::Unsupported,
         }
     }
 }

@@ -16,6 +16,12 @@
 //! claude-code's `--max-turns` is the one cell its `--help` does not list: the flag is
 //! hidden there, and was read instead off a `claude -p` run on 2026-10-11 (version
 //! 2.1.283) that accepted it where an unknown option is refused outright.
+//!
+//! The fx column was read on 2026-11-25 off `trogonai-agent ask --help` together with the
+//! `ask` reference in the fx repository (`docs/reference/headless-output.md`), since
+//! `--help` lists neither `--output-format` nor `--permission-mode` nor the `--allow`
+//! rules. `--permission-mode` was checked the way `--max-turns` was: `ask` accepted `auto`
+//! and `yolo` and refused an unknown value with its usage error.
 
 use super::Runner;
 use ControlMechanism::{ConfigFile, EnvVar, Flag, GuardedFlag, Reported, Subcommand};
@@ -221,6 +227,28 @@ impl Runner {
             (Self::CursorAgent, HarnessControl::ConversationSeeding) => ControlSupport::Absent,
             (Self::CursorAgent, HarnessControl::RunScopedConfigHome) => ControlSupport::Absent,
             (Self::CursorAgent, HarnessControl::CostReporting) => ControlSupport::Absent,
+
+            // fx's `--allow` and `--deny` rules are matched against a permission category
+            // and a target, not against a list of tool names, and full access applies no
+            // rule at all, so a tool grant has nothing it could be translated into.
+            (Self::Fx, HarnessControl::ToolAllowlist) => ControlSupport::Offered(Flag("--allow")),
+            // fx caps the steps of a turn through this variable or `max_agent_steps` in
+            // settings, but an fx step is not one model call, so trg counts the turns itself.
+            (Self::Fx, HarnessControl::TurnCap) => ControlSupport::Offered(EnvVar("TROGONAI_AGENT_MAX_AGENT_STEPS")),
+            // `--system` replaces the system prompt fx assembles rather than appending to it.
+            (Self::Fx, HarnessControl::SystemPromptAppend) => ControlSupport::Absent,
+            // fx reads MCP servers from its settings and the workspace's own files; nothing
+            // on the `ask` command line names a server table.
+            (Self::Fx, HarnessControl::McpServers) => ControlSupport::Absent,
+            (Self::Fx, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("--permission-mode")),
+            (Self::Fx, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--resume")),
+            // `--resume` only reopens a session fx itself saved; nothing ingests an
+            // arbitrary transcript.
+            (Self::Fx, HarnessControl::ConversationSeeding) => ControlSupport::Absent,
+            (Self::Fx, HarnessControl::RunScopedConfigHome) => ControlSupport::Driven(EnvVar("TROGONAI_AGENT_HOME")),
+            // The result carries token counts only; what a provider charged stays in fx's
+            // own usage ledger.
+            (Self::Fx, HarnessControl::CostReporting) => ControlSupport::Absent,
         }
     }
 

@@ -1457,6 +1457,7 @@ fn env_json_names_the_config_home_for_every_harness() {
         (Runner::ClaudeCode, ".claude"),
         (Runner::Codex, ".codex"),
         (Runner::CursorAgent, ".cursor"),
+        (Runner::Fx, ".trogonai-agent"),
     ] {
         let temp = tempdir().unwrap();
         let run_dir = temp.path().join("run-001");
@@ -1488,7 +1489,7 @@ fn env_json_names_the_config_home_for_every_harness() {
 
 #[test]
 fn env_json_names_the_run_config_home_when_isolated() {
-    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx] {
         let temp = tempdir().unwrap();
         let run_dir = temp.path().join("run-001");
         let host = BTreeMap::from([

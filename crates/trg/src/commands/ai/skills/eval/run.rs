@@ -218,7 +218,7 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "N",
-        help = "Stop a run once it takes more than N model turns and record it as budget_exhausted. claude-code enforces this itself through --max-turns; codex and cursor-agent are killed when their stream shows the turn that went past the cap, and codex turns are inferred from the gaps between its tool calls"
+        help = "Stop a run once it takes more than N model turns and record it as budget_exhausted. claude-code enforces this itself through --max-turns; codex, cursor-agent, and fx are killed when their stream shows the turn that went past the cap, and codex and fx turns are inferred from the gaps between their tool calls"
     )]
     pub max_turns_per_run: Option<MaxTurns>,
 

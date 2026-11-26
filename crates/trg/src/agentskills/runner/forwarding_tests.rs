@@ -108,8 +108,8 @@ fn an_operator_chosen_exporter_is_left_alone() {
 }
 
 #[test]
-fn codex_and_cursor_take_no_variables() {
-    for runner in [Runner::Codex, Runner::CursorAgent] {
+fn codex_cursor_and_fx_take_no_variables() {
+    for runner in [Runner::Codex, Runner::CursorAgent, Runner::Fx] {
         let vars = TelemetryForwarding::On.harness_vars(
             runner,
             EnvironmentPolicy::Isolated,

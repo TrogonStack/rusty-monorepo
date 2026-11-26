@@ -340,6 +340,84 @@ fn isolated_takes_the_login_out_of_a_settings_file_and_leaves_the_settings() {
     );
 }
 
+/// fx keeps the providers a run signs in through in the same `settings.json` as the
+/// permissions, hooks, and saved models an isolated run holds still.
+#[test]
+fn an_isolated_fx_run_keeps_only_the_route_it_signs_in_through() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join(".trogonai-agent");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(
+        host_config_home.join("settings.json"),
+        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"GATEWAY_KEY"}}},"provider":"gateway","models":{"gateway":"operator-choice"},"permission":{"bash":"allow"}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert("HOME".to_string(), temp.path().to_string_lossy().into_owned());
+
+    let run_dir = temp.path().join("run-001");
+    let env = RunEnvironment::prepare_from(Runner::Fx, &run_dir, EnvironmentPolicy::Isolated, None, &host).unwrap();
+
+    let config_home = PathBuf::from(env.vars.get("TROGONAI_AGENT_HOME").unwrap());
+    assert!(config_home.starts_with(&run_dir));
+    let carried: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config_home.join("settings.json")).unwrap()).unwrap();
+
+    assert_eq!(carried["provider"], "gateway");
+    assert_eq!(carried["providers"]["gateway"]["auth"]["env"], "GATEWAY_KEY");
+    assert!(
+        carried.get("permission").is_none() && carried.get("models").is_none(),
+        "an isolated run must not be handed the operator's permissions or model choice"
+    );
+}
+
+/// A provider the operator declared reads its key from a variable of the operator's
+/// choosing, so no fixed list could have admitted it.
+#[test]
+fn a_scrubbed_fx_run_sees_the_key_its_declared_provider_names_and_nothing_else() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join("profile");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(
+        host_config_home.join("settings.json"),
+        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"GATEWAY_KEY"}},"local":{"protocol":"openai-chat-completions","base_url":"http://127.0.0.1:8080/v1","auth":{"type":"none"}}}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert(
+        "TROGONAI_AGENT_HOME".to_string(),
+        host_config_home.to_string_lossy().into_owned(),
+    );
+    host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
+    host.insert("UNRELATED_KEY".to_string(), "other".to_string());
+
+    let env = RunEnvironment::prepare_from(Runner::Fx, temp.path(), EnvironmentPolicy::Scrubbed, None, &host).unwrap();
+
+    assert_eq!(env.vars.get("GATEWAY_KEY").map(String::as_str), Some("secret"));
+    assert!(!env.vars.contains_key("UNRELATED_KEY"));
+}
+
+#[test]
+fn an_fx_profile_that_cannot_be_read_admits_no_declared_key() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join("profile");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(host_config_home.join("settings.json"), "not json").unwrap();
+
+    let mut host = host();
+    host.insert(
+        "TROGONAI_AGENT_HOME".to_string(),
+        host_config_home.to_string_lossy().into_owned(),
+    );
+    host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
+
+    let env = RunEnvironment::prepare_from(Runner::Fx, temp.path(), EnvironmentPolicy::Scrubbed, None, &host).unwrap();
+
+    assert!(!env.vars.contains_key("GATEWAY_KEY"));
+}
+
 #[test]
 fn cursor_agent_has_no_config_home_variable_to_redirect() {
     assert!(matches!(
@@ -366,6 +444,13 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
             },
         ),
         (Runner::CursorAgent, "/host/home/.cursor", ConfigHomeBasis::HomeRelative),
+        (
+            Runner::Fx,
+            "/host/home/.trogonai-agent",
+            ConfigHomeBasis::Variable {
+                name: "TROGONAI_AGENT_HOME".to_string(),
+            },
+        ),
     ] {
         let temp = tempdir().unwrap();
         let env =
@@ -382,7 +467,7 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
 
 #[test]
 fn isolated_records_the_run_config_home_and_not_the_hosts() {
-    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx] {
         let temp = tempdir().unwrap();
         let run_dir = temp.path().join("run-001");
         let env = RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();

@@ -9,7 +9,7 @@ use std::path::Path;
 
 #[test]
 fn every_runner_answers_every_control() {
-    let runners = [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent];
+    let runners = [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx];
     let mut count = 0;
     for runner in runners {
         for control in HarnessControl::ALL {
@@ -17,7 +17,7 @@ fn every_runner_answers_every_control() {
             count += 1;
         }
     }
-    assert_eq!(count, 27);
+    assert_eq!(count, 36);
 
     assert_eq!(
         Runner::ClaudeCode.support(HarnessControl::ToolAllowlist),
@@ -132,6 +132,40 @@ fn every_runner_answers_every_control() {
         Runner::CursorAgent.support(HarnessControl::CostReporting),
         ControlSupport::Absent
     );
+
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::ToolAllowlist),
+        ControlSupport::Offered(ControlMechanism::Flag("--allow"))
+    );
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::TurnCap),
+        ControlSupport::Offered(ControlMechanism::EnvVar("TROGONAI_AGENT_MAX_AGENT_STEPS"))
+    );
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::SystemPromptAppend),
+        ControlSupport::Absent
+    );
+    assert_eq!(Runner::Fx.support(HarnessControl::McpServers), ControlSupport::Absent);
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::SandboxLevels),
+        ControlSupport::Driven(ControlMechanism::Flag("--permission-mode"))
+    );
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::ConversationResume),
+        ControlSupport::Offered(ControlMechanism::Flag("--resume"))
+    );
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::ConversationSeeding),
+        ControlSupport::Absent
+    );
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::RunScopedConfigHome),
+        ControlSupport::Driven(ControlMechanism::EnvVar("TROGONAI_AGENT_HOME"))
+    );
+    assert_eq!(
+        Runner::Fx.support(HarnessControl::CostReporting),
+        ControlSupport::Absent
+    );
 }
 
 #[test]
@@ -162,10 +196,11 @@ fn every_driven_flag_is_carried_by_the_invocation_it_drives() {
                 PermissionGrant::Unrestricted,
                 "do the thing",
             ),
+            Runner::Fx => super::super::fx::build_args(None, PermissionGrant::Unrestricted, "do the thing"),
         }
     };
 
-    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx] {
         let argv = argv_for(runner);
         for control in HarnessControl::ALL {
             match runner.support(control) {
@@ -199,7 +234,7 @@ fn every_driven_flag_is_carried_by_the_invocation_it_drives() {
 
 #[test]
 fn the_matrix_and_config_home_agree() {
-    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx] {
         let support = runner.support(HarnessControl::RunScopedConfigHome);
         match runner.config_home() {
             HarnessConfigHome::Redirectable { var, .. } => {
@@ -214,7 +249,7 @@ fn the_matrix_and_config_home_agree() {
 
 #[test]
 fn the_matrix_and_pricing_agree() {
-    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx] {
         let reports_cost =
             runner.support(HarnessControl::CostReporting) == ControlSupport::Driven(ControlMechanism::Reported);
         let publishes = matches!(runner.pricing(), HarnessPricing::Publishes);
@@ -254,8 +289,9 @@ fn the_reference_table_matches_the_declaration() {
     assert_eq!(header_cells[1], "`claude-code`");
     assert_eq!(header_cells[2], "`codex`");
     assert_eq!(header_cells[3], "`cursor-agent`");
+    assert_eq!(header_cells[4], "`fx`");
 
-    let runners_in_column_order = [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent];
+    let runners_in_column_order = [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent, Runner::Fx];
 
     let data_rows = &table_lines[2..];
     assert_eq!(data_rows.len(), HarnessControl::ALL.len());
