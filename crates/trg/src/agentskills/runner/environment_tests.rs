@@ -435,6 +435,15 @@ fn isolated_absolutizes_a_relative_run_dir_before_recording_its_config_home() {
         .join(RUN_HOME_DIR_NAME)
         .join(Runner::Codex.config_home().dir_name());
     assert_eq!(recorded.path(), expected);
+    assert_eq!(
+        env.vars.get("CODEX_HOME").map(PathBuf::from),
+        Some(expected.clone()),
+        "the harness starts in its workspace, so the variable it reads must not be relative"
+    );
+    assert_eq!(
+        env.vars.get("HOME").map(PathBuf::from),
+        expected.parent().map(Path::to_path_buf)
+    );
     println!("relative config home verified");
 }
 

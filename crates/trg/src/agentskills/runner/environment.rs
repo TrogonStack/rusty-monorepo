@@ -375,7 +375,10 @@ impl RunEnvironment {
         let config_home = if matches!(policy, EnvironmentPolicy::Isolated) {
             let host_config_home = runner.config_home().resolve_on_host(host);
 
-            let home = run_dir.join(RUN_HOME_DIR_NAME);
+            // The harness starts in its workspace, not where trg was started, so a relative
+            // run directory would hand it a `HOME` and config home that resolve somewhere
+            // else entirely, or that a harness refuses outright.
+            let home = std::path::absolute(run_dir.join(RUN_HOME_DIR_NAME))?;
             std::fs::create_dir_all(&home)?;
             vars.insert("HOME".to_string(), path_string(&home));
 
