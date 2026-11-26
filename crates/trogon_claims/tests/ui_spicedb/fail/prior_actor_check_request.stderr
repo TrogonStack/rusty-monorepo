@@ -15,8 +15,8 @@ help: the following other types implement trait `AuthorizationSubject`
 note: required by a bound in `CheckRequest::new`
  --> src/check_request.rs
   |
+  | impl CheckRequest {
   |     pub fn new(
-  |            --- required by a bound in this associated function
 ...
   |         subject: &impl AuthorizationSubject,
   |                        ^^^^^^^^^^^^^^^^^^^^ required by this bound in `CheckRequest::new`
