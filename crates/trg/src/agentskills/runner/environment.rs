@@ -20,7 +20,9 @@ use crate::telemetry::ContentCapture;
 mod constants;
 
 pub use constants::RUN_HOME_DIR_NAME;
-use constants::{CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, PROCESS_VARS, TROGONAI_AGENT_SETTINGS_FILE};
+use constants::{
+    CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, OPENCODE_CONFIG_FILE, PROCESS_VARS, TROGONAI_AGENT_SETTINGS_FILE,
+};
 
 /// Where a harness keeps the per-user state that changes what its agent does: installed
 /// skills, global instruction files, MCP servers, permission settings, and history.
@@ -183,6 +185,10 @@ impl Runner {
                 var: "TROGONAI_AGENT_HOME",
                 dir_name: ".trogonai-agent",
             },
+            Self::OpenCode => HarnessConfigHome::Redirectable {
+                var: "OPENCODE_CONFIG_DIR",
+                dir_name: ".config/opencode",
+            },
         }
     }
 
@@ -220,6 +226,14 @@ impl Runner {
                 "VERCEL_OIDC_TOKEN",
                 "TROGONAI_AGENT_GATEWAY_BASE_URL",
             ],
+            // The keys opencode's built-in providers read. A provider the operator declared
+            // names its own variable, which `declared_credential_vars` adds.
+            Self::OpenCode => &[
+                "OPENCODE_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENROUTER_API_KEY",
+            ],
         }
     }
 
@@ -252,6 +266,14 @@ impl Runner {
                     .map(str::to_string)
                     .collect()
             }
+            // A declared provider's options read a variable through `{env:NAME}`, written
+            // anywhere in the config, so every such reference is admitted.
+            Self::OpenCode => self
+                .config_home()
+                .resolve_on_host(host)
+                .and_then(|home| std::fs::read_to_string(home.join(OPENCODE_CONFIG_FILE)).ok())
+                .map(|text| opencode_env_references(&text))
+                .unwrap_or_default(),
             Self::ClaudeCode | Self::Codex | Self::CursorAgent => Vec::new(),
         }
     }
@@ -266,7 +288,7 @@ impl Runner {
     fn credential_locator_var(self) -> Option<&'static str> {
         match self {
             Self::ClaudeCode => Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
-            Self::Codex | Self::CursorAgent | Self::TrogonaiAgent => None,
+            Self::Codex | Self::CursorAgent | Self::TrogonaiAgent | Self::OpenCode => None,
         }
     }
 
@@ -293,6 +315,14 @@ impl Runner {
                 },
                 AuthEntry::Whole("api-key"),
             ],
+            // opencode keeps its providers beside its permissions, agents, MCP servers and
+            // plugins in one `opencode.json`. `provider` is the route a run signs in through
+            // and `model` the default it names; keys `opencode auth` saves live in the data
+            // directory instead, so an isolated run reads its key from the environment.
+            Self::OpenCode => &[AuthEntry::Reduced {
+                file: OPENCODE_CONFIG_FILE,
+                keep: &["provider", "model"],
+            }],
         }
     }
 }
@@ -527,6 +557,18 @@ impl RunEnvironment {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
+}
+
+/// Every `NAME` an opencode config reads through `{env:NAME}`.
+fn opencode_env_references(config: &str) -> Vec<String> {
+    config
+        .split("{env:")
+        .skip(1)
+        .filter_map(|rest| rest.split_once('}'))
+        .map(|(name, _)| name.trim())
+        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .map(str::to_string)
+        .collect()
 }
 
 fn host_environment() -> BTreeMap<String, String> {

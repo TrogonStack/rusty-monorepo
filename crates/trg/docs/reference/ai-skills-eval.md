@@ -3159,17 +3159,17 @@ rather than replacing it, so anything the config home already declared stays
 live. Exclusivity therefore comes from owning the config home, which is why
 that cell is only honoured under `--environment isolated`.
 
-| Control | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` |
-| ------- | ------------- | ------- | -------------- | ---- |
-| tool allowlist | `--allowedTools` | no | no | `--allow` (harness only) |
-| turn cap | `--max-turns` | no | no | `TROGONAI_AGENT_MAX_AGENT_STEPS` (harness only) |
-| system prompt append | `--append-system-prompt` | no | no | no |
-| mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | `config.toml` in `$CODEX_HOME` | no | no |
-| sandbox levels | `--permission-mode` | `-s` | `--force` | `--permission-mode` |
-| conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) | `--resume` (harness only) |
-| conversation seeding | no | no | no | no |
-| run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no | `TROGONAI_AGENT_HOME` |
-| cost reporting | reported | no | no | no |
+| Control | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` | `opencode` |
+| ------- | ------------- | ------- | -------------- | ---- | -------- |
+| tool allowlist | `--allowedTools` | no | no | `--allow` (harness only) | no |
+| turn cap | `--max-turns` | no | no | `TROGONAI_AGENT_MAX_AGENT_STEPS` (harness only) | no |
+| system prompt append | `--append-system-prompt` | no | no | no | no |
+| mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | `config.toml` in `$CODEX_HOME` | no | no | no |
+| sandbox levels | `--permission-mode` | `-s` | `--force` | `--permission-mode` | `--auto` |
+| conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) | `--resume` (harness only) | `--session` (harness only) |
+| conversation seeding | no | no | no | no | no |
+| run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no | `TROGONAI_AGENT_HOME` | `OPENCODE_CONFIG_DIR` |
+| cost reporting | reported | no | no | no | no |
 
 `--max-turns` and trogonai-agent's `--permission-mode` are the driven flags a harness
 leaves out of its own `--help`: each harness accepts its flag and rejects an

@@ -477,6 +477,62 @@ fn a_trogonai_agent_operational_notice_is_no_model_call() {
     assert_eq!(chats(&rebuilt).len(), 1);
 }
 
+/// Shaped after a captured `opencode run --format json` run: a step that read a file, then
+/// the step that answered. The tool carries its own start and end in milliseconds.
+const OPENCODE: &[u8] = br#"{"type":"step_start","timestamp":1,"sessionID":"s","part":{"type":"step-start"}}
+{"type":"tool_use","timestamp":2,"sessionID":"s","part":{"type":"tool","id":"call_1","tool":"read","state":{"status":"completed","input":{"path":"notes.txt"},"output":"hello","time":{"start":1700000001500,"end":1700000002000}}}}
+{"type":"step_finish","timestamp":3,"sessionID":"s","part":{"type":"step-finish","reason":"tool-calls","cost":0,"tokens":{"input":3,"output":18,"reasoning":2,"cache":{"read":0,"write":9000}}}}
+{"type":"step_start","timestamp":4,"sessionID":"s","part":{"type":"step-start"}}
+{"type":"text","timestamp":5,"sessionID":"s","part":{"type":"text","text":"It says hello."}}
+{"type":"step_finish","timestamp":6,"sessionID":"s","part":{"type":"step-finish","reason":"stop","cost":0,"tokens":{"input":4,"output":9,"reasoning":0,"cache":{"read":9000,"write":30}}}}
+"#;
+
+#[test]
+fn every_opencode_step_is_one_model_call_with_its_own_usage() {
+    let rebuilt = rebuild(Runner::OpenCode, OPENCODE, None, ContentCapture::NoContent);
+    let calls = chats(&rebuilt);
+    assert_eq!(calls.len(), 2);
+    let first_tool_start = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_001_500);
+    assert_eq!(
+        (calls[0].start, calls[0].end),
+        (at(1), first_tool_start),
+        "a step's model call ends where its first tool starts"
+    );
+    assert_eq!((calls[1].start, calls[1].end), (at(4), at(6)));
+    let usages = chat_usages(&rebuilt);
+    assert_eq!(usages[0].output, Some(20), "reasoning is output the model generated");
+    assert_eq!(usages[1].cache_read, Some(9000));
+}
+
+#[test]
+fn an_opencode_tool_spans_the_times_opencode_reported_and_an_error_is_a_tool_error() {
+    let rebuilt = rebuild(Runner::OpenCode, OPENCODE, None, ContentCapture::NoContent);
+    let read = tool(&rebuilt, "read");
+    assert_eq!(
+        (read.start, read.end),
+        (
+            SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_001_500),
+            SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_002_000)
+        )
+    );
+    assert_eq!(read.failure, None);
+
+    let failed = br#"{"type":"step_start","part":{}}
+{"type":"tool_use","part":{"id":"call_9","tool":"shell","state":{"status":"error","input":{"command":"false"},"error":"boom"}}}
+"#;
+    let rebuilt = rebuild(Runner::OpenCode, failed, None, ContentCapture::NoContent);
+    assert_eq!(tool(&rebuilt, "shell").failure, Some(StepFailure::ToolError));
+}
+
+#[test]
+fn an_opencode_error_event_fails_the_open_model_call() {
+    let stdout = br#"{"type":"step_start","part":{}}
+{"type":"error","error":{"type":"provider.auth","message":"HTTP 401"}}
+"#;
+    let rebuilt = rebuild(Runner::OpenCode, stdout, None, ContentCapture::NoContent);
+    assert_eq!(chats(&rebuilt)[0].failure, Some(StepFailure::TurnFailed));
+}
+
 #[test]
 fn a_trogonai_agent_tool_still_running_when_the_clock_ran_out_is_marked_timed_out() {
     let stdout = br#"{"protocol_version":1,"seq":1,"session_id":"s","turn_id":1,"event":{"type":"tool_started","call_id":"call_1","tool_name":"run_command","arguments_json":null}}
@@ -642,7 +698,7 @@ fn a_tool_called_again_with_the_same_arguments_counts_as_repeated() {
 }
 
 #[test]
-fn codex_cursor_and_trogonai_agent_report_no_per_turn_input() {
+fn only_a_harness_reporting_usage_per_model_call_reports_per_turn_input() {
     assert_eq!(measure(Runner::Codex, CODEX).peak_turn_input_tokens, None);
     assert_eq!(measure(Runner::Codex, CODEX).tool_calls.get(), 3);
     assert_eq!(measure(Runner::CursorAgent, CURSOR).peak_turn_input_tokens, None);
@@ -653,6 +709,14 @@ fn codex_cursor_and_trogonai_agent_report_no_per_turn_input() {
     );
     assert_eq!(measure(Runner::TrogonaiAgent, TROGONAI_AGENT).tool_calls.get(), 2);
     assert_eq!(measure(Runner::TrogonaiAgent, TROGONAI_AGENT).turns.get(), 2);
+    let opencode = measure(Runner::OpenCode, OPENCODE);
+    assert_eq!(
+        opencode.peak_turn_input_tokens,
+        Some(9034),
+        "opencode reports usage per model call"
+    );
+    assert_eq!(opencode.tool_calls.get(), 1);
+    assert_eq!(opencode.turns.get(), 2);
 }
 
 #[test]
@@ -662,6 +726,7 @@ fn a_live_count_agrees_with_the_rebuilt_steps() {
         (Runner::Codex, CODEX),
         (Runner::CursorAgent, CURSOR),
         (Runner::TrogonaiAgent, TROGONAI_AGENT),
+        (Runner::OpenCode, OPENCODE),
     ] {
         let rebuilt = rebuild(runner, stdout, None, ContentCapture::NoContent);
         let mut live = LiveReconstruction::counting(runner, at(0));

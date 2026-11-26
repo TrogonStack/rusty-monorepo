@@ -850,3 +850,56 @@ fn a_trogonai_agent_skill_tool_call_naming_the_staged_skill_is_native_engagement
     assert_eq!(load("demo-skill"), SkillEngagement::NativeSkillTool);
     assert_eq!(load("some-installed-skill"), SkillEngagement::NotEngaged);
 }
+
+/// Shaped after a captured `opencode run --format json` run.
+const OPENCODE_STREAM: &[u8] = br#"{"type":"step_start","part":{"type":"step-start"}}
+{"type":"text","part":{"type":"text","text":"Reading the skill."}}
+{"type":"tool_use","part":{"id":"call_1","tool":"read","state":{"status":"completed","input":{"filePath":".skill/SKILL.md"},"output":"..."}}}
+{"type":"tool_use","part":{"id":"call_2","tool":"shell","state":{"status":"completed","input":{"command":"cat ~/.config/opencode/opencode.json"},"output":"..."}}}
+{"type":"step_finish","part":{"type":"step-finish","reason":"tool-calls","tokens":{"input":3,"output":10}}}
+{"type":"step_start","part":{"type":"step-start"}}
+{"type":"text","part":{"type":"text","text":"Done."}}
+{"type":"step_finish","part":{"type":"step-finish","reason":"stop","tokens":{"input":3,"output":2}}}
+"#;
+
+#[test]
+fn opencode_tools_text_and_a_stopped_last_step_are_normalized() {
+    let workspace = tempfile::tempdir().unwrap();
+    let transcript = TranscriptFormat::OpenCodeJson.normalize(
+        "opencode",
+        &redact_transcript_bytes(OPENCODE_STREAM),
+        &WorkspaceBoundary::at(workspace.path()),
+    );
+
+    assert_eq!(
+        transcript
+            .tool_sequence()
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read", "shell"]
+    );
+    assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    assert_eq!(
+        transcript
+            .workspace_escapes
+            .iter()
+            .map(|escape| escape.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["~/.config/opencode/opencode.json"]
+    );
+    assert_eq!(transcript.events.last(), Some(&TranscriptEvent::Terminal { ok: true }));
+}
+
+#[test]
+fn an_opencode_error_event_is_a_terminal_that_did_not_succeed() {
+    let stdout = br#"{"type":"step_start","part":{}}
+{"type":"error","error":{"type":"provider.auth","message":"HTTP 401"}}
+"#;
+    let transcript = TranscriptFormat::OpenCodeJson.normalize(
+        "opencode",
+        &redact_transcript_bytes(stdout),
+        &WorkspaceBoundary::unknown(),
+    );
+    assert_eq!(transcript.events, vec![TranscriptEvent::Terminal { ok: false }]);
+}

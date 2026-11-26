@@ -31,3 +31,5 @@ pub const CLOUD_CREDENTIAL_PREFIXES: &[&str] = &["AWS_", "GOOGLE_", "GCLOUD_", "
 /// The profile settings file trogonai-agent reads from its config home. It declares the providers a
 /// run signs in through, beside everything an isolated run holds still.
 pub const TROGONAI_AGENT_SETTINGS_FILE: &str = "settings.json";
+
+pub const OPENCODE_CONFIG_FILE: &str = "opencode.json";

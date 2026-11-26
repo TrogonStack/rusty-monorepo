@@ -493,6 +493,44 @@ fn an_isolated_trogonai_agent_run_links_the_key_of_a_relative_host_config_home()
     println!("relative trogonai-agent home verified");
 }
 
+/// An opencode provider reads its key through `{env:NAME}` in the config, so the variable
+/// is the operator's choice and no fixed list could admit it.
+#[test]
+fn an_opencode_run_sees_the_variables_its_config_reads_and_nothing_else() {
+    let temp = tempdir().unwrap();
+    let config_dir = temp.path().join("opencode");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("opencode.json"),
+        r#"{"provider":{"gateway":{"npm":"@ai-sdk/openai","options":{"baseURL":"https://gateway.example/v1","apiKey":"{env:GATEWAY_KEY}"}}},"model":"gateway/m","permission":{"bash":"allow"}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert(
+        "OPENCODE_CONFIG_DIR".to_string(),
+        config_dir.to_string_lossy().into_owned(),
+    );
+    host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
+    host.insert("UNRELATED_KEY".to_string(), "other".to_string());
+
+    let run_dir = temp.path().join("run-001");
+    let env =
+        RunEnvironment::prepare_from(Runner::OpenCode, &run_dir, EnvironmentPolicy::Isolated, None, &host).unwrap();
+    assert_eq!(env.vars.get("GATEWAY_KEY").map(String::as_str), Some("secret"));
+    assert!(!env.vars.contains_key("UNRELATED_KEY"));
+    assert!(!env.recorded_vars().contains_key("GATEWAY_KEY"));
+
+    let run_config = PathBuf::from(env.vars.get("OPENCODE_CONFIG_DIR").unwrap());
+    let carried: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_config.join("opencode.json")).unwrap()).unwrap();
+    assert_eq!(carried["model"], "gateway/m");
+    assert!(
+        carried.get("permission").is_none(),
+        "an isolated run keeps only the route"
+    );
+}
+
 #[test]
 fn a_trogonai_agent_profile_that_cannot_be_read_admits_no_declared_key() {
     let temp = tempdir().unwrap();
@@ -552,6 +590,13 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
                 name: "TROGONAI_AGENT_HOME".to_string(),
             },
         ),
+        (
+            Runner::OpenCode,
+            "/host/home/.config/opencode",
+            ConfigHomeBasis::Variable {
+                name: "OPENCODE_CONFIG_DIR".to_string(),
+            },
+        ),
     ] {
         let temp = tempdir().unwrap();
         let env =
@@ -573,6 +618,7 @@ fn isolated_records_the_run_config_home_and_not_the_hosts() {
         Runner::Codex,
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
+        Runner::OpenCode,
     ] {
         let temp = tempdir().unwrap();
         let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");

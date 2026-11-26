@@ -3,6 +3,13 @@ use super::super::prompt::{SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WIT
 /// event envelope, which carries no top-level `type` of its own.
 pub const TROGONAI_AGENT_RESULT_TYPE: &str = "result";
 
+/// The events that open and close one model call in opencode's `--format json` stream.
+pub const OPENCODE_STEP_START_TYPE: &str = "step_start";
+pub const OPENCODE_STEP_FINISH_TYPE: &str = "step_finish";
+
+/// The event opencode streams when a run fails, such as a provider refusing its key.
+pub const OPENCODE_ERROR_TYPE: &str = "error";
+
 pub const NORMALIZED_TRANSCRIPT_FILE: &str = "events.json";
 
 /// The directories a run's own skill is ever staged at.
