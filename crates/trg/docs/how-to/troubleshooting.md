@@ -24,7 +24,7 @@ $ which cursor-agent
 $ cursor-agent --version
 ```
 
-Supported runners: `cursor-agent`, `claude-code` (spawns `claude`), `codex`, `trogonai-agent`, `opencode`.
+Supported runners: `cursor-agent`, `claude-code` (spawns `claude`), `codex`, `trogonai-agent`, `opencode`, `pi`.
 
 ### `'cursor-agent' exited without emitting a terminal result event`
 
