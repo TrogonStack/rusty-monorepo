@@ -3374,6 +3374,13 @@ stream no event per model call, so their turns are inferred from the gaps
 between their tool calls, and the count can differ from what either harness
 itself would call a turn or a step.
 
+For `trogonai-agent` the inferred count runs high. It runs the tool calls of one
+model response one after another, so each gap between them reads as another
+model call: a response that asks for three reads counts as three turns. A
+`--max-turns-per-run` cap therefore stops a `trogonai-agent` run well before its
+real number of model calls; leave room for that, or cap tool calls instead. The
+count becomes exact once the harness streams an event per model call.
+
 A capped run is never retried by `--retries`: going past a cap is a property of
 the run, not a failure in transit. It is graded as a run that did not complete,
 and it does not change the exit code on its own, unlike `--max-cost-usd`.

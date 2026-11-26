@@ -821,6 +821,10 @@ fn trogonai_agent_model_call_under_way(builder: &mut StepBuilder) {
 /// the one that chose the next tools, or the one that ended the run. trogonai-agent names the model
 /// once, in its `result`, so the run's summary carries it and no single call does. Its
 /// usage is one total for the run, so no call carries a usage of its own either.
+///
+/// The count runs high: trogonai-agent runs the tools of one response one after another,
+/// and nothing in the stream tells a batch's next tool apart from the next response's
+/// first, so every gap between them is taken as a call.
 fn trogonai_agent(builder: &mut StepBuilder, event: &Value, at: SystemTime, content: ToolContent) {
     if event_type(event) == Some(TROGONAI_AGENT_RESULT_TYPE) {
         builder.end_turn(at, None);
