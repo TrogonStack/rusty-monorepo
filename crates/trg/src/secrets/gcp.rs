@@ -601,31 +601,30 @@ impl GcpBackend {
 
         // The value is written and the pipe closed before waiting, so `gcloud`
         // sees end of input and does not wait on a stream that never ends.
+        // Writing is inside the timeout with the wait: a `gcloud` that stalls
+        // before it reads leaves a value larger than the pipe unwritten, and a
+        // timeout that began afterwards would never start.
         //
         // A broken pipe means `gcloud` exited without reading, as it does when
         // the secret is not there. Its exit status and stderr say why, so the
-        // wait below reports that instead of the pipe.
-        if let (Some(value), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            let wrote = async {
-                pipe.write_all(value.expose_secret().as_bytes()).await?;
-                pipe.shutdown().await
-            }
-            .await;
-            if let Err(e) = wrote.or_else(|e| {
-                if e.kind() == std::io::ErrorKind::BrokenPipe {
-                    Ok(())
-                } else {
-                    Err(e)
+        // wait reports that instead of the pipe.
+        let mut pipe = child.stdin.take();
+        let exchange = async {
+            if let (Some(value), Some(pipe)) = (stdin, pipe.as_mut()) {
+                let wrote = async {
+                    pipe.write_all(value.expose_secret().as_bytes()).await?;
+                    pipe.shutdown().await
                 }
-            }) {
-                let error =
-                    SecretsError::Transport(format!("gcloud {}: could not send the value: {e}", command.as_str()));
-                call.failed(error.error_type());
-                return Err(error);
+                .await;
+                match wrote {
+                    Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(Exchange::Send(e)),
+                    _ => {}
+                }
             }
-        }
-
-        let waited = tokio::time::timeout(self.timeout, child.wait_with_output())
+            drop(pipe.take());
+            child.wait_with_output().await.map_err(Exchange::Wait)
+        };
+        let waited = tokio::time::timeout(self.timeout, exchange)
             .instrument(call.span().clone())
             .await;
         match waited {
@@ -633,7 +632,13 @@ impl GcpBackend {
                 call.exited(&output.status);
                 Ok(output)
             }
-            Ok(Err(e)) => {
+            Ok(Err(Exchange::Send(e))) => {
+                let error =
+                    SecretsError::Transport(format!("gcloud {}: could not send the value: {e}", command.as_str()));
+                call.failed(error.error_type());
+                Err(error)
+            }
+            Ok(Err(Exchange::Wait(e))) => {
                 let error = SecretsError::Transport(format!("gcloud {}: {e}", invocation()));
                 call.failed(error.error_type());
                 Err(error)
@@ -648,6 +653,12 @@ impl GcpBackend {
             }
         }
     }
+}
+
+/// Which half of one invocation failed, so each keeps its own message.
+enum Exchange {
+    Send(std::io::Error),
+    Wait(std::io::Error),
 }
 
 /// `gcloud` prints `payload.data` as URL-safe base64, and which of the padded

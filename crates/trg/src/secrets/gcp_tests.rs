@@ -361,6 +361,22 @@ async fn a_hung_gcloud_is_bounded_by_the_timeout() {
     assert!(err.to_string().contains("timed out"), "{err}");
 }
 
+/// A `gcloud` that never reads stdin leaves a value larger than the pipe
+/// unwritten, so the write itself has to be inside the timeout. The outer
+/// timeout turns a regression into a failure instead of a hung suite.
+#[tokio::test]
+async fn a_gcloud_that_never_reads_the_value_is_bounded_by_the_timeout() {
+    let stub = StubGcloud::scripted("exec sleep 300\n");
+    let backend = stub.backend().with_timeout(Duration::from_millis(200));
+    let large = "v".repeat(1 << 22);
+    let outcome = tokio::time::timeout(Duration::from_secs(20), backend.add_version(&id("tok"), &secret(&large)))
+        .await
+        .expect("the invocation timeout must fire while the value is still being written");
+    let err = outcome.expect_err("timed out");
+    assert!(matches!(err, SecretsError::Transport(_)), "{err}");
+    assert!(err.to_string().contains("timed out"), "{err}");
+}
+
 #[test]
 fn a_backend_is_declared_with_a_project_and_an_account() {
     let section: SecretsSection = toml::from_str(&format!(
