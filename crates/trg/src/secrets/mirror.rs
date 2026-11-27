@@ -925,11 +925,18 @@ where
         Some(_) => MirrorOutcome::WouldUpdate,
         None => {
             // Nothing readable is either a secret with no version yet or no
-            // secret at all, and only the first is something to fill.
-            if !backend
-                .secret_exists(&target.secret)
-                .await
-                .map_err(MirrorError::TargetRead)?
+            // secret at all, and only the first is something to fill. Applying
+            // needs no answer: adding a version to a secret that is not there
+            // is itself refused as a missing container, and nothing is written.
+            // Asking first would need `secretmanager.secrets.get`, which neither
+            // `secretAccessor` nor `secretVersionAdder` carries, so only a dry
+            // run asks, since it would otherwise report a plan that applying
+            // cannot carry out.
+            if !apply
+                && !backend
+                    .secret_exists(&target.secret)
+                    .await
+                    .map_err(MirrorError::TargetRead)?
             {
                 return Err(MirrorError::TargetRead(backend.missing_container(&target.secret)));
             }

@@ -599,6 +599,56 @@ async fn a_missing_secret_is_an_error_even_in_a_dry_run() {
     assert_eq!(world.stub.adds(), 0);
 }
 
+/// An identity with `secretAccessor` and `secretVersionAdder` holds neither
+/// `secretmanager.secrets.get` nor any way to describe the secret, so applying
+/// a mirror onto a secret with no version yet must not ask.
+#[tokio::test]
+async fn applying_onto_a_secret_with_no_version_does_not_describe_it() {
+    let stub = StubGcloud::scripted(
+        r#"
+case "$1 $2 $3" in
+  "secrets versions add") cat > "$0.state"; printf 'projects/1/secrets/x/versions/1'; exit 0;;
+  "secrets versions access")
+    [ -f "$0.state" ] || { echo "NOT_FOUND: Secret Version [projects/1/secrets/x/versions/latest] not found." >&2; exit 1; }
+    base64 < "$0.state" | tr -d '\n' | tr '+/' '-_'; exit 0;;
+esac
+case "$1 $2" in
+  "secrets describe") echo "ERROR: (gcloud) PERMISSION_DENIED: Permission 'secretmanager.secrets.get' denied" >&2; exit 1;;
+esac
+exit 127
+"#,
+    );
+    let world = Mirrored::new("v1", stub).await;
+    assert_eq!(world.run(true).await, Ok(MirrorOutcome::Created));
+    assert_eq!(world.stub.stored().as_deref(), Some(b"v1".as_slice()));
+    assert!(
+        !world.stub.argv().iter().any(|a| a == "describe"),
+        "{:?}",
+        world.stub.argv()
+    );
+}
+
+/// A dry run is the one place the probe stays, and a refusal there is said
+/// plainly rather than read as the secret being absent.
+#[tokio::test]
+async fn a_dry_run_that_cannot_describe_the_secret_says_so() {
+    let stub = StubGcloud::scripted(
+        r#"
+case "$1 $2 $3" in
+  "secrets versions access") echo "NOT_FOUND: Secret Version [projects/1/secrets/x/versions/latest] not found." >&2; exit 1;;
+esac
+case "$1 $2" in
+  "secrets describe") echo "ERROR: (gcloud) PERMISSION_DENIED: Permission 'secretmanager.secrets.get' denied" >&2; exit 1;;
+esac
+exit 127
+"#,
+    );
+    let world = Mirrored::new("v1", stub).await;
+    let err = world.run(false).await.expect_err("denied");
+    assert!(err.contains("secretmanager.secrets.get"), "{err}");
+    assert!(!err.contains("does not exist"), "{err}");
+}
+
 #[tokio::test]
 async fn a_write_that_reads_back_differently_fails() {
     // Accepts the add, and keeps serving an older value.

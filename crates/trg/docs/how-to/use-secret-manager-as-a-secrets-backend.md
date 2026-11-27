@@ -13,11 +13,22 @@ its own.
   ignored, because it could name a different identity than `account`.
 - The secret exists. `trg` adds versions to a secret and never creates one, so
   declare it where you declare the rest of your infrastructure.
-- The identity can access versions (`roles/secretmanager.secretAccessor`) to
-  read, and add versions (`roles/secretmanager.secretVersionAdder`) to write.
-- Optional, for `trg doctor` only: `secretmanager.secrets.list` on the project
-  (`roles/secretmanager.viewer` carries it). Reads and writes do not need it.
-  Without it `trg doctor` reports the project check as skipped, not failed.
+- The identity holds the permissions for what you run. Each command asks for
+  only these:
+
+  | Command | Permission | Role that carries it |
+  | ------- | ---------- | -------------------- |
+  | `trg secret get`, an `[exec]` or MCP var, a mirror (it reads the target to compare) | `secretmanager.versions.access` | `roles/secretmanager.secretAccessor` |
+  | `trg secret put`, a mirror write | `secretmanager.versions.add` | `roles/secretmanager.secretVersionAdder` |
+  | a mirror dry run onto a secret that has no readable version yet | `secretmanager.secrets.get` | `roles/secretmanager.viewer` |
+  | `trg doctor` project check | `secretmanager.secrets.list` | `roles/secretmanager.viewer` |
+
+  The last two are optional. A mirror that is applied, rather than a dry run,
+  does not describe the secret first, so `secretAccessor` plus
+  `secretVersionAdder` is enough to fill a secret that has no version. A dry run
+  has to ask whether that secret exists, which needs `secrets.get`, and is
+  refused without it. `trg doctor` reports the project check as skipped, not
+  failed, when it lacks `secrets.list`.
 
 ## 1. Declare the backend
 
@@ -64,7 +75,8 @@ op read "op://Engineering/deploy-key/token" | trg secret put --backend gsm --sec
 
 The value arrives on stdin and goes to `gcloud` on stdin, so it is never in a
 process listing. The write only adds a version, so `secretVersionAdder` is
-enough; `put` does not read the secret first.
+enough; `put` does not read the secret first. A mirror applied to a secret that
+has no version yet does not describe it first either, so it needs no more.
 
 `put` strips one trailing line ending from stdin, so a value whose final
 newline matters, such as a PEM private key, is stored without it. Most PEM

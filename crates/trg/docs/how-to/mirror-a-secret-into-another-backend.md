@@ -125,7 +125,12 @@ targets = [
 
 The secret must already exist. `trg` adds a version to it and never creates
 it, because the secret's replication, access and rotation belong to whatever
-declares it, so a missing secret is an error, in a dry run too. A mirror writes
+declares it, so a missing secret is an error, in a dry run too. The
+identity needs `secretmanager.versions.access` to compare and
+`secretmanager.versions.add` to write. Only a dry run onto a secret with no
+readable version also needs `secretmanager.secrets.get`, to tell that from a
+missing secret; applying does not ask, because adding a version to a missing
+secret is refused without writing anything. A mirror writes
 the source bytes exactly and compares them exactly, so a value ending in a
 newline, such as a PEM private key, is a different value from the same text
 without it. A write is read back through the version it created, by number, since
