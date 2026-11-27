@@ -247,6 +247,28 @@ async fn nothing_to_read_is_none_and_a_refusal_is_an_error() {
 }
 
 #[tokio::test]
+async fn a_latest_version_that_is_disabled_or_destroyed_is_nothing_to_read() {
+    for state in ["DISABLED", "DESTROYED"] {
+        let stub = StubGcloud::answering(
+            1,
+            "",
+            &format!(
+                "ERROR: (gcloud.secrets.versions.access) FAILED_PRECONDITION: Secret Version [projects/1/secrets/tok/versions/3] is in {state} state."
+            ),
+        );
+        assert!(
+            stub.backend().get_latest(&id("tok")).await.expect("read").is_none(),
+            "{state}"
+        );
+    }
+
+    // Any other precondition failure is not a statement about the version.
+    let other = StubGcloud::answering(1, "", "ERROR: FAILED_PRECONDITION: the project is suspended");
+    let err = other.backend().get_latest(&id("tok")).await.expect_err("failed");
+    assert!(matches!(err, SecretsError::Unavailable(_)), "{err}");
+}
+
+#[tokio::test]
 async fn a_version_is_added_from_stdin_and_the_value_never_reaches_argv() {
     let stub = StubGcloud::with_secret();
     stub.backend()
@@ -370,9 +392,12 @@ async fn a_gcloud_that_never_reads_the_value_is_bounded_by_the_timeout() {
     let stub = StubGcloud::scripted("exec sleep 300\n");
     let backend = stub.backend().with_timeout(Duration::from_millis(200));
     let large = "v".repeat(1 << 22);
-    let outcome = tokio::time::timeout(Duration::from_secs(20), backend.add_version(&id("tok"), &secret(&large)))
-        .await
-        .expect("the invocation timeout must fire while the value is still being written");
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(20),
+        backend.add_version(&id("tok"), &secret(&large)),
+    )
+    .await
+    .expect("the invocation timeout must fire while the value is still being written");
     let err = outcome.expect_err("timed out");
     assert!(matches!(err, SecretsError::Transport(_)), "{err}");
     assert!(err.to_string().contains("timed out"), "{err}");
@@ -468,6 +493,30 @@ async fn a_mirror_with_nothing_stored_yet_adds_the_first_version() {
     let world = Mirrored::new("v1", StubGcloud::with_secret()).await;
     assert_eq!(world.run(false).await, Ok(MirrorOutcome::WouldCreate));
     assert_eq!(world.stub.adds(), 0, "a dry run writes nothing");
+    assert_eq!(world.run(true).await, Ok(MirrorOutcome::Created));
+    assert_eq!(world.stub.stored().as_deref(), Some(b"v1".as_slice()));
+}
+
+/// The secret's only version is disabled, so `latest` cannot be read. That is
+/// the same as having nothing yet, and a new version is what fills it.
+#[tokio::test]
+async fn a_mirror_fills_a_secret_whose_only_version_is_disabled() {
+    let stub = StubGcloud::scripted(
+        r#"
+case "$1 $2 $3" in
+  "secrets versions add") cat > "$0.state"; printf 'projects/1/secrets/x/versions/2'; exit 0;;
+  "secrets versions access")
+    [ -f "$0.state" ] || { echo "ERROR: FAILED_PRECONDITION: Secret Version [projects/1/secrets/x/versions/1] is in DISABLED state." >&2; exit 1; }
+    base64 < "$0.state" | tr -d '\n' | tr '+/' '-_'; exit 0;;
+esac
+case "$1 $2" in
+  "secrets describe") printf x; exit 0;;
+esac
+exit 127
+"#,
+    );
+    let world = Mirrored::new("v1", stub).await;
+    assert_eq!(world.run(false).await, Ok(MirrorOutcome::WouldCreate));
     assert_eq!(world.run(true).await, Ok(MirrorOutcome::Created));
     assert_eq!(world.stub.stored().as_deref(), Some(b"v1".as_slice()));
 }

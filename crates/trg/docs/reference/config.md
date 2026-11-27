@@ -550,7 +550,9 @@ A secret holds one value and its versions are not fields, so it has no `key`,
 and `path`, `key` and `ref` are refused. The id may hold ASCII letters, digits, `-` and `_`,
 and may not start with `-`. A read takes the `latest` version, and the stored
 bytes come back exactly, a trailing newline included, so a PEM private key
-survives a round trip. A value that is not valid UTF-8 is refused.
+survives a round trip. A value that is not valid UTF-8 is refused. `latest` is the newest version in whatever state it is in, so a secret
+whose newest version is disabled or destroyed has no readable version: a read
+reports that, and a mirror treats it as a secret to fill and adds a version.
 
 Writing, through `trg secret put --secret <secret-id>` or as a mirror target,
 adds a new version with the value sent on stdin, never in argv. It never

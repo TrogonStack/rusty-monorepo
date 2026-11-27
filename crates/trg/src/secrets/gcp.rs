@@ -361,6 +361,18 @@ fn classify(stderr: &str) -> Failure {
     }
 }
 
+/// Whether a failed `versions access` said the version exists but is disabled
+/// or destroyed, which is `FAILED_PRECONDITION: ... is in DISABLED state`.
+///
+/// Only those two states. Any other `FAILED_PRECONDITION` is not a statement
+/// about the version and stays an error. A destroyed version cannot come back,
+/// so adding one is the only way forward, and that is the same path as a
+/// disabled one.
+fn is_unreadable_state(stderr: &str) -> bool {
+    stderr.contains("FAILED_PRECONDITION")
+        && (stderr.contains("is in DISABLED state") || stderr.contains("is in DESTROYED state"))
+}
+
 #[derive(Clone)]
 pub struct GcpBackend {
     project: GcpProject,
@@ -413,8 +425,11 @@ impl GcpBackend {
     }
 
     /// The bytes of the `latest` version of a secret, or `None` when there is
-    /// nothing to read: the secret does not exist, or it has no enabled
-    /// version. Secret Manager answers both the same way.
+    /// nothing to read: the secret does not exist, or its newest version is
+    /// not one that can be read. `latest` is the newest version in any state, so
+    /// a disabled or destroyed one answers `FAILED_PRECONDITION` rather than
+    /// falling back to an older one. Neither is a reason to fail: a new version
+    /// is the way out of both.
     pub async fn get_latest(&self, secret: &GcpSecretId) -> Result<Option<SecretString>, SecretsError> {
         self.access(secret, LATEST).await
     }
@@ -449,6 +464,9 @@ impl GcpBackend {
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let stderr = stderr.trim();
+            if is_unreadable_state(stderr) {
+                return Ok(None);
+            }
             return match classify(stderr) {
                 Failure::NotFound => Ok(None),
                 Failure::Denied => Err(self.denied(GcloudCommand::VersionsAccess, stderr)),
