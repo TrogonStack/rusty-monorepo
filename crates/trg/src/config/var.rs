@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
+mod constants;
+use constants::VAR_SOURCE_EXPECTED;
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
@@ -768,13 +771,6 @@ impl<'de, S: Deserialize<'de>> VarSource<S> {
         }
     }
 }
-
-const VAR_SOURCE_EXPECTED: &str = "expected a string, or an inline table `{ env = \"NAME\", default = \"...\" }`, \
-     `{ backend = \"NAME\", path = \"...\", key = \"...\" }`, \
-     `{ backend = \"NAME\", ref = \"op://<vault>/<item>/<field>\" }`, \
-     `{ backend = \"NAME\", secret = \"<secret-id>\" }` \
-     or a secret table with `fallbacks = [ <secret tables>, ... ]`, \
-     whose entries cannot carry `fallbacks` of their own";
 
 /// A secret declaration and the ones to try after it.
 ///
