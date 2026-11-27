@@ -33,6 +33,8 @@ pub mod stream;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub(crate) mod telemetry;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
+pub mod trogonai_agent;
+#[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod usage;
 
 #[cfg(test)]
@@ -85,6 +87,7 @@ pub enum Runner {
     #[value(name = "claude-code")]
     ClaudeCode,
     Codex,
+    TrogonaiAgent,
 }
 
 impl Runner {
@@ -93,6 +96,7 @@ impl Runner {
             Self::CursorAgent => cursor_agent::run(request),
             Self::ClaudeCode => claude_code::run(request),
             Self::Codex => codex::run(request),
+            Self::TrogonaiAgent => trogonai_agent::run(request),
         };
         // Run unconditionally, regardless of which backend ran or whether it succeeded,
         // failed, or timed out: the harness has exited either way, and the `mcp-launch`
@@ -119,13 +123,13 @@ impl Runner {
     /// the one requested.
     ///
     /// cursor-agent has exactly one non-interactive mode, `--force`, so any run under it
-    /// executes unrestricted no matter what an operator asked for; claude-code and codex
-    /// both offer a flag per grant, so they enforce exactly what was requested. This is
+    /// executes unrestricted no matter what an operator asked for; claude-code, codex, and
+    /// trogonai-agent each offer a flag per grant, so they enforce exactly what was requested. This is
     /// the one place that answers what a run was actually allowed to do, so a report can
     /// say so rather than repeating the request back as if it were the outcome.
     pub fn effective_permission_grant(self, requested: PermissionGrant) -> PermissionGrant {
         match self {
-            Self::ClaudeCode | Self::Codex => requested,
+            Self::ClaudeCode | Self::Codex | Self::TrogonaiAgent => requested,
             Self::CursorAgent => PermissionGrant::Unrestricted,
         }
     }
@@ -149,6 +153,7 @@ impl Runner {
             Self::CursorAgent => "cursor-agent",
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
+            Self::TrogonaiAgent => "trogonai-agent",
         }
     }
 
@@ -160,7 +165,7 @@ impl Runner {
     pub fn pricing(self) -> HarnessPricing {
         match self {
             Self::ClaudeCode => HarnessPricing::Publishes,
-            Self::CursorAgent | Self::Codex => HarnessPricing::Silent {
+            Self::CursorAgent | Self::Codex | Self::TrogonaiAgent => HarnessPricing::Silent {
                 harness: self.display_name().to_string(),
             },
         }
@@ -171,6 +176,7 @@ impl Runner {
             Self::CursorAgent => TranscriptFormat::CursorStreamJson,
             Self::ClaudeCode => TranscriptFormat::AnthropicStreamJson,
             Self::Codex => TranscriptFormat::CodexThreadJsonl,
+            Self::TrogonaiAgent => TranscriptFormat::TrogonaiAgentStreamJson,
         }
     }
 }

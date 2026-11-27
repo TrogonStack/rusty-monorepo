@@ -119,7 +119,7 @@ pub const EVAL_MODEL_CONFIG: &str = "trg.eval.model_config";
 /// The model a run resolved to, once the case's choice and the operator's are combined.
 pub const EVAL_RUNNER_MODEL: &str = "trg.eval.runner.model";
 
-/// The harness kind a run executes on (`claude`, `codex`, `cursor-agent`).
+/// The harness kind a run executes on (`claude`, `codex`, `cursor-agent`, `trogonai-agent`).
 pub const EVAL_RUNNER_KIND: &str = "trg.eval.runner.kind";
 
 /// The harness version the availability probe reported.

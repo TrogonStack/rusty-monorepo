@@ -1,4 +1,8 @@
 use super::super::prompt::{SKILL_DIR_UNANNOUNCED, SKILL_LINK_OLD, SKILL_LINK_WITH};
+/// The `type` trogonai-agent gives the object that ends a `stream-json` run. Every line before it is an
+/// event envelope, which carries no top-level `type` of its own.
+pub const TROGONAI_AGENT_RESULT_TYPE: &str = "result";
+
 pub const NORMALIZED_TRANSCRIPT_FILE: &str = "events.json";
 
 /// The directories a run's own skill is ever staged at.
