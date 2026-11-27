@@ -763,6 +763,25 @@ fn a_tool_called_again_with_the_same_arguments_counts_as_repeated() {
     assert_eq!(metrics.repeated_tool_calls.get(), 1);
 }
 
+/// One response asked for both tools, which the gaps between them cannot show.
+#[test]
+fn a_trogonai_agent_run_that_reports_its_model_calls_counts_them_as_turns() {
+    let reported = String::from_utf8(TROGONAI_AGENT.to_vec()).unwrap().replace(
+        r#""steps":1,"#,
+        r#""steps":1,"model_calls":{"total":2,"requests":3,"by_purpose":{"agent":1,"title":1}},"#,
+    );
+    assert_eq!(
+        measure(Runner::TrogonaiAgent, reported.as_bytes()).turns.get(),
+        1,
+        "only the conversation's own calls are turns, and a retry is not another one"
+    );
+    assert_eq!(
+        measure(Runner::TrogonaiAgent, TROGONAI_AGENT).turns.get(),
+        2,
+        "a result without model_calls keeps the inferred count"
+    );
+}
+
 #[test]
 fn only_a_harness_reporting_usage_per_model_call_reports_per_turn_input() {
     assert_eq!(measure(Runner::Codex, CODEX).peak_turn_input_tokens, None);

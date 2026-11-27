@@ -288,8 +288,35 @@ pub fn measure(runner: Runner, stdout: &[u8]) -> TranscriptMetrics {
         }),
         StepKind::Chat { .. } => None,
     });
-    let turns = TurnCount::new(u64::try_from(reconstruction.inference_calls()).unwrap_or(u64::MAX));
+    let inferred = || u64::try_from(reconstruction.inference_calls()).unwrap_or(u64::MAX);
+    let turns = TurnCount::new(match runner {
+        Runner::TrogonaiAgent => reported_agent_model_calls(stdout).unwrap_or_else(inferred),
+        _ => inferred(),
+    });
     TranscriptMetrics::measure(turns, peak_turn_input_tokens, calls)
+}
+
+/// The conversation's model calls as trogonai-agent's `result` line reports them.
+///
+/// Inferring turns from the gaps between tool calls overcounts this harness: it runs one
+/// response's tool calls one after another, so a response asking for three reads looks like
+/// three model calls. The result reports the real count under `model_calls`, split by what
+/// each call was for, and only `agent` calls are the conversation's own turns: compaction or a
+/// session title is a call the agent never chose to make. A harness too old to report it, or
+/// a run cut off before its result, falls back to the inferred count.
+fn reported_agent_model_calls(stdout: &[u8]) -> Option<u64> {
+    let result = stdout
+        .split(|byte| *byte == b'\n')
+        .rev()
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .find(|value| value.get("type").and_then(Value::as_str) == Some(TROGONAI_AGENT_RESULT_TYPE))?;
+    let model_calls = result.get("model_calls")?;
+    Some(
+        model_calls
+            .pointer("/by_purpose/agent")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    )
 }
 
 /// Every step with its arguments and results kept, for measuring a run rather than
