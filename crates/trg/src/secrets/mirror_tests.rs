@@ -28,6 +28,13 @@ fn section(text: &str) -> SecretsSection {
     toml::from_str(text).expect("section")
 }
 
+fn parse_err(text: &str) -> String {
+    toml::from_str::<SecretsSection>(text)
+        .expect_err("refused while parsing")
+        .message()
+        .to_string()
+}
+
 fn one() -> Mirror {
     section(SECTION).resolve_mirrors().expect("mirrors").remove(0)
 }
@@ -605,17 +612,18 @@ fn a_transit_target_on_an_undeclared_backend_lists_the_declared_ones() {
 fn a_transit_target_cannot_also_be_a_value_address() {
     let text = with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal", path = "a", key = "k" }"#);
 
-    assert!(matches!(resolve_err(&text), MirrorConfigError::MixedTarget { .. }));
+    let err = parse_err(&text);
+    assert!(
+        err.contains("cannot also carry `path`, `key`, `ref` or `secret`"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_transit_mount_without_a_key_is_refused() {
     let text = with_transit_targets(r#"{ backend = "bao", transit_mount = "signing" }"#);
 
-    assert!(matches!(
-        resolve_err(&text),
-        MirrorConfigError::MissingTransitKey { .. }
-    ));
+    assert!(parse_err(&text).contains("a Transit target needs `transit_key`"));
 }
 
 #[test]
@@ -724,4 +732,52 @@ fn two_mirrors_may_not_write_the_same_transit_key() {
     );
 
     assert!(matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }));
+}
+
+const GSM_SECTION: &str = r#"
+        [backends.src]
+        kind = "keychain"
+
+        [backends.gsm_a]
+        kind = "gcp_secret_manager"
+        project = "shared-project"
+        account = "a@shared-project.iam.gserviceaccount.com"
+
+        [backends.gsm_b]
+        kind = "gcp_secret_manager"
+        project = "shared-project"
+        account = "b@shared-project.iam.gserviceaccount.com"
+
+        [backends.gsm_c]
+        kind = "gcp_secret_manager"
+        project = "other-project"
+        account = "c@other-project.iam.gserviceaccount.com"
+"#;
+
+fn gsm_mirrors(second_backend: &str) -> String {
+    format!(
+        r#"{GSM_SECTION}
+            [mirrors.a]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{{ backend = "gsm_a", secret = "signing" }}]
+
+            [mirrors.b]
+            source = {{ backend = "src", path = "b", key = "k" }}
+            targets = [{{ backend = "{second_backend}", secret = "signing" }}]
+        "#
+    )
+}
+
+#[test]
+fn two_backends_on_one_project_share_a_secret_target() {
+    let err = resolve_err(&gsm_mirrors("gsm_b"));
+
+    assert!(matches!(err, MirrorConfigError::DuplicateTarget { .. }), "{err}");
+}
+
+#[test]
+fn the_same_secret_id_in_another_project_is_another_target() {
+    section(&gsm_mirrors("gsm_c"))
+        .resolve_mirrors()
+        .expect("a different project is a different secret");
 }

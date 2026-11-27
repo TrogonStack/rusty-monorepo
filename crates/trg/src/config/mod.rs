@@ -27,9 +27,11 @@ use http::HeaderName;
 pub use secrecy::SecretString;
 use serde::Deserialize;
 use tracing::field::Empty;
+pub(crate) use var::from_toml_value;
 pub use var::{
-    EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretRead, SecretVar, SecretVarError, Segment,
-    VarRef, VarResolveError, VarSite, VarSource, VarTemplate, WithFallbacks,
+    AddressShapeError, EnvValue, FetchedSecrets, RawAddress, RawEnvValue, RawSecretVar, RawVarSource, SecretRead,
+    SecretVar, SecretVarError, Segment, VarRef, VarResolveError, VarSite, VarSource, VarTemplate, Vocabulary,
+    WithFallbacks,
 };
 
 use crate::secrets::{MirrorConfigError, SecretsSection};

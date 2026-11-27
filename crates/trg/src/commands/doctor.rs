@@ -26,8 +26,10 @@ use tracing::Instrument;
 
 use crate::exit_code::ExitCode;
 use crate::output::OutputFormat;
+use crate::secrets::gcp::CREDENTIAL_FILE_OVERRIDE;
 use crate::secrets::onepassword;
 use crate::secrets::openbao::{Health, TokenSource};
+use crate::secrets::GcpBackend;
 use crate::secrets::{
     Backend, BackendError, BackendKind, KeychainBackend, OnePasswordBackend, OpenBaoBackend, Registry, SecretsError,
 };
@@ -53,7 +55,9 @@ pub enum Outcome {
     Passed { detail: String },
     /// It answered, and the answer was no.
     Failed { detail: String, remedy: String },
-    /// An earlier failure left this one unanswerable, so it was not attempted.
+    /// It could not be answered, because an earlier check failed or because
+    /// the identity lacks the permission that would answer it, which is not
+    /// evidence that anything is broken.
     Skipped { because: String },
 }
 
@@ -157,6 +161,7 @@ pub async fn diagnose(name: &str, backend: &Backend) -> Report {
             Backend::OpenBao(bao) => openbao(name, bao).await,
             Backend::Keychain(kc) => keychain(name, kc),
             Backend::OnePassword(op) => onepassword(name, op).await,
+            Backend::Gcp(gcp) => gcp_secret_manager(name, gcp).await,
             #[cfg(test)]
             Backend::Fake(_) => Report {
                 backend: name.to_string(),
@@ -354,6 +359,94 @@ fn keychain(name: &str, kc: &KeychainBackend) -> Report {
 /// unlock both surface as a failed read — and the fixes are a config edit and
 /// an unlock prompt respectively, so a typo would otherwise send someone to
 /// `op signin` over and over.
+/// Whether `gcloud` is there, holds the credentials the config names, and
+/// reaches the project. Each check gates the next, because a probe that could
+/// not have been authenticated says nothing about the project.
+async fn gcp_secret_manager(name: &str, gcp: &GcpBackend) -> Report {
+    let report = |checks| Report {
+        backend: name.to_string(),
+        kind: "gcp_secret_manager",
+        target: gcp.describe(),
+        checks,
+    };
+
+    let known = match gcp.accounts().await {
+        Ok(known) => known,
+        Err(err) => {
+            return report(vec![
+                Check::new(
+                    "gcloud",
+                    Outcome::failed(
+                        err.to_string(),
+                        "install the Google Cloud CLI, so `gcloud auth list` answers",
+                    ),
+                ),
+                Check::new(
+                    "account",
+                    Outcome::skipped("`gcloud` could not be asked which accounts it holds"),
+                ),
+                Check::new("project", Outcome::skipped("there is no `gcloud` to ask")),
+            ]);
+        }
+    };
+    let gcloud = Check::new("gcloud", Outcome::passed("`gcloud auth list` answers"));
+
+    let wanted = gcp.account();
+    // A credential file named in the environment is the credential `gcloud`
+    // uses when it is set, and it is never in `gcloud auth list`, so its
+    // principal is what answers here. `trg` passes it through only when it is
+    // for the configured account, so a file that is not is a failure to report.
+    let account = match gcp.credential_file() {
+        Ok(Some(file)) => Outcome::passed(format!(
+            "`{}` is the identity of the credential file named by `{CREDENTIAL_FILE_OVERRIDE}`",
+            file.principal()
+        )),
+        Err(err) => Outcome::failed(
+            err.to_string(),
+            format!("unset `{CREDENTIAL_FILE_OVERRIDE}`, or point it at a credential for `{wanted}`"),
+        ),
+        Ok(None) if known.iter().any(|a| a.account == wanted.as_str()) => {
+            Outcome::passed(format!("`{wanted}` holds credentials"))
+        }
+        Ok(None) => Outcome::failed(
+            format!("`{wanted}` is not an account `gcloud` holds credentials for"),
+            format!("run `gcloud auth login --account {wanted}`, or fix `account` under `[secrets.backends.{name}]`"),
+        ),
+    };
+    if matches!(account, Outcome::Failed { .. }) {
+        return report(vec![
+            gcloud,
+            Check::new("account", account),
+            Check::new("project", Outcome::skipped("no account to ask with")),
+        ]);
+    }
+
+    let project = match gcp.probe_project().await {
+        // Listing needs a permission that reading or adding versions of known
+        // secrets does not, so a refusal cannot tell a missing project from an
+        // identity scoped to the secrets it uses. Failing here would mark a
+        // working setup unhealthy.
+        Err(SecretsError::PermissionDenied(_)) => Outcome::skipped(format!(
+            "listing secrets in `{}` was refused, which is what a missing `secretmanager.secrets.list` permission or a project the account cannot see looks like, so the project could not be probed; reading and writing known secrets does not need that permission",
+            gcp.project()
+        )),
+        Ok(()) => Outcome::passed(format!("`{}` answers and Secret Manager can be listed", gcp.project())),
+        Err(err) => Outcome::failed(
+            err.to_string(),
+            format!(
+                "check that project `{}` exists, that the Secret Manager API is enabled in it, \
+                 and that the account holds `roles/secretmanager.viewer` or better",
+                gcp.project()
+            ),
+        ),
+    };
+    report(vec![
+        gcloud,
+        Check::new("account", account),
+        Check::new("project", project),
+    ])
+}
+
 async fn onepassword(name: &str, op: &OnePasswordBackend) -> Report {
     let account_ref = op.account();
     let report = |checks| Report {

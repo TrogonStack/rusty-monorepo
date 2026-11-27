@@ -22,7 +22,7 @@ use crate::telemetry::semconv::trg::{
 };
 
 use super::onepassword::{OnePasswordItem, OnePasswordReference, OpRead};
-use super::{Backend, BackendError, Registry, SecretAddress, SecretKey, SecretPath, SecretsError};
+use super::{Backend, BackendError, GcpSecretId, Registry, SecretAddress, SecretKey, SecretPath, SecretsError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VarFetchError {
@@ -217,9 +217,11 @@ where
     let mut at_path: BTreeMap<(&str, &SecretPath), Vec<(&SecretRead, &SecretKey)>> = BTreeMap::new();
     let mut in_item: BTreeMap<(&str, &OnePasswordItem), Vec<(&SecretRead, &OnePasswordReference)>> = BTreeMap::new();
     let mut derived: Vec<(&str, &SecretRead, &OnePasswordReference)> = Vec::new();
+    let mut of_secret: BTreeMap<(&str, &GcpSecretId), Vec<&SecretRead>> = BTreeMap::new();
     for read in wanted {
         let var = read.primary();
         match var.address() {
+            SecretAddress::GcpSecretManager(r) => of_secret.entry((var.backend(), r.secret())).or_default().push(read),
             SecretAddress::OnePassword(r) if r.query().is_some() => derived.push((var.backend(), read, r.as_ref())),
             SecretAddress::Keychain(r) => at_path
                 .entry((var.backend(), r.path()))
@@ -319,6 +321,35 @@ where
         })
         .await?;
 
+        out.extend(selected);
+    }
+
+    // One value per secret, so a round trip serves every read of the same one.
+    for ((backend_name, secret), reads) in of_secret {
+        let representative = reads[0].primary();
+        let span = round_trip_span(backend_name, reads.len());
+        let selected = traced(span.clone(), async {
+            let answer = async {
+                let backend = build(resolve, built, backend_name, representative)?;
+                span.record(SECRETS_BACKEND_KIND, backend.kind());
+                backend
+                    .get_secret(secret)
+                    .await
+                    .map_err(|cause| read_error(representative, cause))?
+                    .ok_or_else(|| missing_entry(representative))
+            }
+            .await;
+            let value = match answer {
+                Ok(value) => value,
+                Err(e) => return declined(&span, reads.iter().copied(), e),
+            };
+            let mut selected = Vec::with_capacity(reads.len());
+            for &read in &reads {
+                selected.push((read, settle(&span, read, Ok(value.clone()))?));
+            }
+            Ok(selected)
+        })
+        .await?;
         out.extend(selected);
     }
 

@@ -11,7 +11,7 @@ truth: `trg` only ever writes toward the target.
 ## Before you start
 
 You need two `[secrets.backends.<name>]` entries: a source `trg` can read, and
-a target of kind `keychain` or `openbao`. A `onepassword` backend can be a
+a target of kind `keychain`, `openbao` or `gcp_secret_manager`. A `onepassword` backend can be a
 source but never a target, because its items are managed in 1Password.
 
 ```toml
@@ -109,6 +109,39 @@ whoever finds the entry in the backend can tell where to change it.
 A target that fails does not stop the others, of its mirror or of the ones
 after it, and the exit code is nonzero if any did. A source that cannot be read
 fails every target of its mirror.
+
+## Mirror a secret into Secret Manager
+
+A `gcp_secret_manager` target is addressed by `secret`, which is the secret id,
+and takes no `path` or `key`:
+
+```toml trg-example=fragment
+[secrets.mirrors.deploy-token]
+source = { backend = "personal", ref = "op://Engineering/deploy-key/token" }
+targets = [
+  { backend = "gsm", secret = "deploy-token" },
+]
+```
+
+The secret must already exist. `trg` adds a version to it and never creates
+it, because the secret's replication, access and rotation belong to whatever
+declares it, so a missing secret is an error, in a dry run too. The
+identity needs `secretmanager.versions.access` to compare and
+`secretmanager.versions.add` to write. Only a dry run onto a secret with no
+readable version also needs `secretmanager.secrets.get`, to tell that from a
+missing secret; applying does not ask, because adding a version to a missing
+secret is refused without writing anything. A mirror writes
+the source bytes exactly and compares them exactly, so a value ending in a
+newline, such as a PEM private key, is a different value from the same text
+without it. A write is read back through the version it created, by number, since
+Secret Manager promises that read is consistent and does not promise it of the
+`latest` alias, and the target fails if that version does not hold what was
+written.
+
+Unlike the other targets, the secret gets no `source` key: it holds one value
+with nowhere to put a second, and a version's labels are not something `trg`
+should be setting on a secret it did not create. The declaration is the record
+of where the value comes from.
 
 ## Mirror an SSH key into an OpenBao Transit key
 

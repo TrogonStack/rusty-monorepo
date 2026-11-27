@@ -1,0 +1,103 @@
+# Use Google Cloud Secret Manager as a secrets backend
+
+Read a secret from Secret Manager into an `[exec]` or MCP var, and mirror a value
+into it from another backend, without `trg` holding any Google credential of
+its own.
+
+## Before you start
+
+- The [`gcloud` CLI](https://cloud.google.com/sdk/gcloud) is installed and
+  authenticated as the account you declare, in one of two ways:
+  - Stored: `gcloud auth login`, or `gcloud auth login --cred-file` (which
+    `google-github-actions/setup-gcloud` runs).
+  - A credential file in `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, as
+    `google-github-actions/auth` sets it in CI. `trg` reads the file and uses it
+    only when it is a service account key whose `client_email` is `account`, or
+    a workload identity federation file whose `service_account_impersonation_url`
+    names `account`. A file for another identity, or a federation file that
+    impersonates no service account, is refused with a message.
+
+  An access token, an access token file or impersonation that is only set in the
+  environment is ignored, because it could name a different identity than
+  `account`.
+- The secret exists. `trg` adds versions to a secret and never creates one, so
+  declare it where you declare the rest of your infrastructure.
+- The identity holds the permissions for what you run. Each command asks for
+  only these:
+
+  | Command | Permission | Role that carries it |
+  | ------- | ---------- | -------------------- |
+  | `trg secret get`, an `[exec]` or MCP var, a mirror (it reads the target to compare) | `secretmanager.versions.access` | `roles/secretmanager.secretAccessor` |
+  | `trg secret put`, a mirror write | `secretmanager.versions.add` | `roles/secretmanager.secretVersionAdder` |
+  | a mirror dry run onto a secret that has no readable version yet | `secretmanager.secrets.get` | `roles/secretmanager.viewer` |
+  | `trg doctor` project check | `secretmanager.secrets.list` | `roles/secretmanager.viewer` |
+
+  The last two are optional. A mirror that is applied, rather than a dry run,
+  does not describe the secret first, so `secretAccessor` plus
+  `secretVersionAdder` is enough to fill a secret that has no version. A dry run
+  has to ask whether that secret exists, which needs `secrets.get`, and is
+  refused without it. `trg doctor` reports the project check as skipped, not
+  failed, when it lacks `secrets.list`.
+
+## 1. Declare the backend
+
+```toml trg-example=fragment
+[secrets.backends.gsm]
+kind    = "gcp_secret_manager"
+project = "my-project"
+account = "deployer@my-project.iam.gserviceaccount.com"
+```
+
+`project` and `account` are both required, and neither is taken from
+`gcloud config`, so the same file acts as the same identity on the same project
+on every machine.
+
+## 2. Check it
+
+```sh
+trg doctor --backend gsm
+```
+
+The report says whether `gcloud` answers, whether the account holds
+credentials, and whether the project can be listed with it.
+
+## 3. Read a secret
+
+A secret is addressed by its id, as `secret`. It has no `path` or `key`:
+
+```sh
+trg secret get --backend gsm --secret deploy-token
+```
+
+```toml trg-example=fragment
+[exec.deploy.env]
+DEPLOY_TOKEN = { backend = "gsm", secret = "deploy-token" }
+```
+
+The `latest` version is read, byte for byte.
+
+## 4. Write a version
+
+```sh
+op read "op://Engineering/deploy-key/token" | trg secret put --backend gsm --secret deploy-token
+```
+
+The value arrives on stdin and goes to `gcloud` on stdin, so it is never in a
+process listing. The write only adds a version, so `secretVersionAdder` is
+enough; `put` does not read the secret first. A mirror applied to a secret that
+has no version yet does not describe it first either, so it needs no more.
+
+`put` strips one trailing line ending from stdin, so a value whose final
+newline matters, such as a PEM private key, is stored without it. Most PEM
+parsers accept that. When the exact bytes matter, copy the value with a mirror,
+which writes the source bytes untouched. To keep a value in sync from another backend instead, declare
+a [mirror](mirror-a-secret-into-another-backend.md#mirror-a-secret-into-secret-manager).
+
+## Troubleshooting
+
+| Message | What to do |
+| ------- | ---------- |
+| `secret ... does not exist in project ...` | Create the secret first. `trg` never does. |
+| `permission denied` | The account lacks the role above on that secret or project. |
+| `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE names ...` | The credential file is for another identity or names no principal `trg` can check. Point it at a key or federation file for `account`, or unset it and run `gcloud auth login --cred-file`. |
+| `gcloud ... timed out` | `gcloud` is probably waiting on a reauthentication prompt. Run `gcloud auth login`. |

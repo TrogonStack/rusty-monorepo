@@ -21,6 +21,8 @@ pub mod address;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod config;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
+pub mod gcp;
+#[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod keychain;
 pub mod kv_v2;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
@@ -43,6 +45,10 @@ use secrecy::{ExposeSecret, SecretString};
 
 pub use address::SecretAddress;
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
+pub use gcp::{
+    GcloudAccount, GcpAccount, GcpAccountError, GcpBackend, GcpProject, GcpProjectError, GcpReference, GcpSecretId,
+    GcpSecretIdError, GcpVersion,
+};
 pub use keychain::{KeychainBackend, KeychainReference};
 pub use mirror::{
     Fingerprint, Mirror, MirrorConfig, MirrorConfigError, MirrorError, MirrorName, MirrorNameError, MirrorOutcome,
@@ -66,6 +72,7 @@ pub enum BackendKind {
     Keychain,
     Openbao,
     OnePassword,
+    GcpSecretManager,
 }
 
 impl BackendKind {
@@ -75,6 +82,7 @@ impl BackendKind {
             Self::Keychain => "keychain",
             Self::Openbao => "openbao",
             Self::OnePassword => "onepassword",
+            Self::GcpSecretManager => "gcp_secret_manager",
         }
     }
 
@@ -84,7 +92,7 @@ impl BackendKind {
     /// value there must not offer a `trg secret put` that would only fail.
     pub fn is_writable(self) -> bool {
         match self {
-            Self::Keychain | Self::Openbao => true,
+            Self::Keychain | Self::Openbao | Self::GcpSecretManager => true,
             Self::OnePassword => false,
         }
     }
@@ -175,6 +183,18 @@ pub enum SecretsError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// A value was to be written to a secret that does not exist.
+    ///
+    /// Kept apart from [`SecretsError::NotFound`], which says a read found
+    /// nothing, because the remedy is not to write: `trg` adds versions and
+    /// never creates the secret they belong to, since that is where
+    /// replication, access and rotation are decided and something else owns
+    /// those decisions.
+    #[error(
+        "secret `{secret}` does not exist in project `{project}`; `trg` adds versions and never creates the secret itself, so create it first, for example with Terraform"
+    )]
+    MissingContainer { project: String, secret: String },
+
     #[error("`{op}` is not supported by the `{kind}` backend")]
     Unsupported { kind: &'static str, op: &'static str },
 }
@@ -193,6 +213,7 @@ impl SecretsError {
             Self::MalformedItem { .. } => "malformed_item",
             Self::AmbiguousField { .. } => "ambiguous_field",
             Self::PermissionDenied(_) => "permission_denied",
+            Self::MissingContainer { .. } => "missing_container",
             Self::Unsupported { .. } => "unsupported",
         }
     }
@@ -216,7 +237,8 @@ impl SecretsError {
             | Self::Unauthenticated { .. }
             | Self::Unavailable(_)
             | Self::Transport(_)
-            | Self::PermissionDenied(_) => true,
+            | Self::PermissionDenied(_)
+            | Self::MissingContainer { .. } => true,
             Self::Malformed { .. }
             | Self::MalformedItem { .. }
             | Self::AmbiguousField { .. }
@@ -492,6 +514,7 @@ pub enum Backend {
     Keychain(KeychainBackend),
     OpenBao(OpenBaoBackend),
     OnePassword(OnePasswordBackend),
+    Gcp(GcpBackend),
     #[cfg(test)]
     Fake(fake::FakeBackend),
 }
@@ -502,6 +525,7 @@ impl Backend {
             Self::Keychain(_) => "keychain",
             Self::OpenBao(_) => "openbao",
             Self::OnePassword(_) => "onepassword",
+            Self::Gcp(_) => "gcp_secret_manager",
             #[cfg(test)]
             Self::Fake(_) => "fake",
         }
@@ -519,6 +543,7 @@ impl Backend {
             Self::Keychain(b) => b.describe(),
             Self::OpenBao(b) => b.describe(),
             Self::OnePassword(b) => b.describe(),
+            Self::Gcp(b) => b.describe(),
             #[cfg(test)]
             Self::Fake(_) => "an in-memory fake".to_string(),
         }
@@ -550,6 +575,13 @@ impl Backend {
                 kind: "onepassword",
                 reason: "a 1Password path needs a vault, which a bare server name does not carry".to_string(),
             }),
+            // The same: a bare server name is not a Secret Manager secret id,
+            // and one secret holds one value where credentials are a map.
+            Self::Gcp(_) => Err(CredentialPathError::Name {
+                name: server.to_string(),
+                kind: "gcp_secret_manager",
+                reason: "a Secret Manager secret holds one value, and OAuth credentials are a map of them".to_string(),
+            }),
             #[cfg(test)]
             Self::Fake(_) => Ok(SecretPath::parse(server)?),
         }
@@ -574,7 +606,7 @@ impl Backend {
                     None => None,
                 })
             }
-            Self::Keychain(_) | Self::OnePassword(_) => Ok(None),
+            Self::Keychain(_) | Self::OnePassword(_) | Self::Gcp(_) => Ok(None),
             #[cfg(test)]
             Self::Fake(_) => Ok(None),
         }
@@ -591,7 +623,7 @@ impl Backend {
     pub fn removal_command(&self, path: &SecretPath) -> Option<String> {
         match self {
             Self::OpenBao(b) => Some(b.removal_command(path)),
-            Self::Keychain(_) | Self::OnePassword(_) => None,
+            Self::Keychain(_) | Self::OnePassword(_) | Self::Gcp(_) => None,
             #[cfg(test)]
             Self::Fake(_) => None,
         }
@@ -630,6 +662,75 @@ impl Backend {
         }
     }
 
+    /// Read the `latest` version of one Secret Manager secret, or `None` when
+    /// it has no version to read.
+    ///
+    /// Like [`Self::get_item`], a method of its own: a secret is one value and
+    /// not a map, so it has no honest answer in terms of [`SecretMap`].
+    pub async fn get_secret(&self, secret: &GcpSecretId) -> Result<Option<SecretString>, SecretsError> {
+        match self {
+            Self::Gcp(b) => b.get_latest(secret).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "secret get",
+            }),
+        }
+    }
+
+    /// Add a version to a Secret Manager secret that already exists.
+    ///
+    /// Answers with the version created, which a readback can name.
+    pub async fn add_secret_version(
+        &self,
+        secret: &GcpSecretId,
+        value: &SecretString,
+    ) -> Result<Option<GcpVersion>, SecretsError> {
+        match self {
+            Self::Gcp(b) => b.add_version(secret, value).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "secret version add",
+            }),
+        }
+    }
+
+    /// Read one version of a Secret Manager secret by its number.
+    pub async fn get_secret_version(
+        &self,
+        secret: &GcpSecretId,
+        version: &GcpVersion,
+    ) -> Result<Option<SecretString>, SecretsError> {
+        match self {
+            Self::Gcp(b) => b.get_version(secret, version).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "secret get",
+            }),
+        }
+    }
+
+    /// The error for writing to a Secret Manager secret that is not there.
+    pub fn missing_container(&self, secret: &GcpSecretId) -> SecretsError {
+        match self {
+            Self::Gcp(b) => b.missing_container(secret),
+            other => SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "secret describe",
+            },
+        }
+    }
+
+    /// Whether a Secret Manager secret exists, whether or not it has a version.
+    pub async fn secret_exists(&self, secret: &GcpSecretId) -> Result<bool, SecretsError> {
+        match self {
+            Self::Gcp(b) => b.secret_exists(secret).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "secret describe",
+            }),
+        }
+    }
+
     /// Read the map of values at one path.
     ///
     /// 1Password is not addressed this way and has no arm here: an item is
@@ -655,6 +756,10 @@ impl Backend {
             Self::Keychain(b) => b.set(path, map).await,
             Self::OpenBao(b) => b.set(path, map).await,
             Self::OnePassword(b) => b.set(path, map).await,
+            Self::Gcp(_) => Err(SecretsError::Unsupported {
+                kind: "gcp_secret_manager",
+                op: "put by path",
+            }),
             #[cfg(test)]
             Self::Fake(b) => b.set(path, map).await,
         }
@@ -665,6 +770,10 @@ impl Backend {
             Self::Keychain(b) => b.delete(path).await,
             Self::OpenBao(b) => b.delete(path).await,
             Self::OnePassword(b) => b.delete(path).await,
+            Self::Gcp(_) => Err(SecretsError::Unsupported {
+                kind: "gcp_secret_manager",
+                op: "delete",
+            }),
             #[cfg(test)]
             Self::Fake(b) => b.delete(path).await,
         }
@@ -675,6 +784,10 @@ impl Backend {
             Self::Keychain(b) => b.list(prefix).await,
             Self::OpenBao(b) => b.list(prefix).await,
             Self::OnePassword(b) => b.list(prefix).await,
+            Self::Gcp(_) => Err(SecretsError::Unsupported {
+                kind: "gcp_secret_manager",
+                op: "list",
+            }),
             #[cfg(test)]
             Self::Fake(b) => b.list(prefix).await,
         }

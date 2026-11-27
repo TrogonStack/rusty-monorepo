@@ -128,7 +128,7 @@ fn an_unknown_fallback_backend_fails_at_load() {
 fn the_wrong_vocabulary_for_a_backend_kind_is_refused() {
     let s = section("[vars.t]\nbackend = \"op\"\npath = \"p\"\nkey = \"k\"");
     let err = resolve_all(&s).unwrap_err();
-    assert!(matches!(err, SecretVarError::NeedsReference { .. }), "{err}");
+    assert!(matches!(err, SecretVarError::WrongVocabulary { .. }), "{err}");
 }
 
 #[test]

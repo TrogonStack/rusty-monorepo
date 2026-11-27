@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::secrets::openbao::OpenBaoSettings;
+use crate::secrets::{GcpAccount, GcpProject};
 
 /// Answers `sys/health` one way and everything else another, recording what
 /// it was asked so a test can assert on what was never sent.
@@ -420,5 +421,148 @@ fn a_sealed_instance_is_unhealthy_without_failing_the_health_request() {
             .map(|v| v.to_string())
             .as_deref(),
         Some("503")
+    );
+}
+
+/// A `gcloud` that knows the configured account and answers `secrets list`
+/// with the given exit status and message.
+fn gcloud_listing(exit: i32, stderr: &str) -> (tempfile::TempDir, GcpBackend) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("gcloud");
+    let body = format!(
+        r#"case "$1 $2" in
+  "auth list") printf '%s' '[{{"account":"deployer@my-project.iam.gserviceaccount.com","status":"ACTIVE"}}]'; exit 0;;
+  "secrets list") printf '%s' '{stderr}' >&2; exit {exit};;
+esac
+exit 127
+"#
+    );
+    std::fs::write(bin.with_extension("body"), body).expect("write body");
+    let shim = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/op-stub.sh");
+    std::os::unix::fs::symlink(shim, &bin).expect("link stub");
+    let backend = GcpBackend::new(
+        GcpProject::parse("my-project").expect("project"),
+        GcpAccount::parse("deployer@my-project.iam.gserviceaccount.com").expect("account"),
+    )
+    .with_bin(bin)
+    .with_credential_file(None);
+    (dir, backend)
+}
+
+fn project_check(report: &Report) -> &Outcome {
+    &report
+        .checks
+        .iter()
+        .find(|c| c.name == "project")
+        .expect("project check")
+        .outcome
+}
+
+#[tokio::test]
+async fn an_identity_that_cannot_list_secrets_is_not_reported_unhealthy() {
+    let (_dir, backend) = gcloud_listing(1, "ERROR: PERMISSION_DENIED: secretmanager.secrets.list denied");
+    let report = gcp_secret_manager("gsm", &backend).await;
+
+    assert!(report.is_healthy(), "{}", report.to_text());
+    let Outcome::Skipped { because } = project_check(&report) else {
+        panic!("expected a skipped project check: {}", report.to_text());
+    };
+    assert!(because.contains("secretmanager.secrets.list"), "{because}");
+}
+
+#[tokio::test]
+async fn a_project_that_does_not_answer_still_fails_the_check() {
+    let (_dir, backend) = gcloud_listing(1, "ERROR: project not usable");
+    let report = gcp_secret_manager("gsm", &backend).await;
+
+    assert!(!report.is_healthy(), "{}", report.to_text());
+    assert!(matches!(project_check(&report), Outcome::Failed { .. }));
+}
+
+#[tokio::test]
+async fn a_listable_project_passes() {
+    let (_dir, backend) = gcloud_listing(0, "");
+    let report = gcp_secret_manager("gsm", &backend).await;
+
+    assert!(
+        matches!(project_check(&report), Outcome::Passed { .. }),
+        "{}",
+        report.to_text()
+    );
+}
+
+fn account_check(report: &Report) -> &Outcome {
+    &report
+        .checks
+        .iter()
+        .find(|c| c.name == "account")
+        .expect("account check")
+        .outcome
+}
+
+/// What `google-github-actions/auth` leaves behind: a credential file in the
+/// environment and no stored account, so `gcloud auth list` is empty.
+fn gcloud_with_no_stored_account(key_body: &str) -> (tempfile::TempDir, GcpBackend, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("gcloud");
+    std::fs::write(
+        bin.with_extension("body"),
+        "case \"$1 $2\" in\n  \"auth list\") printf '[]'; exit 0;;\n  \"secrets list\") exit 0;;\nesac\nexit 127\n",
+    )
+    .expect("write body");
+    let shim = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/op-stub.sh");
+    std::os::unix::fs::symlink(shim, &bin).expect("link stub");
+    let backend = GcpBackend::new(
+        GcpProject::parse("my-project").expect("project"),
+        GcpAccount::parse("deployer@my-project.iam.gserviceaccount.com").expect("account"),
+    )
+    .with_bin(bin);
+    let key = dir.path().join("key.json");
+    std::fs::write(&key, key_body).expect("key");
+    (dir, backend, key)
+}
+
+#[tokio::test]
+async fn a_credential_file_for_the_account_is_a_valid_identity_and_the_project_is_probed() {
+    let (_dir, backend, key) = gcloud_with_no_stored_account(
+        r#"{"type":"service_account","client_email":"deployer@my-project.iam.gserviceaccount.com"}"#,
+    );
+    let report = gcp_secret_manager("gsm", &backend.with_credential_file(Some(key))).await;
+
+    assert!(report.is_healthy(), "{}", report.to_text());
+    assert!(
+        matches!(account_check(&report), Outcome::Passed { .. }),
+        "{}",
+        report.to_text()
+    );
+    assert!(
+        matches!(project_check(&report), Outcome::Passed { .. }),
+        "{}",
+        report.to_text()
+    );
+}
+
+#[tokio::test]
+async fn a_credential_file_for_another_identity_fails_the_account_check() {
+    let (_dir, backend, key) = gcloud_with_no_stored_account(
+        r#"{"type":"service_account","client_email":"other@my-project.iam.gserviceaccount.com"}"#,
+    );
+    let report = gcp_secret_manager("gsm", &backend.with_credential_file(Some(key))).await;
+
+    assert!(!report.is_healthy(), "{}", report.to_text());
+    let Outcome::Failed { .. } = account_check(&report) else {
+        panic!("expected a failed account check: {}", report.to_text());
+    };
+    assert!(matches!(project_check(&report), Outcome::Skipped { .. }));
+}
+
+#[tokio::test]
+async fn with_no_credential_file_and_no_stored_account_the_account_check_still_fails() {
+    let (_dir, backend, _key) = gcloud_with_no_stored_account("{}");
+    let report = gcp_secret_manager("gsm", &backend.with_credential_file(None)).await;
+    assert!(
+        matches!(account_check(&report), Outcome::Failed { .. }),
+        "{}",
+        report.to_text()
     );
 }

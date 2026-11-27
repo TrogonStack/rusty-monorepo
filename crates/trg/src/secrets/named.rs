@@ -9,7 +9,7 @@ use std::fmt;
 
 use serde::Deserialize;
 
-use crate::config::{RawSecretVar, RawVarSource, SecretVarError, WithFallbacks};
+use crate::config::{from_toml_value, RawSecretVar, RawVarSource, SecretVarError, WithFallbacks};
 
 /// The name a `[secrets.vars.<name>]` table is declared under.
 ///
@@ -71,16 +71,32 @@ impl fmt::Display for SecretName {
 ///
 /// Exactly the secret shapes a var can take: one address, or one address with
 /// `fallbacks`. A literal or an env var is not a secret and has no place here.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-#[serde(
-    expecting = "a secret table such as `{ backend = \"<name>\", path = \"<path>\", key = \"<key>\" }` \
-                     or `{ backend = \"<name>\", ref = \"op://<vault>/<item>/<field>\" }`, \
-                     optionally with `fallbacks = [ <secret tables> ]` whose entries cannot carry `fallbacks` of their own"
-)]
+#[derive(Clone, Debug)]
 pub enum NamedSecretConfig {
     WithFallbacks(Box<WithFallbacks<RawSecretVar>>),
     Secret(RawSecretVar),
+}
+
+/// Chosen by whether `fallbacks` is written, so a table that is shaped wrongly
+/// is reported as that table's own mistake rather than as "no variant matched".
+impl<'de> Deserialize<'de> for NamedSecretConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match toml::Value::deserialize(deserializer)? {
+            toml::Value::Table(table) if table.contains_key("fallbacks") => {
+                from_toml_value(toml::Value::Table(table)).map(|chain| Self::WithFallbacks(Box::new(chain)))
+            }
+            toml::Value::Table(table) if table.contains_key("backend") => {
+                from_toml_value(toml::Value::Table(table)).map(Self::Secret)
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "invalid {}, expected a secret table such as `{{ backend = \"<name>\", path = \"<path>\", key = \"<key>\" }}`, \
+                 `{{ backend = \"<name>\", ref = \"op://<vault>/<item>/<field>\" }}` \
+                 or `{{ backend = \"<name>\", secret = \"<secret-id>\" }}`, \
+                 optionally with `fallbacks = [ <secret tables> ]` whose entries cannot carry `fallbacks` of their own",
+                other.type_str()
+            ))),
+        }
+    }
 }
 
 impl NamedSecretConfig {

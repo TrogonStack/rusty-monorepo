@@ -233,7 +233,7 @@ trg secret get --name signing-key
 The table is the same secret table a var takes, so the first address and every
 fallback are read exactly as they are for a var, and stderr names the backend
 that answered when it was not the first. `--name` cannot be combined with
-`--backend`, `--path`, `--key`, `--ref` or `--fallback`. With
+`--backend`, `--path`, `--key`, `--ref`, `--secret` or `--fallback`. With
 `--output-format json` the document carries `name` and `value`, and
 `answered_by` when the secret declares `fallbacks`.
 
@@ -267,12 +267,13 @@ A `[secrets.backends.*]` entry's `addr` or `token` used a secret var of any
 shape. Reaching a backend cannot depend on having already reached it. Use a
 literal, `{ env = "..." }`, or `token_file`.
 
-**``... which is addressed with a 1Password secret reference, not `path`/`key` ``**
+**``... which is addressed with `ref`, not `path` and `key` ``**
 
 The var names a `onepassword` backend but was written with `path` and `key`.
 The message spells out the `ref` line to replace it with. The mirror case, a
 `ref` naming a `keychain` or `openbao` backend, reports the same thing in
-reverse.
+reverse, and so does a `secret` naming either of them, or `path` and `key`
+naming a `gcp_secret_manager` backend.
 
 ## See also
 

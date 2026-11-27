@@ -72,7 +72,10 @@ impl StubOp {
     /// timeout — as if `op` were blocked on an unlock prompt no one is
     /// watching for.
     fn hanging() -> Self {
-        Self::scripted("sleep 300\n")
+        // `exec` so the timeout kills `sleep` itself. A forked `sleep` outlives
+        // the killed shell as an orphan, and tarpaulin aborts the run when it
+        // sees one.
+        Self::scripted("exec sleep 300\n")
     }
 
     fn backend(&self) -> OnePasswordBackend {

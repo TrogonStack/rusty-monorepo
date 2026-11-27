@@ -26,11 +26,13 @@ use tracing::Instrument;
 use super::telemetry::record_error;
 use super::vars::{self, VarFetchError};
 use super::{
-    Backend, BackendConfig, BackendError, BackendKind, SecretAddress, SecretKey, SecretPath, SecretsError,
-    SecretsSection,
+    Backend, BackendConfig, BackendError, BackendKind, GcpProject, GcpSecretId, SecretAddress, SecretKey, SecretPath,
+    SecretsError, SecretsSection,
 };
 use crate::config::signers::{TransitKeyName, TransitMount};
-use crate::config::{FetchedSecrets, RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
+use crate::config::{
+    AddressShapeError, FetchedSecrets, RawAddress, RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite,
+};
 use crate::git::ssh::transit_key::TransitKeyError;
 use crate::secrets::openbao::WrapError;
 use crate::telemetry::semconv::trg::SECRETS_BACKEND_NAME;
@@ -51,6 +53,18 @@ pub struct Fingerprint {
 impl Fingerprint {
     pub fn of(value: &str) -> Self {
         let value = value.strip_suffix('\n').unwrap_or(value);
+        Self {
+            length: value.len(),
+            digest: Sha256::digest(value.as_bytes()).into(),
+        }
+    }
+
+    /// The fingerprint of every byte, trailing newline included.
+    ///
+    /// For a backend that stores bytes as given, where a value ending in a
+    /// newline (a PEM key) and the same value without it are two values, and
+    /// treating them as one would report as in sync a target that is not.
+    pub fn exact(value: &str) -> Self {
         Self {
             length: value.len(),
             digest: Sha256::digest(value.as_bytes()).into(),
@@ -136,41 +150,85 @@ pub struct MirrorConfig {
     pub targets: Vec<RawMirrorTarget>,
 }
 
-/// One entry of `targets` as the file spelled it: either a var's fields
-/// (`backend` with `path` and `key`, or `ref`), or `backend` with
-/// `transit_key` and optionally `transit_mount`.
+/// One entry of `targets` as the file spelled it: either a var (`backend`
+/// with `path` and `key`, `ref`, or `secret`), or `backend` with `transit_key`
+/// and optionally `transit_mount`.
 ///
 /// Both spellings share one table because the fields present tell which one
-/// applies, the way they do for a signer address, and it stays a plain table
-/// of optional fields so that a mistake is reported by name instead of as
-/// "data did not match any variant".
+/// applies, the way they do for a signer address. The choice is made while
+/// parsing, so a Transit target that also carries an address, or a mount with
+/// no key, cannot be built.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RawMirrorTarget {
+#[serde(try_from = "RawMirrorTargetFields")]
+pub enum RawMirrorTarget {
+    Var(RawSecretVar),
+    Transit(RawTransitTarget),
+}
+
+/// A Transit target as the file spelled it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawTransitTarget {
     pub backend: String,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub key: Option<String>,
-    #[serde(default, rename = "ref")]
-    pub reference: Option<String>,
-    #[serde(default)]
-    pub transit_key: Option<String>,
-    #[serde(default)]
+    pub transit_key: String,
     pub transit_mount: Option<String>,
 }
 
-impl RawMirrorTarget {
-    fn is_transit(&self) -> bool {
-        self.transit_key.is_some() || self.transit_mount.is_some()
-    }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawMirrorTargetFields {
+    backend: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default, rename = "ref")]
+    reference: Option<String>,
+    #[serde(default)]
+    secret: Option<String>,
+    #[serde(default)]
+    transit_key: Option<String>,
+    #[serde(default)]
+    transit_mount: Option<String>,
+}
 
-    fn as_var(&self) -> RawSecretVar {
-        RawSecretVar {
-            backend: self.backend.clone(),
-            path: self.path.clone(),
-            key: self.key.clone(),
-            reference: self.reference.clone(),
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RawMirrorTargetError {
+    #[error(
+        "a Transit target is `{{ backend, transit_key }}` with an optional `transit_mount`, and cannot also carry `path`, `key`, `ref` or `secret`"
+    )]
+    MixedTarget,
+
+    #[error("a Transit target needs `transit_key`")]
+    MissingTransitKey,
+
+    #[error(transparent)]
+    Address(#[from] AddressShapeError),
+}
+
+impl TryFrom<RawMirrorTargetFields> for RawMirrorTarget {
+    type Error = RawMirrorTargetError;
+
+    fn try_from(fields: RawMirrorTargetFields) -> Result<Self, Self::Error> {
+        let has_address =
+            fields.path.is_some() || fields.key.is_some() || fields.reference.is_some() || fields.secret.is_some();
+        match (fields.transit_key, fields.transit_mount) {
+            (None, None) => {
+                let address = RawAddress::from_parts(
+                    &fields.backend,
+                    fields.path,
+                    fields.key,
+                    fields.reference,
+                    fields.secret,
+                )?;
+                Ok(Self::Var(RawSecretVar::new(fields.backend, address)))
+            }
+            _ if has_address => Err(RawMirrorTargetError::MixedTarget),
+            (None, Some(_)) => Err(RawMirrorTargetError::MissingTransitKey),
+            (Some(transit_key), transit_mount) => Ok(Self::Transit(RawTransitTarget {
+                backend: fields.backend,
+                transit_key,
+                transit_mount,
+            })),
         }
     }
 }
@@ -181,6 +239,17 @@ pub struct ValueTarget {
     var: SecretVar,
     path: SecretPath,
     key: SecretKey,
+}
+
+/// A Secret Manager secret that receives a new version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretTarget {
+    var: SecretVar,
+    /// The project the backend writes into. Two backends may name one
+    /// project under different accounts, so the backend name does not say
+    /// which secret is written; this does.
+    project: GcpProject,
+    secret: GcpSecretId,
 }
 
 /// An OpenBao Transit key a private SSH key is imported into.
@@ -201,6 +270,7 @@ pub struct TransitTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MirrorTarget {
     Value(ValueTarget),
+    Secret(SecretTarget),
     Transit(TransitTarget),
 }
 
@@ -208,6 +278,7 @@ impl MirrorTarget {
     pub fn backend(&self) -> &str {
         match self {
             Self::Value(t) => t.var.backend(),
+            Self::Secret(t) => t.var.backend(),
             Self::Transit(t) => &t.backend,
         }
     }
@@ -216,6 +287,7 @@ impl MirrorTarget {
     pub fn address(&self) -> String {
         match self {
             Self::Value(t) => t.var.to_string(),
+            Self::Secret(t) => t.var.to_string(),
             Self::Transit(t) => format!(
                 "Transit key `{}` (mount `{}`) from backend `{}`",
                 t.key.as_str(),
@@ -230,6 +302,7 @@ impl MirrorTarget {
     pub fn describe(&self) -> String {
         match self {
             Self::Value(t) => format!("{}#{} ({})", t.path, t.key, t.var.backend()),
+            Self::Secret(t) => format!("{} ({})", t.secret, t.var.backend()),
             Self::Transit(t) => format!("{}/keys/{} ({})", t.mount.as_str(), t.key.as_str(), t.backend),
         }
     }
@@ -252,7 +325,7 @@ pub enum MirrorConfigError {
     NoTargets { name: MirrorName },
 
     #[error(
-        "`[secrets.mirrors.{name}]`: target backend `{backend}` is of kind `{kind}`, which `trg` only reads from; mirror into a `keychain` or `openbao` backend"
+        "`[secrets.mirrors.{name}]`: target backend `{backend}` is of kind `{kind}`, which `trg` only reads from; mirror into a `keychain`, `openbao` or `gcp_secret_manager` backend"
     )]
     TargetNotWritable {
         name: MirrorName,
@@ -275,14 +348,6 @@ pub enum MirrorConfigError {
         backend: String,
         kind: BackendKind,
     },
-
-    #[error(
-        "`[secrets.mirrors.{name}]`: a Transit target is `{{ backend, transit_key }}` with an optional `transit_mount`, and cannot also carry `path`, `key` or `ref`"
-    )]
-    MixedTarget { name: MirrorName },
-
-    #[error("`[secrets.mirrors.{name}]`: a Transit target needs `transit_key`")]
-    MissingTransitKey { name: MirrorName },
 
     #[error(
         "`[secrets.mirrors.{name}]`: `{field}` must be made of [A-Za-z0-9._-] (`transit_mount` may nest with `/`), got `{value}`"
@@ -344,6 +409,7 @@ impl Mirror {
             SecretAddress::OnePassword(r) => r.to_string(),
             SecretAddress::Keychain(r) => format!("{}:{}#{}", self.source.backend(), r.path(), r.key()),
             SecretAddress::Openbao(r) => format!("{}:{}#{}", self.source.backend(), r.path(), r.key()),
+            SecretAddress::GcpSecretManager(r) => format!("{}:{}", self.source.backend(), r.secret()),
         }
     }
 }
@@ -354,6 +420,7 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
     let mut out = Vec::with_capacity(secrets.mirrors.len());
     let mut claimed: HashMap<SecretVar, MirrorName> = HashMap::new();
     let mut claimed_transit: HashMap<(String, String, String), MirrorName> = HashMap::new();
+    let mut claimed_secrets: HashMap<(GcpProject, GcpSecretId), MirrorName> = HashMap::new();
     let mut paths: HashMap<(String, SecretPath), (MirrorName, SecretVar)> = HashMap::new();
 
     for (name, config) in &secrets.mirrors {
@@ -361,6 +428,46 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
         for target in &mirror.targets {
             let target = match target {
                 MirrorTarget::Value(target) => target,
+                MirrorTarget::Secret(target) => {
+                    let at = (target.project.clone(), target.secret.clone());
+                    match claimed_secrets.get(&at) {
+                        Some(first) if first == name => {
+                            return Err(MirrorConfigError::RepeatedTarget {
+                                name: name.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        Some(first) => {
+                            return Err(MirrorConfigError::DuplicateTarget {
+                                name: name.clone(),
+                                first: first.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        None => {
+                            claimed_secrets.insert(at, name.clone());
+                        }
+                    }
+                    match claimed.get(&target.var) {
+                        Some(first) if first == name => {
+                            return Err(MirrorConfigError::RepeatedTarget {
+                                name: name.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        Some(first) => {
+                            return Err(MirrorConfigError::DuplicateTarget {
+                                name: name.clone(),
+                                first: first.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        None => {
+                            claimed.insert(target.var.clone(), name.clone());
+                        }
+                    }
+                    continue;
+                }
                 MirrorTarget::Transit(target) => {
                     let at = (
                         target.endpoint.clone(),
@@ -442,11 +549,14 @@ fn resolve_one(
     let mut targets = Vec::with_capacity(config.targets.len());
     for (offset, raw) in config.targets.iter().enumerate() {
         let side = format!("targets[{offset}]");
-        if raw.is_transit() {
-            targets.push(MirrorTarget::Transit(resolve_transit(name, raw, secrets)?));
-            continue;
-        }
-        let var = SecretVar::resolve(&raw.as_var(), secrets, VarSite::mirror(name.as_str(), &side))?;
+        let raw = match raw {
+            RawMirrorTarget::Transit(transit) => {
+                targets.push(MirrorTarget::Transit(resolve_transit(name, transit, secrets)?));
+                continue;
+            }
+            RawMirrorTarget::Var(raw) => raw,
+        };
+        let var = SecretVar::resolve(raw, secrets, VarSite::mirror(name.as_str(), &side))?;
 
         let kind = var.address().backend_kind();
         if !kind.is_writable() {
@@ -461,6 +571,17 @@ fn resolve_one(
                 name: name.clone(),
                 address: source.to_string(),
             });
+        }
+        if let SecretAddress::GcpSecretManager(r) = var.address() {
+            // A secret holds one value and records no origin beside it, so
+            // there is no `source` key to reserve and no path to share.
+            let secret = r.secret().clone();
+            let Some(BackendConfig::GcpSecretManager(gcp)) = secrets.backends.get(var.backend()) else {
+                unreachable!("a gcp address is only resolved against a gcp backend")
+            };
+            let project = gcp.project.clone();
+            targets.push(MirrorTarget::Secret(SecretTarget { var, project, secret }));
+            continue;
         }
         let Some((path, key)) = var.address().path_key() else {
             unreachable!("a writable kind is addressed by path and key")
@@ -481,15 +602,10 @@ fn resolve_one(
 
 fn resolve_transit(
     name: &MirrorName,
-    raw: &RawMirrorTarget,
+    raw: &RawTransitTarget,
     secrets: &SecretsSection,
 ) -> Result<TransitTarget, MirrorConfigError> {
-    if raw.path.is_some() || raw.key.is_some() || raw.reference.is_some() {
-        return Err(MirrorConfigError::MixedTarget { name: name.clone() });
-    }
-    let Some(key) = raw.transit_key.as_deref() else {
-        return Err(MirrorConfigError::MissingTransitKey { name: name.clone() });
-    };
+    let key = raw.transit_key.as_str();
     match secrets.kind_of(&raw.backend) {
         None => {
             return Err(MirrorConfigError::UndeclaredTransitBackend {
@@ -673,6 +789,7 @@ where
         unreachable!("a fetch answers for every var it was asked about")
     };
     let wanted = Fingerprint::of(value.expose_secret());
+    let wanted_exact = Fingerprint::exact(value.expose_secret());
     if wanted.is_empty() {
         return Err(MirrorError::EmptySource);
     }
@@ -694,6 +811,11 @@ where
         let outcome = match (target, &key) {
             (MirrorTarget::Value(target), _) => {
                 sync_target(resolve, target, value, &wanted, &reference, apply)
+                    .instrument(span.clone())
+                    .await
+            }
+            (MirrorTarget::Secret(target), _) => {
+                sync_secret(resolve, target, value, &wanted_exact, apply)
                     .instrument(span.clone())
                     .await
             }
@@ -768,6 +890,84 @@ where
         .map_err(MirrorError::TargetWrite)?;
 
     verify_readback(&backend, target, wanted).await?;
+
+    Ok(match outcome {
+        MirrorOutcome::WouldCreate => MirrorOutcome::Created,
+        _ => MirrorOutcome::Updated,
+    })
+}
+
+/// Add a version to a Secret Manager secret when its latest one differs.
+///
+/// Compared byte for byte, since the store keeps bytes as given and a PEM
+/// key's final newline is part of it. The secret is never created: one that
+/// is missing is an error even in a dry run, because applying could not fix it.
+async fn sync_secret<F>(
+    resolve: &F,
+    target: &SecretTarget,
+    value: &SecretString,
+    wanted: &Fingerprint,
+    apply: bool,
+) -> Result<MirrorOutcome, MirrorError>
+where
+    F: Fn(&str) -> Result<Backend, BackendError>,
+{
+    let backend = resolve(target.var.backend()).map_err(|cause| MirrorError::TargetBackend {
+        name: target.var.backend().to_string(),
+        cause: Box::new(cause),
+    })?;
+    let held = backend
+        .get_secret(&target.secret)
+        .await
+        .map_err(MirrorError::TargetRead)?;
+    let outcome = match &held {
+        Some(held) if Fingerprint::exact(held.expose_secret()) == *wanted => return Ok(MirrorOutcome::UpToDate),
+        Some(_) => MirrorOutcome::WouldUpdate,
+        None => {
+            // Nothing readable is either a secret with no version yet or no
+            // secret at all, and only the first is something to fill. Applying
+            // needs no answer: adding a version to a secret that is not there
+            // is itself refused as a missing container, and nothing is written.
+            // Asking first would need `secretmanager.secrets.get`, which neither
+            // `secretAccessor` nor `secretVersionAdder` carries, so only a dry
+            // run asks, since it would otherwise report a plan that applying
+            // cannot carry out.
+            if !apply
+                && !backend
+                    .secret_exists(&target.secret)
+                    .await
+                    .map_err(MirrorError::TargetRead)?
+            {
+                return Err(MirrorError::TargetRead(backend.missing_container(&target.secret)));
+            }
+            MirrorOutcome::WouldCreate
+        }
+    };
+    if !apply {
+        return Ok(outcome);
+    }
+
+    let created = backend
+        .add_secret_version(&target.secret, value)
+        .await
+        .map_err(MirrorError::TargetWrite)?
+        .ok_or_else(|| {
+            MirrorError::TargetRead(SecretsError::Unavailable(
+                "gcloud did not say which version it added, so the write could not be read back".to_string(),
+            ))
+        })?;
+
+    // The version that was just created, never `latest`: reading a version by
+    // number right after adding it is strongly consistent, and the alias is
+    // not, so it can still answer with the previous value for a while.
+    let back = backend
+        .get_secret_version(&target.secret, &created)
+        .await
+        .map_err(MirrorError::TargetRead)?;
+    match back {
+        Some(back) if Fingerprint::exact(back.expose_secret()) == *wanted => {}
+        _ => return Err(MirrorError::ReadbackMismatch),
+    }
 
     Ok(match outcome {
         MirrorOutcome::WouldCreate => MirrorOutcome::Created,

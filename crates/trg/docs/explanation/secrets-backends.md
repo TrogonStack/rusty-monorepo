@@ -136,18 +136,48 @@ that address is whatever the product holding it uses.
 
 So there is no single `{ path, key }` spelling imposed on every kind. A
 `keychain` or `openbao` var is a path and a key, because that is what those
-stores are. A `onepassword` var is a secret reference,
+stores are. A `gcp_secret_manager` var is a `secret` id alone, because a secret
+holds one value and its versions are not fields. A `onepassword` var is a secret reference,
 `op://<vault>/<item>/<field>`, because that is what 1Password's own
 `Copy Secret Reference` button puts on the clipboard. Pasting it in unchanged
 is both less to get wrong and the only spelling that can reach a field inside
 a section at all, which a vault-and-item path plus a field label could not
 express.
 
-The cost is that the two are not interchangeable: a var written in the wrong
-one fails to load rather than being translated. Translating would mean
+The cost is that the three are not interchangeable: a var written in the wrong
+one fails to load rather than being translated. Each has a spelling no other
+shares (`path` with `key`, `ref`, `secret`), so the shape of a table says which
+was meant, and a table that is half of one or a blend of two is refused while
+the file is parsed, before any backend is looked up. Translating would mean
 inventing a vocabulary native to no backend, and would make a config's address
 something you cannot look up in the documentation of the product the secret
 lives in.
+
+## Secret Manager is driven through `gcloud`
+
+A native client would need an OAuth stack for Application Default Credentials,
+a Secret Manager client, and a rule for which credential source wins when
+several exist. `gcloud` already is all of that, and the session it holds is the
+one a developer's shell, and a CI job that ran `google-github-actions/auth`,
+already trust. Shelling out reuses it with nothing new to store, which is the
+same trade the `onepassword` backend makes with `op`, and it adds no
+dependency.
+
+Two things follow from `gcloud` carrying machine-local state. The project is
+required in the config and passed on every call, because `gcloud config`'s
+default would otherwise make one file read different projects on a laptop and
+in CI. The account is required and passed on every call for the same reason, so
+a machine signed into several identities always uses the one the config says.
+
+The backend never creates a secret. A secret is more than a value: its
+replication policy, access and rotation are infrastructure, and a tool that
+created one on the first write would also be deciding all of them. So it adds
+versions to secrets something else declared, and says so when one is missing.
+
+Values are stored and compared as bytes, because that is what the service
+keeps. The other backends treat one trailing newline as the shell's and not
+the secret's, which is wrong for a PEM key whose final newline a client may
+require, so a mirror into Secret Manager fingerprints every byte.
 
 ## A mirror is a declaration, not a copy
 
