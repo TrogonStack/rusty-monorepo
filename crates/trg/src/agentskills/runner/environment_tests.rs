@@ -72,7 +72,8 @@ fn each_harness_gets_only_its_own_credentials() {
 #[test]
 fn isolated_redirects_home_and_the_harness_config_home() {
     let temp = tempdir().unwrap();
-    let run_dir = temp.path().join("run-001");
+    // Resolved, as the run home is: the system temp directory may sit behind a link.
+    let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");
     let env =
         RunEnvironment::prepare_from(Runner::Codex, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();
 
@@ -356,7 +357,7 @@ fn an_isolated_trogonai_agent_run_keeps_only_the_route_it_signs_in_through() {
     let mut host = host();
     host.insert("HOME".to_string(), temp.path().to_string_lossy().into_owned());
 
-    let run_dir = temp.path().join("run-001");
+    let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");
     let env = RunEnvironment::prepare_from(
         Runner::TrogonaiAgent,
         &run_dir,
@@ -574,7 +575,7 @@ fn isolated_records_the_run_config_home_and_not_the_hosts() {
         Runner::TrogonaiAgent,
     ] {
         let temp = tempdir().unwrap();
-        let run_dir = temp.path().join("run-001");
+        let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");
         let env = RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();
 
         let recorded = env
@@ -594,6 +595,35 @@ fn isolated_records_the_run_config_home_and_not_the_hosts() {
             })
         );
     }
+}
+
+/// A harness that keeps private state may refuse a home it reaches through a symlink, as
+/// trogonai-agent does under macOS's `/tmp`, so the run is handed the resolved path.
+#[cfg(unix)]
+#[test]
+fn isolated_hands_the_harness_a_home_with_no_symlink_on_the_way_to_it() {
+    let temp = tempdir().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let env = RunEnvironment::prepare_from(
+        Runner::Codex,
+        &link.join("run-001"),
+        EnvironmentPolicy::Isolated,
+        None,
+        &host(),
+    )
+    .unwrap();
+
+    let home = PathBuf::from(env.vars.get("HOME").unwrap());
+    assert_eq!(
+        home,
+        std::fs::canonicalize(real.join("run-001").join(RUN_HOME_DIR_NAME)).unwrap()
+    );
+    let config_home = PathBuf::from(env.vars.get("CODEX_HOME").unwrap());
+    assert!(config_home.starts_with(&home), "{}", config_home.display());
 }
 
 #[test]

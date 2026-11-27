@@ -447,9 +447,13 @@ impl RunEnvironment {
 
             // The harness starts in its workspace, not where trg was started, so a relative
             // run directory would hand it a `HOME` and config home that resolve somewhere
-            // else entirely, or that a harness refuses outright.
-            let home = std::path::absolute(run_dir.join(RUN_HOME_DIR_NAME))?;
+            // else entirely, or that a harness refuses outright. The path is also resolved
+            // through any symlink on the way to it: a harness that keeps private state may
+            // refuse a home it reaches through a link, as trogonai-agent does under macOS's
+            // `/tmp`, which is a link to `/private/tmp`.
+            let home = run_dir.join(RUN_HOME_DIR_NAME);
             std::fs::create_dir_all(&home)?;
+            let home = std::fs::canonicalize(&home)?;
             vars.insert("HOME".to_string(), path_string(&home));
 
             let run_config_home = home.join(runner.config_home().dir_name());

@@ -1496,7 +1496,7 @@ fn env_json_names_the_run_config_home_when_isolated() {
         Runner::TrogonaiAgent,
     ] {
         let temp = tempdir().unwrap();
-        let run_dir = temp.path().join("run-001");
+        let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");
         let host = BTreeMap::from([
             ("HOME".to_string(), "/host/home".to_string()),
             ("PATH".to_string(), "/usr/bin".to_string()),
