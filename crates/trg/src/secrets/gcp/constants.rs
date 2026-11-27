@@ -25,6 +25,11 @@ pub const QUIET: &str = "--quiet";
 /// credential file one, so the same config would act as a different principal
 /// there than on a laptop.
 ///
+/// All four are blanked, except that the credential file is passed through when
+/// it is verified to be a credential for the configured account (see
+/// `credential_file`), so a CI job that authenticated with a key or a workload
+/// identity federation file works without storing it first.
+///
 /// Each is set to the empty string rather than removed. `gcloud` reads an
 /// environment value before the active configuration's properties file and
 /// treats an empty one as unset, so this also shadows the same setting made
@@ -32,9 +37,18 @@ pub const QUIET: &str = "--quiet";
 pub const IDENTITY_OVERRIDES: [&str; 4] = [
     "CLOUDSDK_AUTH_ACCESS_TOKEN",
     "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
-    "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+    CREDENTIAL_FILE_OVERRIDE,
     "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
 ];
+
+/// The one override that may reach `gcloud`, and only when the file it names is
+/// verified to be a credential for the configured account.
+pub const CREDENTIAL_FILE_OVERRIDE: &str = "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE";
+
+/// The most bytes read from a credential file. A service account key is about
+/// 2.5 KiB, so this is generous, and a path that points at something huge, such
+/// as a device, is refused instead of read.
+pub const CREDENTIAL_FILE_SIZE_LIMIT: u64 = 64 * 1024;
 
 /// Turns user output back on for one call. With `core/user_output_enabled`
 /// false, `gcloud` exits 0 and prints neither the payload nor its errors, which

@@ -531,10 +531,34 @@ otherwise prefer an access token, an access token file or a credential file
 override (`CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`,
 `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`) over `--account`, and impersonation
 (`CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT`) would replace the result, so
-`trg` blanks all four for every call. The identity is the stored credential of
-`account`, or `gcloud` refuses. A CI job that authenticates with a credential
-file must store it for that account first, with `gcloud auth login --cred-file`
-(which `google-github-actions/setup-gcloud` does), and name the same account.
+`trg` blanks the access token, access token file and impersonation settings for
+every call. The identity is then the stored credential of `account`, or the
+credential file below, or `gcloud` refuses.
+
+`CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` is the one setting that may pass
+through, because it is how a CI job that ran `google-github-actions/auth` hands
+over its identity, and that identity is not in `gcloud auth list`. `trg` reads
+the file and keeps the setting only when the principal it names is `account`:
+
+| File                                                              | Principal `trg` checks against `account`                  |
+| ----------------------------------------------------------------- | ---------------------------------------------------------- |
+| `service_account` key                                             | `client_email`                                             |
+| `external_account` (workload identity federation) that impersonates a service account | the service account in `service_account_impersonation_url` |
+| `external_account` without `service_account_impersonation_url`    | none: the identity is a federated subject, not an email    |
+| `authorized_user`, or any other type                              | none                                                       |
+
+This is the same principal `gcloud` itself reports for the first two. Emails are
+compared without regard to case. When the file is for another principal, names
+none, or cannot be read or parsed, every call and `trg doctor` fail with a
+message that names the file and `account`; `trg` does not fall back to another
+identity and does not ignore the file. Only `client_email`, `type` and
+`service_account_impersonation_url` are read, and the key material is never
+printed. For a file that names no principal, impersonate a service account in
+the federation file, or unset the variable and store the credential with
+`gcloud auth login --cred-file` for `account`.
+
+With a verified file, `trg doctor` reports that principal as the account
+identity, and does not require it to be in `gcloud auth list`.
 
 Every call also passes `--quiet`, `--user-output-enabled` and `--verbosity=error`,
 so a prompt cannot stall it and a `gcloud config` that silences output cannot
@@ -587,7 +611,7 @@ which writes the source bytes untouched.
 server's OAuth credentials, which are a map of values and not one.
 
 `trg doctor` checks that `gcloud` answers, that the configured account holds
-credentials, and that the project can be listed with
+credentials (stored, or through a verified credential file as above), and that the project can be listed with
 that account, which fails the same way for a project that does not exist and
 one the account cannot see. Listing needs `secretmanager.secrets.list`
 (`roles/secretmanager.viewer` carries it). An identity that only reads or adds

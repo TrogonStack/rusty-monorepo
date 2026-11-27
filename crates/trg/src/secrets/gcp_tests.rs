@@ -101,6 +101,7 @@ impl StubGcloud {
             GcpAccount::parse(ACCOUNT).expect("account"),
         )
         .with_bin(self.dir.path().join("gcloud"))
+        .with_credential_file(None)
     }
 
     fn argv(&self) -> Vec<String> {
@@ -184,6 +185,121 @@ async fn a_read_names_the_project_and_the_account_and_never_infers_either() {
     ] {
         assert!(argv.iter().any(|a| a == wanted), "{wanted} missing from {argv:?}");
     }
+}
+
+const KEY_FOR_ACCOUNT: &str = r#"{"type":"service_account","client_email":"deployer@my-project.iam.gserviceaccount.com","private_key":"TOP-SECRET-KEY"}"#;
+
+/// The stateful stand-in that also records which identity overrides reached it.
+fn recording_stub() -> StubGcloud {
+    let stub = StubGcloud::scripted(&format!("env | grep '^CLOUDSDK_AUTH_' | sort > \"$0.env\"\n{STATEFUL}"));
+    std::fs::write(stub.file("exists"), "").expect("create");
+    stub
+}
+
+fn seen_env(stub: &StubGcloud) -> Vec<String> {
+    std::fs::read_to_string(stub.file("env"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn credential_file(body: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("creds.json");
+    std::fs::write(&path, body).expect("write");
+    (dir, path)
+}
+
+/// CI that ran `google-github-actions/auth` has the credential file in the
+/// environment and nothing in `gcloud auth list`. Its identity is the configured
+/// account, so the file reaches `gcloud` and every other override stays blank.
+#[tokio::test]
+async fn a_credential_file_for_the_configured_account_reaches_gcloud() {
+    let stub = recording_stub();
+    stub.put_bytes(b"v");
+    let (_dir, path) = credential_file(KEY_FOR_ACCOUNT);
+    let backend = stub.backend().with_credential_file(Some(path.clone()));
+    assert_eq!(
+        backend
+            .get_latest(&id("tok"))
+            .await
+            .expect("read")
+            .expect("value")
+            .expose_secret(),
+        "v"
+    );
+    backend.add_version(&id("tok"), &secret("w")).await.expect("write");
+
+    let seen = seen_env(&stub);
+    assert!(
+        seen.contains(&format!("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE={}", path.display())),
+        "{seen:?}"
+    );
+    for blank in [
+        "CLOUDSDK_AUTH_ACCESS_TOKEN=",
+        "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=",
+        "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=",
+    ] {
+        assert!(seen.iter().any(|l| l == blank), "{blank} missing from {seen:?}");
+    }
+    assert!(!seen.iter().any(|l| l.contains("TOP-SECRET-KEY")), "{seen:?}");
+}
+
+#[tokio::test]
+async fn without_a_credential_file_every_override_is_blank() {
+    let stub = recording_stub();
+    stub.put_bytes(b"v");
+    stub.backend().get_latest(&id("tok")).await.expect("read");
+    let mut seen = seen_env(&stub);
+    seen.sort_unstable();
+    assert_eq!(
+        seen,
+        [
+            "CLOUDSDK_AUTH_ACCESS_TOKEN=",
+            "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE=",
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=",
+            "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT=",
+        ]
+    );
+}
+
+/// A file that is for someone else, or that names nobody `trg` can check, is
+/// neither used nor quietly set aside for another identity: the call fails
+/// before `gcloud` runs, so no secret is read or written as a stranger.
+#[tokio::test]
+async fn a_credential_file_that_cannot_be_matched_fails_before_gcloud_runs() {
+    for body in [
+        r#"{"type":"service_account","client_email":"other@my-project.iam.gserviceaccount.com"}"#,
+        r#"{"type":"external_account","audience":"//iam.googleapis.com/x"}"#,
+        r#"{"type":"authorized_user"}"#,
+    ] {
+        let stub = recording_stub();
+        stub.put_bytes(b"v");
+        let (_dir, path) = credential_file(body);
+        let backend = stub.backend().with_credential_file(Some(path));
+
+        let read = backend.get_latest(&id("tok")).await.expect_err(body);
+        let write = backend.add_version(&id("tok"), &secret("w")).await.expect_err(body);
+        for err in [read, write] {
+            let text = err.to_string();
+            assert!(text.contains("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE"), "{text}");
+            assert!(text.contains("deployer@my-project"), "{text}");
+        }
+        assert!(stub.argv().is_empty(), "gcloud ran: {:?}", stub.argv());
+        assert_eq!(stub.stored().as_deref(), Some(b"v".as_slice()));
+    }
+}
+
+/// `auth list` uses no credential, so a file that cannot be matched must not
+/// stop `trg doctor` from asking it and then reporting the file.
+#[tokio::test]
+async fn listing_accounts_does_not_need_a_matching_credential_file() {
+    let stub = recording_stub();
+    let (_dir, path) = credential_file(r#"{"type":"authorized_user"}"#);
+    let backend = stub.backend().with_credential_file(Some(path));
+    assert!(backend.accounts().await.is_ok());
+    assert!(backend.credential_file().is_err());
 }
 
 /// Every subcommand this backend drives, not only the read: `versions add` sends

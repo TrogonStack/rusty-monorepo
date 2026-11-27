@@ -29,9 +29,16 @@
 //! access token file or a credential file override over the account it was
 //! told to use, and impersonation replaces the result with another principal.
 //! Every invocation therefore blanks those settings, so the identity is the
-//! stored credential of the configured account or `gcloud` refuses. A CI job
-//! that authenticates through a credential file must store it for the account
-//! first, as `gcloud auth login --cred-file` does.
+//! stored credential of the configured account or `gcloud` refuses.
+//!
+//! The credential file is the one exception, because it is how a CI job that ran
+//! `google-github-actions/auth` hands over its identity, and that identity is
+//! not in `gcloud auth list`. It is kept only after `trg` reads the file and
+//! finds the principal `gcloud` would act as (`client_email` of a service
+//! account key, the impersonated service account of an `external_account` file)
+//! equal to the configured account. A file that names no such principal, or a
+//! different one, fails the call with a message instead of acting as someone
+//! else or silently ignoring the file.
 //!
 //! # Why `gcloud` is kept from logging
 //!
@@ -66,6 +73,7 @@
 //! newline, which a PEM private key ends with and a client may require.
 
 mod constants;
+mod credential_file;
 use constants::{
     DISABLE_FILE_LOGGING, ERRORS_ONLY, GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, LATEST, NO_LOG_HTTP, QUIET,
     SECRET_ID_MAX_LEN, USER_OUTPUT,
@@ -81,6 +89,9 @@ use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::Instrument;
+
+pub use constants::CREDENTIAL_FILE_OVERRIDE;
+pub use credential_file::{CredentialFileError, VerifiedCredentialFile};
 
 use super::telemetry::{CliSpan, TIMEOUT};
 use super::{BackendKind, SecretPath, SecretsError};
@@ -396,6 +407,10 @@ pub struct GcpBackend {
     /// How long one `gcloud` invocation gets; overridden in tests so a hung
     /// stub does not cost the suite real wall-clock time.
     timeout: Duration,
+    /// The credential file the environment names, as it was when the backend
+    /// was built. Held as data so tests do not depend on, or write to, the
+    /// process environment.
+    credential_file: Option<PathBuf>,
 }
 
 impl GcpBackend {
@@ -405,7 +420,28 @@ impl GcpBackend {
             account,
             bin: PathBuf::from("gcloud"),
             timeout: GCLOUD_TIMEOUT,
+            credential_file: std::env::var_os(CREDENTIAL_FILE_OVERRIDE)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_credential_file(mut self, path: Option<PathBuf>) -> Self {
+        self.credential_file = path;
+        self
+    }
+
+    /// The credential file in effect for this backend, verified to be for the
+    /// configured account. `None` when the environment names none, so the
+    /// stored credential of the account is what `gcloud` uses. An error when it
+    /// names one that cannot be matched, which is refused rather than set aside
+    /// in favour of some other identity.
+    pub fn credential_file(&self) -> Result<Option<VerifiedCredentialFile>, CredentialFileError> {
+        self.credential_file
+            .as_deref()
+            .map(|path| credential_file::verify(path, &self.account))
+            .transpose()
     }
 
     #[cfg(test)]
@@ -641,6 +677,13 @@ impl GcpBackend {
         self.invoke(command, args, None).await
     }
 
+    #[cfg_attr(
+        dylint_lib = "trogon_dylint_lints",
+        expect(
+            discarded_error_source,
+            reason = "SecretsError::Unavailable carries text only, and the credential file error renders its own cause in that text"
+        )
+    )]
     /// Runs `gcloud <command> <args> --quiet` under a CLI client span that
     /// names the subcommand and none of the arguments, which address the
     /// secret. The value, when there is one, goes in on stdin.
@@ -650,6 +693,15 @@ impl GcpBackend {
         args: &[&str],
         stdin: Option<&SecretString>,
     ) -> Result<std::process::Output, SecretsError> {
+        // `auth list` reads local state and uses no credential, so it needs no
+        // verified identity, and `trg doctor` must be able to run it to report
+        // a credential file that cannot be matched.
+        let credential_file = match command {
+            GcloudCommand::AuthList => None,
+            _ => self
+                .credential_file()
+                .map_err(|e| SecretsError::Unavailable(e.to_string()))?,
+        };
         let call = CliSpan::start(BackendKind::GcpSecretManager, "gcloud", command.as_str());
         let invocation = || format!("{} {}", command.as_str(), args.join(" "));
 
@@ -667,7 +719,10 @@ impl GcpBackend {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         for name in IDENTITY_OVERRIDES {
-            process.env(name, "");
+            match &credential_file {
+                Some(file) if name == CREDENTIAL_FILE_OVERRIDE => process.env(name, file.path()),
+                _ => process.env(name, ""),
+            };
         }
         process.env(DISABLE_FILE_LOGGING.0, DISABLE_FILE_LOGGING.1);
         call.span().in_scope(|| propagation::inject_tokio_command(&mut process));

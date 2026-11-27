@@ -7,10 +7,19 @@ its own.
 ## Before you start
 
 - The [`gcloud` CLI](https://cloud.google.com/sdk/gcloud) is installed and
-  authenticated for the account you declare, with `gcloud auth login` or, in
-  CI, `gcloud auth login --cred-file` (`google-github-actions/setup-gcloud` runs
-  it). A credential file or access token that is only set in the environment is
-  ignored, because it could name a different identity than `account`.
+  authenticated as the account you declare, in one of two ways:
+  - Stored: `gcloud auth login`, or `gcloud auth login --cred-file` (which
+    `google-github-actions/setup-gcloud` runs).
+  - A credential file in `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`, as
+    `google-github-actions/auth` sets it in CI. `trg` reads the file and uses it
+    only when it is a service account key whose `client_email` is `account`, or
+    a workload identity federation file whose `service_account_impersonation_url`
+    names `account`. A file for another identity, or a federation file that
+    impersonates no service account, is refused with a message.
+
+  An access token, an access token file or impersonation that is only set in the
+  environment is ignored, because it could name a different identity than
+  `account`.
 - The secret exists. `trg` adds versions to a secret and never creates one, so
   declare it where you declare the rest of your infrastructure.
 - The identity holds the permissions for what you run. Each command asks for
@@ -90,4 +99,5 @@ a [mirror](mirror-a-secret-into-another-backend.md#mirror-a-secret-into-secret-m
 | ------- | ---------- |
 | `secret ... does not exist in project ...` | Create the secret first. `trg` never does. |
 | `permission denied` | The account lacks the role above on that secret or project. |
+| `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE names ...` | The credential file is for another identity or names no principal `trg` can check. Point it at a key or federation file for `account`, or unset it and run `gcloud auth login --cred-file`. |
 | `gcloud ... timed out` | `gcloud` is probably waiting on a reauthentication prompt. Run `gcloud auth login`. |

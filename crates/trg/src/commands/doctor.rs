@@ -26,6 +26,7 @@ use tracing::Instrument;
 
 use crate::exit_code::ExitCode;
 use crate::output::OutputFormat;
+use crate::secrets::gcp::CREDENTIAL_FILE_OVERRIDE;
 use crate::secrets::onepassword;
 use crate::secrets::openbao::{Health, TokenSource};
 use crate::secrets::GcpBackend;
@@ -391,13 +392,26 @@ async fn gcp_secret_manager(name: &str, gcp: &GcpBackend) -> Report {
     let gcloud = Check::new("gcloud", Outcome::passed("`gcloud auth list` answers"));
 
     let wanted = gcp.account();
-    let account = if known.iter().any(|a| a.account == wanted.as_str()) {
-        Outcome::passed(format!("`{wanted}` holds credentials"))
-    } else {
-        Outcome::failed(
+    // A credential file named in the environment is the credential `gcloud`
+    // uses when it is set, and it is never in `gcloud auth list`, so its
+    // principal is what answers here. `trg` passes it through only when it is
+    // for the configured account, so a file that is not is a failure to report.
+    let account = match gcp.credential_file() {
+        Ok(Some(file)) => Outcome::passed(format!(
+            "`{}` is the identity of the credential file named by `{CREDENTIAL_FILE_OVERRIDE}`",
+            file.principal()
+        )),
+        Err(err) => Outcome::failed(
+            err.to_string(),
+            format!("unset `{CREDENTIAL_FILE_OVERRIDE}`, or point it at a credential for `{wanted}`"),
+        ),
+        Ok(None) if known.iter().any(|a| a.account == wanted.as_str()) => {
+            Outcome::passed(format!("`{wanted}` holds credentials"))
+        }
+        Ok(None) => Outcome::failed(
             format!("`{wanted}` is not an account `gcloud` holds credentials for"),
             format!("run `gcloud auth login --account {wanted}`, or fix `account` under `[secrets.backends.{name}]`"),
-        )
+        ),
     };
     if matches!(account, Outcome::Failed { .. }) {
         return report(vec![

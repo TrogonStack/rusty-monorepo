@@ -192,7 +192,6 @@ fn an_inherited_credential_override_never_reaches_gcloud() {
     let overrides = [
         "CLOUDSDK_AUTH_ACCESS_TOKEN",
         "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
-        "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
         "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
     ];
     let setup = Setup::new(true);
@@ -207,7 +206,9 @@ fn an_inherited_credential_override_never_reaches_gcloud() {
     let seen = fs::read_to_string(setup.bin.path().join("gcloud.body.env")).unwrap();
     let mut lines: Vec<&str> = seen.lines().collect();
     lines.sort_unstable();
-    let blank: Vec<String> = overrides.iter().map(|n| format!("{n}=")).collect();
+    let mut blank: Vec<String> = overrides.iter().map(|n| format!("{n}=")).collect();
+    blank.push("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE=".to_string());
+    blank.sort_unstable();
     assert_eq!(lines, blank, "{seen}");
     assert!(!seen.contains("someone-else"), "{seen}");
 }
@@ -293,4 +294,59 @@ fn http_logging_is_off_for_every_call_whatever_the_user_set() {
         seen.lines().any(|l| l == "CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true"),
         "{seen}"
     );
+}
+
+fn key_file(setup: &Setup, email: &str) -> PathBuf {
+    let path = setup.home.path().join("key.json");
+    fs::write(
+        &path,
+        format!(r#"{{"type":"service_account","client_email":"{email}","private_key":"TOP-SECRET-KEY"}}"#),
+    )
+    .unwrap();
+    path
+}
+
+/// A CI job that ran `google-github-actions/auth` has no stored account, only
+/// this file, and its secret calls must work end to end with it.
+#[test]
+fn a_credential_file_for_the_configured_account_works_end_to_end() {
+    let setup = Setup::new(true);
+    fs::write(setup.bin.path().join("gcloud.body.state"), b"stored-value").unwrap();
+    let key = key_file(&setup, "deployer@my-project.iam.gserviceaccount.com");
+    let out = setup
+        .command(&["secret", "get", "--backend", "gsm", "--secret", "deploy-token"])
+        .env("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", &key)
+        .env("CLOUDSDK_AUTH_ACCESS_TOKEN", "someone-else")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let seen = fs::read_to_string(setup.bin.path().join("gcloud.body.env")).unwrap();
+    assert!(
+        seen.lines()
+            .any(|l| l == format!("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE={}", key.display())),
+        "{seen}"
+    );
+    assert!(seen.lines().any(|l| l == "CLOUDSDK_AUTH_ACCESS_TOKEN="), "{seen}");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("TOP-SECRET-KEY"));
+}
+
+/// A file for a different principal fails with a message, and `gcloud` never
+/// runs as that stranger.
+#[test]
+fn a_credential_file_for_another_identity_is_refused_and_gcloud_never_runs() {
+    let setup = Setup::new(true);
+    fs::write(setup.bin.path().join("gcloud.body.state"), b"stored-value").unwrap();
+    let key = key_file(&setup, "other@my-project.iam.gserviceaccount.com");
+    let out = setup
+        .command(&["secret", "get", "--backend", "gsm", "--secret", "deploy-token"])
+        .env("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", &key)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("other@my-project"), "{stderr}");
+    assert!(stderr.contains("deployer@my-project"), "{stderr}");
+    assert!(!stderr.contains("TOP-SECRET-KEY"), "{stderr}");
+    assert_eq!(setup.argv(), "");
 }
