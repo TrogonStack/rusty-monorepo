@@ -336,7 +336,9 @@ async fn the_project_probe_lists_at_most_one_secret() {
 
 #[tokio::test]
 async fn a_hung_gcloud_is_bounded_by_the_timeout() {
-    let stub = StubGcloud::scripted("sleep 300\n");
+    // `exec` so the timeout kills `sleep` itself. A forked `sleep` outlives the
+    // killed shell as an orphan, and tarpaulin aborts the run when it sees one.
+    let stub = StubGcloud::scripted("exec sleep 300\n");
     let backend = stub.backend().with_timeout(Duration::from_millis(200));
     let err = backend.get_latest(&id("tok")).await.expect_err("timed out");
     assert!(matches!(err, SecretsError::Transport(_)), "{err}");
