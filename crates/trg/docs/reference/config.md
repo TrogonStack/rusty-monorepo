@@ -536,6 +536,10 @@ override (`CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`,
 file must store it for that account first, with `gcloud auth login --cred-file`
 (which `google-github-actions/setup-gcloud` does), and name the same account.
 
+Every call also passes `--quiet`, `--user-output-enabled` and `--verbosity=error`,
+so a prompt cannot stall it and a `gcloud config` that silences output cannot
+turn a successful read into an empty value.
+
 A value is addressed by the secret id alone, written as a var's `secret`:
 
 ```toml

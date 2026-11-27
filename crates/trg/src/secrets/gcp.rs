@@ -56,7 +56,7 @@
 //! newline, which a PEM private key ends with and a client may require.
 
 mod constants;
-use constants::{GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, QUIET, SECRET_ID_MAX_LEN};
+use constants::{ERRORS_ONLY, GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, QUIET, SECRET_ID_MAX_LEN, USER_OUTPUT};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -578,7 +578,7 @@ impl GcpBackend {
         process
             .args(command.words())
             .args(args)
-            .arg(QUIET)
+            .args([QUIET, USER_OUTPUT, ERRORS_ONLY])
             .stdin(if stdin.is_some() {
                 std::process::Stdio::piped()
             } else {

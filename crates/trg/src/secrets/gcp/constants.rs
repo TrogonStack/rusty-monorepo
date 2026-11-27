@@ -35,3 +35,12 @@ pub const IDENTITY_OVERRIDES: [&str; 4] = [
     "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
     "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
 ];
+
+/// Turns user output back on for one call. With `core/user_output_enabled`
+/// false, `gcloud` exits 0 and prints neither the payload nor its errors, which
+/// would read as an empty secret.
+pub const USER_OUTPUT: &str = "--user-output-enabled";
+
+/// Keeps error text on stderr whatever `core/verbosity` says, since a failure
+/// is told apart by what it printed.
+pub const ERRORS_ONLY: &str = "--verbosity=error";

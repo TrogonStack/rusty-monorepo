@@ -207,3 +207,20 @@ fn an_inherited_credential_override_never_reaches_gcloud() {
     assert_eq!(lines, blank, "{seen}");
     assert!(!seen.contains("someone-else"), "{seen}");
 }
+
+/// A user's own `core/user_output_enabled=false` would make `gcloud` succeed
+/// without printing the payload, which reads as an empty secret.
+#[test]
+fn output_is_enabled_for_every_call() {
+    let setup = Setup::new(true);
+    fs::write(setup.bin.path().join("gcloud.body.state"), b"stored-value").unwrap();
+    let out = setup
+        .command(&["secret", "get", "--backend", "gsm", "--secret", "deploy-token"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let argv = setup.argv();
+    for wanted in ["--user-output-enabled", "--verbosity=error", "--quiet"] {
+        assert!(argv.lines().any(|a| a == wanted), "{wanted} missing from {argv}");
+    }
+}
