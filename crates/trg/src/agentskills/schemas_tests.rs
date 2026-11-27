@@ -179,6 +179,7 @@ fn events_json_round_trip_validates() {
     .staged_at(StagedSkill::At {
         directory,
         name: StagedSkillName::known(SkillName::parse("demo-skill").unwrap()),
+        native: None,
     });
     transcript.workspace_escapes.push(WorkspaceEscape {
         tool: ToolName::new("Read").unwrap(),

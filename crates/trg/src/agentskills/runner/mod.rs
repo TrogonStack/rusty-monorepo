@@ -64,7 +64,7 @@ use super::budget::{HarnessPricing, RunCap, RunCaps, RunCost};
 use super::case_directories::EVAL_CASE_PROMPT_FILE_NAME;
 use super::companion_skills::{resolve_companions, CompanionError, StagedCompanion};
 use super::errors::SkillError;
-use super::evals::{EvalCase, EvalDirName, EvalError, EVAL_SUITE_MANIFEST_NAME};
+use super::evals::{EvalCase, EvalDirName, EvalError, SkillDisclosure, EVAL_SUITE_MANIFEST_NAME};
 use super::mocks::MaterializedMcpConfig;
 use super::outputs::ensure_outputs_dir;
 use super::prompt::{build_eval_prompt, EvalPromptInput, SkillName, SkillSummary, StagedSkillDir};
@@ -97,7 +97,24 @@ pub enum Runner {
     Pi,
 }
 
+/// Where `.agents/`-convention harnesses discover workspace skills by name.
+pub const NATIVE_SKILL_ROOT_AGENTS: &str = ".agents/skills/";
+
 impl Runner {
+    /// Where this runner's harness discovers workspace skills by name, if it does.
+    ///
+    /// The prompt names an announced skill and points at `.skill/`, a directory no
+    /// harness scans. A harness with a skill tool of its own then calls it with that
+    /// name and is told the skill does not exist, a round trip that a harness with no
+    /// such tool never pays, so the comparison between them is tilted before either
+    /// has done any work. A copy where the harness looks makes the name resolve.
+    pub fn native_skill_root(self) -> Option<&'static str> {
+        match self {
+            Self::TrogonaiAgent | Self::OpenCode => Some(NATIVE_SKILL_ROOT_AGENTS),
+            Self::CursorAgent | Self::ClaudeCode | Self::Codex | Self::Pi => None,
+        }
+    }
+
     pub fn invoke(self, request: &EvalRunRequest) -> Result<EvalRunOutcome, RunnerError> {
         let result = match self {
             Self::CursorAgent => cursor_agent::run(request),
@@ -580,7 +597,7 @@ pub fn persist_runner_io(
                     &stdout,
                     &WorkspaceBoundary::at(request.workspace_dir),
                 )
-                .staged_at(staged_skill(request)?);
+                .staged_at(staged_skill(runner, request)?);
             Ok(write_normalized_transcript(request.transcript_path, &normalized)?)
         })
     })
@@ -651,6 +668,15 @@ pub fn prepare_workspace(request: &EvalRunRequest, runner: Runner) -> Result<Pre
                     request.skill_staging,
                     &request.eval_dir,
                 )?;
+                if let Some(native) = native_skill_dir(runner, request, &plan) {
+                    stage_skill_into_workspace(
+                        plan.source,
+                        request.workspace_dir,
+                        native.as_str(),
+                        request.skill_staging,
+                        &request.eval_dir,
+                    )?;
+                }
             }
             Ok(())
         })?;
@@ -833,10 +859,25 @@ fn companion_error_to_runner(err: CompanionError) -> RunnerError {
     }
 }
 
+/// The harness-native copy of this run's skill, if the runner's harness has one.
+///
+/// Only an announced skill gets one. An unannounced case measures whether the agent
+/// finds the skill from what the workspace shows, and a harness that discovers skills
+/// would list it in its own prompt, which is the announcement the case withholds.
+fn native_skill_dir(runner: Runner, request: &EvalRunRequest, plan: &SkillStagingPlan) -> Option<StagedSkillDir> {
+    if request.eval.skill_disclosure == SkillDisclosure::Unannounced {
+        return None;
+    }
+    runner
+        .native_skill_root()
+        .map(|root| StagedSkillDir::native(root, plan.name.as_str()))
+}
+
 /// What this run staged, for the transcript to carry to whoever grades it.
-fn staged_skill(request: &EvalRunRequest) -> Result<StagedSkill, RunnerError> {
+fn staged_skill(runner: Runner, request: &EvalRunRequest) -> Result<StagedSkill, RunnerError> {
     Ok(match skill_to_stage(request)? {
         Some(plan) => StagedSkill::At {
+            native: native_skill_dir(runner, request, &plan),
             directory: plan.directory,
             name: StagedSkillName::known(plan.name),
         },

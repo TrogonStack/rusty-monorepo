@@ -377,6 +377,84 @@ fn prepare_with_skill_symlinks_skill_and_prefixes_prompt() {
     assert!(workspace.join("evals/files/input.txt").is_file());
 }
 
+/// Stages a with-skill case with the given disclosure for `runner`, answering the
+/// workspace and what the run recorded.
+fn staged_for(runner: Runner, disclosure: &str) -> (tempfile::TempDir, std::path::PathBuf, StagedSkill) {
+    let temp = tempdir().unwrap();
+    let skill_path = temp.path().join("skill");
+    std::fs::create_dir_all(&skill_path).unwrap();
+    let skill_md = "---\nname: test-skill\ndescription: Test skill\n---\n# Skill\n";
+    std::fs::write(skill_path.join("SKILL.md"), skill_md).unwrap();
+    let workspace = temp.path().join("ws");
+    let transcript = workspace.join("transcript.jsonl");
+    let stderr = workspace.join("stderr.log");
+    let case: EvalCase = serde_json::from_value(serde_json::json!({
+        "id": "case-1",
+        "prompt": "do the thing",
+        "expected_output": "done",
+        "skill_disclosure": disclosure,
+    }))
+    .unwrap();
+    let request = test_request(
+        &case,
+        ScenarioKind::WithSkill,
+        skill_md,
+        &skill_path,
+        &workspace,
+        &transcript,
+        &stderr,
+        None,
+        None,
+    );
+    prepare_workspace(&request, runner).unwrap();
+    let staged = staged_skill(runner, &request).unwrap();
+    (temp, workspace, staged)
+}
+
+/// A harness whose own skill tool takes the name the prompt gives has to find the
+/// skill under that name, or the tool's first call is a refusal the other harnesses
+/// never pay for.
+#[test]
+fn an_announced_skill_is_also_staged_where_a_native_skill_tool_finds_it() {
+    for runner in [Runner::TrogonaiAgent, Runner::OpenCode] {
+        let (_temp, workspace, staged) = staged_for(runner, "announced");
+        assert!(
+            workspace.join(".skill/SKILL.md").is_file(),
+            "{runner:?} keeps the announced path"
+        );
+        assert!(
+            workspace.join(".agents/skills/test-skill/SKILL.md").is_file(),
+            "{runner:?} finds skills under .agents/skills"
+        );
+        let StagedSkill::At { native, .. } = &staged else {
+            panic!("a with-skill run staged a skill");
+        };
+        assert_eq!(
+            native.as_ref().map(StagedSkillDir::as_str),
+            Some(".agents/skills/test-skill/"),
+            "{runner:?} records the copy so reading it counts as reading the skill"
+        );
+        assert!(staged.planted(".agents/skills/test-skill/SKILL.md"));
+    }
+}
+
+/// A harness that would not look there gets no second copy to stumble on.
+#[test]
+fn a_runner_without_native_skill_discovery_gets_no_second_copy() {
+    let (_temp, workspace, staged) = staged_for(Runner::Pi, "announced");
+    assert!(!workspace.join(".agents").exists());
+    assert!(matches!(staged, StagedSkill::At { native: None, .. }));
+}
+
+/// A harness that discovers skills lists them in its own prompt, which would announce
+/// a skill the case is measuring whether the agent finds unprompted.
+#[test]
+fn an_unannounced_skill_gets_no_native_copy() {
+    let (_temp, workspace, staged) = staged_for(Runner::TrogonaiAgent, "unannounced");
+    assert!(!workspace.join(".agents").exists());
+    assert!(matches!(staged, StagedSkill::At { native: None, .. }));
+}
+
 /// What a run records as staged is read against the paths the run named, so it
 /// has to be the directory the workspace was staged at rather than a second guess
 /// at where staging put it.
@@ -413,7 +491,7 @@ fn a_run_records_the_directory_it_staged_the_skill_at() {
 
         prepare_workspace(&request, Runner::ClaudeCode).unwrap();
 
-        let StagedSkill::At { directory, .. } = staged_skill(&request).unwrap() else {
+        let StagedSkill::At { directory, .. } = staged_skill(Runner::ClaudeCode, &request).unwrap() else {
             panic!("a with-skill run staged a skill");
         };
         assert!(

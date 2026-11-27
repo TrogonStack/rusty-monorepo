@@ -90,6 +90,12 @@ impl StagedSkillDir {
         Some(Self(link))
     }
 
+    /// A second copy of an announced skill, where a harness that finds skills by
+    /// name looks for them, so its own skill tool resolves the name the prompt gives.
+    pub fn native(root: &str, skill_name: &str) -> Self {
+        Self(format!("{root}{}/", directory_segment(skill_name)))
+    }
+
     /// Where a skill staged only to be passed over goes.
     ///
     /// The same shared parent an unannounced skill uses, so a listing reports the skill

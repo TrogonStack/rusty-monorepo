@@ -99,7 +99,7 @@ When `--runner` is provided, the CLI invokes the agent for each run:
 
 | Step | What happens |
 | ---- | ------------ |
-| Prepare workspace | Stage fixtures; stage skill to `.skill/`, `.old-skill/`, or `skills/<skill-name>/` for an unannounced case, via copy (default) or symlink (`--skill-staging`) |
+| Prepare workspace | Stage fixtures; stage skill to `.skill/`, `.old-skill/`, or `skills/<skill-name>/` for an unannounced case, via copy (default) or symlink (`--skill-staging`); an announced skill is also staged at `.agents/skills/<skill-name>/` for runners whose harness looks skills up by name |
 | Build prompt | Task + fixture paths + frontmatter summary + output constraints (`prompt` contract v1) |
 | Invoke runner | Spawn `cursor-agent`, `claude`, `codex`, `trogonai-agent`, `opencode`, or `pi` with JSON event output |
 | Capture output | Write `transcript.jsonl`, `timing.json`; update run status and metrics, including the turn and per-tool counts read off the transcript |
