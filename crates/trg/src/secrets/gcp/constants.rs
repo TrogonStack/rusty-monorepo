@@ -47,3 +47,21 @@ pub const ERRORS_ONLY: &str = "--verbosity=error";
 
 /// The alias for the newest version, whatever state it is in.
 pub const LATEST: &str = "latest";
+
+/// Keeps `gcloud` from logging HTTP traffic, whatever `core/log_http` says.
+///
+/// With that property on, `gcloud` writes each response to its log files, and a
+/// `secrets versions access` response carries the secret in `payload.data`. A
+/// command line flag outranks the environment and the properties file, so a
+/// user's own `gcloud config set core/log_http true` or `CLOUDSDK_CORE_LOG_HTTP`
+/// cannot turn it back on for this call.
+pub const NO_LOG_HTTP: &str = "--no-log-http";
+
+/// Stops `gcloud` from writing a log file at all.
+///
+/// The flag above covers HTTP bodies. `gcloud` also writes everything at debug
+/// level to a file under its configuration directory regardless of
+/// `--verbosity`, and keeps those files for 30 days by default, so nothing a
+/// future release logs about a secret is left on disk either. The cost is that
+/// there is no debug log to attach to a bug report from these calls.
+pub const DISABLE_FILE_LOGGING: (&str, &str) = ("CLOUDSDK_CORE_DISABLE_FILE_LOGGING", "true");

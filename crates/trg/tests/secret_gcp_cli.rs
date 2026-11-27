@@ -20,6 +20,7 @@ use std::process::Command;
 
 const BODY: &str = r#"
 env | grep '^CLOUDSDK_AUTH_' | sort > "$0.env"
+env | grep '^CLOUDSDK_CORE_' | sort > "$0.coreenv"
 case "$1 $2 $3" in
   "secrets versions add")
     [ -f "$0.exists" ] || { echo "NOT_FOUND: Secret not found." >&2; exit 1; }
@@ -266,4 +267,30 @@ exit 127
     let document: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(document["secret"], "deploy-token", "{document}");
     assert!(document.get("replaced").is_none(), "{document}");
+}
+
+/// A secret read is an HTTP response with the value in `payload.data`, and
+/// `gcloud` writes responses to its log files when `core/log_http` is on. The
+/// flag outranks a user's own setting, so it is passed on every call, and file
+/// logging is switched off for the child.
+#[test]
+fn http_logging_is_off_for_every_call_whatever_the_user_set() {
+    let setup = Setup::new(true);
+    fs::write(setup.bin.path().join("gcloud.body.state"), b"stored-value").unwrap();
+    let out = setup
+        .command(&["secret", "get", "--backend", "gsm", "--secret", "deploy-token"])
+        .env("CLOUDSDK_CORE_LOG_HTTP", "true")
+        .env("CLOUDSDK_CORE_DISABLE_FILE_LOGGING", "false")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let argv = setup.argv();
+    assert!(argv.lines().any(|a| a == "--no-log-http"), "{argv}");
+    assert!(!argv.lines().any(|a| a == "--log-http"), "{argv}");
+    let seen = fs::read_to_string(setup.bin.path().join("gcloud.body.coreenv")).unwrap();
+    assert!(
+        seen.lines().any(|l| l == "CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true"),
+        "{seen}"
+    );
 }

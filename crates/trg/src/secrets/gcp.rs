@@ -33,6 +33,16 @@
 //! that authenticates through a credential file must store it for the account
 //! first, as `gcloud auth login --cred-file` does.
 //!
+//! # Why `gcloud` is kept from logging
+//!
+//! `gcloud` can log HTTP requests and responses to its log files
+//! (`core/log_http`), and a `versions access` response holds the secret as
+//! `payload.data`. Documenting that the setting must stay off would leave the
+//! secret one `gcloud config set` away from sitting on disk for the 30 days
+//! `gcloud` keeps its logs. Every invocation therefore passes `--no-log-http`,
+//! which outranks the environment and the properties file, and disables file
+//! logging outright.
+//!
 //! # Addressing
 //!
 //! A value is addressed by its [`GcpSecretId`] alone. A Secret Manager secret is
@@ -56,7 +66,10 @@
 //! newline, which a PEM private key ends with and a client may require.
 
 mod constants;
-use constants::{ERRORS_ONLY, GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, LATEST, QUIET, SECRET_ID_MAX_LEN, USER_OUTPUT};
+use constants::{
+    DISABLE_FILE_LOGGING, ERRORS_ONLY, GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, LATEST, NO_LOG_HTTP, QUIET,
+    SECRET_ID_MAX_LEN, USER_OUTPUT,
+};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -644,7 +657,7 @@ impl GcpBackend {
         process
             .args(command.words())
             .args(args)
-            .args([QUIET, USER_OUTPUT, ERRORS_ONLY])
+            .args([QUIET, USER_OUTPUT, ERRORS_ONLY, NO_LOG_HTTP])
             .stdin(if stdin.is_some() {
                 std::process::Stdio::piped()
             } else {
@@ -656,6 +669,7 @@ impl GcpBackend {
         for name in IDENTITY_OVERRIDES {
             process.env(name, "");
         }
+        process.env(DISABLE_FILE_LOGGING.0, DISABLE_FILE_LOGGING.1);
         call.span().in_scope(|| propagation::inject_tokio_command(&mut process));
 
         let mut child = process.spawn().map_err(|e| {

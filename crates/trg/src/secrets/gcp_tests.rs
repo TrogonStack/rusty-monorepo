@@ -186,6 +186,34 @@ async fn a_read_names_the_project_and_the_account_and_never_infers_either() {
     }
 }
 
+/// Every subcommand this backend drives, not only the read: `versions add` sends
+/// the value in its request, and the others are cheap to cover alongside.
+#[tokio::test]
+async fn no_call_lets_gcloud_log_http_traffic() {
+    let id = id("tok");
+    let calls: [(&str, StubGcloud); 5] = [
+        ("read", StubGcloud::with_secret()),
+        ("add", StubGcloud::with_secret()),
+        ("describe", StubGcloud::with_secret()),
+        ("probe", StubGcloud::with_secret()),
+        ("accounts", StubGcloud::with_secret()),
+    ];
+    for (name, stub) in calls {
+        let backend = stub.backend();
+        match name {
+            "read" => drop(backend.get_latest(&id).await),
+            "add" => drop(backend.add_version(&id, &secret("v")).await),
+            "describe" => drop(backend.secret_exists(&id).await),
+            "probe" => drop(backend.probe_project().await),
+            _ => drop(backend.accounts().await),
+        }
+        let argv = stub.argv();
+        assert!(!argv.is_empty(), "{name} never reached gcloud");
+        assert!(argv.iter().any(|a| a == "--no-log-http"), "{name}: {argv:?}");
+        assert!(!argv.iter().any(|a| a == "--log-http"), "{name}: {argv:?}");
+    }
+}
+
 #[tokio::test]
 async fn a_read_returns_the_stored_bytes_including_a_trailing_newline() {
     let stub = StubGcloud::with_secret();

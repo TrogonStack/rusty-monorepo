@@ -540,6 +540,18 @@ Every call also passes `--quiet`, `--user-output-enabled` and `--verbosity=error
 so a prompt cannot stall it and a `gcloud config` that silences output cannot
 turn a successful read into an empty value.
 
+Every call also passes `--no-log-http` and runs with
+`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true`. With `core/log_http` on, `gcloud`
+writes HTTP responses to its log files, and a `secrets versions access` response
+holds the secret in `payload.data`, kept for the 30 days `gcloud` retains its
+logs. The flag outranks `gcloud config set core/log_http true` and
+`CLOUDSDK_CORE_LOG_HTTP`, so no setting of yours turns it back on for these
+calls, and with file logging off nothing else `gcloud` logs at debug level is
+written either. The cost is that there is no `gcloud` log file for these calls
+to attach to a bug report; run the same `gcloud` command by hand to get one.
+A `gcloud` you run yourself is unaffected, so keep `core/log_http` off there if
+it can touch Secret Manager.
+
 A value is addressed by the secret id alone, written as a var's `secret`:
 
 ```toml
