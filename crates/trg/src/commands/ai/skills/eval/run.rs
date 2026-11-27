@@ -1691,7 +1691,9 @@ fn apply_outcome(
 /// say that the run could have, so a run that drew on it is not mistaken for one that
 /// stood on the skill alone.
 fn ancestor_agent_context_warning(workspace_dir: &Path) -> Option<String> {
-    let workspace = std::path::absolute(workspace_dir).ok()?;
+    // The harness starts in the physical directory, so its parents are what it can reach,
+    // not the parents of a symlink that led there.
+    let workspace = std::fs::canonicalize(workspace_dir).ok()?;
     let found: Vec<String> = workspace
         .ancestors()
         .skip(1)
