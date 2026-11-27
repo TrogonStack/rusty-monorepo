@@ -15,6 +15,9 @@ its own.
   declare it where you declare the rest of your infrastructure.
 - The identity can access versions (`roles/secretmanager.secretAccessor`) to
   read, and add versions (`roles/secretmanager.secretVersionAdder`) to write.
+- Optional, for `trg doctor` only: `secretmanager.secrets.list` on the project
+  (`roles/secretmanager.viewer` carries it). Reads and writes do not need it.
+  Without it `trg doctor` reports the project check as skipped, not failed.
 
 ## 1. Declare the backend
 
