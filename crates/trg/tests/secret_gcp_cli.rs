@@ -88,7 +88,7 @@ fn a_put_sends_the_value_on_stdin_and_never_in_argv() {
     let setup = Setup::new(true);
     let out = put(
         &setup,
-        &["secret", "put", "--backend", "gsm", "--path", "deploy-token"],
+        &["secret", "put", "--backend", "gsm", "--secret", "deploy-token"],
         b"s3cr3t-value\n",
     );
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -104,7 +104,7 @@ fn a_get_prints_the_stored_value() {
     let setup = Setup::new(true);
     fs::write(setup.bin.path().join("gcloud.body.state"), b"stored-value").unwrap();
     let out = setup
-        .command(&["secret", "get", "--backend", "gsm", "--path", "deploy-token"])
+        .command(&["secret", "get", "--backend", "gsm", "--secret", "deploy-token"])
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -112,7 +112,7 @@ fn a_get_prints_the_stored_value() {
 }
 
 #[test]
-fn a_key_is_refused_before_anything_is_read_or_written() {
+fn the_path_and_key_vocabulary_is_refused_before_anything_is_read_or_written() {
     let setup = Setup::new(true);
     let out = put(
         &setup,
@@ -130,7 +130,35 @@ fn a_key_is_refused_before_anything_is_read_or_written() {
     );
     assert!(!out.status.success());
     let stderr = String::from_utf8(out.stderr).unwrap();
-    assert!(stderr.contains("`key` is not supported"), "{stderr}");
+    assert!(
+        stderr.contains("which is addressed with `--secret`, not `--path` and `--key`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("use instead: --secret <secret-id>"), "{stderr}");
+    assert_eq!(setup.stored(), None);
+    assert_eq!(setup.argv(), "");
+}
+
+#[test]
+fn a_secret_blended_with_a_key_is_refused_by_the_parser() {
+    let setup = Setup::new(true);
+    let out = put(
+        &setup,
+        &[
+            "secret",
+            "put",
+            "--backend",
+            "gsm",
+            "--secret",
+            "deploy-token",
+            "--key",
+            "token",
+        ],
+        b"v\n",
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
     assert_eq!(setup.stored(), None);
     assert_eq!(setup.argv(), "");
 }
@@ -140,7 +168,7 @@ fn a_secret_that_does_not_exist_is_reported_and_not_created() {
     let setup = Setup::new(false);
     let out = put(
         &setup,
-        &["secret", "put", "--backend", "gsm", "--path", "deploy-token"],
+        &["secret", "put", "--backend", "gsm", "--secret", "deploy-token"],
         b"v\n",
     );
     assert!(!out.status.success());

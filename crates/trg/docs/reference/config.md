@@ -95,19 +95,24 @@ Each entry is one of:
   `backend` is always required and names a `[secrets.backends.<name>]` entry.
   What comes after it is whatever that entry's `kind` uses to address a value:
 
-  | `kind`        | Address                                              |
-  | ------------- | ---------------------------------------------------- |
-  | `keychain`    | `path` and `key`, both required                      |
-  | `openbao`     | `path` and `key`, both required                      |
-  | `onepassword` | `ref`, a 1Password secret reference                  |
-  | `gcp_secret_manager` | `path`, the secret id, and no `key`          |
+  | `kind`               | Address                                |
+  | -------------------- | -------------------------------------- |
+  | `keychain`           | `path` and `key`, both required        |
+  | `openbao`            | `path` and `key`, both required        |
+  | `onepassword`        | `ref`, a 1Password secret reference    |
+  | `gcp_secret_manager` | `secret`, the secret id                |
 
-  The two spellings are not interchangeable. A `path`/`key` var naming a
-  `onepassword` backend fails to load, and so does a `ref` var naming a
-  `keychain` or `openbao` one; see [Error reference](#error-reference). A var
-  naming a backend that no `[secrets.backends]` table declares fails to load
-  too, because there is no `kind` to say which of the two it should have been
-  written in.
+  The three spellings are not interchangeable, and each is spelled differently
+  from the others so that the shape of the table alone says which one was
+  meant. A table that gives `path` without `key`, `key` without `path`, no
+  address at all, or fields from more than one spelling fails to parse,
+  whatever backend it names. A table that is whole but in the wrong spelling
+  for its backend, such as `path` and `key` naming a `onepassword` backend or
+  `ref` naming a `keychain` or `openbao` one, fails to load once the backend's
+  `kind` is known; see [Error reference](#error-reference). A var naming a
+  backend that no `[secrets.backends]` table declares fails to load too,
+  because there is no `kind` to say which spelling it should have been written
+  in.
 
   A secret var may add addresses to try in order after its own, with
   `fallbacks`:
@@ -184,8 +189,10 @@ $ trg secret get --backend homelab --path mcp/prod --key token
 ```
 
 The flags mirror the var: a backend addressed by `path` and `key` is checked
-with `--path` and `--key`, and one addressed by a secret reference is checked
-with `--ref`.
+with `--path` and `--key`, one addressed by a secret reference with `--ref`, and
+a Secret Manager secret with `--secret`. The parser refuses `--path` without
+`--key`, `--key` without `--path`, and `--ref` or `--secret` together with any
+other address flag.
 
 ```console
 $ trg secret get --backend personal --ref "op://Ops/deploy-keys/api-token"
@@ -521,19 +528,19 @@ job that authenticated before `trg` ran, answers every call.
 
 Every call carries `--project` and `--account` explicitly.
 
-A value is addressed by the secret id alone, written as a var's `path`:
+A value is addressed by the secret id alone, written as a var's `secret`:
 
 ```toml
-token = { backend = "gsm", path = "deploy-token" }
+token = { backend = "gsm", secret = "deploy-token" }
 ```
 
-A secret holds one value and its versions are not fields, so a `key` is
-refused, and so is a `ref`. The id may hold ASCII letters, digits, `-` and `_`,
+A secret holds one value and its versions are not fields, so it has no `key`,
+and `path`, `key` and `ref` are refused. The id may hold ASCII letters, digits, `-` and `_`,
 and may not start with `-`. A read takes the `latest` version, and the stored
 bytes come back exactly, a trailing newline included, so a PEM private key
 survives a round trip. A value that is not valid UTF-8 is refused.
 
-Writing, through `trg secret put --path <secret-id>` or as a mirror target,
+Writing, through `trg secret put --secret <secret-id>` or as a mirror target,
 adds a new version with the value sent on stdin, never in argv. It never
 creates the secret: replication, access and rotation are decided where the
 secret is declared, for example in Terraform. A secret that does not exist is
@@ -631,6 +638,7 @@ fallbacks = [
 | `backend`   | string          | yes      | A declared `[secrets.backends.<name>]` entry.                         |
 | `path`, `key` | strings       | by kind  | For a `keychain` or `openbao` backend. Both are required together.   |
 | `ref`       | string          | by kind  | For a `onepassword` backend.                                          |
+| `secret`    | string          | by kind  | For a `gcp_secret_manager` backend.                                   |
 | `fallbacks` | array of tables | no       | At least one when present. Entries are plain secret tables and cannot carry `fallbacks`. |
 
 The name is what the table is declared under, limited to ASCII letters,
@@ -644,7 +652,7 @@ read-only: `trg secret put` and the mirrors do not use it.
 
 | Argument or flag  | Notes                                                           |
 | ----------------- | --------------------------------------------------------------- |
-| `--name`          | Read the secret declared under this name. Conflicts with `--backend`, `--path`, `--key`, `--ref` and `--fallback`. An unknown name is an error that lists the declared names. |
+| `--name`          | Read the secret declared under this name. Conflicts with `--backend`, `--path`, `--key`, `--ref`, `--secret` and `--fallback`. An unknown name is an error that lists the declared names. |
 | `--output-format` | `text` (default) or `json`. The document carries `name` and `value`, and `answered_by` when the secret declares `fallbacks`. |
 
 When a fallback answers, stderr names the backend that did, as it does for
@@ -666,10 +674,10 @@ targets = [
 
 | Field     | Type          | Required | Notes                                                       |
 | --------- | ------------- | -------- | ----------------------------------------------------------- |
-| `source`  | table         | yes      | Addressed like a var: `backend` plus `ref`, or `path` and `key`, by the backend's kind. |
+| `source`  | table         | yes      | Addressed like a var: `backend` plus `ref`, `secret`, or `path` and `key`, by the backend's kind. |
 | `targets` | array of tables | yes    | At least one. Each is addressed like a var, in a backend of kind `keychain` or `openbao`, or is a Transit key: `{ backend, transit_key }` with an optional `transit_mount`. |
 
-A Transit target takes these fields and none of `path`, `key` or `ref`:
+A Transit target takes these fields and none of `path`, `key`, `ref` or `secret`:
 
 | Field           | Required | Notes                                                              |
 | --------------- | -------- | ------------------------------------------------------------------ |
@@ -691,7 +699,7 @@ what the table is declared under, limited to ASCII letters, digits, `-` and
 
 - Each target's backend must be one `trg` can write to. A `onepassword` target
   is rejected.
-- A `gcp_secret_manager` target is addressed by `path`, the secret id, and adds
+- A `gcp_secret_manager` target is addressed by `secret`, the secret id, and adds
   a version when the latest one differs, compared byte for byte. It records no
   `source` key, because a secret holds one value with nothing beside it, and a
   secret that does not exist is an error rather than something to create.
@@ -1121,11 +1129,14 @@ trg exec run --name claude -- --resume
 | `var ... found no such key there` | The path exists but holds different keys. The message lists the keys that are there, never their values. |
 | `... names backend <name>, which is not declared; declared: ...` | A var's `backend` matches no `[secrets.backends.<name>]` entry, so there is no `kind` to say how the var should have been addressed. |
 | `... names backend <name>, but no secrets backends are declared` | The same, in a config with no `[secrets.backends]` at all. |
-| `` ... which is addressed with a 1Password secret reference, not `path`/`key` `` | A var used `path` and `key` against a `onepassword` backend. The message spells out the `ref` line to replace it with. |
+| `` ... which is addressed with `ref`, not `path` and `key` `` | A var used `path` and `key` against a `onepassword` backend. The message spells out the `ref` line to replace it with. |
 | `` ... which is addressed with `path` and `key`, not `ref` `` | A var used `ref` against a `keychain` or `openbao` backend. |
-| `` ... which needs both `path` and `key`; `<field>` is missing `` | Only one half of a path-and-key address was given. |
-| `` ... which is addressed with `path` holding the secret id alone; ... `` | A var naming a `gcp_secret_manager` backend used `key`, used `ref`, or left out `path`. The message spells out the line to replace it with. |
-| `` invalid `path`: Secret Manager secret id `...` ... `` | The secret id is empty, longer than 255 characters, holds a character other than ASCII letters, digits, `-` and `_`, or starts with `-`. A resource name such as `projects/p/secrets/s` is not an id. |
+| `` ... which is addressed with `secret`, not `path` and `key` `` | A var used `path` and `key`, or `ref`, against a `gcp_secret_manager` backend. The message spells out the line to replace it with. |
+| `` ... which is addressed with `path` and `key`, not `secret` `` | A var used `secret` against a `keychain` or `openbao` backend. |
+| `` backend `<name>`: `path` needs `key` as well; `key` is missing `` | A table gave `path` without `key`. Raised while the file is parsed. The reverse reads `` `key` needs `path` as well ``. |
+| `` backend `<name>`: no address; give `path` and `key` ... `` | A table named a backend and nothing to address in it. The message lists the three spellings. |
+| `` backend `<name>`: ... mix address spellings; use exactly one of `path` and `key`, `ref`, or `secret` `` | A table combined fields from more than one spelling, such as `secret` with `path`, or `ref` with `key`. The message names the fields it found. |
+| `` invalid `secret`: Secret Manager secret id `...` ... `` | The secret id is empty, longer than 255 characters, holds a character other than ASCII letters, digits, `-` and `_`, or starts with `-`. A resource name such as `projects/p/secrets/s` is not an id. |
 | `` secret `<id>` does not exist in project `<project>`; `trg` adds versions and never creates the secret itself ... `` | A write, or a mirror run, named a Secret Manager secret that is not there. Create it first, for example with Terraform. |
 | `` 1Password secret reference `...` must start with `op://` `` | The `ref` is not a secret reference. Use the item's `Copy Secret Reference` button. |
 | `` 1Password secret reference `...` must be `op://<vault>/<item>/<field>` or `op://<vault>/<item>/<section>/<field>` `` | The reference has too few or too many segments. |
@@ -1137,8 +1148,8 @@ trg exec run --name claude -- --resume
 | `` `[secrets.mirrors.<name>]`: `targets` must name at least one target `` | A mirror declares an empty `targets` array. |
 | `` `[secrets.mirrors.<name>]`: target backend `<backend>` is of kind `<kind>`, which `trg` only reads from `` | A mirror's target names a `onepassword` backend. |
 | `` `[secrets.mirrors.<name>]`: backend `<backend>` is of kind `<kind>`, but a Transit key needs an `openbao` backend `` | A Transit target names a backend that is not of kind `openbao`. |
-| `` `[secrets.mirrors.<name>]`: a Transit target is `{ backend, transit_key }` ... and cannot also carry `path`, `key` or `ref` `` | A Transit target also carries a var's address fields. |
-| `` `[secrets.mirrors.<name>]`: a Transit target needs `transit_key` `` | A target sets `transit_mount` without `transit_key`. |
+| `` a Transit target is `{ backend, transit_key }` ... and cannot also carry `path`, `key`, `ref` or `secret` `` | A Transit target also carries a var's address fields. Raised while the file is parsed. |
+| `` a Transit target needs `transit_key` `` | A target sets `transit_mount` without `transit_key`. Raised while the file is parsed. |
 | `` `[secrets.mirrors.<name>]`: the source and a target are the same address `` | The source and one target address the same value. |
 | `` `[secrets.mirrors.<name>]`: target key `source` is reserved `` | A mirror's target key is `source`, which holds the reference the value came from. |
 | `` `[secrets.mirrors.<name>]`: target ... is listed more than once `` | A mirror lists the same target twice. |

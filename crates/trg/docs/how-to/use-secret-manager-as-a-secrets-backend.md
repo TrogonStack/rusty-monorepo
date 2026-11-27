@@ -38,15 +38,15 @@ credentials, and whether the project can be listed with it.
 
 ## 3. Read a secret
 
-A secret is addressed by its id, as `path`, with no `key`:
+A secret is addressed by its id, as `secret`. It has no `path` or `key`:
 
 ```sh
-trg secret get --backend gsm --path deploy-token
+trg secret get --backend gsm --secret deploy-token
 ```
 
 ```toml trg-example=fragment
 [exec.deploy.env]
-DEPLOY_TOKEN = { backend = "gsm", path = "deploy-token" }
+DEPLOY_TOKEN = { backend = "gsm", secret = "deploy-token" }
 ```
 
 The `latest` version is read, byte for byte.
@@ -54,7 +54,7 @@ The `latest` version is read, byte for byte.
 ## 4. Write a version
 
 ```sh
-op read "op://Engineering/deploy-key/token" | trg secret put --backend gsm --path deploy-token
+op read "op://Engineering/deploy-key/token" | trg secret put --backend gsm --secret deploy-token
 ```
 
 The value arrives on stdin and goes to `gcloud` on stdin, so it is never in a

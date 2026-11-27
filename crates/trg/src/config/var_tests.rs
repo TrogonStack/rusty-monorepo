@@ -31,6 +31,16 @@ fn raw(table: &str) -> RawSecretVar {
     toml::from_str::<W>(&format!("t = {table}")).expect("raw var").t
 }
 
+fn parse_raw(table: &str) -> Result<RawSecretVar, String> {
+    #[derive(Deserialize)]
+    struct W {
+        t: RawSecretVar,
+    }
+    toml::from_str::<W>(&format!("t = {table}"))
+        .map(|w| w.t)
+        .map_err(|e| e.message().to_string())
+}
+
 fn resolve(table: &str, backends: &[(&str, &str)]) -> Result<SecretVar, SecretVarError> {
     SecretVar::resolve(&raw(table), &declaring(backends), VarSite::exec_env("acme", "TOKEN"))
 }
@@ -121,8 +131,8 @@ fn varsource_deserializes_a_reference_table() {
     let m: HashMap<String, RawVarSource> =
         toml::from_str(r#"t = { backend = "op", ref = "op://Ops/deploy/TOKEN" }"#).unwrap();
     assert_eq!(
-        m["t"].secret().and_then(|v| v.reference.as_deref()),
-        Some("op://Ops/deploy/TOKEN")
+        m["t"].secret().map(|v| &v.address),
+        Some(&RawAddress::Reference("op://Ops/deploy/TOKEN".to_string()))
     );
 }
 
@@ -186,8 +196,8 @@ fn varsource_deserializes_a_secret_table_with_fallbacks() {
     assert_eq!(chain.primary.backend, "homelab");
     assert_eq!(chain.fallbacks.len(), 1);
     assert_eq!(
-        chain.fallbacks[0].reference.as_deref(),
-        Some("op://Ops/github/GH_TOKEN")
+        chain.fallbacks[0].address,
+        RawAddress::Reference("op://Ops/github/GH_TOKEN".to_string())
     );
 }
 
@@ -522,7 +532,7 @@ fn a_path_and_key_address_is_refused_for_onepassword() {
     let message = err.to_string();
     assert!(message.contains("[exec.acme.env] TOKEN"), "{message}");
     assert!(
-        message.contains("1Password secret reference, not `path`/`key`"),
+        message.contains("which is addressed with `ref`, not `path` and `key`"),
         "{message}"
     );
     assert!(
@@ -546,19 +556,74 @@ fn a_reference_is_refused_for_a_path_and_key_backend() {
 }
 
 #[test]
-fn a_half_spelled_path_and_key_address_names_what_is_missing() {
-    let err = resolve(
-        r#"{ backend = "login", path = "agentgateway" }"#,
-        &[("login", "keychain")],
-    )
-    .expect_err("key is required");
-    assert!(err.to_string().contains("`key` is missing"), "{err}");
+fn a_path_without_a_key_is_refused_at_parse_and_names_the_missing_field() {
+    let err = parse_raw(r#"{ backend = "login", path = "agentgateway" }"#).expect_err("key is required");
+    assert!(err.contains("`path` needs `key` as well"), "{err}");
+    assert!(err.contains("`key` is missing"), "{err}");
+}
+
+#[test]
+fn a_key_without_a_path_is_refused_at_parse_and_names_the_missing_field() {
+    let err = parse_raw(r#"{ backend = "login", key = "token" }"#).expect_err("path is required");
+    assert!(err.contains("`key` needs `path` as well"), "{err}");
+    assert!(err.contains("`path` is missing"), "{err}");
+}
+
+#[test]
+fn a_table_with_no_address_is_refused_at_parse_and_lists_the_spellings() {
+    let err = parse_raw(r#"{ backend = "op" }"#).expect_err("an address is required");
+    assert!(err.contains("no address"), "{err}");
+    assert!(
+        err.contains("`path` and `key` (keychain, openbao), `ref` (onepassword) or `secret` (gcp_secret_manager)"),
+        "{err}"
+    );
+}
+
+#[test]
+fn blended_address_spellings_are_refused_at_parse_and_name_what_was_mixed() {
+    for (table, given) in [
+        (r#"{ backend = "b", secret = "s", path = "p" }"#, "`path`, `secret`"),
+        (r#"{ backend = "b", secret = "s", key = "k" }"#, "`key`, `secret`"),
+        (
+            r#"{ backend = "b", secret = "s", ref = "op://v/i/f" }"#,
+            "`ref`, `secret`",
+        ),
+        (r#"{ backend = "b", ref = "op://v/i/f", path = "p" }"#, "`path`, `ref`"),
+        (
+            r#"{ backend = "b", ref = "op://v/i/f", path = "p", key = "k" }"#,
+            "`path`, `key`, `ref`",
+        ),
+    ] {
+        let err = parse_raw(table).expect_err("mixed spellings");
+        assert!(
+            err.contains(&format!("{given} mix address spellings")),
+            "{table}: {err}"
+        );
+        assert!(
+            err.contains("use exactly one of `path` and `key`, `ref`, or `secret`"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_field_is_still_refused_at_parse() {
+    let err = parse_raw(r#"{ backend = "b", path = "p", key = "k", extra = "x" }"#).expect_err("unknown field");
+    assert!(err.contains("unknown field `extra`"), "{err}");
+}
+
+/// Inside a `vars` table the secret table is picked by what it holds, so the
+/// mistake is the table's own and not "no variant matched".
+#[test]
+fn a_misshapen_secret_table_keeps_its_message_inside_a_vars_table() {
+    let err = source_of(r#"{ backend = "b", path = "p" }"#).expect_err("key is required");
+    assert!(err.message().contains("`path` needs `key` as well"), "{err}");
 }
 
 #[test]
 fn a_reference_is_required_for_onepassword() {
-    let err = resolve(r#"{ backend = "op" }"#, &[("op", "onepassword")]).expect_err("ref is required");
-    assert!(err.to_string().contains("not `path`/`key`"), "{err}");
+    let err = resolve(r#"{ backend = "op", secret = "s" }"#, &[("op", "onepassword")]).expect_err("ref is required");
+    assert!(err.to_string().contains("addressed with `ref`, not `secret`"), "{err}");
 }
 
 /// Nothing checked this before, so a typo in a backend name surfaced as a
@@ -604,50 +669,63 @@ fn a_malformed_reference_is_a_config_error_naming_the_site() {
 #[test]
 fn a_secret_manager_secret_is_addressed_by_its_id_alone() {
     let var = resolve(
-        r#"{ backend = "gsm", path = "deploy-token" }"#,
+        r#"{ backend = "gsm", secret = "deploy-token" }"#,
         &[("gsm", "gcp_secret_manager")],
     )
     .expect("resolves");
     assert!(matches!(var.address(), SecretAddress::GcpSecretManager(_)));
-    assert_eq!(var.declaration(), r#"{ backend = "gsm", path = "deploy-token" }"#);
+    assert_eq!(var.declaration(), r#"{ backend = "gsm", secret = "deploy-token" }"#);
     assert_eq!(
         var.put_command().as_deref(),
-        Some("trg secret put --backend gsm --path deploy-token")
+        Some("trg secret put --backend gsm --secret deploy-token")
     );
 }
 
 #[test]
-fn a_key_or_a_reference_is_refused_for_a_secret_manager_secret() {
-    for (table, problem) in [
+fn another_vocabulary_is_refused_for_a_secret_manager_secret() {
+    for (table, given) in [
         (
             r#"{ backend = "gsm", path = "deploy-token", key = "token" }"#,
-            "`key` is not supported",
+            "`path` and `key`",
         ),
-        (
-            r#"{ backend = "gsm", ref = "op://Ops/deploy/TOKEN" }"#,
-            "`ref` is a 1Password spelling",
-        ),
-        (r#"{ backend = "gsm" }"#, "`path` is missing"),
+        (r#"{ backend = "gsm", ref = "op://Ops/deploy/TOKEN" }"#, "`ref`"),
     ] {
         let err = resolve(table, &[("gsm", "gcp_secret_manager")]).expect_err("refused");
         let message = err.to_string();
         assert!(message.contains("of kind `gcp_secret_manager`"), "{message}");
-        assert!(message.contains(problem), "{message}");
         assert!(
-            message.contains(r#"replace with: { backend = "gsm", path = "<secret-id>" }"#),
+            message.contains(&format!("addressed with `secret`, not {given}")),
+            "{message}"
+        );
+        assert!(
+            message.contains(r#"replace with: { backend = "gsm", secret = "<secret-id>" }"#),
             "{message}"
         );
     }
 }
 
 #[test]
+fn a_secret_is_refused_for_a_path_and_key_backend() {
+    let err = resolve(
+        r#"{ backend = "login", secret = "deploy-token" }"#,
+        &[("login", "keychain")],
+    )
+    .expect_err("secret is not how a keychain is addressed");
+    assert!(
+        err.to_string()
+            .contains("addressed with `path` and `key`, not `secret`"),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_secret_id_that_is_not_one_is_refused_while_the_config_is_in_view() {
     let err = resolve(
-        r#"{ backend = "gsm", path = "projects/p/secrets/s" }"#,
+        r#"{ backend = "gsm", secret = "projects/p/secrets/s" }"#,
         &[("gsm", "gcp_secret_manager")],
     )
     .expect_err("a resource name is not a secret id");
-    assert!(err.to_string().contains("invalid `path`"), "{err}");
+    assert!(err.to_string().contains("invalid `secret`"), "{err}");
 }
 
 #[test]

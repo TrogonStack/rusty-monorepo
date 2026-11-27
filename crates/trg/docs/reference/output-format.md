@@ -38,8 +38,8 @@ choice to offer.
 `trg secret get` prints the secret it was asked for, under either format. Under
 `json` the value is a field in the document rather than the whole of stdout,
 which is a difference in shape and not in exposure. The document also echoes
-the address it was given: `path` and `key`, or `ref`, whichever the backend is
-addressed by, never both.
+the address it was given: `path` and `key`, `ref`, or `secret`, whichever the
+backend is addressed by, never more than one.
 
 `trg mcp auth status` never prints a token under either format. The `json` form
 carries the same redacted summary the text form describes.

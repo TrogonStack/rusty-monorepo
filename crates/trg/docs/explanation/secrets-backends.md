@@ -136,7 +136,7 @@ that address is whatever the product holding it uses.
 
 So there is no single `{ path, key }` spelling imposed on every kind. A
 `keychain` or `openbao` var is a path and a key, because that is what those
-stores are. A `gcp_secret_manager` var is a secret id alone, because a secret
+stores are. A `gcp_secret_manager` var is a `secret` id alone, because a secret
 holds one value and its versions are not fields. A `onepassword` var is a secret reference,
 `op://<vault>/<item>/<field>`, because that is what 1Password's own
 `Copy Secret Reference` button puts on the clipboard. Pasting it in unchanged
@@ -144,8 +144,11 @@ is both less to get wrong and the only spelling that can reach a field inside
 a section at all, which a vault-and-item path plus a field label could not
 express.
 
-The cost is that the two are not interchangeable: a var written in the wrong
-one fails to load rather than being translated. Translating would mean
+The cost is that the three are not interchangeable: a var written in the wrong
+one fails to load rather than being translated. Each has a spelling no other
+shares (`path` with `key`, `ref`, `secret`), so the shape of a table says which
+was meant, and a table that is half of one or a blend of two is refused while
+the file is parsed, before any backend is looked up. Translating would mean
 inventing a vocabulary native to no backend, and would make a config's address
 something you cannot look up in the documentation of the product the secret
 lives in.

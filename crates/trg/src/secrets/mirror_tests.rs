@@ -28,6 +28,13 @@ fn section(text: &str) -> SecretsSection {
     toml::from_str(text).expect("section")
 }
 
+fn parse_err(text: &str) -> String {
+    toml::from_str::<SecretsSection>(text)
+        .expect_err("refused while parsing")
+        .message()
+        .to_string()
+}
+
 fn one() -> Mirror {
     section(SECTION).resolve_mirrors().expect("mirrors").remove(0)
 }
@@ -605,17 +612,18 @@ fn a_transit_target_on_an_undeclared_backend_lists_the_declared_ones() {
 fn a_transit_target_cannot_also_be_a_value_address() {
     let text = with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal", path = "a", key = "k" }"#);
 
-    assert!(matches!(resolve_err(&text), MirrorConfigError::MixedTarget { .. }));
+    let err = parse_err(&text);
+    assert!(
+        err.contains("cannot also carry `path`, `key`, `ref` or `secret`"),
+        "{err}"
+    );
 }
 
 #[test]
 fn a_transit_mount_without_a_key_is_refused() {
     let text = with_transit_targets(r#"{ backend = "bao", transit_mount = "signing" }"#);
 
-    assert!(matches!(
-        resolve_err(&text),
-        MirrorConfigError::MissingTransitKey { .. }
-    ));
+    assert!(parse_err(&text).contains("a Transit target needs `transit_key`"));
 }
 
 #[test]

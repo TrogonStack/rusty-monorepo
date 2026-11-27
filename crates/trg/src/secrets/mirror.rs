@@ -30,7 +30,9 @@ use super::{
     SecretsSection,
 };
 use crate::config::signers::{TransitKeyName, TransitMount};
-use crate::config::{FetchedSecrets, RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite};
+use crate::config::{
+    AddressShapeError, FetchedSecrets, RawAddress, RawSecretVar, SecretRead, SecretVar, SecretVarError, VarSite,
+};
 use crate::git::ssh::transit_key::TransitKeyError;
 use crate::secrets::openbao::WrapError;
 use crate::telemetry::semconv::trg::SECRETS_BACKEND_NAME;
@@ -148,41 +150,85 @@ pub struct MirrorConfig {
     pub targets: Vec<RawMirrorTarget>,
 }
 
-/// One entry of `targets` as the file spelled it: either a var's fields
-/// (`backend` with `path` and `key`, or `ref`), or `backend` with
-/// `transit_key` and optionally `transit_mount`.
+/// One entry of `targets` as the file spelled it: either a var (`backend`
+/// with `path` and `key`, `ref`, or `secret`), or `backend` with `transit_key`
+/// and optionally `transit_mount`.
 ///
 /// Both spellings share one table because the fields present tell which one
-/// applies, the way they do for a signer address, and it stays a plain table
-/// of optional fields so that a mistake is reported by name instead of as
-/// "data did not match any variant".
+/// applies, the way they do for a signer address. The choice is made while
+/// parsing, so a Transit target that also carries an address, or a mount with
+/// no key, cannot be built.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct RawMirrorTarget {
+#[serde(try_from = "RawMirrorTargetFields")]
+pub enum RawMirrorTarget {
+    Var(RawSecretVar),
+    Transit(RawTransitTarget),
+}
+
+/// A Transit target as the file spelled it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawTransitTarget {
     pub backend: String,
-    #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub key: Option<String>,
-    #[serde(default, rename = "ref")]
-    pub reference: Option<String>,
-    #[serde(default)]
-    pub transit_key: Option<String>,
-    #[serde(default)]
+    pub transit_key: String,
     pub transit_mount: Option<String>,
 }
 
-impl RawMirrorTarget {
-    fn is_transit(&self) -> bool {
-        self.transit_key.is_some() || self.transit_mount.is_some()
-    }
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawMirrorTargetFields {
+    backend: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default, rename = "ref")]
+    reference: Option<String>,
+    #[serde(default)]
+    secret: Option<String>,
+    #[serde(default)]
+    transit_key: Option<String>,
+    #[serde(default)]
+    transit_mount: Option<String>,
+}
 
-    fn as_var(&self) -> RawSecretVar {
-        RawSecretVar {
-            backend: self.backend.clone(),
-            path: self.path.clone(),
-            key: self.key.clone(),
-            reference: self.reference.clone(),
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RawMirrorTargetError {
+    #[error(
+        "a Transit target is `{{ backend, transit_key }}` with an optional `transit_mount`, and cannot also carry `path`, `key`, `ref` or `secret`"
+    )]
+    MixedTarget,
+
+    #[error("a Transit target needs `transit_key`")]
+    MissingTransitKey,
+
+    #[error(transparent)]
+    Address(#[from] AddressShapeError),
+}
+
+impl TryFrom<RawMirrorTargetFields> for RawMirrorTarget {
+    type Error = RawMirrorTargetError;
+
+    fn try_from(fields: RawMirrorTargetFields) -> Result<Self, Self::Error> {
+        let has_address =
+            fields.path.is_some() || fields.key.is_some() || fields.reference.is_some() || fields.secret.is_some();
+        match (fields.transit_key, fields.transit_mount) {
+            (None, None) => {
+                let address = RawAddress::from_parts(
+                    &fields.backend,
+                    fields.path,
+                    fields.key,
+                    fields.reference,
+                    fields.secret,
+                )?;
+                Ok(Self::Var(RawSecretVar::new(fields.backend, address)))
+            }
+            _ if has_address => Err(RawMirrorTargetError::MixedTarget),
+            (None, Some(_)) => Err(RawMirrorTargetError::MissingTransitKey),
+            (Some(transit_key), transit_mount) => Ok(Self::Transit(RawTransitTarget {
+                backend: fields.backend,
+                transit_key,
+                transit_mount,
+            })),
         }
     }
 }
@@ -298,14 +344,6 @@ pub enum MirrorConfigError {
         backend: String,
         kind: BackendKind,
     },
-
-    #[error(
-        "`[secrets.mirrors.{name}]`: a Transit target is `{{ backend, transit_key }}` with an optional `transit_mount`, and cannot also carry `path`, `key` or `ref`"
-    )]
-    MixedTarget { name: MirrorName },
-
-    #[error("`[secrets.mirrors.{name}]`: a Transit target needs `transit_key`")]
-    MissingTransitKey { name: MirrorName },
 
     #[error(
         "`[secrets.mirrors.{name}]`: `{field}` must be made of [A-Za-z0-9._-] (`transit_mount` may nest with `/`), got `{value}`"
@@ -487,11 +525,14 @@ fn resolve_one(
     let mut targets = Vec::with_capacity(config.targets.len());
     for (offset, raw) in config.targets.iter().enumerate() {
         let side = format!("targets[{offset}]");
-        if raw.is_transit() {
-            targets.push(MirrorTarget::Transit(resolve_transit(name, raw, secrets)?));
-            continue;
-        }
-        let var = SecretVar::resolve(&raw.as_var(), secrets, VarSite::mirror(name.as_str(), &side))?;
+        let raw = match raw {
+            RawMirrorTarget::Transit(transit) => {
+                targets.push(MirrorTarget::Transit(resolve_transit(name, transit, secrets)?));
+                continue;
+            }
+            RawMirrorTarget::Var(raw) => raw,
+        };
+        let var = SecretVar::resolve(raw, secrets, VarSite::mirror(name.as_str(), &side))?;
 
         let kind = var.address().backend_kind();
         if !kind.is_writable() {
@@ -533,15 +574,10 @@ fn resolve_one(
 
 fn resolve_transit(
     name: &MirrorName,
-    raw: &RawMirrorTarget,
+    raw: &RawTransitTarget,
     secrets: &SecretsSection,
 ) -> Result<TransitTarget, MirrorConfigError> {
-    if raw.path.is_some() || raw.key.is_some() || raw.reference.is_some() {
-        return Err(MirrorConfigError::MixedTarget { name: name.clone() });
-    }
-    let Some(key) = raw.transit_key.as_deref() else {
-        return Err(MirrorConfigError::MissingTransitKey { name: name.clone() });
-    };
+    let key = raw.transit_key.as_str();
     match secrets.kind_of(&raw.backend) {
         None => {
             return Err(MirrorConfigError::UndeclaredTransitBackend {

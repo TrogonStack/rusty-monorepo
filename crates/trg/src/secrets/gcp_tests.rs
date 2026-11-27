@@ -416,7 +416,7 @@ impl Mirrored {
 
     async fn run(&self, apply: bool) -> Result<MirrorOutcome, String> {
         let section: SecretsSection =
-            toml::from_str(&mirror_to(r#"{ backend = "gsm", path = "deploy-token" }"#)).expect("section");
+            toml::from_str(&mirror_to(r#"{ backend = "gsm", secret = "deploy-token" }"#)).expect("section");
         let declared = section.resolve_mirrors().expect("mirrors").remove(0);
         let gcp = self.stub.backend();
         let resolve = |name: &str| -> Result<Backend, BackendError> {
@@ -502,11 +502,28 @@ exit 127
 }
 
 #[test]
-fn a_secret_target_is_addressed_by_id_and_a_key_is_refused() {
-    let with_key = mirror_to(r#"{ backend = "gsm", path = "deploy-token", key = "token" }"#);
-    let section: SecretsSection = toml::from_str(&with_key).expect("section");
+fn a_secret_target_is_addressed_by_secret_and_a_key_is_refused_at_parse() {
+    for target in [
+        r#"{ backend = "gsm", secret = "deploy-token", key = "token" }"#,
+        r#"{ backend = "gsm", secret = "deploy-token", path = "deploy-token" }"#,
+        r#"{ backend = "gsm", path = "deploy-token" }"#,
+    ] {
+        let err = toml::from_str::<SecretsSection>(&mirror_to(target))
+            .expect_err("refused while parsing")
+            .message()
+            .to_string();
+        assert!(err.contains("backend `gsm`"), "{err}");
+    }
+}
+
+#[test]
+fn path_and_key_are_refused_for_a_secret_target_at_resolve() {
+    let section: SecretsSection = toml::from_str(&mirror_to(
+        r#"{ backend = "gsm", path = "deploy-token", key = "token" }"#,
+    ))
+    .expect("section");
     let err = section.resolve_mirrors().expect_err("refused").to_string();
-    assert!(err.contains("`key`"), "{err}");
+    assert!(err.contains("addressed with `secret`, not `path` and `key`"), "{err}");
 }
 
 #[test]
@@ -520,8 +537,8 @@ fn a_reference_is_refused_for_a_secret_target() {
 fn a_secret_cannot_be_a_target_of_two_mirrors() {
     let twice = format!(
         "{}\n[mirrors.again]\nsource = {{ backend = \"src\", path = \"deploy\", key = \"token\" }}\n\
-         targets = [{{ backend = \"gsm\", path = \"deploy-token\" }}]\n",
-        mirror_to(r#"{ backend = "gsm", path = "deploy-token" }"#)
+         targets = [{{ backend = \"gsm\", secret = \"deploy-token\" }}]\n",
+        mirror_to(r#"{ backend = "gsm", secret = "deploy-token" }"#)
     );
     let section: SecretsSection = toml::from_str(&twice).expect("section");
     let err = section.resolve_mirrors().expect_err("refused").to_string();

@@ -112,14 +112,14 @@ fails every target of its mirror.
 
 ## Mirror a secret into Secret Manager
 
-A `gcp_secret_manager` target is addressed by `path`, which is the secret id,
-and takes no `key`:
+A `gcp_secret_manager` target is addressed by `secret`, which is the secret id,
+and takes no `path` or `key`:
 
 ```toml trg-example=fragment
 [secrets.mirrors.deploy-token]
 source = { backend = "personal", ref = "op://Engineering/deploy-key/token" }
 targets = [
-  { backend = "gsm", path = "deploy-token" },
+  { backend = "gsm", secret = "deploy-token" },
 ]
 ```
 

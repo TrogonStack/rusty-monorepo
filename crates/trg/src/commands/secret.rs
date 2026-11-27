@@ -17,7 +17,7 @@ use serde_json::Value;
 use tracing::field::Empty;
 use tracing::Instrument;
 
-use crate::config::{RawSecretVar, SecretRead, SecretVar, VarSite};
+use crate::config::{RawAddress, RawSecretVar, SecretRead, SecretVar, VarSite};
 use crate::exit_code::ExitCode;
 use crate::output::{print_json, OutputFormat};
 use crate::secrets::mirror as secrets_mirror;
@@ -56,31 +56,82 @@ pub struct CommonArgs {
 
 /// One value's address, in whichever vocabulary its backend speaks.
 ///
-/// `clap` is what keeps the two vocabularies from being mixed: `--ref`
-/// conflicts with both of the others and `--key` requires `--path`, so a
-/// blended address is refused before any of this runs. A path with no key is
-/// complete for a Secret Manager secret and not for the other kinds, which
-/// only the declared kind can tell. What clap cannot know is which vocabulary the named backend speaks,
-/// since that is declared in the config rather than typed on the command line.
-/// [`SecretVar::resolve_at`] settles that, which is the same call config load
-/// makes, so the two surfaces cannot drift on what they accept.
+/// There are three vocabularies, each with a spelling of its own: `--path`
+/// with `--key`, `--ref`, or `--secret`. `clap` is what keeps them apart, so
+/// a half-written or blended address is refused before any of this runs:
+/// `--path` and `--key` require each other, and `--ref` and `--secret` conflict
+/// with every other address flag, as does `--name`, which takes the place of
+/// all of them. What clap cannot know is which vocabulary the named backend
+/// speaks, since that is declared in the config rather than typed on the
+/// command line. [`SecretVar::resolve_at`] settles that, which is the same
+/// call config load makes, so the two surfaces cannot drift on what they
+/// accept.
 #[derive(Args)]
 pub struct AddressArgs {
-    /// The entry within that backend, relative to its configured prefix
+    /// The entry within that backend, relative to its configured prefix.
+    /// Given together with `--key`
     #[arg(
         long,
-        conflicts_with_all = ["reference", "name"],
-        required_unless_present_any = ["reference", "name"]
+        requires = "key",
+        conflicts_with_all = ["reference", "secret", "name"],
+        required_unless_present_any = ["reference", "secret", "name"]
     )]
     pub path: Option<String>,
 
-    /// The field within that entry
-    #[arg(long, requires = "path", conflicts_with_all = ["reference", "name"])]
+    /// The field within that entry. Given together with `--path`
+    #[arg(long, requires = "path", conflicts_with_all = ["reference", "secret", "name"])]
     pub key: Option<String>,
 
     /// A 1Password secret reference, as `Copy Secret Reference` yields it
-    #[arg(long = "ref", value_name = "op://...", conflicts_with = "name")]
+    #[arg(
+        long = "ref",
+        value_name = "op://...",
+        conflicts_with_all = ["path", "key", "secret", "name"]
+    )]
     pub reference: Option<String>,
+
+    /// The id of a Secret Manager secret, which holds one value and so has no
+    /// `--key`
+    #[arg(
+        long,
+        value_name = "SECRET_ID",
+        conflicts_with_all = ["path", "key", "reference", "name"]
+    )]
+    pub secret: Option<String>,
+}
+
+impl AddressArgs {
+    /// The address the flags spell, or `None` when none was given, which clap
+    /// only allows when `--name` stands in for it.
+    fn raw_address(&self) -> Option<RawAddress> {
+        address_from_flags(
+            self.path.as_deref(),
+            self.key.as_deref(),
+            self.reference.as_deref(),
+            self.secret.as_deref(),
+        )
+    }
+}
+
+/// The one place the address flags become the vocabulary a table would use,
+/// shared by every command that takes them. The combinations clap refuses
+/// never reach it, so each arm is a vocabulary rather than a repair.
+fn address_from_flags(
+    path: Option<&str>,
+    key: Option<&str>,
+    reference: Option<&str>,
+    secret: Option<&str>,
+) -> Option<RawAddress> {
+    let own = |value: &str| value.to_string();
+    match (path, key, reference, secret) {
+        (Some(path), Some(key), None, None) => Some(RawAddress::PathKey {
+            path: own(path),
+            key: own(key),
+        }),
+        (None, None, Some(reference), None) => Some(RawAddress::Reference(own(reference))),
+        (None, None, None, Some(secret)) => Some(RawAddress::Secret(own(secret))),
+        _ => None,
+    }
 }
 
 #[derive(Args)]
@@ -123,41 +174,47 @@ fn parse_fallback(text: &str) -> Result<RawSecretVar, String> {
 }
 
 impl GetArgs {
-    fn raw(&self) -> RawSecretVar {
-        RawSecretVar {
-            backend: self.backend.clone().unwrap_or_default(),
-            path: self.address.path.clone(),
-            key: self.address.key.clone(),
-            reference: self.address.reference.clone(),
-        }
+    fn raw(&self) -> Option<RawSecretVar> {
+        Some(RawSecretVar::new(self.backend.clone()?, self.address.raw_address()?))
     }
 }
 
 /// `put` takes no `--ref`, because the only backend addressed that way is
 /// read-only: there is no reference this command could act on.
+///
+/// The two vocabularies it does take are held apart as for [`AddressArgs`]:
+/// `--path` and `--key` require each other and `--secret` conflicts with both,
+/// and one of the two is required.
 #[derive(Args)]
 pub struct PutArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
-    /// The entry within that backend, relative to its configured prefix
-    #[arg(long)]
-    pub path: String,
+    /// The entry within that backend, relative to its configured prefix.
+    /// Given together with `--key`
+    #[arg(
+        long,
+        requires = "key",
+        conflicts_with = "secret",
+        required_unless_present = "secret"
+    )]
+    pub path: Option<String>,
 
-    /// The field within that entry; a Secret Manager secret holds one value,
-    /// so there it is left out and `--path` is the secret id
-    #[arg(long)]
+    /// The field within that entry. Given together with `--path`
+    #[arg(long, requires = "path", conflicts_with = "secret")]
     pub key: Option<String>,
+
+    /// The id of a Secret Manager secret, which holds one value and so has no
+    /// `--key`
+    #[arg(long, value_name = "SECRET_ID", conflicts_with_all = ["path", "key"])]
+    pub secret: Option<String>,
 }
 
 impl PutArgs {
-    fn raw(&self) -> RawSecretVar {
-        RawSecretVar {
-            backend: self.common.backend.clone(),
-            path: Some(self.path.clone()),
-            key: self.key.clone(),
-            reference: None,
-        }
+    fn raw(&self) -> Result<RawSecretVar, String> {
+        address_from_flags(self.path.as_deref(), self.key.as_deref(), None, self.secret.as_deref())
+            .map(|address| RawSecretVar::new(self.common.backend.clone(), address))
+            .ok_or_else(|| "give `--path` and `--key`, or `--secret`".to_string())
     }
 }
 
@@ -272,7 +329,9 @@ async fn get(registry: &Registry, args: &GetArgs) -> Result<ExitCode, String> {
     if let Some(name) = &args.name {
         return get_named(registry, args, name).await;
     }
-    let raw = args.raw();
+    let raw = args
+        .raw()
+        .ok_or("give `--name`, or `--backend` with `--path` and `--key`, `--ref` or `--secret`")?;
     if !args.fallbacks.is_empty() {
         return get_with_fallbacks(registry, args, &raw).await;
     }
@@ -398,61 +457,85 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
     // that was never going to be written.
     let kind = kind_of(registry, &args.common.backend)?;
     if !kind.is_writable() {
-        return Err(format!(
-            "backend `{}` is of kind `{kind}`, which `trg` only reads from; \
-             its entries are managed in the product itself, so write the value there \
-             and read it back with `trg secret get`",
-            args.common.backend
-        ));
+        return Err(read_only(&args.common.backend, kind));
     }
 
     // The address is checked as a declaration would be, for the same reasons
     // and with the same messages, and before stdin is read for the same one.
-    let var = SecretVar::resolve_at(kind, &args.raw(), VarSite::Flags).map_err(|e| e.to_string())?;
+    let var = SecretVar::resolve_at(kind, &args.raw()?, VarSite::Flags).map_err(|e| e.to_string())?;
+    let name = var.backend();
 
     let value = read_value()?;
-    let existed = match var.address() {
-        SecretAddress::GcpSecretManager(r) => add_version(&backend, r.secret(), value, args).await?,
-        _ => {
-            let path = SecretPath::parse(&args.path).map_err(|e| e.to_string())?;
-            let Some(key) = args.key.as_deref() else {
-                return Err("`--key` is required for this backend".to_string());
-            };
-            let key = SecretKey::parse(key).map_err(|e| e.to_string())?;
-            write_key(&backend, &path, key, value, args).await?
-        }
+    let (existed, written) = match var.address() {
+        SecretAddress::GcpSecretManager(r) => (
+            add_version(&backend, r.secret(), value, name).await?,
+            PutAddress::Secret {
+                secret: r.secret().as_str(),
+            },
+        ),
+        SecretAddress::Keychain(r) => (
+            write_key(&backend, r.path(), r.key().clone(), value, name).await?,
+            PutAddress::PathKey {
+                path: r.path().as_str(),
+                key: r.key().as_str(),
+            },
+        ),
+        SecretAddress::Openbao(r) => (
+            write_key(&backend, r.path(), r.key().clone(), value, name).await?,
+            PutAddress::PathKey {
+                path: r.path().as_str(),
+                key: r.key().as_str(),
+            },
+        ),
+        SecretAddress::OnePassword(_) => return Err(read_only(name, kind)),
     };
 
     // The confirmation is on stderr under `text` so a `put` in a pipeline
     // leaves stdout empty. Under `json` it is the result, and moves to stdout
     // with everything else a caller parses.
     if args.common.output_format.is_json() {
-        #[derive(serde::Serialize)]
-        struct PutDocument<'a> {
-            backend: &'a str,
-            path: &'a str,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            key: Option<&'a str>,
-            replaced: bool,
-            declaration: String,
-        }
         let document = PutDocument {
-            backend: &args.common.backend,
-            path: &args.path,
-            key: args.key.as_deref(),
+            backend: name,
+            address: written,
             replaced: existed,
-            declaration: args.raw().declaration(),
+            declaration: var.declaration(),
         };
         return Ok(print_json(&document, ExitCode::Success));
     }
 
     let verb = if existed { "replaced" } else { "wrote" };
-    match args.key.as_deref() {
-        Some(key) => eprintln!("{verb} `{key}` at `{}` in `{}`", args.path, args.common.backend),
-        None => eprintln!("added a version of `{}` in `{}`", args.path, args.common.backend),
+    match written {
+        PutAddress::PathKey { path, key } => eprintln!("{verb} `{key}` at `{path}` in `{name}`"),
+        PutAddress::Secret { secret } => eprintln!("added a version of `{secret}` in `{name}`"),
     }
-    eprintln!("declare it with: {}", args.raw().declaration());
+    eprintln!("declare it with: {}", var.declaration());
     Ok(ExitCode::Success)
+}
+
+/// What a `put` wrote, in the vocabulary it was addressed in and with no null
+/// placeholder for the one it was not.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(untagged)]
+enum PutAddress<'a> {
+    PathKey { path: &'a str, key: &'a str },
+    Secret { secret: &'a str },
+}
+
+#[derive(serde::Serialize)]
+struct PutDocument<'a> {
+    backend: &'a str,
+    #[serde(flatten)]
+    address: PutAddress<'a>,
+    replaced: bool,
+    declaration: String,
+}
+
+fn read_only(backend: &str, kind: BackendKind) -> String {
+    format!(
+        "backend `{backend}` is of kind `{kind}`, which `trg` only reads from; \
+         its entries are managed in the product itself, so write the value there \
+         and read it back with `trg secret get`"
+    )
 }
 
 /// The declared mirrors, in name order, or only the named ones.
@@ -652,14 +735,8 @@ fn kind_of(registry: &Registry, name: &str) -> Result<BackendKind, String> {
 fn document(raw: &RawSecretVar, value: &SecretString) -> Value {
     let mut out = serde_json::Map::new();
     out.insert("backend".to_string(), Value::String(raw.backend.clone()));
-    for (field, given) in [
-        ("path", raw.path.as_deref()),
-        ("key", raw.key.as_deref()),
-        ("ref", raw.reference.as_deref()),
-    ] {
-        if let Some(given) = given {
-            out.insert(field.to_string(), Value::String(given.to_string()));
-        }
+    for (field, given) in raw.address.fields() {
+        out.insert(field.to_string(), Value::String(given.to_string()));
     }
     out.insert("value".to_string(), Value::String(value.expose_secret().to_string()));
     Value::Object(out)
@@ -753,12 +830,12 @@ async fn write_key(
     path: &SecretPath,
     key: SecretKey,
     value: SecretString,
-    args: &PutArgs,
+    name: &str,
 ) -> Result<bool, String> {
     let mut map = backend
         .get(path)
         .await
-        .map_err(|e| format!("could not read `{}` from `{}`: {e}", args.path, args.common.backend))?
+        .map_err(|e| format!("could not read `{path}` from `{name}`: {e}"))?
         .unwrap_or_else(SecretMap::new);
 
     let existed = map.contains_key(&key);
@@ -767,7 +844,7 @@ async fn write_key(
     backend
         .set(path, &map)
         .await
-        .map_err(|e| format!("could not write `{}` to `{}`: {e}", args.path, args.common.backend))?;
+        .map_err(|e| format!("could not write `{path}` to `{name}`: {e}"))?;
 
     Ok(existed)
 }
@@ -775,13 +852,7 @@ async fn write_key(
 /// Add a version to a Secret Manager secret. There is no earlier value to
 /// have replaced that `trg` could tell apart from none, so the answer is
 /// whether the secret already held a version.
-async fn add_version(
-    backend: &Backend,
-    secret: &GcpSecretId,
-    value: SecretString,
-    args: &PutArgs,
-) -> Result<bool, String> {
-    let name = &args.common.backend;
+async fn add_version(backend: &Backend, secret: &GcpSecretId, value: SecretString, name: &str) -> Result<bool, String> {
     let existed = backend
         .get_secret(secret)
         .await

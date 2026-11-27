@@ -25,8 +25,9 @@ fn put_args(key: &str) -> PutArgs {
             backend: "fake".to_string(),
             output_format: OutputFormat::Text,
         },
-        path: "mcp/demo".to_string(),
+        path: Some("mcp/demo".to_string()),
         key: Some(key.to_string()),
+        secret: None,
     }
 }
 
@@ -51,7 +52,7 @@ async fn write(backend: &Backend, name: &str, value: &str) -> bool {
         &path(),
         key(name),
         SecretString::from(value.to_string()),
-        &put_args(name),
+        "fake",
     )
     .await
     .expect("write")
@@ -267,18 +268,16 @@ async fn a_reference_reads_the_field_it_names_and_names_the_others_when_it_misse
 fn the_json_document_carries_only_the_form_that_was_used() {
     let value = SecretString::from("super-secret".to_string());
 
-    let by_path = document(&put_args("token").raw(), &value);
+    let by_path = document(&put_args("token").raw().expect("an address"), &value);
     assert_eq!(by_path["path"], json!("mcp/demo"));
     assert_eq!(by_path["value"], json!("super-secret"));
     assert!(by_path.get("ref").is_none());
 
     let by_reference = document(
-        &RawSecretVar {
-            backend: "op".to_string(),
-            path: None,
-            key: None,
-            reference: Some("op://Ops/deploy-keys/TOKEN".to_string()),
-        },
+        &RawSecretVar::new(
+            "op".to_string(),
+            RawAddress::Reference("op://Ops/deploy-keys/TOKEN".to_string()),
+        ),
         &value,
     );
     assert_eq!(by_reference["ref"], json!("op://Ops/deploy-keys/TOKEN"));
@@ -288,7 +287,7 @@ fn the_json_document_carries_only_the_form_that_was_used() {
 
 #[test]
 fn a_declaration_can_be_pasted_into_a_vars_table() {
-    let line = put_args("token").raw().declaration();
+    let line = put_args("token").raw().expect("an address").declaration();
     assert_eq!(line, r#"{ backend = "fake", path = "mcp/demo", key = "token" }"#);
 }
 
@@ -315,17 +314,84 @@ fn a_key_with_no_path_is_refused() {
     assert!(parse(&["get", "--backend", "local", "--key", "token"]).is_err());
 }
 
-/// A path alone is the whole address of a Secret Manager secret, so which
-/// kinds may leave the key out is for the declared kind to say, not `clap`.
+/// Each half of `path` and `key` needs the other, for every backend, so a
+/// half-written address is clap's to refuse and never reaches a declared kind.
 #[test]
-fn a_path_with_no_key_is_left_to_the_declared_kind() {
-    assert!(parse(&["get", "--backend", "local", "--path", "mcp/demo"]).is_ok());
-    assert!(parse(&["put", "--backend", "local", "--path", "mcp/demo"]).is_ok());
+fn a_path_and_a_key_require_each_other() {
+    for argv in [
+        &["get", "--backend", "local", "--path", "mcp/demo"][..],
+        &["get", "--backend", "local", "--key", "token"][..],
+        &["put", "--backend", "local", "--path", "mcp/demo"][..],
+        &["put", "--backend", "local", "--key", "token"][..],
+    ] {
+        let err = parse(argv).err().expect("refused");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{argv:?}: {err}"
+        );
+    }
+}
+
+/// `--secret` is a vocabulary of its own, so it cannot be blended with either
+/// of the others.
+#[test]
+fn a_secret_cannot_be_blended_with_another_vocabulary() {
+    for argv in [
+        &["get", "--backend", "g", "--secret", "s", "--path", "p"][..],
+        &["get", "--backend", "g", "--secret", "s", "--key", "k"][..],
+        &["get", "--backend", "g", "--secret", "s", "--ref", "op://v/i/f"][..],
+        &[
+            "get",
+            "--backend",
+            "g",
+            "--ref",
+            "op://v/i/f",
+            "--path",
+            "p",
+            "--key",
+            "k",
+        ][..],
+        &["get", "--backend", "g", "--ref", "op://v/i/f", "--path", "p"][..],
+        &["get", "--name", "n", "--secret", "s"][..],
+        &["put", "--backend", "g", "--secret", "s", "--path", "p"][..],
+        &["put", "--backend", "g", "--secret", "s", "--key", "k"][..],
+        &["put", "--backend", "g", "--secret", "s", "--path", "p", "--key", "k"][..],
+    ] {
+        let err = parse(argv).err().expect("refused");
+        assert!(
+            matches!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict | clap::error::ErrorKind::MissingRequiredArgument
+            ),
+            "{argv:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_secret_parses_on_its_own_and_becomes_the_secret_vocabulary() {
+    let SecretCommands::Get(get) = parse(&["get", "--backend", "gsm", "--secret", "deploy-token"]).unwrap() else {
+        panic!("expected get");
+    };
+    assert_eq!(
+        get.raw().map(|raw| raw.address),
+        Some(RawAddress::Secret("deploy-token".to_string()))
+    );
+
+    let SecretCommands::Put(put) = parse(&["put", "--backend", "gsm", "--secret", "deploy-token"]).unwrap() else {
+        panic!("expected put");
+    };
+    assert_eq!(
+        put.raw().map(|raw| raw.address),
+        Ok(RawAddress::Secret("deploy-token".to_string()))
+    );
 }
 
 #[test]
 fn an_address_is_required() {
     assert!(parse(&["get", "--backend", "local"]).is_err());
+    assert!(parse(&["put", "--backend", "local"]).is_err());
 }
 
 /// `put` writes, and the only backend addressed by reference is one `trg`
