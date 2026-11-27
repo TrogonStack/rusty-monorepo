@@ -28,6 +28,7 @@ case "$1 $2 $3" in
     [ -f "$0.exists" ] || { echo "NOT_FOUND: Secret [projects/1/secrets/$4] not found." >&2; exit 1; }
     cat > "$0.state" || exit 1
     echo added >> "$0.adds"
+    printf 'projects/1/secrets/%s/versions/%s' "$4" "$(wc -l < "$0.adds" | tr -d ' ')"
     exit 0;;
   "secrets versions access")
     [ -f "$0.state" ] || { echo "NOT_FOUND: Secret Version [projects/1/secrets/x/versions/latest] not found." >&2; exit 1; }
@@ -518,7 +519,7 @@ async fn a_write_that_reads_back_differently_fails() {
     let stub = StubGcloud::scripted(
         r#"
 case "$1 $2 $3" in
-  "secrets versions add") cat > /dev/null; exit 0;;
+  "secrets versions add") cat > /dev/null; printf 'projects/1/secrets/x/versions/2'; exit 0;;
   "secrets versions access") printf 'b2xk'; exit 0;;
 esac
 case "$1 $2" in
@@ -531,6 +532,42 @@ exit 127
     let err = world.run(true).await.expect_err("mismatch");
     assert!(err.contains("did not read back"), "{err}");
     assert!(!err.contains("v1"), "{err}");
+}
+
+/// `latest` is an alias and may keep answering with the previous value after
+/// a version was added, which is not a failed write. Only the new version's own
+/// number is promised to read back.
+#[tokio::test]
+async fn a_lagging_latest_alias_is_not_a_failed_write() {
+    let stub = StubGcloud::scripted(
+        r#"
+case "$1 $2 $3" in
+  "secrets versions add") cat > /dev/null; printf 'projects/1/secrets/x/versions/2'; exit 0;;
+  "secrets versions access")
+    case "$4" in
+      latest) printf 'b2xk'; exit 0;;
+      2) printf 'djE'; exit 0;;
+    esac;;
+esac
+case "$1 $2" in
+  "secrets describe") printf x; exit 0;;
+esac
+exit 127
+"#,
+    );
+    let world = Mirrored::new("v1", stub).await;
+    assert_eq!(world.run(true).await, Ok(MirrorOutcome::Updated));
+}
+
+#[tokio::test]
+async fn a_version_gcloud_does_not_name_is_an_error_and_not_a_guess() {
+    let stub = StubGcloud::scripted("cat > /dev/null\nprintf 'Created'\n");
+    let err = stub
+        .backend()
+        .add_version(&id("tok"), &secret("v"))
+        .await
+        .expect_err("unnamed");
+    assert!(err.to_string().contains("did not say which version"), "{err}");
 }
 
 #[test]

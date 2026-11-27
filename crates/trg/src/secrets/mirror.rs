@@ -912,13 +912,16 @@ where
         return Ok(outcome);
     }
 
-    backend
+    let created = backend
         .add_secret_version(&target.secret, value)
         .await
         .map_err(MirrorError::TargetWrite)?;
 
+    // The version that was just created, never `latest`: reading a version by
+    // number right after adding it is strongly consistent, and the alias is
+    // not, so it can still answer with the previous value for a while.
     let back = backend
-        .get_secret(&target.secret)
+        .get_secret_version(&target.secret, &created)
         .await
         .map_err(MirrorError::TargetRead)?;
     match back {

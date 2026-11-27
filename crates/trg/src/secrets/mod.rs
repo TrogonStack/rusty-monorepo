@@ -47,7 +47,7 @@ pub use address::SecretAddress;
 pub use config::{BackendConfig, BackendError, Registry, SecretsSection, ServerBackendError};
 pub use gcp::{
     GcloudAccount, GcpAccount, GcpAccountError, GcpBackend, GcpProject, GcpProjectError, GcpReference, GcpSecretId,
-    GcpSecretIdError,
+    GcpSecretIdError, GcpVersion,
 };
 pub use keychain::{KeychainBackend, KeychainReference};
 pub use mirror::{
@@ -678,12 +678,33 @@ impl Backend {
     }
 
     /// Add a version to a Secret Manager secret that already exists.
-    pub async fn add_secret_version(&self, secret: &GcpSecretId, value: &SecretString) -> Result<(), SecretsError> {
+    ///
+    /// Answers with the version created, which a readback can name.
+    pub async fn add_secret_version(
+        &self,
+        secret: &GcpSecretId,
+        value: &SecretString,
+    ) -> Result<GcpVersion, SecretsError> {
         match self {
             Self::Gcp(b) => b.add_version(secret, value).await,
             other => Err(SecretsError::Unsupported {
                 kind: other.kind(),
                 op: "secret version add",
+            }),
+        }
+    }
+
+    /// Read one version of a Secret Manager secret by its number.
+    pub async fn get_secret_version(
+        &self,
+        secret: &GcpSecretId,
+        version: &GcpVersion,
+    ) -> Result<Option<SecretString>, SecretsError> {
+        match self {
+            Self::Gcp(b) => b.get_version(secret, version).await,
+            other => Err(SecretsError::Unsupported {
+                kind: other.kind(),
+                op: "secret get",
             }),
         }
     }

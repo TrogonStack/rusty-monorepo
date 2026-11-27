@@ -56,7 +56,7 @@
 //! newline, which a PEM private key ends with and a client may require.
 
 mod constants;
-use constants::{ERRORS_ONLY, GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, QUIET, SECRET_ID_MAX_LEN, USER_OUTPUT};
+use constants::{ERRORS_ONLY, GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, LATEST, QUIET, SECRET_ID_MAX_LEN, USER_OUTPUT};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -292,6 +292,29 @@ impl fmt::Debug for GcpSecretId {
     }
 }
 
+/// The number of one Secret Manager version, as `versions add` reports it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GcpVersion(String);
+
+impl GcpVersion {
+    /// The version out of `projects/<n>/secrets/<id>/versions/<v>`. Only a
+    /// run of digits is taken, since the value goes to `gcloud` as an argument.
+    fn from_resource_name(name: &str) -> Option<Self> {
+        let number = name.rsplit('/').next()?;
+        (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then(|| Self(number.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for GcpVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "GcpVersion({:?})", self.0)
+    }
+}
+
 /// One value's address in this backend: the secret whose latest version it is.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct GcpReference {
@@ -392,6 +415,21 @@ impl GcpBackend {
     /// The bytes of the `latest` version of a secret, or `None` when there is
     /// nothing to read: the secret does not exist, or it has no enabled
     /// version. Secret Manager answers both the same way.
+    pub async fn get_latest(&self, secret: &GcpSecretId) -> Result<Option<SecretString>, SecretsError> {
+        self.access(secret, LATEST).await
+    }
+
+    /// The bytes of one specific version, which unlike `latest` is strongly
+    /// consistent right after the version was added. `None` as for
+    /// [`Self::get_latest`].
+    pub async fn get_version(
+        &self,
+        secret: &GcpSecretId,
+        version: &GcpVersion,
+    ) -> Result<Option<SecretString>, SecretsError> {
+        self.access(secret, version.as_str()).await
+    }
+
     #[cfg_attr(
         dylint_lib = "trogon_dylint_lints",
         expect(
@@ -399,11 +437,11 @@ impl GcpBackend {
             reason = "The payload is a secret and a UTF-8 error carries the bytes it rejected, so neither decode error may travel into a message"
         )
     )]
-    pub async fn get_latest(&self, secret: &GcpSecretId) -> Result<Option<SecretString>, SecretsError> {
+    async fn access(&self, secret: &GcpSecretId, version: &str) -> Result<Option<SecretString>, SecretsError> {
         let out = self
             .run(
                 GcloudCommand::VersionsAccess,
-                &["latest", &format!("--secret={secret}"), "--format=get(payload.data)"],
+                &[version, &format!("--secret={secret}"), "--format=get(payload.data)"],
                 None,
             )
             .await?;
@@ -432,17 +470,27 @@ impl GcpBackend {
     /// The value goes to `gcloud` on stdin and is written exactly as given.
     /// A secret that is not there is [`SecretsError::MissingContainer`],
     /// never a reason to create one.
-    pub async fn add_version(&self, secret: &GcpSecretId, value: &SecretString) -> Result<(), SecretsError> {
+    ///
+    /// Answers with the version that was created, so a readback can name it
+    /// rather than ask `latest`, an alias that may lag behind the write.
+    pub async fn add_version(&self, secret: &GcpSecretId, value: &SecretString) -> Result<GcpVersion, SecretsError> {
         let out = self
             .run(
                 GcloudCommand::VersionsAdd,
-                &[secret.as_str(), "--data-file=-"],
+                &[secret.as_str(), "--data-file=-", "--format=value(name)"],
                 Some(value),
             )
             .await?;
 
         if out.status.success() {
-            return Ok(());
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            return GcpVersion::from_resource_name(stdout.trim()).ok_or_else(|| {
+                SecretsError::Unavailable(format!(
+                    "gcloud {} succeeded but did not say which version it created (project `{}`)",
+                    GcloudCommand::VersionsAdd.as_str(),
+                    self.project
+                ))
+            });
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stderr = stderr.trim();

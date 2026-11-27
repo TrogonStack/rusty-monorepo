@@ -44,3 +44,6 @@ pub const USER_OUTPUT: &str = "--user-output-enabled";
 /// Keeps error text on stderr whatever `core/verbosity` says, since a failure
 /// is told apart by what it printed.
 pub const ERRORS_ONLY: &str = "--verbosity=error";
+
+/// The alias for the newest version, whatever state it is in.
+pub const LATEST: &str = "latest";

@@ -128,8 +128,10 @@ it, because the secret's replication, access and rotation belong to whatever
 declares it, so a missing secret is an error, in a dry run too. A mirror writes
 the source bytes exactly and compares them exactly, so a value ending in a
 newline, such as a PEM private key, is a different value from the same text
-without it. A write is read back through the `latest` version, and the target
-fails if it does not hold what was written.
+without it. A write is read back through the version it created, by number, since
+Secret Manager promises that read is consistent and does not promise it of the
+`latest` alias, and the target fails if that version does not hold what was
+written.
 
 Unlike the other targets, the secret gets no `source` key: it holds one value
 with nowhere to put a second, and a version's labels are not something `trg`
