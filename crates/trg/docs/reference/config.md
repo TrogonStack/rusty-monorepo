@@ -526,7 +526,15 @@ job that authenticated before `trg` ran, answers every call.
 | `project` | string | yes      | The project id, such as `my-project`. Never inferred from `gcloud config`, so one config reads one project on every machine. |
 | `account` | string | yes      | The `gcloud` identity to act as, as `gcloud auth list` names it. Never inferred from the active account. |
 
-Every call carries `--project` and `--account` explicitly.
+Every call carries `--project` and `--account` explicitly. `gcloud` would
+otherwise prefer an access token, an access token file or a credential file
+override (`CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`,
+`CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`) over `--account`, and impersonation
+(`CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT`) would replace the result, so
+`trg` blanks all four for every call. The identity is the stored credential of
+`account`, or `gcloud` refuses. A CI job that authenticates with a credential
+file must store it for that account first, with `gcloud auth login --cred-file`
+(which `google-github-actions/setup-gcloud` does), and name the same account.
 
 A value is addressed by the secret id alone, written as a var's `secret`:
 

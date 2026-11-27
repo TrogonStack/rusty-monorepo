@@ -25,6 +25,14 @@
 //! machine signed into several identities always acts as the one the config
 //! names.
 //!
+//! `--account` alone does not hold that. `gcloud` prefers an access token, an
+//! access token file or a credential file override over the account it was
+//! told to use, and impersonation replaces the result with another principal.
+//! Every invocation therefore blanks those settings, so the identity is the
+//! stored credential of the configured account or `gcloud` refuses. A CI job
+//! that authenticates through a credential file must store it for the account
+//! first, as `gcloud auth login --cred-file` does.
+//!
 //! # Addressing
 //!
 //! A value is addressed by its [`GcpSecretId`] alone. A Secret Manager secret is
@@ -48,7 +56,7 @@
 //! newline, which a PEM private key ends with and a client may require.
 
 mod constants;
-use constants::{GCLOUD_TIMEOUT, QUIET, SECRET_ID_MAX_LEN};
+use constants::{GCLOUD_TIMEOUT, IDENTITY_OVERRIDES, QUIET, SECRET_ID_MAX_LEN};
 use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -579,6 +587,9 @@ impl GcpBackend {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        for name in IDENTITY_OVERRIDES {
+            process.env(name, "");
+        }
         call.span().in_scope(|| propagation::inject_tokio_command(&mut process));
 
         let mut child = process.spawn().map_err(|e| {

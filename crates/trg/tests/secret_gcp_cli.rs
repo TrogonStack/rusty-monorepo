@@ -19,6 +19,7 @@ use assert_cmd::prelude::*;
 use std::process::Command;
 
 const BODY: &str = r#"
+env | grep '^CLOUDSDK_AUTH_' | sort > "$0.env"
 case "$1 $2 $3" in
   "secrets versions add")
     [ -f "$0.exists" ] || { echo "NOT_FOUND: Secret not found." >&2; exit 1; }
@@ -177,4 +178,32 @@ fn a_secret_that_does_not_exist_is_reported_and_not_created() {
     assert!(stderr.contains("never creates"), "{stderr}");
     assert!(!setup.argv().contains("create"), "{}", setup.argv());
     assert_eq!(setup.stored(), None);
+}
+
+/// `gcloud` prefers these over the account `--account` names, so inheriting one
+/// would let the same config act as a different principal on a CI runner than
+/// on a laptop. Each must reach `gcloud` blank, for reads and for writes.
+#[test]
+fn an_inherited_credential_override_never_reaches_gcloud() {
+    let overrides = [
+        "CLOUDSDK_AUTH_ACCESS_TOKEN",
+        "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+        "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+        "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+    ];
+    let setup = Setup::new(true);
+    fs::write(setup.bin.path().join("gcloud.body.state"), b"stored-value").unwrap();
+    let mut get = setup.command(&["secret", "get", "--backend", "gsm", "--secret", "deploy-token"]);
+    for name in overrides {
+        get.env(name, "someone-else");
+    }
+    let out = get.output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let seen = fs::read_to_string(setup.bin.path().join("gcloud.body.env")).unwrap();
+    let mut lines: Vec<&str> = seen.lines().collect();
+    lines.sort_unstable();
+    let blank: Vec<String> = overrides.iter().map(|n| format!("{n}=")).collect();
+    assert_eq!(lines, blank, "{seen}");
+    assert!(!seen.contains("someone-else"), "{seen}");
 }

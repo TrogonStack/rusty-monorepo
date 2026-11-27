@@ -7,8 +7,10 @@ its own.
 ## Before you start
 
 - The [`gcloud` CLI](https://cloud.google.com/sdk/gcloud) is installed and
-  authenticated, with `gcloud auth login` or, in CI, an authentication step that
-  ran before `trg`.
+  authenticated for the account you declare, with `gcloud auth login` or, in
+  CI, `gcloud auth login --cred-file` (`google-github-actions/setup-gcloud` runs
+  it). A credential file or access token that is only set in the environment is
+  ignored, because it could name a different identity than `account`.
 - The secret exists. `trg` adds versions to a secret and never creates one, so
   declare it where you declare the rest of your infrastructure.
 - The identity can access versions (`roles/secretmanager.secretAccessor`) to
