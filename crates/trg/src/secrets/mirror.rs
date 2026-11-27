@@ -915,7 +915,12 @@ where
     let created = backend
         .add_secret_version(&target.secret, value)
         .await
-        .map_err(MirrorError::TargetWrite)?;
+        .map_err(MirrorError::TargetWrite)?
+        .ok_or_else(|| {
+            MirrorError::TargetRead(SecretsError::Unavailable(
+                "gcloud did not say which version it added, so the write could not be read back".to_string(),
+            ))
+        })?;
 
     // The version that was just created, never `latest`: reading a version by
     // number right after adding it is strongly consistent, and the alias is

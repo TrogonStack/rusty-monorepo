@@ -684,7 +684,7 @@ impl Backend {
         &self,
         secret: &GcpSecretId,
         value: &SecretString,
-    ) -> Result<GcpVersion, SecretsError> {
+    ) -> Result<Option<GcpVersion>, SecretsError> {
         match self {
             Self::Gcp(b) => b.add_version(secret, value).await,
             other => Err(SecretsError::Unsupported {

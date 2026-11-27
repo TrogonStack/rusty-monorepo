@@ -60,7 +60,8 @@ op read "op://Engineering/deploy-key/token" | trg secret put --backend gsm --sec
 ```
 
 The value arrives on stdin and goes to `gcloud` on stdin, so it is never in a
-process listing. To keep a value in sync from another backend instead, declare
+process listing. The write only adds a version, so `secretVersionAdder` is
+enough; `put` does not read the secret first. To keep a value in sync from another backend instead, declare
 a [mirror](mirror-a-secret-into-another-backend.md#mirror-a-secret-into-secret-manager).
 
 ## Troubleshooting

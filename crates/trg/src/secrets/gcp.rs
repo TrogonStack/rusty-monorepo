@@ -490,8 +490,14 @@ impl GcpBackend {
     /// never a reason to create one.
     ///
     /// Answers with the version that was created, so a readback can name it
-    /// rather than ask `latest`, an alias that may lag behind the write.
-    pub async fn add_version(&self, secret: &GcpSecretId, value: &SecretString) -> Result<GcpVersion, SecretsError> {
+    /// rather than ask `latest`, an alias that may lag behind the write. `None`
+    /// when `gcloud` succeeded without saying which: the write happened, so it is
+    /// not an error, but nothing can be read back by number.
+    pub async fn add_version(
+        &self,
+        secret: &GcpSecretId,
+        value: &SecretString,
+    ) -> Result<Option<GcpVersion>, SecretsError> {
         let out = self
             .run(
                 GcloudCommand::VersionsAdd,
@@ -502,13 +508,7 @@ impl GcpBackend {
 
         if out.status.success() {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            return GcpVersion::from_resource_name(stdout.trim()).ok_or_else(|| {
-                SecretsError::Unavailable(format!(
-                    "gcloud {} succeeded but did not say which version it created (project `{}`)",
-                    GcloudCommand::VersionsAdd.as_str(),
-                    self.project
-                ))
-            });
+            return Ok(GcpVersion::from_resource_name(stdout.trim()));
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stderr = stderr.trim();

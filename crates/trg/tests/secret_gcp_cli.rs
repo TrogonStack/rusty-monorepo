@@ -24,6 +24,7 @@ case "$1 $2 $3" in
   "secrets versions add")
     [ -f "$0.exists" ] || { echo "NOT_FOUND: Secret not found." >&2; exit 1; }
     cat > "$0.state"
+    printf 'projects/1/secrets/x/versions/1'
     exit 0;;
   "secrets versions access")
     [ -f "$0.state" ] || { echo "NOT_FOUND: not found." >&2; exit 1; }
@@ -223,4 +224,44 @@ fn output_is_enabled_for_every_call() {
     for wanted in ["--user-output-enabled", "--verbosity=error", "--quiet"] {
         assert!(argv.lines().any(|a| a == wanted), "{wanted} missing from {argv}");
     }
+}
+
+/// `roles/secretmanager.secretVersionAdder` can add a version and cannot read
+/// one, so a `put` that read first would be refused before it wrote.
+#[test]
+fn a_put_needs_only_the_right_to_add_a_version() {
+    let setup = Setup::new(true);
+    fs::write(
+        setup.bin.path().join("gcloud.body"),
+        r#"
+case "$1 $2 $3" in
+  "secrets versions add") cat > "$0.state"; printf 'projects/1/secrets/x/versions/1'; exit 0;;
+  "secrets versions access") echo "ERROR: (gcloud) PERMISSION_DENIED: Permission 'secretmanager.versions.access' denied" >&2; exit 1;;
+esac
+exit 127
+"#,
+    )
+    .unwrap();
+    let out = put(
+        &setup,
+        &[
+            "secret",
+            "put",
+            "--backend",
+            "gsm",
+            "--secret",
+            "deploy-token",
+            "--output-format",
+            "json",
+        ],
+        b"s3cr3t-value\n",
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(setup.stored().as_deref(), Some(b"s3cr3t-value".as_slice()));
+    assert!(!setup.argv().contains("access"), "{}", setup.argv());
+
+    // What was never observed is not reported, in particular not as `false`.
+    let document: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(document["secret"], "deploy-token", "{document}");
+    assert!(document.get("replaced").is_none(), "{document}");
 }

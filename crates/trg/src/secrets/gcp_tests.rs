@@ -609,14 +609,26 @@ exit 127
 }
 
 #[tokio::test]
-async fn a_version_gcloud_does_not_name_is_an_error_and_not_a_guess() {
-    let stub = StubGcloud::scripted("cat > /dev/null\nprintf 'Created'\n");
-    let err = stub
+async fn a_version_gcloud_does_not_name_is_unknown_and_not_a_guess() {
+    let stub = StubGcloud::scripted(
+        r#"
+case "$1 $2 $3" in
+  "secrets versions add") cat > /dev/null; printf 'Created'; exit 0;;
+  "secrets versions access") printf 'b2xk'; exit 0;;
+esac
+exit 127
+"#,
+    );
+    let added = stub
         .backend()
         .add_version(&id("tok"), &secret("v"))
         .await
-        .expect_err("unnamed");
-    assert!(err.to_string().contains("did not say which version"), "{err}");
+        .expect("added");
+    assert_eq!(added, None);
+
+    let world = Mirrored::new("v1", stub).await;
+    let err = world.run(true).await.expect_err("unverifiable");
+    assert!(err.contains("did not say which version"), "{err}");
 }
 
 #[test]

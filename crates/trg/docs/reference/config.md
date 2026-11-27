@@ -558,7 +558,9 @@ Writing, through `trg secret put --secret <secret-id>` or as a mirror target,
 adds a new version with the value sent on stdin, never in argv. It never
 creates the secret: replication, access and rotation are decided where the
 secret is declared, for example in Terraform. A secret that does not exist is
-reported as such, in a dry run too. `trg secret put` strips one trailing line
+reported as such, in a dry run too. `trg secret put` does not read the secret first, so an identity that can only
+add versions can write, and its JSON confirmation carries no `replaced` field:
+whether a version was there before is not something that write observed. `trg secret put` strips one trailing line
 ending from stdin as it does for every backend, and a mirror writes the source
 bytes untouched.
 

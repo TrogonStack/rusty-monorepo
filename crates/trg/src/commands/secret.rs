@@ -474,14 +474,14 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
             },
         ),
         SecretAddress::Keychain(r) => (
-            write_key(&backend, r.path(), r.key().clone(), value, name).await?,
+            Some(write_key(&backend, r.path(), r.key().clone(), value, name).await?),
             PutAddress::PathKey {
                 path: r.path().as_str(),
                 key: r.key().as_str(),
             },
         ),
         SecretAddress::Openbao(r) => (
-            write_key(&backend, r.path(), r.key().clone(), value, name).await?,
+            Some(write_key(&backend, r.path(), r.key().clone(), value, name).await?),
             PutAddress::PathKey {
                 path: r.path().as_str(),
                 key: r.key().as_str(),
@@ -503,7 +503,7 @@ async fn put(registry: &Registry, args: &PutArgs) -> Result<ExitCode, String> {
         return Ok(print_json(&document, ExitCode::Success));
     }
 
-    let verb = if existed { "replaced" } else { "wrote" };
+    let verb = if existed == Some(true) { "replaced" } else { "wrote" };
     match written {
         PutAddress::PathKey { path, key } => eprintln!("{verb} `{key}` at `{path}` in `{name}`"),
         PutAddress::Secret { secret } => eprintln!("added a version of `{secret}` in `{name}`"),
@@ -526,7 +526,10 @@ struct PutDocument<'a> {
     backend: &'a str,
     #[serde(flatten)]
     address: PutAddress<'a>,
-    replaced: bool,
+    /// Absent when the write could not tell. A Secret Manager `put` has only
+    /// the right to add a version, which is not the right to read one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replaced: Option<bool>,
     declaration: String,
 }
 
@@ -849,20 +852,24 @@ async fn write_key(
     Ok(existed)
 }
 
-/// Add a version to a Secret Manager secret. There is no earlier value to
-/// have replaced that `trg` could tell apart from none, so the answer is
-/// whether the secret already held a version.
-async fn add_version(backend: &Backend, secret: &GcpSecretId, value: SecretString, name: &str) -> Result<bool, String> {
-    let existed = backend
-        .get_secret(secret)
-        .await
-        .map_err(|e| format!("could not read `{secret}` from `{name}`: {e}"))?
-        .is_some();
+/// Add a version to a Secret Manager secret.
+///
+/// Whether the secret already held one is not asked: reading it needs
+/// `secretmanager.versions.access`, which `roles/secretmanager.secretVersionAdder`
+/// does not carry, and a write that fails for want of a read it does not need
+/// is worse than a confirmation that says less. So the answer is unknown, never
+/// a guess.
+async fn add_version(
+    backend: &Backend,
+    secret: &GcpSecretId,
+    value: SecretString,
+    name: &str,
+) -> Result<Option<bool>, String> {
     backend
         .add_secret_version(secret, &value)
         .await
         .map_err(|e| format!("could not write `{secret}` to `{name}`: {e}"))?;
-    Ok(existed)
+    Ok(None)
 }
 
 /// Take the value from stdin, never from an argument.
