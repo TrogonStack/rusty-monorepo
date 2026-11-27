@@ -61,7 +61,12 @@ op read "op://Engineering/deploy-key/token" | trg secret put --backend gsm --sec
 
 The value arrives on stdin and goes to `gcloud` on stdin, so it is never in a
 process listing. The write only adds a version, so `secretVersionAdder` is
-enough; `put` does not read the secret first. To keep a value in sync from another backend instead, declare
+enough; `put` does not read the secret first.
+
+`put` strips one trailing line ending from stdin, so a value whose final
+newline matters, such as a PEM private key, is stored without it. Most PEM
+parsers accept that. When the exact bytes matter, copy the value with a mirror,
+which writes the source bytes untouched. To keep a value in sync from another backend instead, declare
 a [mirror](mirror-a-secret-into-another-backend.md#mirror-a-secret-into-secret-manager).
 
 ## Troubleshooting

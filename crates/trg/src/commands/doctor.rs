@@ -54,7 +54,9 @@ pub enum Outcome {
     Passed { detail: String },
     /// It answered, and the answer was no.
     Failed { detail: String, remedy: String },
-    /// An earlier failure left this one unanswerable, so it was not attempted.
+    /// It could not be answered, because an earlier check failed or because
+    /// the identity lacks the permission that would answer it, which is not
+    /// evidence that anything is broken.
     Skipped { because: String },
 }
 
@@ -406,6 +408,14 @@ async fn gcp_secret_manager(name: &str, gcp: &GcpBackend) -> Report {
     }
 
     let project = match gcp.probe_project().await {
+        // Listing needs a permission that reading or adding versions of known
+        // secrets does not, so a refusal cannot tell a missing project from an
+        // identity scoped to the secrets it uses. Failing here would mark a
+        // working setup unhealthy.
+        Err(SecretsError::PermissionDenied(_)) => Outcome::skipped(format!(
+            "listing secrets in `{}` was refused, which is what a missing `secretmanager.secrets.list` permission or a project the account cannot see looks like, so the project could not be probed; reading and writing known secrets does not need that permission",
+            gcp.project()
+        )),
         Ok(()) => Outcome::passed(format!("`{}` answers and Secret Manager can be listed", gcp.project())),
         Err(err) => Outcome::failed(
             err.to_string(),

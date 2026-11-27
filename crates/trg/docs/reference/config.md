@@ -549,8 +549,14 @@ token = { backend = "gsm", secret = "deploy-token" }
 A secret holds one value and its versions are not fields, so it has no `key`,
 and `path`, `key` and `ref` are refused. The id may hold ASCII letters, digits, `-` and `_`,
 and may not start with `-`. A read takes the `latest` version, and the stored
-bytes come back exactly, a trailing newline included, so a PEM private key
-survives a round trip. A value that is not valid UTF-8 is refused. `latest` is the newest version in whatever state it is in, so a secret
+bytes come back exactly, a trailing newline included. That holds for what
+the secret stores, not for what was typed into `trg secret put`, which strips
+one trailing line ending first (see below), so a PEM written with `put` comes
+back without its final newline. Most PEM parsers accept that, but a consumer
+that needs the exact bytes should get them through a mirror, which writes the
+source bytes untouched. A value that is not valid UTF-8 is refused.
+
+`latest` is the newest version in whatever state it is in, so a secret
 whose newest version is disabled or destroyed has no readable version: a read
 reports that, and a mirror treats it as a secret to fill and adds a version.
 
@@ -561,8 +567,9 @@ secret is declared, for example in Terraform. A secret that does not exist is
 reported as such, in a dry run too. `trg secret put` does not read the secret first, so an identity that can only
 add versions can write, and its JSON confirmation carries no `replaced` field:
 whether a version was there before is not something that write observed. `trg secret put` strips one trailing line
-ending from stdin as it does for every backend, and a mirror writes the source
-bytes untouched.
+ending from stdin as it does for every backend, so a value whose final newline
+matters, such as a PEM, is not byte exact through `put`: copy it with a mirror,
+which writes the source bytes untouched.
 
 `delete` and `list` are not supported, and the backend cannot store an MCP
 server's OAuth credentials, which are a map of values and not one.
@@ -570,7 +577,11 @@ server's OAuth credentials, which are a map of values and not one.
 `trg doctor` checks that `gcloud` answers, that the configured account holds
 credentials, and that the project can be listed with
 that account, which fails the same way for a project that does not exist and
-one the account cannot see.
+one the account cannot see. Listing needs `secretmanager.secrets.list`
+(`roles/secretmanager.viewer` carries it). An identity that only reads or adds
+versions of known secrets lacks it, so a refused listing is reported as a
+skipped project check with the reason, not as a failure, because reads and
+writes work without it. Any other failure of the listing still fails the check.
 
 ### Credential layout
 

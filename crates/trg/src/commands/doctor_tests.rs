@@ -422,3 +422,71 @@ fn a_sealed_instance_is_unhealthy_without_failing_the_health_request() {
         Some("503")
     );
 }
+
+/// A `gcloud` that knows the configured account and answers `secrets list`
+/// with the given exit status and message.
+fn gcloud_listing(exit: i32, stderr: &str) -> (tempfile::TempDir, GcpBackend) {
+    use crate::secrets::{GcpAccount, GcpProject};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("gcloud");
+    let body = format!(
+        r#"case "$1 $2" in
+  "auth list") printf '%s' '[{{"account":"deployer@my-project.iam.gserviceaccount.com","status":"ACTIVE"}}]'; exit 0;;
+  "secrets list") printf '%s' '{stderr}' >&2; exit {exit};;
+esac
+exit 127
+"#
+    );
+    std::fs::write(bin.with_extension("body"), body).expect("write body");
+    let shim = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/op-stub.sh");
+    std::os::unix::fs::symlink(shim, &bin).expect("link stub");
+    let backend = GcpBackend::new(
+        GcpProject::parse("my-project").expect("project"),
+        GcpAccount::parse("deployer@my-project.iam.gserviceaccount.com").expect("account"),
+    )
+    .with_bin(bin);
+    (dir, backend)
+}
+
+fn project_check(report: &Report) -> &Outcome {
+    &report
+        .checks
+        .iter()
+        .find(|c| c.name == "project")
+        .expect("project check")
+        .outcome
+}
+
+#[tokio::test]
+async fn an_identity_that_cannot_list_secrets_is_not_reported_unhealthy() {
+    let (_dir, backend) = gcloud_listing(1, "ERROR: PERMISSION_DENIED: secretmanager.secrets.list denied");
+    let report = gcp_secret_manager("gsm", &backend).await;
+
+    assert!(report.is_healthy(), "{}", report.to_text());
+    let Outcome::Skipped { because } = project_check(&report) else {
+        panic!("expected a skipped project check: {}", report.to_text());
+    };
+    assert!(because.contains("secretmanager.secrets.list"), "{because}");
+}
+
+#[tokio::test]
+async fn a_project_that_does_not_answer_still_fails_the_check() {
+    let (_dir, backend) = gcloud_listing(1, "ERROR: project not usable");
+    let report = gcp_secret_manager("gsm", &backend).await;
+
+    assert!(!report.is_healthy(), "{}", report.to_text());
+    assert!(matches!(project_check(&report), Outcome::Failed { .. }));
+}
+
+#[tokio::test]
+async fn a_listable_project_passes() {
+    let (_dir, backend) = gcloud_listing(0, "");
+    let report = gcp_secret_manager("gsm", &backend).await;
+
+    assert!(
+        matches!(project_check(&report), Outcome::Passed { .. }),
+        "{}",
+        report.to_text()
+    );
+}
