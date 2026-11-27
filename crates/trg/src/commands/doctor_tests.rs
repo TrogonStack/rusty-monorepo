@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::secrets::openbao::OpenBaoSettings;
+use crate::secrets::{GcpAccount, GcpProject};
 
 /// Answers `sys/health` one way and everything else another, recording what
 /// it was asked so a test can assert on what was never sent.
@@ -426,8 +427,6 @@ fn a_sealed_instance_is_unhealthy_without_failing_the_health_request() {
 /// A `gcloud` that knows the configured account and answers `secrets list`
 /// with the given exit status and message.
 fn gcloud_listing(exit: i32, stderr: &str) -> (tempfile::TempDir, GcpBackend) {
-    use crate::secrets::{GcpAccount, GcpProject};
-
     let dir = tempfile::tempdir().expect("tempdir");
     let bin = dir.path().join("gcloud");
     let body = format!(
