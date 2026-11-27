@@ -61,6 +61,8 @@ impl Setup {
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::cargo_bin("trg").unwrap();
         cmd.env("XDG_CONFIG_HOME", self.home.path());
+        // A developer shell may point at a real config; the test owns its own.
+        cmd.env_remove("TRG_CONFIG");
         cmd.env("PATH", format!("{}:/usr/bin:/bin", self.bin.path().display()));
         cmd.args(args);
         cmd
