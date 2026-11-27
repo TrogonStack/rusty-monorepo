@@ -277,6 +277,22 @@ async fn a_value_ending_in_a_newline_is_written_byte_for_byte() {
     assert_eq!(back.expose_secret(), pem);
 }
 
+/// `gcloud` refuses a missing secret without reading stdin. A value larger
+/// than a pipe buffer makes the write outlast it every time, so the broken
+/// pipe that follows is certain rather than a race, and the answer must still
+/// be the missing secret.
+#[tokio::test]
+async fn a_gcloud_that_exits_without_reading_the_value_is_judged_by_what_it_said() {
+    let stub = StubGcloud::without_secret();
+    let large = "v".repeat(1 << 20);
+    let err = stub
+        .backend()
+        .add_version(&id("tok"), &secret(&large))
+        .await
+        .expect_err("missing");
+    assert!(matches!(&err, SecretsError::MissingContainer { .. }), "{err}");
+}
+
 #[tokio::test]
 async fn a_missing_secret_is_never_created_and_is_said_so() {
     let stub = StubGcloud::without_secret();

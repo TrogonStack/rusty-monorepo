@@ -590,13 +590,23 @@ impl GcpBackend {
 
         // The value is written and the pipe closed before waiting, so `gcloud`
         // sees end of input and does not wait on a stream that never ends.
+        //
+        // A broken pipe means `gcloud` exited without reading, as it does when
+        // the secret is not there. Its exit status and stderr say why, so the
+        // wait below reports that instead of the pipe.
         if let (Some(value), Some(mut pipe)) = (stdin, child.stdin.take()) {
             let wrote = async {
                 pipe.write_all(value.expose_secret().as_bytes()).await?;
                 pipe.shutdown().await
             }
             .await;
-            if let Err(e) = wrote {
+            if let Err(e) = wrote.or_else(|e| {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }) {
                 let error =
                     SecretsError::Transport(format!("gcloud {}: could not send the value: {e}", command.as_str()));
                 call.failed(error.error_type());
