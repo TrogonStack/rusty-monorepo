@@ -306,6 +306,15 @@ async fn a_value_ending_in_a_newline_is_written_byte_for_byte() {
 /// be the missing secret.
 #[tokio::test]
 async fn a_gcloud_that_exits_without_reading_the_value_is_judged_by_what_it_said() {
+    // The Rust runtime ignores SIGPIPE, but an `exec` that fails inside this
+    // test process (the `commands::exec` tests) puts the default disposition
+    // back for every thread, and the write below would then kill the whole
+    // test binary with 141 instead of failing with `BrokenPipe`.
+    // SAFETY: `signal` with `SIG_IGN` is async-signal-safe and only sets the
+    // disposition the runtime installs at startup.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
     let stub = StubGcloud::without_secret();
     let large = "v".repeat(1 << 20);
     let err = stub
