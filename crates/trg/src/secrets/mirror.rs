@@ -26,8 +26,8 @@ use tracing::Instrument;
 use super::telemetry::record_error;
 use super::vars::{self, VarFetchError};
 use super::{
-    Backend, BackendConfig, BackendError, BackendKind, GcpSecretId, SecretAddress, SecretKey, SecretPath, SecretsError,
-    SecretsSection,
+    Backend, BackendConfig, BackendError, BackendKind, GcpProject, GcpSecretId, SecretAddress, SecretKey, SecretPath,
+    SecretsError, SecretsSection,
 };
 use crate::config::signers::{TransitKeyName, TransitMount};
 use crate::config::{
@@ -245,6 +245,10 @@ pub struct ValueTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretTarget {
     var: SecretVar,
+    /// The project the backend writes into. Two backends may name one
+    /// project under different accounts, so the backend name does not say
+    /// which secret is written; this does.
+    project: GcpProject,
     secret: GcpSecretId,
 }
 
@@ -416,6 +420,7 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
     let mut out = Vec::with_capacity(secrets.mirrors.len());
     let mut claimed: HashMap<SecretVar, MirrorName> = HashMap::new();
     let mut claimed_transit: HashMap<(String, String, String), MirrorName> = HashMap::new();
+    let mut claimed_secrets: HashMap<(GcpProject, GcpSecretId), MirrorName> = HashMap::new();
     let mut paths: HashMap<(String, SecretPath), (MirrorName, SecretVar)> = HashMap::new();
 
     for (name, config) in &secrets.mirrors {
@@ -424,6 +429,25 @@ pub fn resolve_all(secrets: &SecretsSection) -> Result<Vec<Mirror>, MirrorConfig
             let target = match target {
                 MirrorTarget::Value(target) => target,
                 MirrorTarget::Secret(target) => {
+                    let at = (target.project.clone(), target.secret.clone());
+                    match claimed_secrets.get(&at) {
+                        Some(first) if first == name => {
+                            return Err(MirrorConfigError::RepeatedTarget {
+                                name: name.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        Some(first) => {
+                            return Err(MirrorConfigError::DuplicateTarget {
+                                name: name.clone(),
+                                first: first.clone(),
+                                target: target.var.to_string(),
+                            })
+                        }
+                        None => {
+                            claimed_secrets.insert(at, name.clone());
+                        }
+                    }
                     match claimed.get(&target.var) {
                         Some(first) if first == name => {
                             return Err(MirrorConfigError::RepeatedTarget {
@@ -552,7 +576,11 @@ fn resolve_one(
             // A secret holds one value and records no origin beside it, so
             // there is no `source` key to reserve and no path to share.
             let secret = r.secret().clone();
-            targets.push(MirrorTarget::Secret(SecretTarget { var, secret }));
+            let Some(BackendConfig::GcpSecretManager(gcp)) = secrets.backends.get(var.backend()) else {
+                unreachable!("a gcp address is only resolved against a gcp backend")
+            };
+            let project = gcp.project.clone();
+            targets.push(MirrorTarget::Secret(SecretTarget { var, project, secret }));
             continue;
         }
         let Some((path, key)) = var.address().path_key() else {
