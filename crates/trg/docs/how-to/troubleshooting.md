@@ -57,6 +57,24 @@ the agent found the skill elsewhere on the host. The same escapes are recorded
 under `runs[].warnings` in `report.json` and under `workspace_escapes` in
 `runs/<run-id>/events.json`.
 
+### `the workspace sits below agent instructions or skills a harness may read`
+
+A directory above the run's workspace holds `AGENTS.md`, `CLAUDE.md`, or a skill
+folder such as `skills/` or `.claude/skills`. Harnesses look upward from their
+working directory for these, and `isolated` cannot hide them: it gives the run a
+`HOME` of its own beside the workspace, so a walk that stops at `HOME` never
+reaches it and climbs past your project and home directories instead.
+
+```shell
+Run run-001: the workspace sits below agent instructions or skills a harness may read by looking above its working directory, which isolation does not hide: /Users/me/.claude/skills; run with an --out-dir outside any project and home directory to keep runs apart from them
+```
+
+**Fix:** Pass an `--out-dir` whose parents hold no agent context, such as a
+directory under `/tmp`. Until then, a run may have drawn on instructions or skills
+you did not stage, and the `without_skill` arm of a comparison may not have run
+without a skill at all. The warning is also recorded under `runs[].warnings` in
+`report.json`.
+
 ### `--old-skill-dir is required when --scenario old_skill is included`
 
 The `old_skill` scenario stages a prior skill revision into the workspace, so it
