@@ -104,3 +104,17 @@ fn a_cached_count_is_never_folded_into_the_total() {
         Some(CacheTokens::parse(Some(500), None).unwrap())
     );
 }
+
+#[test]
+fn a_summed_count_keeps_the_first_garbled_value_instead_of_a_partial_sum() {
+    let mut count = SummedCount::default();
+    assert_eq!(count.block_value(), None);
+    count.add(Some(&Value::from(3)));
+    count.add(None);
+    count.add(Some(&Value::from(4)));
+    assert_eq!(count.block_value(), Some(Value::from(7)));
+    count.add(Some(&Value::from(-1)));
+    count.add(Some(&Value::from(9)));
+    count.add(Some(&Value::Null));
+    assert_eq!(count.block_value(), Some(Value::from(-1)));
+}

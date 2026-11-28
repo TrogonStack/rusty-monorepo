@@ -69,6 +69,26 @@ fn a_provider_that_reports_no_cache_reports_no_cached_tokens() {
     assert_eq!(outcome.tokens.cached_tokens(), None);
 }
 
+/// A step that garbles one count must not leave a smaller total that looks complete.
+#[test]
+fn a_garbled_count_in_one_step_is_reported_unreadable_rather_than_summed_around() {
+    let stdout = br#"{"type":"step_start","part":{}}
+{"type":"step_finish","part":{"tokens":{"input":5,"output":1}}}
+{"type":"step_start","part":{}}
+{"type":"text","part":{"text":"ok"}}
+{"type":"step_finish","part":{"tokens":{"input":"lots","output":2}}}
+"#;
+    let outcome = parse_outcome(stdout, 1, Some(0));
+    assert_eq!(outcome.tokens.input_tokens(), None);
+    assert_eq!(outcome.tokens.output_tokens(), Some(3));
+    assert_eq!(outcome.tokens.unreadable().len(), 1);
+    assert!(
+        outcome.tokens.unreadable()[0].warning().contains("\"lots\""),
+        "{}",
+        outcome.tokens.unreadable()[0].warning()
+    );
+}
+
 #[test]
 fn only_an_unrestricted_grant_auto_approves() {
     let unrestricted = build_args(None, PermissionGrant::Unrestricted, "go");
