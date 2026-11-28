@@ -935,6 +935,23 @@ fn a_pi_run_whose_last_message_stopped_on_an_error_did_not_succeed() {
 }
 
 #[test]
+fn a_pi_stream_cut_off_after_a_tool_call_message_records_no_terminal() {
+    let stdout = br#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Reading."}],"stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"c1","toolName":"read","args":{"path":"notes.txt"}}
+"#;
+    let transcript =
+        TranscriptFormat::PiJson.normalize("pi", &redact_transcript_bytes(stdout), &WorkspaceBoundary::unknown());
+    assert!(
+        !transcript
+            .events
+            .iter()
+            .any(|event| matches!(event, TranscriptEvent::Terminal { .. })),
+        "{:?}",
+        transcript.events
+    );
+}
+
+#[test]
 fn an_opencode_error_event_is_a_terminal_that_did_not_succeed() {
     let stdout = br#"{"type":"step_start","part":{}}
 {"type":"error","error":{"type":"provider.auth","message":"HTTP 401"}}

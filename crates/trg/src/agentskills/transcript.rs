@@ -1012,7 +1012,9 @@ pub fn pi_stop_failed(message: &serde_json::Value) -> bool {
 /// A tool's arguments arrive as an object when its execution starts. Assistant text is read
 /// from each assistant message once it has ended, which is the authoritative copy of what
 /// the stream's deltas built up. The run ended well when its last assistant message stopped
-/// on its own rather than on an error or an abort.
+/// on its own rather than on an error or an abort. A message that stopped to call a tool
+/// ends nothing: the run still owes the tool's result and the next reply, so a stream cut
+/// off there records no terminal at all.
 pub fn normalize_pi_json(
     runner: &str,
     stdout: &RedactedTranscript,
@@ -1023,7 +1025,7 @@ pub fn normalize_pi_json(
     const TEXT_KEYS: &[&str] = &["pattern", "query", "name"];
 
     let mut builder = TranscriptBuilder::new(boundary);
-    let mut last_failed = None;
+    let mut last_ok = None;
 
     for value in ndjson_values(stdout) {
         if let Some(message) = pi_assistant_message(&value) {
@@ -1037,7 +1039,8 @@ pub fn normalize_pi_json(
                 .collect::<Vec<_>>()
                 .join("\n");
             builder.assistant_text(&text);
-            last_failed = Some(pi_stop_failed(message));
+            let stopped_for_tool = message.get("stopReason").and_then(|v| v.as_str()) == Some("toolUse");
+            last_ok = (!stopped_for_tool).then(|| !pi_stop_failed(message));
             continue;
         }
         if value.get("type").and_then(|v| v.as_str()) == Some("tool_execution_start") {
@@ -1050,8 +1053,8 @@ pub fn normalize_pi_json(
             );
         }
     }
-    if let Some(failed) = last_failed {
-        builder.terminal(!failed);
+    if let Some(ok) = last_ok {
+        builder.terminal(ok);
     }
 
     builder.finish(runner, ToolVisibility::Observed)
