@@ -37,7 +37,9 @@ fn runnable_commands() -> Vec<(String, Command)> {
 ///
 /// `proxy` and `mock-server` both speak JSON-RPC on stdout to whatever launched them,
 /// so an `--output-format` there would offer a choice neither can honour.
-const WITHOUT_AN_OUTPUT_CHOICE: [&str; 2] = ["trg mcp proxy", "trg ai skills eval mock-server"];
+/// `git ssh sign` stands in for `ssh-keygen -Y sign`, whose few progress lines
+/// are what git and its users expect, so it has no second rendering to offer.
+const WITHOUT_AN_OUTPUT_CHOICE: [&str; 3] = ["trg mcp proxy", "trg ai skills eval mock-server", "trg git ssh sign"];
 
 /// Offered everywhere, stated as the rule rather than as a list of the
 /// commands that happen to have it, so a command added tomorrow is held to

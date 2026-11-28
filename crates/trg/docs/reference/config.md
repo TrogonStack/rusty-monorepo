@@ -9,18 +9,27 @@ time.
 
 `trg` resolves the config path in this order:
 
-1. `$XDG_CONFIG_HOME/trg/config.toml`
-2. `$HOME/.config/trg/config.toml`
-3. `/.config/trg/config.toml`
+1. `--config <PATH>`, accepted by every command
+2. `$TRG_CONFIG`
+3. `$XDG_CONFIG_HOME/trg/config.toml`
+4. `$HOME/.config/trg/config.toml`
+5. `/.config/trg/config.toml`
+
+The flag wins over the environment variable, and the environment variable wins
+over the default location. A set but empty `TRG_CONFIG` still names a path, so
+it is an error rather than a way back to the default; unset it instead.
 
 The file is read on demand. If it is missing, commands that require it fail
-with a clear `config file not found at <path>` error.
+with a clear `config file not found at <path>` error. That holds for a path
+chosen with `--config` or `TRG_CONFIG` too: a path that does not exist is an
+error, and `trg` never falls back to the default location, since that would
+read a different file from the one you named.
 
 ## File layout
 
 ```toml trg-example=skip
 [secrets.backends.<backend-name>]
-kind = "keychain"                  # or "openbao", "onepassword"
+kind = "keychain"                  # or "openbao", "onepassword", "gcp_secret_manager"
 
 [secrets.vars.<secret-name>]
 backend = "..."                    # with path and key, or ref
@@ -86,18 +95,24 @@ Each entry is one of:
   `backend` is always required and names a `[secrets.backends.<name>]` entry.
   What comes after it is whatever that entry's `kind` uses to address a value:
 
-  | `kind`        | Address                                              |
-  | ------------- | ---------------------------------------------------- |
-  | `keychain`    | `path` and `key`, both required                      |
-  | `openbao`     | `path` and `key`, both required                      |
-  | `onepassword` | `ref`, a 1Password secret reference                  |
+  | `kind`               | Address                                |
+  | -------------------- | -------------------------------------- |
+  | `keychain`           | `path` and `key`, both required        |
+  | `openbao`            | `path` and `key`, both required        |
+  | `onepassword`        | `ref`, a 1Password secret reference    |
+  | `gcp_secret_manager` | `secret`, the secret id                |
 
-  The two spellings are not interchangeable. A `path`/`key` var naming a
-  `onepassword` backend fails to load, and so does a `ref` var naming a
-  `keychain` or `openbao` one; see [Error reference](#error-reference). A var
-  naming a backend that no `[secrets.backends]` table declares fails to load
-  too, because there is no `kind` to say which of the two it should have been
-  written in.
+  The three spellings are not interchangeable, and each is spelled differently
+  from the others so that the shape of the table alone says which one was
+  meant. A table that gives `path` without `key`, `key` without `path`, no
+  address at all, or fields from more than one spelling fails to parse,
+  whatever backend it names. A table that is whole but in the wrong spelling
+  for its backend, such as `path` and `key` naming a `onepassword` backend or
+  `ref` naming a `keychain` or `openbao` one, fails to load once the backend's
+  `kind` is known; see [Error reference](#error-reference). A var naming a
+  backend that no `[secrets.backends]` table declares fails to load too,
+  because there is no `kind` to say which spelling it should have been written
+  in.
 
   A secret var may add addresses to try in order after its own, with
   `fallbacks`:
@@ -174,8 +189,10 @@ $ trg secret get --backend homelab --path mcp/prod --key token
 ```
 
 The flags mirror the var: a backend addressed by `path` and `key` is checked
-with `--path` and `--key`, and one addressed by a secret reference is checked
-with `--ref`.
+with `--path` and `--key`, one addressed by a secret reference with `--ref`, and
+a Secret Manager secret with `--secret`. The parser refuses `--path` without
+`--key`, `--key` without `--path`, and `--ref` or `--secret` together with any
+other address flag.
 
 ```console
 $ trg secret get --backend personal --ref "op://Ops/deploy-keys/api-token"
@@ -497,6 +514,111 @@ API_TOKEN = { backend = "personal", ref = "op://Ops/deploy-keys/api-token" }
 `{ backend = "...", path = "...", key = "..." }` naming this backend is a load
 error rather than a second spelling of the same address.
 
+### `kind = "gcp_secret_manager"`
+
+Reads and writes Google Cloud Secret Manager through an already-authenticated
+[`gcloud` CLI](https://cloud.google.com/sdk/gcloud). There is no credential to
+configure: the session `gcloud` holds, from `gcloud auth login` or from a CI
+job that authenticated before `trg` ran, answers every call.
+
+| Field     | Type   | Required | Notes                                                                 |
+| --------- | ------ | -------- | ---------------------------------------------------------------------- |
+| `project` | string | yes      | The project id, such as `my-project`. Never inferred from `gcloud config`, so one config reads one project on every machine. |
+| `account` | string | yes      | The `gcloud` identity to act as, as `gcloud auth list` names it. Never inferred from the active account. |
+
+Every call carries `--project` and `--account` explicitly. `gcloud` would
+otherwise prefer an access token, an access token file or a credential file
+override (`CLOUDSDK_AUTH_ACCESS_TOKEN`, `CLOUDSDK_AUTH_ACCESS_TOKEN_FILE`,
+`CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`) over `--account`, and impersonation
+(`CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT`) would replace the result, so
+`trg` blanks the access token, access token file and impersonation settings for
+every call. The identity is then the stored credential of `account`, or the
+credential file below, or `gcloud` refuses.
+
+`CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE` is the one setting that may pass
+through, because it is how a CI job that ran `google-github-actions/auth` hands
+over its identity, and that identity is not in `gcloud auth list`. `trg` reads
+the file and keeps the setting only when the principal it names is `account`:
+
+| File                                                              | Principal `trg` checks against `account`                  |
+| ----------------------------------------------------------------- | ---------------------------------------------------------- |
+| `service_account` key                                             | `client_email`                                             |
+| `external_account` (workload identity federation) that impersonates a service account | the service account in `service_account_impersonation_url` |
+| `external_account` without `service_account_impersonation_url`    | none: the identity is a federated subject, not an email    |
+| `authorized_user`, or any other type                              | none                                                       |
+
+This is the same principal `gcloud` itself reports for the first two. Emails are
+compared without regard to case. When the file is for another principal, names
+none, or cannot be read or parsed, every call and `trg doctor` fail with a
+message that names the file and `account`; `trg` does not fall back to another
+identity and does not ignore the file. Only `client_email`, `type` and
+`service_account_impersonation_url` are read, and the key material is never
+printed. For a file that names no principal, impersonate a service account in
+the federation file, or unset the variable and store the credential with
+`gcloud auth login --cred-file` for `account`.
+
+With a verified file, `trg doctor` reports that principal as the account
+identity, and does not require it to be in `gcloud auth list`.
+
+Every call also passes `--quiet`, `--user-output-enabled` and `--verbosity=error`,
+so a prompt cannot stall it and a `gcloud config` that silences output cannot
+turn a successful read into an empty value.
+
+Every call also passes `--no-log-http` and runs with
+`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true`. With `core/log_http` on, `gcloud`
+writes HTTP responses to its log files, and a `secrets versions access` response
+holds the secret in `payload.data`, kept for the 30 days `gcloud` retains its
+logs. The flag outranks `gcloud config set core/log_http true` and
+`CLOUDSDK_CORE_LOG_HTTP`, so no setting of yours turns it back on for these
+calls, and with file logging off nothing else `gcloud` logs at debug level is
+written either. The cost is that there is no `gcloud` log file for these calls
+to attach to a bug report; run the same `gcloud` command by hand to get one.
+A `gcloud` you run yourself is unaffected, so keep `core/log_http` off there if
+it can touch Secret Manager.
+
+A value is addressed by the secret id alone, written as a var's `secret`:
+
+```toml
+token = { backend = "gsm", secret = "deploy-token" }
+```
+
+A secret holds one value and its versions are not fields, so it has no `key`,
+and `path`, `key` and `ref` are refused. The id may hold ASCII letters, digits, `-` and `_`,
+and may not start with `-`. A read takes the `latest` version, and the stored
+bytes come back exactly, a trailing newline included. That holds for what
+the secret stores, not for what was typed into `trg secret put`, which strips
+one trailing line ending first (see below), so a PEM written with `put` comes
+back without its final newline. Most PEM parsers accept that, but a consumer
+that needs the exact bytes should get them through a mirror, which writes the
+source bytes untouched. A value that is not valid UTF-8 is refused.
+
+`latest` is the newest version in whatever state it is in, so a secret
+whose newest version is disabled or destroyed has no readable version: a read
+reports that, and a mirror treats it as a secret to fill and adds a version.
+
+Writing, through `trg secret put --secret <secret-id>` or as a mirror target,
+adds a new version with the value sent on stdin, never in argv. It never
+creates the secret: replication, access and rotation are decided where the
+secret is declared, for example in Terraform. A secret that does not exist is
+reported as such, in a dry run too. `trg secret put` does not read the secret first, so an identity that can only
+add versions can write, and its JSON confirmation carries no `replaced` field:
+whether a version was there before is not something that write observed. `trg secret put` strips one trailing line
+ending from stdin as it does for every backend, so a value whose final newline
+matters, such as a PEM, is not byte exact through `put`: copy it with a mirror,
+which writes the source bytes untouched.
+
+`delete` and `list` are not supported, and the backend cannot store an MCP
+server's OAuth credentials, which are a map of values and not one.
+
+`trg doctor` checks that `gcloud` answers, that the configured account holds
+credentials (stored, or through a verified credential file as above), and that the project can be listed with
+that account, which fails the same way for a project that does not exist and
+one the account cannot see. Listing needs `secretmanager.secrets.list`
+(`roles/secretmanager.viewer` carries it). An identity that only reads or adds
+versions of known secrets lacks it, so a refused listing is reported as a
+skipped project check with the reason, not as a failure, because reads and
+writes work without it. Any other failure of the listing still fails the check.
+
 ### Credential layout
 
 | Backend       | Where one server's credentials live                             |
@@ -504,6 +626,7 @@ error rather than a second spelling of the same address.
 | `keychain`    | Service = the backend's `service`, account = the server name.     |
 | `openbao`     | `<mount>/data/[<path_prefix>/]<owner>/mcp/[<machine_id>/]<server-name>` |
 | `onepassword` | Not usable for this — a bare server name carries no vault to address. |
+| `gcp_secret_manager` | Not usable for this: a secret holds one value and credentials are a map. |
 
 Two segments are conditional and `<owner>` is not, so the full form is
 `<mount>/data/<path_prefix>/<owner>/mcp/<machine_id>/<server-name>` and the
@@ -578,6 +701,7 @@ fallbacks = [
 | `backend`   | string          | yes      | A declared `[secrets.backends.<name>]` entry.                         |
 | `path`, `key` | strings       | by kind  | For a `keychain` or `openbao` backend. Both are required together.   |
 | `ref`       | string          | by kind  | For a `onepassword` backend.                                          |
+| `secret`    | string          | by kind  | For a `gcp_secret_manager` backend.                                   |
 | `fallbacks` | array of tables | no       | At least one when present. Entries are plain secret tables and cannot carry `fallbacks`. |
 
 The name is what the table is declared under, limited to ASCII letters,
@@ -591,7 +715,7 @@ read-only: `trg secret put` and the mirrors do not use it.
 
 | Argument or flag  | Notes                                                           |
 | ----------------- | --------------------------------------------------------------- |
-| `--name`          | Read the secret declared under this name. Conflicts with `--backend`, `--path`, `--key`, `--ref` and `--fallback`. An unknown name is an error that lists the declared names. |
+| `--name`          | Read the secret declared under this name. Conflicts with `--backend`, `--path`, `--key`, `--ref`, `--secret` and `--fallback`. An unknown name is an error that lists the declared names. |
 | `--output-format` | `text` (default) or `json`. The document carries `name` and `value`, and `answered_by` when the secret declares `fallbacks`. |
 
 When a fallback answers, stderr names the backend that did, as it does for
@@ -613,8 +737,24 @@ targets = [
 
 | Field     | Type          | Required | Notes                                                       |
 | --------- | ------------- | -------- | ----------------------------------------------------------- |
-| `source`  | table         | yes      | Addressed like a var: `backend` plus `ref`, or `path` and `key`, by the backend's kind. |
-| `targets` | array of tables | yes    | At least one, each the same shape, in a backend of kind `keychain` or `openbao`. |
+| `source`  | table         | yes      | Addressed like a var: `backend` plus `ref`, `secret`, or `path` and `key`, by the backend's kind. |
+| `targets` | array of tables | yes    | At least one. Each is addressed like a var, in a backend of kind `keychain` or `openbao`, or is a Transit key: `{ backend, transit_key }` with an optional `transit_mount`. |
+
+A Transit target takes these fields and none of `path`, `key`, `ref` or `secret`:
+
+| Field           | Required | Notes                                                              |
+| --------------- | -------- | ------------------------------------------------------------------ |
+| `backend`       | yes      | A declared backend of kind `openbao`. Any other kind is rejected when the config loads. |
+| `transit_key`   | yes      | The Transit key name, one segment of `[A-Za-z0-9._-]`.             |
+| `transit_mount` | no       | The Transit mount, `transit` by default. May nest with `/`.         |
+
+```toml trg-example=fragment
+[secrets.mirrors.git-personal]
+source = { backend = "personal", ref = "op://Engineering/git-signing/private key?ssh-format=openssh" }
+targets = [
+  { backend = "homelab", transit_key = "git-personal", transit_mount = "transit" },
+]
+```
 
 Unknown fields are rejected, so a singular `target` is an error. The name is
 what the table is declared under, limited to ASCII letters, digits, `-` and
@@ -622,6 +762,10 @@ what the table is declared under, limited to ASCII letters, digits, `-` and
 
 - Each target's backend must be one `trg` can write to. A `onepassword` target
   is rejected.
+- A `gcp_secret_manager` target is addressed by `secret`, the secret id, and adds
+  a version when the latest one differs, compared byte for byte. It records no
+  `source` key, because a secret holds one value with nothing beside it, and a
+  secret that does not exist is an error rather than something to create.
 - `targets` must not be empty, and the source must not be the same address as
   any target.
 - A target may be listed once, across all mirrors. A repeat names both
@@ -653,10 +797,106 @@ source value is refused for every target of the mirror. After a write the
 target is read back and must match. Exit status is nonzero if any target
 failed.
 
-A text line is `<status> <name> -> <path>#<key> (<backend>)`. The JSON output
+A Transit target is not read back as a value. The source must be an
+unencrypted OpenSSH private key (`ssh-ed25519`, or `ssh-rsa` of 2048, 3072 or
+4096 bits). `trg` compares the public key it implies with the public key of
+the Transit key's latest version, then:
+
+| Transit key             | Result                                                                 |
+| ----------------------- | ---------------------------------------------------------------------- |
+| Missing                 | Imported with `transit/keys/<name>/import`, non-exportable, plaintext backup disallowed. |
+| Holds the source key    | Up to date, nothing is sent.                                           |
+| Holds a different key   | The source key is added with `transit/keys/<name>/import_version`.     |
+
+The requests are `GET <mount>/wrapping_key`, `GET <mount>/keys/<name>`, and
+`POST <mount>/keys/<name>/import` or `.../import_version`. A key cannot change
+type, so a source of another type than the Transit key is refused before
+anything is sent. OpenBao only versions a key that was itself imported, and its
+refusal is shown as the target's error. Without `apply` a Transit target
+reports what it would do and writes nothing.
+
+A text line is `<status> <name> -> <path>#<key> (<backend>)`, or
+`<status> <name> -> <mount>/keys/<name> (<backend>)` for a Transit target. The JSON output
 is `{ "applied": bool, "entries": [...] }`, where each entry carries `name`,
 `source`, and `targets`, one object per target with `target`, `status` and, on
 failure, `error`.
+
+## `[git.ssh.signers.<name>]`
+
+Declares who signs for a public key when git runs `trg git ssh sign` as its
+SSH signing program. Git execs `gpg.ssh.program` as one path without a shell,
+so it cannot carry arguments: point it at a small executable file that runs
+`exec trg git ssh sign "$@"`. See
+[Sign git commits with OpenBao Transit](../how-to/sign-git-commits-with-openbao-transit.md)
+for the file and the rest of the setup.
+
+```toml
+[secrets.backends.homelab]
+kind = "openbao"
+addr = "https://bao.example.com:8200"
+mount = "secret"
+path_prefix = "trg"
+owner = "me"
+token_file = "~/.config/trg/bao-token"
+
+[git.ssh.signers.personal]
+public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIF90u+fxY15X29x2s3wSRElNouutw3GGhm7A7ZE4UrAI docs-example"
+signer = { backend = "homelab", transit_key = "git-personal", fallbacks = [
+  { ssh_agent = "~/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock" },
+] }
+```
+
+The table name is a label for messages and telemetry: letters, digits, `-`
+and `_`. The signer for a request is the one whose `public_key` equals the key
+named by `-f`, comparing the key type and blob and ignoring the comment. There
+is no default signer: a key no signer declares is an error that lists the
+declared names.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `public_key` | string | yes | An `ssh-ed25519` or `ssh-rsa` public key line. An RSA key must be 2048 to 8192 bits. Another key type is rejected at load, and so is a key another signer already declares. |
+| `signer` | address | yes | The address tried first, with optional `fallbacks`. |
+
+An address is one of two shapes.
+
+| Shape | Fields | Meaning |
+|---|---|---|
+| Transit | `backend`, `transit_key`, `transit_mount` | Signs with an OpenBao Transit key of type `ed25519`, `rsa-2048`, `rsa-3072` or `rsa-4096`. `backend` names a declared `kind = "openbao"` backend and supplies its address, token, CA and `timeout_ms`. `transit_mount` defaults to `transit`. |
+| SSH agent | `ssh_agent` | Signs with the agent listening on this socket path. A leading `~` is expanded. |
+
+An Ed25519 key is signed with Transit's defaults. An RSA key is signed with
+`hash_algorithm = "sha2-512"` and `signature_algorithm = "pkcs1v15"`, which
+makes an `rsa-sha2-512` SSH signature. The public key of an RSA Transit key is
+a PEM `SubjectPublicKeyInfo`, which `trg` converts to the SSH form to compare
+it with `public_key`. A Transit request that is not answered within the
+backend's `timeout_ms` counts as unreachable.
+
+Only the primary address takes `fallbacks`: a non-empty array of addresses
+tried in order, and the order may start with either shape. A fallback cannot
+carry `fallbacks` of its own.
+
+An address that is neither shape, an undeclared `backend`, a `backend` that is
+not an OpenBao backend, an empty `fallbacks` array and a nested `fallbacks`
+are all rejected when the config loads.
+
+### Fall-through
+
+A signer falls through to the next address only when the current one could not
+be asked or has declined, never when it answered with a refusal.
+
+| Address | Outcome | Next |
+|---|---|---|
+| Transit | Backend unreachable, timeout, or a transport error | Falls through |
+| Transit | HTTP 403, so the token was rejected | Falls through |
+| Transit | Transit key is missing, is not an `ed25519` or RSA key, or its public key differs from `public_key` | Stops |
+| Transit | Malformed response | Stops |
+| Transit | The signature does not verify against `public_key`, so no `.sig` is written | Stops |
+| SSH agent | Socket missing or connection refused | Falls through |
+| SSH agent | Key not listed by the agent | Falls through |
+| SSH agent | Signing fails after the key was listed, such as a denied approval prompt | Stops |
+
+When a later address signs, `trg` writes a warning to stderr naming the signer,
+why each earlier address failed, and which address answered.
 
 ## Validation
 
@@ -952,9 +1192,15 @@ trg exec run --name claude -- --resume
 | `var ... found no such key there` | The path exists but holds different keys. The message lists the keys that are there, never their values. |
 | `... names backend <name>, which is not declared; declared: ...` | A var's `backend` matches no `[secrets.backends.<name>]` entry, so there is no `kind` to say how the var should have been addressed. |
 | `... names backend <name>, but no secrets backends are declared` | The same, in a config with no `[secrets.backends]` at all. |
-| `` ... which is addressed with a 1Password secret reference, not `path`/`key` `` | A var used `path` and `key` against a `onepassword` backend. The message spells out the `ref` line to replace it with. |
+| `` ... which is addressed with `ref`, not `path` and `key` `` | A var used `path` and `key` against a `onepassword` backend. The message spells out the `ref` line to replace it with. |
 | `` ... which is addressed with `path` and `key`, not `ref` `` | A var used `ref` against a `keychain` or `openbao` backend. |
-| `` ... which needs both `path` and `key`; `<field>` is missing `` | Only one half of a path-and-key address was given. |
+| `` ... which is addressed with `secret`, not `path` and `key` `` | A var used `path` and `key`, or `ref`, against a `gcp_secret_manager` backend. The message spells out the line to replace it with. |
+| `` ... which is addressed with `path` and `key`, not `secret` `` | A var used `secret` against a `keychain` or `openbao` backend. |
+| `` backend `<name>`: `path` needs `key` as well; `key` is missing `` | A table gave `path` without `key`. Raised while the file is parsed. The reverse reads `` `key` needs `path` as well ``. |
+| `` backend `<name>`: no address; give `path` and `key` ... `` | A table named a backend and nothing to address in it. The message lists the three spellings. |
+| `` backend `<name>`: ... mix address spellings; use exactly one of `path` and `key`, `ref`, or `secret` `` | A table combined fields from more than one spelling, such as `secret` with `path`, or `ref` with `key`. The message names the fields it found. |
+| `` invalid `secret`: Secret Manager secret id `...` ... `` | The secret id is empty, longer than 255 characters, holds a character other than ASCII letters, digits, `-` and `_`, or starts with `-`. A resource name such as `projects/p/secrets/s` is not an id. |
+| `` secret `<id>` does not exist in project `<project>`; `trg` adds versions and never creates the secret itself ... `` | A write, or a mirror run, named a Secret Manager secret that is not there. Create it first, for example with Terraform. |
 | `` 1Password secret reference `...` must start with `op://` `` | The `ref` is not a secret reference. Use the item's `Copy Secret Reference` button. |
 | `` 1Password secret reference `...` must be `op://<vault>/<item>/<field>` or `op://<vault>/<item>/<section>/<field>` `` | The reference has too few or too many segments. |
 | `` 1Password secret reference `...` must not contain an empty segment `` | A `//` or a trailing `/` left a vault, item, section, or field name empty. |
@@ -964,6 +1210,9 @@ trg exec run --name claude -- --resume
 | `` no secret named `<name>` is declared; declared: ... `` | `trg secret get --name` named a secret with no `[secrets.vars.<name>]` table. |
 | `` `[secrets.mirrors.<name>]`: `targets` must name at least one target `` | A mirror declares an empty `targets` array. |
 | `` `[secrets.mirrors.<name>]`: target backend `<backend>` is of kind `<kind>`, which `trg` only reads from `` | A mirror's target names a `onepassword` backend. |
+| `` `[secrets.mirrors.<name>]`: backend `<backend>` is of kind `<kind>`, but a Transit key needs an `openbao` backend `` | A Transit target names a backend that is not of kind `openbao`. |
+| `` a Transit target is `{ backend, transit_key }` ... and cannot also carry `path`, `key`, `ref` or `secret` `` | A Transit target also carries a var's address fields. Raised while the file is parsed. |
+| `` a Transit target needs `transit_key` `` | A target sets `transit_mount` without `transit_key`. Raised while the file is parsed. |
 | `` `[secrets.mirrors.<name>]`: the source and a target are the same address `` | The source and one target address the same value. |
 | `` `[secrets.mirrors.<name>]`: target key `source` is reserved `` | A mirror's target key is `source`, which holds the reference the value came from. |
 | `` `[secrets.mirrors.<name>]`: target ... is listed more than once `` | A mirror lists the same target twice. |

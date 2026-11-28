@@ -1,0 +1,5 @@
+error: object_id "": must not be empty
+ --> tests/ui/fail/object_id_empty.rs:4:24
+  |
+4 |     let _ = object_id!("");
+  |                        ^^

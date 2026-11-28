@@ -119,7 +119,7 @@ pub const EVAL_MODEL_CONFIG: &str = "trg.eval.model_config";
 /// The model a run resolved to, once the case's choice and the operator's are combined.
 pub const EVAL_RUNNER_MODEL: &str = "trg.eval.runner.model";
 
-/// The harness kind a run executes on (`claude`, `codex`, `cursor-agent`).
+/// The harness kind a run executes on (`claude`, `codex`, `cursor-agent`, `trogonai-agent`).
 pub const EVAL_RUNNER_KIND: &str = "trg.eval.runner.kind";
 
 /// The harness version the availability probe reported.
@@ -183,3 +183,6 @@ pub const EVAL_REPORT_ID: &str = "trg.eval.report.id";
 /// Counter: graded assertions, split by `gen_ai.evaluation.score.label` and
 /// `trg.eval.grader.kind`.
 pub const EVAL_ASSERTIONS_METRIC: &str = "trg.eval.assertions";
+
+/// The `[git.ssh.signers.<name>]` table a signature was made for.
+pub const GIT_SSH_SIGNER_NAME: &str = "trg.git.ssh.signer.name";

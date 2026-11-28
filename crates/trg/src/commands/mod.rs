@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod doctor;
 pub mod exec;
+pub mod git;
 pub mod mcp;
 pub mod secret;
 
@@ -9,6 +10,7 @@ use clap::Subcommand;
 use ai::AiCommands;
 use doctor::DoctorArgs;
 use exec::ExecCommands;
+use git::GitCommands;
 use mcp::McpCommands;
 use secret::SecretCommands;
 
@@ -37,5 +39,10 @@ pub enum Commands {
     Exec {
         #[command(subcommand)]
         command: ExecCommands,
+    },
+    /// Programs git runs on `trg`'s behalf
+    Git {
+        #[command(subcommand)]
+        command: GitCommands,
     },
 }

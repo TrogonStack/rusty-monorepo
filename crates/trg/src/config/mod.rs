@@ -17,6 +17,7 @@
 //! them concatenated in order. Inline `{ env = "..." }` and a secret table are
 //! both allowed inside that array.
 
+pub mod signers;
 mod var;
 
 use std::collections::HashMap;
@@ -26,12 +27,15 @@ use http::HeaderName;
 pub use secrecy::SecretString;
 use serde::Deserialize;
 use tracing::field::Empty;
+pub(crate) use var::from_toml_value;
 pub use var::{
-    EnvValue, FetchedSecrets, RawEnvValue, RawSecretVar, RawVarSource, SecretRead, SecretVar, SecretVarError, Segment,
-    VarRef, VarResolveError, VarSite, VarSource, VarTemplate, WithFallbacks,
+    AddressShapeError, EnvValue, FetchedSecrets, RawAddress, RawEnvValue, RawSecretVar, RawVarSource, SecretRead,
+    SecretVar, SecretVarError, Segment, VarRef, VarResolveError, VarSite, VarSource, VarTemplate, Vocabulary,
+    WithFallbacks,
 };
 
 use crate::secrets::{MirrorConfigError, SecretsSection};
+use signers::{GitSection, SignerConfigError, Signers};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -84,6 +88,9 @@ pub enum ConfigError {
 
     #[error("{0}")]
     Mirror(#[from] MirrorConfigError),
+
+    #[error("{0}")]
+    Signer(#[from] SignerConfigError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +119,7 @@ impl ConfigError {
             Self::UnknownExecEntry { .. } => "unknown_exec_entry",
             Self::SecretVar(_) => "secret_var",
             Self::Mirror(_) => "mirror",
+            Self::Signer(_) => "signer",
         }
     }
 }
@@ -137,6 +145,8 @@ struct FileRoot {
     secrets: Option<SecretsSection>,
     #[serde(default)]
     exec: Option<HashMap<String, ExecEntryRaw>>,
+    #[serde(default)]
+    git: Option<GitSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,6 +261,8 @@ pub struct ResolvedMcpServer {
     pub http_headers: HashMap<HeaderName, SecretString>,
 }
 
+/// The config file read when neither `--config` nor `TRG_CONFIG` names one:
+/// `config.toml` in [`trg_config_dir`].
 pub fn trg_config_path() -> PathBuf {
     trg_config_dir().join("config.toml")
 }
@@ -382,12 +394,12 @@ fn sorted_distinct(vars: impl Iterator<Item = SecretRead>) -> Vec<SecretRead> {
     out
 }
 
-pub fn load_mcp(selected_name: &str) -> Result<PendingMcp, ConfigError> {
-    traced_load(|| load_mcp_at(&trg_config_path(), selected_name))
+pub fn load_mcp(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigError> {
+    traced_load(|| load_mcp_at(path, selected_name))
 }
 
-pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
-    traced_load(|| load_exec_at(&trg_config_path(), name))
+pub fn load_exec(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
+    traced_load(|| load_exec_at(path, name))
 }
 
 /// Every `[exec.<name>]` name declared in the config, sorted.
@@ -397,8 +409,8 @@ pub fn load_exec(name: &str) -> Result<PendingExec, ConfigError> {
 /// nothing to launch, and listing a config that declares nothing yet is not
 /// that — it is the ordinary state of a config nobody has written an entry
 /// into.
-pub fn list_exec_names() -> Result<Vec<String>, ConfigError> {
-    traced_load(|| list_exec_names_at(&trg_config_path()))
+pub fn list_exec_names(path: &Path) -> Result<Vec<String>, ConfigError> {
+    traced_load(|| list_exec_names_at(path))
 }
 
 fn list_exec_names_at(path: &Path) -> Result<Vec<String>, ConfigError> {
@@ -415,8 +427,8 @@ fn list_exec_names_at(path: &Path) -> Result<Vec<String>, ConfigError> {
 /// answer for a command that is about to talk to an MCP server and the wrong
 /// one for a command that only inspects a backend. Declaring a backend before
 /// declaring anything that uses it is an ordinary order to do things in.
-pub fn load_secrets() -> Result<SecretsSection, ConfigError> {
-    traced_load(|| load_secrets_at(&trg_config_path()))
+pub fn load_secrets(path: &Path) -> Result<SecretsSection, ConfigError> {
+    traced_load(|| load_secrets_at(path))
 }
 
 fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
@@ -425,7 +437,27 @@ fn load_secrets_at(path: &Path) -> Result<SecretsSection, ConfigError> {
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
     secrets.check_named()?;
+    check_signers(root.git.as_ref(), &secrets)?;
     Ok(secrets)
+}
+
+/// The `[git.ssh.signers]` tables, against the declared backends.
+pub fn load_signers(path: &Path) -> Result<(Signers, SecretsSection), ConfigError> {
+    traced_load(|| load_signers_at(path))
+}
+
+fn load_signers_at(path: &Path) -> Result<(Signers, SecretsSection), ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|e| read_error(path, e))?;
+    let root: FileRoot = toml::from_str(&text)?;
+    let secrets = root.secrets.unwrap_or_default();
+    secrets.resolve_mirrors()?;
+    secrets.check_named()?;
+    let signers = check_signers(root.git.as_ref(), &secrets)?;
+    Ok((signers, secrets))
+}
+
+fn check_signers(git: Option<&GitSection>, secrets: &SecretsSection) -> Result<Signers, SignerConfigError> {
+    git.map_or_else(|| Ok(Signers::default()), |git| git.resolve(secrets))
 }
 
 /// A config that exists but cannot be read is a different problem from one that
@@ -474,6 +506,7 @@ fn load_mcp_at(path: &Path, selected_name: &str) -> Result<PendingMcp, ConfigErr
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
     secrets.check_named()?;
+    check_signers(root.git.as_ref(), &secrets)?;
     let mut servers = root
         .mcp
         .and_then(|m| (!m.servers.is_empty()).then_some(m.servers))
@@ -503,6 +536,7 @@ fn load_exec_at(path: &Path, name: &str) -> Result<PendingExec, ConfigError> {
     let secrets = root.secrets.unwrap_or_default();
     secrets.resolve_mirrors()?;
     secrets.check_named()?;
+    check_signers(root.git.as_ref(), &secrets)?;
     let mut entries = root
         .exec
         .and_then(|e| (!e.is_empty()).then_some(e))

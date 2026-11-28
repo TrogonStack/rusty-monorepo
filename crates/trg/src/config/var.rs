@@ -1,30 +1,193 @@
 use std::collections::HashMap;
 use std::fmt;
 
+mod constants;
+use constants::VAR_SOURCE_EXPECTED;
+
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use crate::secrets::onepassword::{OnePasswordReference, OpReferenceError};
 use crate::secrets::{
-    BackendKind, KeyError, KeychainReference, OpenbaoReference, PathError, SecretAddress, SecretKey, SecretPath,
-    SecretsSection,
+    BackendKind, GcpReference, GcpSecretId, GcpSecretIdError, KeyError, KeychainReference, OpenbaoReference, PathError,
+    SecretAddress, SecretKey, SecretPath, SecretsSection,
 };
+
+/// How a declaration addresses its value, in the one vocabulary it chose.
+///
+/// Each backend kind speaks exactly one of these, and each has a spelling no
+/// other shares, so the shape of a table alone says which was meant and a
+/// table that blends two cannot be built. Which vocabulary the named backend
+/// speaks is only known once the whole document is read, so that comparison is
+/// [`SecretVar::resolve_at`]'s; everything that can be refused without it is
+/// refused here, while the file is parsed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RawAddress {
+    /// `path` and `key`, the vocabulary of `keychain` and `openbao`.
+    PathKey { path: String, key: String },
+    /// `ref`, the vocabulary of `onepassword`.
+    Reference(String),
+    /// `secret`, the vocabulary of `gcp_secret_manager`, whose secrets hold
+    /// one value each and so have an id and no fields.
+    Secret(String),
+}
+
+impl RawAddress {
+    pub fn vocabulary(&self) -> Vocabulary {
+        match self {
+            Self::PathKey { .. } => Vocabulary::PathKey,
+            Self::Reference(_) => Vocabulary::Reference,
+            Self::Secret(_) => Vocabulary::Secret,
+        }
+    }
+
+    /// The fields as the file spells them, in the order they are written.
+    pub fn fields(&self) -> Vec<(&'static str, &str)> {
+        match self {
+            Self::PathKey { path, key } => vec![("path", path), ("key", key)],
+            Self::Reference(reference) => vec![("ref", reference)],
+            Self::Secret(secret) => vec![("secret", secret)],
+        }
+    }
+
+    /// The address fields as the optional spellings a table or a flag set
+    /// offers, which is the one place a partial or blended shape can show up.
+    pub fn from_parts(
+        backend: &str,
+        path: Option<String>,
+        key: Option<String>,
+        reference: Option<String>,
+        secret: Option<String>,
+    ) -> Result<Self, AddressShapeError> {
+        let backend = backend.to_string();
+        match (path, key, reference, secret) {
+            (Some(path), Some(key), None, None) => Ok(Self::PathKey { path, key }),
+            (None, None, Some(reference), None) => Ok(Self::Reference(reference)),
+            (None, None, None, Some(secret)) => Ok(Self::Secret(secret)),
+            (Some(_), None, None, None) => Err(AddressShapeError::Incomplete {
+                backend,
+                present: "path",
+                missing: "key",
+            }),
+            (None, Some(_), None, None) => Err(AddressShapeError::Incomplete {
+                backend,
+                present: "key",
+                missing: "path",
+            }),
+            (None, None, None, None) => Err(AddressShapeError::Empty { backend }),
+            (path, key, reference, secret) => {
+                let given = [
+                    ("path", path.is_some()),
+                    ("key", key.is_some()),
+                    ("ref", reference.is_some()),
+                    ("secret", secret.is_some()),
+                ]
+                .into_iter()
+                .filter(|(_, present)| *present)
+                .map(|(field, _)| format!("`{field}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+                Err(AddressShapeError::Mixed { backend, given })
+            }
+        }
+    }
+}
+
+/// The three ways a backend can be addressed, named apart from any value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vocabulary {
+    PathKey,
+    Reference,
+    Secret,
+}
+
+impl Vocabulary {
+    /// What a backend of this kind is addressed with.
+    pub fn of(kind: BackendKind) -> Self {
+        match kind {
+            BackendKind::Keychain | BackendKind::Openbao => Self::PathKey,
+            BackendKind::OnePassword => Self::Reference,
+            BackendKind::GcpSecretManager => Self::Secret,
+        }
+    }
+
+    fn spelled(self, site: &VarSite) -> &'static str {
+        match (self, site) {
+            (Self::PathKey, VarSite::Table { .. }) => "`path` and `key`",
+            (Self::PathKey, VarSite::Flags) => "`--path` and `--key`",
+            (Self::Reference, VarSite::Table { .. }) => "`ref`",
+            (Self::Reference, VarSite::Flags) => "`--ref`",
+            (Self::Secret, VarSite::Table { .. }) => "`secret`",
+            (Self::Secret, VarSite::Flags) => "`--secret`",
+        }
+    }
+
+    fn fix(self, site: &VarSite, backend: &str) -> String {
+        match (self, site) {
+            (Self::PathKey, VarSite::Table { .. }) => {
+                format!(r#"replace with: {{ backend = "{backend}", path = "...", key = "..." }}"#)
+            }
+            (Self::PathKey, VarSite::Flags) => "use instead: --path <path> --key <key>".to_string(),
+            (Self::Reference, VarSite::Table { .. }) => {
+                format!(r#"replace with: {{ backend = "{backend}", ref = "op://<vault>/<item>/<field>" }}"#)
+            }
+            (Self::Reference, VarSite::Flags) => r#"use instead: --ref "op://<vault>/<item>/<field>""#.to_string(),
+            (Self::Secret, VarSite::Table { .. }) => {
+                format!(r#"replace with: {{ backend = "{backend}", secret = "<secret-id>" }}"#)
+            }
+            (Self::Secret, VarSite::Flags) => "use instead: --secret <secret-id>".to_string(),
+        }
+    }
+}
+
+/// Why a table is not shaped like any of the three address vocabularies.
+///
+/// Raised while the file is parsed, because none of it depends on which
+/// backend the table names.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AddressShapeError {
+    #[error("backend `{backend}`: `{present}` needs `{missing}` as well; `{missing}` is missing")]
+    Incomplete {
+        backend: String,
+        present: &'static str,
+        missing: &'static str,
+    },
+
+    #[error(
+        "backend `{backend}`: no address; give `path` and `key` (keychain, openbao), `ref` (onepassword) or `secret` (gcp_secret_manager)"
+    )]
+    Empty { backend: String },
+
+    #[error(
+        "backend `{backend}`: {given} mix address spellings; use exactly one of `path` and `key`, `ref`, or `secret`"
+    )]
+    Mixed { backend: String, given: String },
+}
 
 /// A secret declaration exactly as the file spelled it, before anything knows
 /// which backend it names.
 ///
-/// Every addressing field is optional here and none is validated, because
-/// which of them is required depends on the kind of the backend `backend`
-/// names, and that is not known until the whole document has been read: the
-/// `[secrets.backends]` table may well be written below the server that uses
-/// it. Resolution into a [`SecretVar`] is the second phase, and it is where
-/// every "you addressed this the wrong way" error comes from.
+/// The address is already one of the three vocabularies, because that much
+/// does not depend on the backend: a partial or blended table is refused by
+/// the parser. What stays open is whether the named backend speaks that
+/// vocabulary, and that is not known until the whole document has been read,
+/// since the `[secrets.backends]` table may well be written below the server
+/// that uses it. Resolution into a [`SecretVar`] is the second phase.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Hash)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawSecretVarFields")]
 pub struct RawSecretVar {
     /// The `[secrets.backends.<name>]` entry to read from, named here rather
     /// than inherited from the server, so a var says where it comes from
     /// without the reader tracing it through anything.
+    pub backend: String,
+    pub address: RawAddress,
+}
+
+/// The fields of a declaration table as the file may write them, before they
+/// are checked to form one vocabulary.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawSecretVarFields {
     pub backend: String,
     #[serde(default)]
     pub path: Option<String>,
@@ -33,20 +196,44 @@ pub struct RawSecretVar {
     /// Spelled `ref` in the file, which is a Rust keyword.
     #[serde(default, rename = "ref")]
     pub reference: Option<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
+impl TryFrom<RawSecretVarFields> for RawSecretVar {
+    type Error = AddressShapeError;
+
+    fn try_from(fields: RawSecretVarFields) -> Result<Self, Self::Error> {
+        let address = RawAddress::from_parts(
+            &fields.backend,
+            fields.path,
+            fields.key,
+            fields.reference,
+            fields.secret,
+        )?;
+        Ok(Self {
+            backend: fields.backend,
+            address,
+        })
+    }
 }
 
 impl RawSecretVar {
+    pub fn new(backend: String, address: RawAddress) -> Self {
+        Self { backend, address }
+    }
+
     /// A declaration addressed by path and key.
     ///
-    /// For callers that only know that shape, such as the `trg secret` CLI's
-    /// `--path`/`--key` flags.
+    /// For callers that only know that shape.
     pub fn path_key(backend: String, path: &SecretPath, key: &SecretKey) -> Self {
-        Self {
+        Self::new(
             backend,
-            path: Some(path.as_str().to_string()),
-            key: Some(key.as_str().to_string()),
-            reference: None,
-        }
+            RawAddress::PathKey {
+                path: path.as_str().to_string(),
+                key: key.as_str().to_string(),
+            },
+        )
     }
 
     /// The inline table that declares this var in a `vars` table, so the
@@ -57,14 +244,8 @@ impl RawSecretVar {
     /// the TOML string early.
     pub fn declaration(&self) -> String {
         let mut out = format!("{{ backend = {}", toml_basic_string(&self.backend));
-        for (field, value) in [
-            ("path", self.path.as_deref()),
-            ("key", self.key.as_deref()),
-            ("ref", self.reference.as_deref()),
-        ] {
-            if let Some(value) = value {
-                out.push_str(&format!(", {field} = {}", toml_basic_string(value)));
-            }
+        for (field, value) in self.address.fields() {
+            out.push_str(&format!(", {field} = {}", toml_basic_string(value)));
         }
         out.push_str(" }");
         out
@@ -74,13 +255,20 @@ impl RawSecretVar {
 impl fmt::Display for RawSecretVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "backend `{}`", self.backend)?;
-        match (&self.reference, &self.path, &self.key) {
-            (Some(reference), _, _) => write!(f, " at `{reference}`"),
-            (None, Some(path), Some(key)) => write!(f, " at `{path}`, key `{key}`"),
-            (None, Some(path), None) => write!(f, " at `{path}`"),
-            (None, None, _) => Ok(()),
+        match &self.address {
+            RawAddress::Reference(value) | RawAddress::Secret(value) => write!(f, " at `{value}`"),
+            RawAddress::PathKey { path, key } => write!(f, " at `{path}`, key `{key}`"),
         }
     }
+}
+
+/// Deserialise `T` out of a TOML value already read, keeping its own message.
+///
+/// Used where a shape is chosen by what the table holds rather than by trying
+/// each variant in turn, because trying each in turn reports only that none
+/// of them matched and loses the one message that names the mistake.
+pub(crate) fn from_toml_value<'de, T: Deserialize<'de>, E: serde::de::Error>(value: toml::Value) -> Result<T, E> {
+    T::deserialize(value).map_err(|e| E::custom(e.message()))
 }
 
 /// Where an address was written, so an error can point at it and offer the
@@ -139,43 +327,6 @@ impl VarSite {
             name: format!("#{position}"),
         }
     }
-
-    fn path_key(&self) -> &'static str {
-        match self {
-            Self::Table { .. } => "`path`/`key`",
-            Self::Flags => "`--path`/`--key`",
-        }
-    }
-
-    fn path_and_key(&self) -> &'static str {
-        match self {
-            Self::Table { .. } => "`path` and `key`",
-            Self::Flags => "`--path` and `--key`",
-        }
-    }
-
-    fn reference(&self) -> &'static str {
-        match self {
-            Self::Table { .. } => "`ref`",
-            Self::Flags => "`--ref`",
-        }
-    }
-
-    fn reference_fix(&self, backend: &str) -> String {
-        match self {
-            Self::Table { .. } => {
-                format!(r#"replace with: {{ backend = "{backend}", ref = "op://<vault>/<item>/<field>" }}"#)
-            }
-            Self::Flags => r#"use instead: --ref "op://<vault>/<item>/<field>""#.to_string(),
-        }
-    }
-
-    fn path_key_fix(&self, backend: &str) -> String {
-        match self {
-            Self::Table { .. } => format!(r#"replace with: {{ backend = "{backend}", path = "...", key = "..." }}"#),
-            Self::Flags => "use instead: --path <path> --key <key>".to_string(),
-        }
-    }
 }
 
 impl fmt::Display for VarSite {
@@ -200,36 +351,27 @@ pub enum SecretVarError {
     #[error("{site} names backend `{backend}`, but no secrets backends are declared; add a `[secrets.backends.{backend}]` section")]
     NoBackendsDeclared { site: VarSite, backend: String },
 
-    /// The replacement is spelled out because this is the whole migration
-    /// path off the old `{ path, key }` spelling: there is deliberately no
-    /// compatibility bridge, so the error has to be the instructions.
-    #[error(
-        "{site} names backend `{backend}`, which is addressed with a 1Password secret reference, not {}\n  {}",
-        .site.path_key(),
-        .site.reference_fix(.backend)
-    )]
-    NeedsReference { site: VarSite, backend: String },
-
+    /// The replacement is spelled out because there is deliberately no
+    /// compatibility bridge between vocabularies, so the error has to be the
+    /// instructions.
     #[error(
         "{site} names backend `{backend}` of kind `{kind}`, which is addressed with {}, not {}\n  {}",
-        .site.path_and_key(),
-        .site.reference(),
-        .site.path_key_fix(.backend)
+        Vocabulary::of(*kind).spelled(site),
+        given.spelled(site),
+        Vocabulary::of(*kind).fix(site, backend)
     )]
-    RefNotSupported {
+    WrongVocabulary {
         site: VarSite,
         backend: String,
         kind: BackendKind,
+        given: Vocabulary,
     },
 
-    #[error(
-        "{site} names backend `{backend}` of kind `{kind}`, which needs both `path` and `key`; `{missing}` is missing"
-    )]
-    Incomplete {
+    #[error("{site}: invalid `secret`: {cause}")]
+    SecretId {
         site: VarSite,
-        backend: String,
-        kind: BackendKind,
-        missing: &'static str,
+        #[source]
+        cause: GcpSecretIdError,
     },
 
     #[error("{site}: `fallbacks` must list at least one address")]
@@ -334,6 +476,13 @@ impl SecretVar {
         if !self.address.backend_kind().is_writable() {
             return None;
         }
+        if let SecretAddress::GcpSecretManager(r) = &self.address {
+            return Some(format!(
+                "trg secret put --backend {} --secret {}",
+                crate::shell::quote_for_shell(&self.backend),
+                crate::shell::quote_for_shell(r.secret().as_str())
+            ));
+        }
         let (path, key) = self.address.path_key()?;
         let q = crate::shell::quote_for_shell;
         Some(format!(
@@ -354,16 +503,19 @@ impl SecretVar {
     }
 
     fn as_raw(&self) -> RawSecretVar {
-        match &self.address {
-            SecretAddress::Keychain(r) => RawSecretVar::path_key(self.backend.clone(), r.path(), r.key()),
-            SecretAddress::Openbao(r) => RawSecretVar::path_key(self.backend.clone(), r.path(), r.key()),
-            SecretAddress::OnePassword(r) => RawSecretVar {
-                backend: self.backend.clone(),
-                path: None,
-                key: None,
-                reference: Some(r.to_string()),
+        let address = match &self.address {
+            SecretAddress::Keychain(r) => RawAddress::PathKey {
+                path: r.path().as_str().to_string(),
+                key: r.key().as_str().to_string(),
             },
-        }
+            SecretAddress::Openbao(r) => RawAddress::PathKey {
+                path: r.path().as_str().to_string(),
+                key: r.key().as_str().to_string(),
+            },
+            SecretAddress::GcpSecretManager(r) => RawAddress::Secret(r.secret().as_str().to_string()),
+            SecretAddress::OnePassword(r) => RawAddress::Reference(r.to_string()),
+        };
+        RawSecretVar::new(self.backend.clone(), address)
     }
 }
 
@@ -441,33 +593,21 @@ impl fmt::Display for SecretRead {
 ///
 /// Split out of [`SecretVar::resolve`] so the dispatch on kind reads as the
 /// one place that says how each backend is addressed. A kind added to
-/// [`BackendKind`] cannot be forgotten here.
+/// [`BackendKind`] cannot be forgotten here. The shape of the address is
+/// already known to be whole, so all that is left to refuse is a vocabulary
+/// the kind does not speak and a value that does not parse.
 fn parse_address(kind: BackendKind, raw: &RawSecretVar, site: &VarSite) -> Result<SecretAddress, SecretVarError> {
-    match kind {
-        BackendKind::Keychain | BackendKind::Openbao => {
-            if raw.reference.is_some() {
-                return Err(SecretVarError::RefNotSupported {
-                    site: site.clone(),
-                    backend: raw.backend.clone(),
-                    kind,
-                });
-            }
-            let missing = match (&raw.path, &raw.key) {
-                (None, _) => Some("path"),
-                (_, None) => Some("key"),
-                _ => None,
-            };
-            if let Some(missing) = missing {
-                return Err(SecretVarError::Incomplete {
-                    site: site.clone(),
-                    backend: raw.backend.clone(),
-                    kind,
-                    missing,
-                });
-            }
-            let (Some(path), Some(key)) = (&raw.path, &raw.key) else {
-                unreachable!("both are present once `missing` is None")
-            };
+    let given = raw.address.vocabulary();
+    if given != Vocabulary::of(kind) {
+        return Err(SecretVarError::WrongVocabulary {
+            site: site.clone(),
+            backend: raw.backend.clone(),
+            kind,
+            given,
+        });
+    }
+    match (&raw.address, kind) {
+        (RawAddress::PathKey { path, key }, BackendKind::Keychain | BackendKind::Openbao) => {
             let path = SecretPath::parse(path).map_err(|cause| SecretVarError::Path {
                 site: site.clone(),
                 cause,
@@ -481,21 +621,24 @@ fn parse_address(kind: BackendKind, raw: &RawSecretVar, site: &VarSite) -> Resul
                 _ => SecretAddress::Openbao(OpenbaoReference::new(path, key)),
             })
         }
-        BackendKind::OnePassword => {
-            if raw.path.is_some() || raw.key.is_some() || raw.reference.is_none() {
-                return Err(SecretVarError::NeedsReference {
-                    site: site.clone(),
-                    backend: raw.backend.clone(),
-                });
-            }
-            let raw_ref = raw.reference.as_deref().unwrap_or_default();
-            OnePasswordReference::parse(raw_ref)
-                .map(|r| SecretAddress::OnePassword(Box::new(r)))
-                .map_err(|cause| SecretVarError::Reference {
-                    site: site.clone(),
-                    cause,
-                })
-        }
+        (RawAddress::Secret(id), BackendKind::GcpSecretManager) => GcpSecretId::parse(id)
+            .map(|id| SecretAddress::GcpSecretManager(GcpReference::new(id)))
+            .map_err(|cause| SecretVarError::SecretId {
+                site: site.clone(),
+                cause,
+            }),
+        (RawAddress::Reference(reference), BackendKind::OnePassword) => OnePasswordReference::parse(reference)
+            .map(|r| SecretAddress::OnePassword(Box::new(r)))
+            .map_err(|cause| SecretVarError::Reference {
+                site: site.clone(),
+                cause,
+            }),
+        _ => Err(SecretVarError::WrongVocabulary {
+            site: site.clone(),
+            backend: raw.backend.clone(),
+            kind,
+            given,
+        }),
     }
 }
 
@@ -581,23 +724,52 @@ impl FetchedSecrets {
 /// [`SecretVar`], so that "read from the file, backend not yet known" and
 /// "checked against the backend it names" are different types and a resolved
 /// tree cannot be built by forgetting a step.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged, deny_unknown_fields)]
-#[serde(bound(deserialize = "S: Deserialize<'de>"))]
-#[serde(expecting = "a string, or an inline table `{ env = \"NAME\", default = \"...\" }`, \
-                     `{ backend = \"NAME\", path = \"...\", key = \"...\" }`, \
-                     `{ backend = \"NAME\", ref = \"op://<vault>/<item>/<field>\" }` \
-                     or a secret table with `fallbacks = [ <secret tables>, ... ]`, \
-                     whose entries cannot carry `fallbacks` of their own")]
+#[derive(Clone, Debug)]
 pub enum VarSource<S = SecretVar> {
     Literal(String),
-    Env {
-        env: String,
-        #[serde(default)]
-        default: Option<String>,
-    },
+    Env { env: String, default: Option<String> },
     Secret(S),
     SecretWithFallbacks(Box<WithFallbacks<S>>),
+}
+
+/// Read by what the value is rather than by trying each variant in turn, so a
+/// secret table that is shaped wrongly is reported as that table's own mistake
+/// and not as "none of these matched".
+impl<'de, S: Deserialize<'de>> Deserialize<'de> for VarSource<S> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::from_toml_value(toml::Value::deserialize(deserializer)?)
+    }
+}
+
+impl<'de, S: Deserialize<'de>> VarSource<S> {
+    pub(crate) fn from_toml_value<E: serde::de::Error>(value: toml::Value) -> Result<Self, E> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct EnvFields {
+            env: String,
+            #[serde(default)]
+            default: Option<String>,
+        }
+
+        match value {
+            toml::Value::String(literal) => Ok(Self::Literal(literal)),
+            toml::Value::Table(table) if table.contains_key("env") => {
+                let EnvFields { env, default } = from_toml_value(toml::Value::Table(table))?;
+                Ok(Self::Env { env, default })
+            }
+            toml::Value::Table(table) if table.contains_key("fallbacks") => Ok(Self::SecretWithFallbacks(Box::new(
+                from_toml_value(toml::Value::Table(table))?,
+            ))),
+            toml::Value::Table(table) if table.contains_key("backend") => {
+                Ok(Self::Secret(from_toml_value(toml::Value::Table(table))?))
+            }
+            toml::Value::Table(_) => Err(E::custom(format!("invalid table, {VAR_SOURCE_EXPECTED}"))),
+            other => Err(E::custom(format!(
+                "invalid type: {}, {VAR_SOURCE_EXPECTED}",
+                other.type_str()
+            ))),
+        }
+    }
 }
 
 /// A secret declaration and the ones to try after it.
@@ -759,11 +931,23 @@ pub enum VarResolveError {
 /// because an exec entry's `env` table has no separate `vars` table to route
 /// an indirect reference through; it is already the one place these bindings
 /// live.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged, bound(deserialize = "S: Deserialize<'de>"))]
+#[derive(Clone, Debug)]
 pub enum EnvValue<S = SecretVar> {
     Scalar(VarSource<S>),
     Composed(Vec<VarSource<S>>),
+}
+
+impl<'de, S: Deserialize<'de>> Deserialize<'de> for EnvValue<S> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match toml::Value::deserialize(deserializer)? {
+            toml::Value::Array(items) => items
+                .into_iter()
+                .map(VarSource::from_toml_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::Composed),
+            single => VarSource::from_toml_value(single).map(Self::Scalar),
+        }
+    }
 }
 
 /// An [`EnvValue`] as deserialised, before its backends are known.

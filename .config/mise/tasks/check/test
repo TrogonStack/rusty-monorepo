@@ -4,3 +4,4 @@ set -euo pipefail
 cd "${MISE_PROJECT_ROOT:?}"
 cargo test --locked --workspace --lib --tests
 cargo test --locked --workspace --doc
+mise run check:object-id-features

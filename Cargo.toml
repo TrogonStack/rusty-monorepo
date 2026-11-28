@@ -1,6 +1,18 @@
 [workspace]
-members = ["crates/trg"]
+members = [
+  "crates/trg",
+  "crates/trogon_claims",
+  "crates/trogon_claims_macros",
+  "crates/trogon_claims_syntax",
+  "crates/trogon_object_id",
+  "crates/trogon_object_id_derive",
+  "crates/trogon_uuid",
+  "examples/uuid_identity",
+]
 resolver = "2"
+
+[workspace.package]
+license = "Apache-2.0"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(dylint_lib, values("trogon_dylint_lints"))'] }
@@ -19,7 +31,7 @@ unwrap_used = "deny"
 wildcard_imports = "deny"
 
 [workspace.dependencies]
-clap = { version = "4.6", features = ["derive"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 gray_matter = "0.3"
@@ -35,3 +47,10 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 regex = "1.11"
 schemars = "1.2"
 libc = "0.2"
+zeroize = "1.8"
+prost = "0.14"
+prost-types = "0.14"
+axum = { version = "0.8", default-features = false }
+axum-core = "0.5"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+trybuild = "1.0"

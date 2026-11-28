@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.16.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.16.0...trg@v0.16.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **trg:** Harden Transit mirror targets ([#382](https://github.com/TrogonStack/rusty-monorepo/issues/382)) ([238d2c6](https://github.com/TrogonStack/rusty-monorepo/commit/238d2c6808886b7b5daeebd0c45849b55621328c))
+
+## [0.16.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.15.0...trg@v0.16.0) (2026-11-16)
+
+
+### Features
+
+* **trg:** Mirror an SSH key into an OpenBao Transit key ([#380](https://github.com/TrogonStack/rusty-monorepo/issues/380)) ([b7d2827](https://github.com/TrogonStack/rusty-monorepo/commit/b7d282739e0705ec9e3dbdd208af3767aa9f4bfa))
+
+## [0.15.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.2...trg@v0.15.0) (2026-11-16)
+
+
+### Features
+
+* **object-id:** Add type-safe Rust object identifiers ([#334](https://github.com/TrogonStack/rusty-monorepo/issues/334)) ([d4c3d3b](https://github.com/TrogonStack/rusty-monorepo/commit/d4c3d3b6d95708bc8e57018affde108df640b27e))
+* **trg:** Sign git commits with OpenBao Transit or an SSH agent ([#372](https://github.com/TrogonStack/rusty-monorepo/issues/372)) ([4c5d90c](https://github.com/TrogonStack/rusty-monorepo/commit/4c5d90cbeda1188ce4e2eeb78a7890c2e601dd60))
+
+
+### Bug Fixes
+
+* **trg:** Record the integration-test exception for in-crate suites ([#365](https://github.com/TrogonStack/rusty-monorepo/issues/365)) ([8a916c4](https://github.com/TrogonStack/rusty-monorepo/commit/8a916c49c4d64e59097dfcde7b668d26b02ed22c))
+
 ## [0.14.2](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.14.1...trg@v0.14.2) (2026-11-06)
 
 

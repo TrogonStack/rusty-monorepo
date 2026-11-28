@@ -1,5 +1,7 @@
 mod constants;
-use constants::{GRADING_AUTO, GRADING_NONE, RUN_FAILED, STEP_FAILED};
+use constants::{
+    ANCESTOR_AGENT_CONTEXT, ANCESTOR_AGENT_CONTEXT_NAMED, GRADING_AUTO, GRADING_NONE, RUN_FAILED, STEP_FAILED,
+};
 use std::cell::OnceCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -218,7 +220,7 @@ pub struct RunArgs {
     #[arg(
         long,
         value_name = "N",
-        help = "Stop a run once it takes more than N model turns and record it as budget_exhausted. claude-code enforces this itself through --max-turns; codex and cursor-agent are killed when their stream shows the turn that went past the cap, and codex turns are inferred from the gaps between its tool calls"
+        help = "Stop a run once it takes more than N model turns and record it as budget_exhausted. claude-code enforces this itself through --max-turns; codex, cursor-agent, and trogonai-agent are killed when their stream shows the turn that went past the cap, and codex and trogonai-agent turns are inferred from the gaps between their tool calls"
     )]
     pub max_turns_per_run: Option<MaxTurns>,
 
@@ -1672,6 +1674,48 @@ fn apply_outcome(
             run.warnings.push(warning);
         }
     }
+
+    if let Some(warning) = ancestor_agent_context_warning(workspace_dir) {
+        eprintln!("Run {}: {}", run.id, warning);
+        run.warnings.push(warning);
+    }
+}
+
+/// Agent instructions or skills in a directory above the run's workspace.
+///
+/// Harnesses look upward from their working directory: for `AGENTS.md` and `CLAUDE.md`,
+/// and some for skill folders, which trogonai-agent walks until it reaches `HOME`. An
+/// isolated run's `HOME` is a directory of its own beside the workspace, never above it, so
+/// such a walk climbs past the operator's project and home directories, and isolation
+/// cannot hide what it finds there. trg cannot stop the harness from reading it; it can
+/// say that the run could have, so a run that drew on it is not mistaken for one that
+/// stood on the skill alone.
+fn ancestor_agent_context_warning(workspace_dir: &Path) -> Option<String> {
+    // The harness starts in the physical directory, so its parents are what it can reach,
+    // not the parents of a symlink that led there.
+    let workspace = std::fs::canonicalize(workspace_dir).ok()?;
+    let found: Vec<String> = workspace
+        .ancestors()
+        .skip(1)
+        .flat_map(|directory| ANCESTOR_AGENT_CONTEXT.iter().map(move |entry| directory.join(entry)))
+        .filter(|path| path.exists())
+        .map(|path| path.display().to_string())
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    let mut named = found
+        .iter()
+        .take(ANCESTOR_AGENT_CONTEXT_NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if found.len() > ANCESTOR_AGENT_CONTEXT_NAMED {
+        named.push_str(&format!(" and {} more", found.len() - ANCESTOR_AGENT_CONTEXT_NAMED));
+    }
+    Some(format!(
+        "the workspace sits below agent instructions or skills a harness may read by looking above its working directory, which isolation does not hide: {named}; run with an --out-dir outside any project and home directory to keep runs apart from them"
+    ))
 }
 
 /// Every violation the mock server logged against a call this run made.

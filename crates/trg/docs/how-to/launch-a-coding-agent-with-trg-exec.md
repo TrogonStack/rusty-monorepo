@@ -75,7 +75,7 @@ ANTHROPIC_AUTH_TOKEN  = { backend = "homelab", path = "exec/claude", key = "toke
   `onepassword` entry, addressed by the reference that item's `Copy Secret
   Reference` button yields. Each kind takes only its own spelling: `path` and
   `key` against a `onepassword` backend, or a `ref` against either of the
-  others, fails to load.
+  others, fails to load, and `secret` is the spelling of `gcp_secret_manager`.
 - An array of any of those concatenates them in order, e.g.
   `dir = [{ env = "HOME" }, "/app/state"]` resolves to
   `<value of $HOME>/app/state`. This composition is available only for

@@ -20,7 +20,7 @@ use crate::telemetry::ContentCapture;
 mod constants;
 
 pub use constants::RUN_HOME_DIR_NAME;
-use constants::{CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, PROCESS_VARS};
+use constants::{CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, PROCESS_VARS, TROGONAI_AGENT_SETTINGS_FILE};
 
 /// Where a harness keeps the per-user state that changes what its agent does: installed
 /// skills, global instruction files, MCP servers, permission settings, and history.
@@ -179,6 +179,10 @@ impl Runner {
                 dir_name: ".codex",
             },
             Self::CursorAgent => HarnessConfigHome::HomeRelative { dir_name: ".cursor" },
+            Self::TrogonaiAgent => HarnessConfigHome::Redirectable {
+                var: "TROGONAI_AGENT_HOME",
+                dir_name: ".trogonai-agent",
+            },
         }
     }
 
@@ -206,6 +210,49 @@ impl Runner {
                 "OPENAI_BASE_URL",
             ],
             Self::CursorAgent => &["CURSOR_API_KEY"],
+            // The keys trogonai-agent's built-in routes read. A provider the operator declared names its
+            // own variable, which `declared_credential_vars` adds.
+            Self::TrogonaiAgent => &[
+                "ANTHROPIC_API_KEY",
+                "OPENROUTER_API_KEY",
+                "OPENCODE_API_KEY",
+                "AI_GATEWAY_API_KEY",
+                "VERCEL_OIDC_TOKEN",
+                "TROGONAI_AGENT_GATEWAY_BASE_URL",
+            ],
+        }
+    }
+
+    /// The credential variables the host's own harness settings name, beyond the fixed
+    /// list in `credential_vars`.
+    ///
+    /// trogonai-agent lets an operator declare a model provider whose key lives in any variable they
+    /// choose (`providers.<id>.auth.env` in its profile `settings.json`), so no fixed list
+    /// can name it. Only a variable a declared provider names is admitted, which is the
+    /// variable trogonai-agent would read for that provider anyway; the rest of the environment stays
+    /// cleared. A settings file that cannot be read admits nothing, so the run fails to
+    /// authenticate rather than starting with a guess.
+    fn declared_credential_vars(self, host: &BTreeMap<String, String>) -> Vec<String> {
+        match self {
+            Self::TrogonaiAgent => {
+                let Some(settings) = self
+                    .config_home()
+                    .resolve_on_host(host)
+                    .and_then(|home| std::fs::read_to_string(home.join(TROGONAI_AGENT_SETTINGS_FILE)).ok())
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                else {
+                    return Vec::new();
+                };
+                settings
+                    .get("providers")
+                    .and_then(serde_json::Value::as_object)
+                    .into_iter()
+                    .flat_map(|providers| providers.values())
+                    .filter_map(|provider| provider.get("auth")?.get("env")?.as_str())
+                    .map(str::to_string)
+                    .collect()
+            }
+            Self::ClaudeCode | Self::Codex | Self::CursorAgent => Vec::new(),
         }
     }
 
@@ -219,7 +266,7 @@ impl Runner {
     fn credential_locator_var(self) -> Option<&'static str> {
         match self {
             Self::ClaudeCode => Some("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
-            Self::Codex | Self::CursorAgent => None,
+            Self::Codex | Self::CursorAgent | Self::TrogonaiAgent => None,
         }
     }
 
@@ -234,6 +281,18 @@ impl Runner {
                 file: "cli-config.json",
                 keep: &["authInfo"],
             }],
+            // trogonai-agent keeps its providers beside its permissions, hooks, MCP servers, and saved
+            // models in one `settings.json`. `providers` and `provider` are the route a run
+            // signs in through, so they are the members kept; the saved model is not, so a run
+            // names its model with `--runner-model`. `api-key` is the AI Gateway key `setup`
+            // saves, a file holding nothing else.
+            Self::TrogonaiAgent => &[
+                AuthEntry::Reduced {
+                    file: TROGONAI_AGENT_SETTINGS_FILE,
+                    keep: &["providers", "provider"],
+                },
+                AuthEntry::Whole("api-key"),
+            ],
         }
     }
 }
@@ -296,6 +355,9 @@ pub struct RunEnvironment {
     config_home: Option<RecordedConfigHome>,
     /// Held apart because, unlike `vars`, they reach the harness under `Inherited` too.
     telemetry_vars: BTreeMap<String, String>,
+    /// The key variables the harness's own profile names. They are credentials whatever
+    /// they are called, so `env.json` leaves them out by name rather than by suffix.
+    declared_credential_vars: Vec<String>,
     forwards_traces: bool,
     codex_otel: Option<CodexOtelConfig>,
 }
@@ -354,6 +416,7 @@ impl RunEnvironment {
             .flat_map(CaseEnv::iter)
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
+        let declared_credential_vars = runner.declared_credential_vars(host);
 
         if matches!(policy, EnvironmentPolicy::Inherited) {
             let config_home = host_config_home_record(runner, host, basis)?;
@@ -365,18 +428,32 @@ impl RunEnvironment {
                 case_vars,
                 config_home,
                 telemetry_vars: BTreeMap::new(),
+                declared_credential_vars,
                 forwards_traces: false,
                 codex_otel: None,
             });
         }
 
-        let mut vars = allowlisted(runner, host);
+        let mut vars = allowlisted(runner, host, &declared_credential_vars);
 
         let config_home = if matches!(policy, EnvironmentPolicy::Isolated) {
-            let host_config_home = runner.config_home().resolve_on_host(host);
+            // Auth entries are linked to this path from inside the run's config home, so a
+            // relative one would resolve from there instead of from where trg was started.
+            let host_config_home = runner
+                .config_home()
+                .resolve_on_host(host)
+                .map(std::path::absolute)
+                .transpose()?;
 
+            // The harness starts in its workspace, not where trg was started, so a relative
+            // run directory would hand it a `HOME` and config home that resolve somewhere
+            // else entirely, or that a harness refuses outright. The path is also resolved
+            // through any symlink on the way to it: a harness that keeps private state may
+            // refuse a home it reaches through a link, as trogonai-agent does under macOS's
+            // `/tmp`, which is a link to `/private/tmp`.
             let home = run_dir.join(RUN_HOME_DIR_NAME);
             std::fs::create_dir_all(&home)?;
+            let home = std::fs::canonicalize(&home)?;
             vars.insert("HOME".to_string(), path_string(&home));
 
             let run_config_home = home.join(runner.config_home().dir_name());
@@ -406,6 +483,7 @@ impl RunEnvironment {
             case_vars,
             config_home,
             telemetry_vars: BTreeMap::new(),
+            declared_credential_vars,
             forwards_traces: false,
             codex_otel: None,
         })
@@ -443,7 +521,9 @@ impl RunEnvironment {
         self.vars
             .iter()
             .chain(&self.telemetry_vars)
-            .filter(|(key, _)| !is_secret_env_key(key) && !is_exporter_header_var(key))
+            .filter(|(key, _)| {
+                !is_secret_env_key(key) && !is_exporter_header_var(key) && !self.declared_credential_vars.contains(*key)
+            })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
@@ -468,7 +548,7 @@ fn host_config_home_record(
 /// the allowlist. Dropping it would not leave the config home alone: the harness would
 /// fall back to the default under `HOME`, which is neither the operator's config home nor
 /// a config home this run set up. `Isolated` overwrites the variable afterwards.
-fn allowlisted(runner: Runner, host: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+fn allowlisted(runner: Runner, host: &BTreeMap<String, String>, declared: &[String]) -> BTreeMap<String, String> {
     let locator = runner.credential_locator_var();
     let config_home_var = match runner.config_home() {
         HarnessConfigHome::Redirectable { var, .. } => Some(var),
@@ -479,10 +559,12 @@ fn allowlisted(runner: Runner, host: &BTreeMap<String, String>) -> BTreeMap<Stri
         .chain(NETWORK_VARS.iter())
         .chain(runner.credential_vars().iter())
         .chain(locator.iter())
-        .chain(config_home_var.iter());
+        .chain(config_home_var.iter())
+        .copied()
+        .chain(declared.iter().map(String::as_str));
 
     let mut vars: BTreeMap<String, String> = named
-        .filter_map(|name| host.get_key_value(*name))
+        .filter_map(|name| host.get_key_value(name))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
 

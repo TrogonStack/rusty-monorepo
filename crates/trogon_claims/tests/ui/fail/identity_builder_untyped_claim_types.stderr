@@ -1,0 +1,13 @@
+error[E0308]: arguments to this function are incorrect
+ --> tests/ui/fail/identity_builder_untyped_claim_types.rs:6:13
+  |
+6 |     let _ = IdentityBuilder::new(AuthenticationType::try_new("jwt").unwrap(), name, role);
+  |             ^^^^^^^^^^^^^^^^^^^^                                              ----  ---- expected `RoleClaimType`, found `ClaimType`
+  |                                                                               |
+  |                                                                               expected `NameClaimType`, found `ClaimType`
+  |
+note: associated function defined here
+ --> src/identity_builder.rs
+  |
+  |     pub fn new(
+  |            ^^^

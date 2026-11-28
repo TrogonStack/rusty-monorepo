@@ -72,7 +72,8 @@ fn each_harness_gets_only_its_own_credentials() {
 #[test]
 fn isolated_redirects_home_and_the_harness_config_home() {
     let temp = tempdir().unwrap();
-    let run_dir = temp.path().join("run-001");
+    // Resolved, as the run home is: the system temp directory may sit behind a link.
+    let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");
     let env =
         RunEnvironment::prepare_from(Runner::Codex, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();
 
@@ -340,6 +341,184 @@ fn isolated_takes_the_login_out_of_a_settings_file_and_leaves_the_settings() {
     );
 }
 
+/// trogonai-agent keeps the providers a run signs in through in the same `settings.json` as the
+/// permissions, hooks, and saved models an isolated run holds still.
+#[test]
+fn an_isolated_trogonai_agent_run_keeps_only_the_route_it_signs_in_through() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join(".trogonai-agent");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(
+        host_config_home.join("settings.json"),
+        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"GATEWAY_KEY"}}},"provider":"gateway","models":{"gateway":"operator-choice"},"permission":{"bash":"allow"}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert("HOME".to_string(), temp.path().to_string_lossy().into_owned());
+
+    let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");
+    let env = RunEnvironment::prepare_from(
+        Runner::TrogonaiAgent,
+        &run_dir,
+        EnvironmentPolicy::Isolated,
+        None,
+        &host,
+    )
+    .unwrap();
+
+    let config_home = PathBuf::from(env.vars.get("TROGONAI_AGENT_HOME").unwrap());
+    assert!(config_home.starts_with(&run_dir));
+    let carried: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config_home.join("settings.json")).unwrap()).unwrap();
+
+    assert_eq!(carried["provider"], "gateway");
+    assert_eq!(carried["providers"]["gateway"]["auth"]["env"], "GATEWAY_KEY");
+    assert!(
+        carried.get("permission").is_none() && carried.get("models").is_none(),
+        "an isolated run must not be handed the operator's permissions or model choice"
+    );
+}
+
+/// A provider the operator declared reads its key from a variable of the operator's
+/// choosing, so no fixed list could have admitted it.
+#[test]
+fn a_scrubbed_trogonai_agent_run_sees_the_key_its_declared_provider_names_and_nothing_else() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join("profile");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(
+        host_config_home.join("settings.json"),
+        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"GATEWAY_KEY"}},"local":{"protocol":"openai-chat-completions","base_url":"http://127.0.0.1:8080/v1","auth":{"type":"none"}}}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert(
+        "TROGONAI_AGENT_HOME".to_string(),
+        host_config_home.to_string_lossy().into_owned(),
+    );
+    host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
+    host.insert("UNRELATED_KEY".to_string(), "other".to_string());
+
+    let env = RunEnvironment::prepare_from(
+        Runner::TrogonaiAgent,
+        temp.path(),
+        EnvironmentPolicy::Scrubbed,
+        None,
+        &host,
+    )
+    .unwrap();
+
+    assert_eq!(env.vars.get("GATEWAY_KEY").map(String::as_str), Some("secret"));
+    assert!(!env.vars.contains_key("UNRELATED_KEY"));
+}
+
+/// A declared key variable is named by the operator, so it need not end in a suffix the
+/// name-based redaction knows; `env.json` must leave it out all the same.
+#[test]
+fn a_declared_key_is_handed_to_the_harness_but_never_recorded() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join("profile");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(
+        host_config_home.join("settings.json"),
+        r#"{"providers":{"gateway":{"protocol":"openai-chat-completions","base_url":"https://gateway.example/v1","auth":{"type":"bearer","env":"TROGONAI_AGENT_LOGIN"}}}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert(
+        "TROGONAI_AGENT_HOME".to_string(),
+        host_config_home.to_string_lossy().into_owned(),
+    );
+    host.insert("TROGONAI_AGENT_LOGIN".to_string(), "secret".to_string());
+
+    for policy in [
+        EnvironmentPolicy::Scrubbed,
+        EnvironmentPolicy::Isolated,
+        EnvironmentPolicy::Inherited,
+    ] {
+        let env =
+            RunEnvironment::prepare_from(Runner::TrogonaiAgent, &temp.path().join("run"), policy, None, &host).unwrap();
+        assert_eq!(
+            env.vars.get("TROGONAI_AGENT_LOGIN").map(String::as_str),
+            Some("secret"),
+            "{policy:?}"
+        );
+        assert!(!env.recorded_vars().contains_key("TROGONAI_AGENT_LOGIN"), "{policy:?}");
+    }
+}
+
+/// The AI Gateway key is linked from inside the run's config home, so a relative host
+/// config home has to be made absolute first or the link resolves to nothing.
+#[test]
+fn an_isolated_trogonai_agent_run_links_the_key_of_a_relative_host_config_home() {
+    let test_name =
+        "agentskills::runner::environment::tests::an_isolated_trogonai_agent_run_links_the_key_of_a_relative_host_config_home";
+    let child_marker = "TRG_TEST_RELATIVE_TROGONAI_AGENT_HOME_CHILD";
+    if std::env::var_os(child_marker).is_none() {
+        let temp = tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(child_marker, "1")
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+        assert!(stdout.contains("relative trogonai-agent home verified"), "{stdout}");
+        return;
+    }
+
+    std::fs::create_dir_all("profile").unwrap();
+    std::fs::write("profile/api-key", "gateway-key").unwrap();
+    let mut host = host();
+    host.insert("TROGONAI_AGENT_HOME".to_string(), "profile".to_string());
+
+    let env = RunEnvironment::prepare_from(
+        Runner::TrogonaiAgent,
+        Path::new("run-001"),
+        EnvironmentPolicy::Isolated,
+        None,
+        &host,
+    )
+    .unwrap();
+    let config_home = PathBuf::from(env.vars.get("TROGONAI_AGENT_HOME").unwrap());
+    assert_eq!(
+        std::fs::read_to_string(config_home.join("api-key")).unwrap(),
+        "gateway-key"
+    );
+    println!("relative trogonai-agent home verified");
+}
+
+#[test]
+fn a_trogonai_agent_profile_that_cannot_be_read_admits_no_declared_key() {
+    let temp = tempdir().unwrap();
+    let host_config_home = temp.path().join("profile");
+    std::fs::create_dir_all(&host_config_home).unwrap();
+    std::fs::write(host_config_home.join("settings.json"), "not json").unwrap();
+
+    let mut host = host();
+    host.insert(
+        "TROGONAI_AGENT_HOME".to_string(),
+        host_config_home.to_string_lossy().into_owned(),
+    );
+    host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
+
+    let env = RunEnvironment::prepare_from(
+        Runner::TrogonaiAgent,
+        temp.path(),
+        EnvironmentPolicy::Scrubbed,
+        None,
+        &host,
+    )
+    .unwrap();
+
+    assert!(!env.vars.contains_key("GATEWAY_KEY"));
+}
+
 #[test]
 fn cursor_agent_has_no_config_home_variable_to_redirect() {
     assert!(matches!(
@@ -366,6 +545,13 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
             },
         ),
         (Runner::CursorAgent, "/host/home/.cursor", ConfigHomeBasis::HomeRelative),
+        (
+            Runner::TrogonaiAgent,
+            "/host/home/.trogonai-agent",
+            ConfigHomeBasis::Variable {
+                name: "TROGONAI_AGENT_HOME".to_string(),
+            },
+        ),
     ] {
         let temp = tempdir().unwrap();
         let env =
@@ -382,9 +568,14 @@ fn scrubbed_records_the_hosts_config_home_for_every_harness() {
 
 #[test]
 fn isolated_records_the_run_config_home_and_not_the_hosts() {
-    for runner in [Runner::ClaudeCode, Runner::Codex, Runner::CursorAgent] {
+    for runner in [
+        Runner::ClaudeCode,
+        Runner::Codex,
+        Runner::CursorAgent,
+        Runner::TrogonaiAgent,
+    ] {
         let temp = tempdir().unwrap();
-        let run_dir = temp.path().join("run-001");
+        let run_dir = std::fs::canonicalize(temp.path()).unwrap().join("run-001");
         let env = RunEnvironment::prepare_from(runner, &run_dir, EnvironmentPolicy::Isolated, None, &host()).unwrap();
 
         let recorded = env
@@ -404,6 +595,35 @@ fn isolated_records_the_run_config_home_and_not_the_hosts() {
             })
         );
     }
+}
+
+/// A harness that keeps private state may refuse a home it reaches through a symlink, as
+/// trogonai-agent does under macOS's `/tmp`, so the run is handed the resolved path.
+#[cfg(unix)]
+#[test]
+fn isolated_hands_the_harness_a_home_with_no_symlink_on_the_way_to_it() {
+    let temp = tempdir().unwrap();
+    let real = temp.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let env = RunEnvironment::prepare_from(
+        Runner::Codex,
+        &link.join("run-001"),
+        EnvironmentPolicy::Isolated,
+        None,
+        &host(),
+    )
+    .unwrap();
+
+    let home = PathBuf::from(env.vars.get("HOME").unwrap());
+    assert_eq!(
+        home,
+        std::fs::canonicalize(real.join("run-001").join(RUN_HOME_DIR_NAME)).unwrap()
+    );
+    let config_home = PathBuf::from(env.vars.get("CODEX_HOME").unwrap());
+    assert!(config_home.starts_with(&home), "{}", config_home.display());
 }
 
 #[test]
@@ -435,6 +655,15 @@ fn isolated_absolutizes_a_relative_run_dir_before_recording_its_config_home() {
         .join(RUN_HOME_DIR_NAME)
         .join(Runner::Codex.config_home().dir_name());
     assert_eq!(recorded.path(), expected);
+    assert_eq!(
+        env.vars.get("CODEX_HOME").map(PathBuf::from),
+        Some(expected.clone()),
+        "the harness starts in its workspace, so the variable it reads must not be relative"
+    );
+    assert_eq!(
+        env.vars.get("HOME").map(PathBuf::from),
+        expected.parent().map(Path::to_path_buf)
+    );
     println!("relative config home verified");
 }
 

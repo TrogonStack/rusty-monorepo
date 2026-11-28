@@ -30,10 +30,14 @@
 
 use std::os::unix::fs::PermissionsExt as _;
 mod constants;
+mod transit;
+mod transit_import;
 pub use constants::DEFAULT_TIMEOUT_MS;
 use constants::{DATA_ROUTE, DEFAULT_CONNECT_TIMEOUT_MS, HEALTH_ROUTE, MAX_REDIRECTS, METADATA_ROUTE};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+pub use transit::{SignParameters, TransitPublicKey};
+pub use transit_import::{wrap as wrap_for_transit, WrapError};
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};

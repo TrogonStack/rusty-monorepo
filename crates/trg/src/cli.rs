@@ -5,8 +5,12 @@
 //! invocation printed in the docs is checked against it, which is only
 //! meaningful if there is one definition rather than two.
 
+use std::ffi::OsString;
+use std::path::PathBuf;
+
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 
+use crate::commands::git::{GitCommands, SshCommands};
 use crate::commands::Commands;
 use crate::telemetry::CommandIdentity;
 
@@ -15,11 +19,36 @@ use crate::telemetry::CommandIdentity;
 #[command(version)]
 #[command(about = "TrogonStack tools and utilities")]
 pub struct Cli {
+    /// The config file to read instead of `$XDG_CONFIG_HOME/trg/config.toml`.
+    /// A path that does not exist is an error, not a reason to read the default
+    #[arg(long, global = true, env = "TRG_CONFIG", value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
 
 impl Cli {
+    /// The config file this invocation reads: `--config`, else `TRG_CONFIG`,
+    /// else the default location. A named path is never swapped for the
+    /// default, even when it does not exist.
+    pub fn config_path(&self) -> PathBuf {
+        self.config.clone().unwrap_or_else(crate::config::trg_config_path)
+    }
+
+    /// The `ssh-keygen` arguments when git is running `trg` as its
+    /// `gpg.ssh.program`, which is answered before anything else starts.
+    pub fn ssh_signing_args(&self) -> Option<&[OsString]> {
+        match &self.command {
+            Commands::Git {
+                command: GitCommands::Ssh {
+                    command: SshCommands::Sign(sign),
+                },
+            } => Some(&sign.args),
+            _ => None,
+        }
+    }
+
     /// Parses the real process arguments once, returning both the typed
     /// `Cli` and the subcommand path it resolved to (`mcp proxy`, `ai skills
     /// eval run`, ...), for the `trg.command` resource attribute.

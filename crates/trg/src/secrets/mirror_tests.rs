@@ -28,6 +28,13 @@ fn section(text: &str) -> SecretsSection {
     toml::from_str(text).expect("section")
 }
 
+fn parse_err(text: &str) -> String {
+    toml::from_str::<SecretsSection>(text)
+        .expect_err("refused while parsing")
+        .message()
+        .to_string()
+}
+
 fn one() -> Mirror {
     section(SECTION).resolve_mirrors().expect("mirrors").remove(0)
 }
@@ -525,4 +532,252 @@ fn an_unknown_field_in_a_mirror_is_rejected() {
         "#;
 
     assert!(toml::from_str::<SecretsSection>(text).is_err());
+}
+
+const TRANSIT_SECTION: &str = r#"
+        [backends.src]
+        kind = "keychain"
+
+        [backends.dst]
+        kind = "keychain"
+
+        [backends.bao]
+        kind = "openbao"
+        addr = "https://bao.example.com"
+        mount = "secret"
+        path_prefix = "trg"
+        owner = "me"
+        token_file = "/nonexistent/token"
+    "#;
+
+fn with_transit_targets(targets: &str) -> String {
+    format!(
+        r#"{TRANSIT_SECTION}
+            [mirrors.git-key]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{targets}]
+        "#
+    )
+}
+
+#[test]
+fn a_transit_target_resolves_with_the_default_mount() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal" }"#);
+
+    let mirrors = section(&text).resolve_mirrors().expect("mirrors");
+
+    let target = &mirrors[0].targets()[0];
+    assert_eq!(target.backend(), "bao");
+    assert_eq!(target.describe(), "transit/keys/git-personal (bao)");
+}
+
+#[test]
+fn a_transit_target_may_name_its_mount() {
+    let text =
+        with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal", transit_mount = "team/signing" }"#);
+
+    let mirrors = section(&text).resolve_mirrors().expect("mirrors");
+
+    assert_eq!(
+        mirrors[0].targets()[0].describe(),
+        "team/signing/keys/git-personal (bao)"
+    );
+}
+
+#[test]
+fn a_transit_target_on_a_backend_that_is_not_openbao_is_refused_at_load() {
+    let text = with_transit_targets(r#"{ backend = "dst", transit_key = "git-personal" }"#);
+
+    let err = resolve_err(&text);
+
+    assert!(matches!(err, MirrorConfigError::TransitNotOpenbao { .. }), "{err}");
+    assert!(err.to_string().contains("[secrets.mirrors.git-key]"), "{err}");
+    assert!(err.to_string().contains("openbao"), "{err}");
+}
+
+#[test]
+fn a_transit_target_on_an_undeclared_backend_lists_the_declared_ones() {
+    let text = with_transit_targets(r#"{ backend = "nowhere", transit_key = "git-personal" }"#);
+
+    let err = resolve_err(&text);
+
+    assert!(
+        matches!(err, MirrorConfigError::UndeclaredTransitBackend { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("bao"), "{err}");
+}
+
+#[test]
+fn a_transit_target_cannot_also_be_a_value_address() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_key = "git-personal", path = "a", key = "k" }"#);
+
+    let err = parse_err(&text);
+    assert!(
+        err.contains("cannot also carry `path`, `key`, `ref` or `secret`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_transit_mount_without_a_key_is_refused() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_mount = "signing" }"#);
+
+    assert!(parse_err(&text).contains("a Transit target needs `transit_key`"));
+}
+
+#[test]
+fn a_transit_key_with_a_bad_segment_is_refused() {
+    let text = with_transit_targets(r#"{ backend = "bao", transit_key = "../escape" }"#);
+
+    let err = resolve_err(&text);
+
+    assert!(matches!(err, MirrorConfigError::TransitSegment { .. }), "{err}");
+}
+
+#[test]
+fn a_transit_key_listed_twice_is_refused() {
+    let text = with_transit_targets(
+        r#"{ backend = "bao", transit_key = "git-personal" }, { backend = "bao", transit_key = "git-personal" }"#,
+    );
+
+    assert!(matches!(resolve_err(&text), MirrorConfigError::RepeatedTarget { .. }));
+}
+
+/// The rotation caveat lives in prose only, so keep it from being edited away.
+#[test]
+fn the_signing_how_to_says_what_to_update_after_rotating_the_mirrored_key() {
+    let doc = include_str!("../../docs/how-to/sign-git-commits-with-openbao-transit.md");
+    let section = doc
+        .split("#### After rotating the source key")
+        .nth(1)
+        .expect("a rotation section");
+    let section = section.split("\n#").next().unwrap_or(section);
+    for needed in [
+        "public_key",
+        "user.signingkey",
+        "allowed_signers",
+        "mismatch",
+        "does not fall back",
+        "keep the old",
+        "valid-before",
+    ] {
+        assert!(section.contains(needed), "the rotation section must mention `{needed}`");
+    }
+}
+
+fn two_bao_mirrors(second_addr: &str, second_mount: &str) -> String {
+    format!(
+        r#"{TRANSIT_SECTION}
+            [backends.bao2]
+            kind = "openbao"
+            addr = "{second_addr}"
+            mount = "secret"
+            path_prefix = "trg"
+            owner = "me"
+            token_file = "/nonexistent/token"
+
+            [mirrors.a]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{{ backend = "bao", transit_key = "git-personal" }}]
+
+            [mirrors.b]
+            source = {{ backend = "src", path = "b", key = "k" }}
+            targets = [{{ backend = "bao2", transit_key = "git-personal", transit_mount = "{second_mount}" }}]
+        "#
+    )
+}
+
+#[test]
+fn two_backends_reaching_one_server_share_a_transit_key() {
+    let text = two_bao_mirrors("https://bao.example.com/", "transit");
+
+    assert!(matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }));
+}
+
+#[test]
+fn a_default_port_or_another_host_case_still_reaches_the_same_server() {
+    for addr in ["https://bao.example.com:443", "https://BAO.Example.com"] {
+        let text = two_bao_mirrors(addr, "transit");
+
+        assert!(
+            matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }),
+            "`{addr}` reaches the same server as `https://bao.example.com`"
+        );
+    }
+}
+
+#[test]
+fn two_backends_on_different_servers_or_mounts_do_not_share_a_transit_key() {
+    section(&two_bao_mirrors("https://other.example.com", "transit"))
+        .resolve_mirrors()
+        .expect("a different server is a different key");
+    section(&two_bao_mirrors("https://bao.example.com/", "signing"))
+        .resolve_mirrors()
+        .expect("a different mount is a different key");
+}
+
+#[test]
+fn two_mirrors_may_not_write_the_same_transit_key() {
+    let text = format!(
+        r#"{TRANSIT_SECTION}
+            [mirrors.a]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{{ backend = "bao", transit_key = "git-personal" }}]
+
+            [mirrors.b]
+            source = {{ backend = "src", path = "b", key = "k" }}
+            targets = [{{ backend = "bao", transit_key = "git-personal" }}]
+        "#
+    );
+
+    assert!(matches!(resolve_err(&text), MirrorConfigError::DuplicateTarget { .. }));
+}
+
+const GSM_SECTION: &str = r#"
+        [backends.src]
+        kind = "keychain"
+
+        [backends.gsm_a]
+        kind = "gcp_secret_manager"
+        project = "shared-project"
+        account = "a@shared-project.iam.gserviceaccount.com"
+
+        [backends.gsm_b]
+        kind = "gcp_secret_manager"
+        project = "shared-project"
+        account = "b@shared-project.iam.gserviceaccount.com"
+
+        [backends.gsm_c]
+        kind = "gcp_secret_manager"
+        project = "other-project"
+        account = "c@other-project.iam.gserviceaccount.com"
+"#;
+
+fn gsm_mirrors(second_backend: &str) -> String {
+    format!(
+        r#"{GSM_SECTION}
+            [mirrors.a]
+            source = {{ backend = "src", path = "a", key = "k" }}
+            targets = [{{ backend = "gsm_a", secret = "signing" }}]
+
+            [mirrors.b]
+            source = {{ backend = "src", path = "b", key = "k" }}
+            targets = [{{ backend = "{second_backend}", secret = "signing" }}]
+        "#
+    )
+}
+
+#[test]
+fn two_backends_on_one_project_share_a_secret_target() {
+    let err = resolve_err(&gsm_mirrors("gsm_b"));
+
+    assert!(matches!(err, MirrorConfigError::DuplicateTarget { .. }), "{err}");
+}
+
+#[test]
+fn the_same_secret_id_in_another_project_is_another_target() {
+    section(&gsm_mirrors("gsm_c"))
+        .resolve_mirrors()
+        .expect("a different project is a different secret");
 }

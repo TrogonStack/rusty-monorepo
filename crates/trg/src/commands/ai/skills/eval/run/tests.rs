@@ -3166,3 +3166,51 @@ fn a_mocked_codex_case_runs_once_the_run_owns_the_config_home_the_mocks_are_decl
 }
 
 mod telemetry_tests;
+
+#[test]
+fn a_workspace_below_agent_context_says_what_a_harness_could_read_above_it() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("AGENTS.md"), "be terse").unwrap();
+    std::fs::create_dir_all(root.path().join(".claude/skills/house-style")).unwrap();
+    let workspace = root.path().join("artifacts/demo/run-001/workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let warning = ancestor_agent_context_warning(&workspace).expect("agent context above the workspace");
+    assert!(warning.contains("AGENTS.md"), "{warning}");
+    assert!(warning.contains(".claude/skills"), "{warning}");
+    assert!(warning.contains("--out-dir"), "{warning}");
+}
+
+#[test]
+fn agent_context_inside_the_workspace_is_not_above_it() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("run-001/workspace");
+    std::fs::create_dir_all(workspace.join("skills")).unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "staged on purpose").unwrap();
+
+    let warning = ancestor_agent_context_warning(&workspace);
+    assert!(
+        warning
+            .as_deref()
+            .is_none_or(|text| !text.contains(&workspace.display().to_string())),
+        "{warning:?}"
+    );
+}
+
+/// A run reached through a symlink is scanned from where it really is, because that is
+/// where the harness starts and what its upward search climbs from.
+#[cfg(unix)]
+#[test]
+fn agent_context_is_looked_for_above_the_real_workspace_not_the_link() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir_all(real.join("run-001/workspace")).unwrap();
+    std::fs::write(real.join("AGENTS.md"), "above the real path").unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&real, elsewhere.join("link")).unwrap();
+
+    let warning = ancestor_agent_context_warning(&elsewhere.join("link/run-001/workspace"))
+        .expect("the real workspace sits below AGENTS.md");
+    assert!(warning.contains("real/AGENTS.md"), "{warning}");
+}
