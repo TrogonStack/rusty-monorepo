@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.18.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.17.0...trg@v0.18.0) (2026-11-28)
+
+
+### Features
+
+* **trg:** Add a pi runner ([#400](https://github.com/TrogonStack/rusty-monorepo/issues/400)) ([8ce609f](https://github.com/TrogonStack/rusty-monorepo/commit/8ce609f8ec1b2802f87adad80913a5c8cca6a06d))
+* **trg:** Add an opencode runner ([#399](https://github.com/TrogonStack/rusty-monorepo/issues/399)) ([209982c](https://github.com/TrogonStack/rusty-monorepo/commit/209982c18647cd555e9af25d6a05b624e55ad2c2))
+* **trg:** Count a trogonai-agent run's turns from the model calls it reports ([#403](https://github.com/TrogonStack/rusty-monorepo/issues/403)) ([38bfb36](https://github.com/TrogonStack/rusty-monorepo/commit/38bfb3627b4efe6bf2b6b5e41e0c741af099ed13))
+* **trg:** Stage an announced skill where fx and opencode find skills by name ([#402](https://github.com/TrogonStack/rusty-monorepo/issues/402)) ([2d92592](https://github.com/TrogonStack/rusty-monorepo/commit/2d92592b0b2ba44a76b4064e64d4b6e4e37c51b4))
+
 ## [0.17.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.16.1...trg@v0.17.0) (2026-11-28)
 
 
