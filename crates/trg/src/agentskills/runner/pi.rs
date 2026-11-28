@@ -3,7 +3,7 @@ use constants::{INSTALL_HINT, PROGRAM, USAGE_FIELDS};
 use std::ffi::OsString;
 use std::process::Command;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::telemetry::{in_step, AgentInvocation, HarnessTraces};
 use super::usage::{HarnessTokenUsage, UsageFieldNames};
@@ -131,13 +131,13 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_code: Option<i32>) -> EvalRun
     let mut usage = CallUsage::default();
     let mut last = None;
     // pi frames on LF alone; a Unicode line separator inside a string is not a boundary.
-    for message in text
+    let messages = text
         .split('\n')
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|event| pi_assistant_message(&event).cloned())
-    {
+        .filter_map(|event| pi_assistant_message(&event).cloned());
+    for message in messages {
         usage.add(message.get("usage"));
         last = Some(message);
     }
@@ -208,7 +208,7 @@ impl CallUsage {
             (USAGE_FIELDS.cache_write, self.cache_write),
         ] {
             if let Some(value) = value {
-                block.insert(name.to_string(), json!(value));
+                block.insert(name.to_string(), Value::from(value));
             }
         }
         Value::Object(block)
