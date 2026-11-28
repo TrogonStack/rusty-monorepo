@@ -10,6 +10,10 @@ pub const OPENCODE_STEP_FINISH_TYPE: &str = "step_finish";
 /// The event opencode streams when a run fails, such as a provider refusing its key.
 pub const OPENCODE_ERROR_TYPE: &str = "error";
 
+/// The event that closes a message in pi's `--mode json` stream; an assistant one ends a
+/// model call and carries that call's usage.
+pub const PI_MESSAGE_END_TYPE: &str = "message_end";
+
 pub const NORMALIZED_TRANSCRIPT_FILE: &str = "events.json";
 
 /// The directories a run's own skill is ever staged at.

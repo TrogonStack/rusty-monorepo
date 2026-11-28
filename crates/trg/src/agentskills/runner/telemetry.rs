@@ -160,6 +160,7 @@ impl Runner {
             Self::CursorAgent => "cursor",
             Self::TrogonaiAgent => "trogonai",
             Self::OpenCode => "opencode",
+            Self::Pi => "pi",
         }
     }
 }

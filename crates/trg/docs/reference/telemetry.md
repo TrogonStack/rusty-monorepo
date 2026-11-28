@@ -274,7 +274,7 @@ Its children:
 - the harness span below
 
 The harness span is a `CLIENT` span named `invoke_agent {agent}`, where the
-agent is `claude-code`, `codex`, `cursor-agent`, `trogonai-agent`, or `opencode`.
+agent is `claude-code`, `codex`, `cursor-agent`, `trogonai-agent`, `opencode`, or `pi`.
 
 | Attribute | Value |
 | --------- | ----- |
@@ -286,7 +286,7 @@ agent is `claude-code`, `codex`, `cursor-agent`, `trogonai-agent`, or `opencode`
 | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_write.input_tokens` | As reported by the harness |
 | `trg.eval.cost.usd` | As reported by the harness |
 | `trg.eval.harness.duration_ms`, `trg.eval.harness.api_duration_ms` | As reported by the harness |
-| `process.executable.name` | `claude`, `codex`, `cursor-agent`, `trogonai-agent`, or `opencode` |
+| `process.executable.name` | `claude`, `codex`, `cursor-agent`, `trogonai-agent`, `opencode`, or `pi` |
 | `process.pid`, `process.exit.code` | The harness process |
 | `error.type` | `nonzero_exit`, `signaled`, `timeout`, `spawn_failed`, `io`, `invalid_output`, `unsupported_scenario`, `json`, or `harness_error` |
 
@@ -566,7 +566,7 @@ Attributes in the `trg.*` namespace.
 | `trg.eval.case.split` | string | `train`, `test`, or the case's split |
 | `trg.eval.scenario` | string | `with_skill`, `without_skill`, `old_skill` |
 | `trg.eval.model_config` | string | `--model-config` label |
-| `trg.eval.runner.kind` | string | `claude`, `codex`, `cursor-agent`, `trogonai-agent`, `opencode` |
+| `trg.eval.runner.kind` | string | `claude`, `codex`, `cursor-agent`, `trogonai-agent`, `opencode`, `pi` |
 | `trg.eval.runner.version` | string | Harness version from the availability probe |
 | `trg.eval.runner.model` | string | Model the run resolved to |
 | `trg.eval.tool_grant` | string | Tool grant the run executed under |

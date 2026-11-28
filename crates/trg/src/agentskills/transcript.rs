@@ -2,7 +2,7 @@ mod constants;
 use constants::{INTERPRETER_FLAGS, STAGED_SKILL_DIRS};
 pub use constants::{
     NORMALIZED_TRANSCRIPT_FILE, OPENCODE_ERROR_TYPE, OPENCODE_STEP_FINISH_TYPE, OPENCODE_STEP_START_TYPE,
-    TROGONAI_AGENT_RESULT_TYPE,
+    PI_MESSAGE_END_TYPE, TROGONAI_AGENT_RESULT_TYPE,
 };
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
@@ -461,6 +461,7 @@ pub enum TranscriptFormat {
     CodexThreadJsonl,
     TrogonaiAgentStreamJson,
     OpenCodeJson,
+    PiJson,
 }
 
 impl TranscriptFormat {
@@ -470,7 +471,8 @@ impl TranscriptFormat {
             | Self::CursorStreamJson
             | Self::CodexThreadJsonl
             | Self::TrogonaiAgentStreamJson
-            | Self::OpenCodeJson => ToolVisibility::Observed,
+            | Self::OpenCodeJson
+            | Self::PiJson => ToolVisibility::Observed,
         }
     }
 
@@ -489,6 +491,7 @@ impl TranscriptFormat {
             Self::CodexThreadJsonl => normalize_codex_thread_jsonl(runner, stdout, boundary),
             Self::TrogonaiAgentStreamJson => normalize_trogonai_agent_stream_json(runner, stdout, boundary),
             Self::OpenCodeJson => normalize_opencode_json(runner, stdout, boundary),
+            Self::PiJson => normalize_pi_json(runner, stdout, boundary),
         }
     }
 }
@@ -982,6 +985,76 @@ pub fn normalize_opencode_json(
         builder.terminal(false);
     } else if stopped {
         builder.terminal(true);
+    }
+
+    builder.finish(runner, ToolVisibility::Observed)
+}
+
+/// The assistant message a pi `message_end` event closes, when it closes one.
+pub fn pi_assistant_message(event: &serde_json::Value) -> Option<&serde_json::Value> {
+    if event.get("type").and_then(|v| v.as_str()) != Some(PI_MESSAGE_END_TYPE) {
+        return None;
+    }
+    let message = event.get("message")?;
+    (message.get("role").and_then(|v| v.as_str()) == Some("assistant")).then_some(message)
+}
+
+/// Whether a pi assistant message ended on a failure rather than an answer or a tool call.
+pub fn pi_stop_failed(message: &serde_json::Value) -> bool {
+    matches!(
+        message.get("stopReason").and_then(|v| v.as_str()),
+        Some("error" | "aborted")
+    )
+}
+
+/// Normalizes pi's `--mode json` stream.
+///
+/// A tool's arguments arrive as an object when its execution starts. Assistant text is read
+/// from each assistant message once it has ended, which is the authoritative copy of what
+/// the stream's deltas built up. The run ended well when its last assistant message stopped
+/// on its own rather than on an error or an abort. A message that stopped to call a tool
+/// ends nothing: the run still owes the tool's result and the next reply, so a stream cut
+/// off there records no terminal at all.
+pub fn normalize_pi_json(
+    runner: &str,
+    stdout: &RedactedTranscript,
+    boundary: &WorkspaceBoundary,
+) -> NormalizedTranscript {
+    const PATH_KEYS: &[&str] = &["path"];
+    const COMMAND_KEYS: &[&str] = &["command"];
+    const TEXT_KEYS: &[&str] = &["pattern", "query", "name"];
+
+    let mut builder = TranscriptBuilder::new(boundary);
+    let mut last_ok = None;
+
+    for value in ndjson_values(stdout) {
+        if let Some(message) = pi_assistant_message(&value) {
+            let text = message
+                .get("content")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter(|block| block.get("type").and_then(|v| v.as_str()) == Some("text"))
+                .filter_map(|block| block.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            builder.assistant_text(&text);
+            let stopped_for_tool = message.get("stopReason").and_then(|v| v.as_str()) == Some("toolUse");
+            last_ok = (!stopped_for_tool).then(|| !pi_stop_failed(message));
+            continue;
+        }
+        if value.get("type").and_then(|v| v.as_str()) == Some("tool_execution_start") {
+            let Some(tool) = value.get("toolName").and_then(|v| v.as_str()).and_then(ToolName::new) else {
+                continue;
+            };
+            builder.tool_call(
+                tool,
+                ToolArguments::from_object(value.get("args"), PATH_KEYS, COMMAND_KEYS, TEXT_KEYS),
+            );
+        }
+    }
+    if let Some(ok) = last_ok {
+        builder.terminal(ok);
     }
 
     builder.finish(runner, ToolVisibility::Observed)

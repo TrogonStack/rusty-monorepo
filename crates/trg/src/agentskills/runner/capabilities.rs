@@ -277,6 +277,23 @@ impl Runner {
             // prices a provider the operator declared at zero, so it is not a price trg
             // can report.
             (Self::OpenCode, HarnessControl::CostReporting) => ControlSupport::Absent,
+            // `--tools` takes an allowlist of tool names, but trg's grants name tools in
+            // claude-code's vocabulary, so nothing translates one into the other yet.
+            (Self::Pi, HarnessControl::ToolAllowlist) => ControlSupport::Offered(Flag("--tools")),
+            // pi has no cap on the model calls of a run; trg counts the turns itself.
+            (Self::Pi, HarnessControl::TurnCap) => ControlSupport::Absent,
+            (Self::Pi, HarnessControl::SystemPromptAppend) => ControlSupport::Offered(Flag("--append-system-prompt")),
+            // pi reads MCP servers from its own config, which `pi mcp` manages.
+            (Self::Pi, HarnessControl::McpServers) => ControlSupport::Absent,
+            // pi has no permission system: every tool it offers runs without asking.
+            (Self::Pi, HarnessControl::SandboxLevels) => ControlSupport::Absent,
+            (Self::Pi, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--session")),
+            // `--fork` copies a session pi saved; nothing ingests an arbitrary transcript.
+            (Self::Pi, HarnessControl::ConversationSeeding) => ControlSupport::Absent,
+            (Self::Pi, HarnessControl::RunScopedConfigHome) => ControlSupport::Driven(EnvVar("PI_CODING_AGENT_DIR")),
+            // Each message carries a cost priced from pi's model catalogue, which prices a
+            // provider the operator declared at zero, so it is not a price trg can report.
+            (Self::Pi, HarnessControl::CostReporting) => ControlSupport::Absent,
         }
     }
 

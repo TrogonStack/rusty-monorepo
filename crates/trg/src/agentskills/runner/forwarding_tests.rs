@@ -114,6 +114,7 @@ fn codex_cursor_trogonai_agent_and_opencode_take_no_variables() {
         Runner::CursorAgent,
         Runner::TrogonaiAgent,
         Runner::OpenCode,
+        Runner::Pi,
     ] {
         let vars = TelemetryForwarding::On.harness_vars(
             runner,

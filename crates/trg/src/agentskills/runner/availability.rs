@@ -39,6 +39,7 @@ impl RunnerUnavailable {
             Runner::OpenCode => {
                 "install opencode and ensure `opencode` is on PATH (see docs/how-to/troubleshooting.md#runner-setup)"
             }
+            Runner::Pi => "install pi and ensure `pi` is on PATH (see docs/how-to/troubleshooting.md#runner-setup)",
         }
     }
 }
@@ -51,6 +52,7 @@ impl Runner {
             Self::Codex => "codex",
             Self::TrogonaiAgent => "trogonai-agent",
             Self::OpenCode => "opencode",
+            Self::Pi => "pi",
         }
     }
 }

@@ -551,6 +551,45 @@ fn an_opencode_model_call_closed_by_its_tool_keeps_its_end_when_the_clock_runs_o
     assert_eq!(calls[0].failure, None);
 }
 
+/// Shaped after a captured `pi --mode json -p` run: a call that read a file, then the
+/// call that answered.
+const PI: &[u8] = br#"{"type":"session","version":3,"id":"s"}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","model":"gpt-6.2-astra","responseId":"resp_1","stopReason":"toolUse","usage":{"input":3,"output":27,"cacheRead":0,"cacheWrite":1157}}}
+{"type":"tool_execution_start","toolCallId":"call_1","toolName":"read","args":{"path":"notes.txt"}}
+{"type":"tool_execution_end","toolCallId":"call_1","toolName":"read","result":{"content":[]},"isError":false}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","stopReason":"stop","usage":{"input":4,"output":9,"cacheRead":1157,"cacheWrite":30}}}
+"#;
+
+#[test]
+fn every_pi_turn_is_one_model_call_ending_at_its_assistant_message() {
+    let rebuilt = rebuild(Runner::Pi, PI, None, ContentCapture::NoContent);
+    let calls = chats(&rebuilt);
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[0].start, calls[0].end), (at(2), at(3)));
+    assert_eq!((calls[1].start, calls[1].end), (at(6), at(7)));
+    let usages = chat_usages(&rebuilt);
+    assert_eq!(usages[0].cache_write, Some(1157));
+    assert_eq!(usages[1].cache_read, Some(1157));
+    let read = tool(&rebuilt, "read");
+    assert_eq!((read.start, read.end), (at(4), at(5)));
+}
+
+#[test]
+fn a_pi_call_that_stopped_on_an_error_and_a_failed_tool_are_marked() {
+    let stdout = br#"{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"c","toolName":"bash","args":{"command":"false"}}
+{"type":"tool_execution_end","toolCallId":"c","toolName":"bash","result":{},"isError":true}
+{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"401"}}
+"#;
+    let rebuilt = rebuild(Runner::Pi, stdout, None, ContentCapture::NoContent);
+    assert_eq!(tool(&rebuilt, "bash").failure, Some(StepFailure::ToolError));
+    assert_eq!(chats(&rebuilt)[1].failure, Some(StepFailure::TurnFailed));
+}
+
 #[test]
 fn an_opencode_error_event_fails_the_open_model_call() {
     let stdout = br#"{"type":"step_start","part":{}}
@@ -754,6 +793,7 @@ fn a_live_count_agrees_with_the_rebuilt_steps() {
         (Runner::CursorAgent, CURSOR),
         (Runner::TrogonaiAgent, TROGONAI_AGENT),
         (Runner::OpenCode, OPENCODE),
+        (Runner::Pi, PI),
     ] {
         let rebuilt = rebuild(runner, stdout, None, ContentCapture::NoContent);
         let mut live = LiveReconstruction::counting(runner, at(0));

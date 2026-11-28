@@ -892,6 +892,66 @@ fn opencode_tools_text_and_a_stopped_last_step_are_normalized() {
 }
 
 #[test]
+fn pi_tools_and_assistant_text_are_normalized_and_a_stopped_run_succeeded() {
+    let stdout = br#"{"type":"turn_start"}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Reading the skill."}],"stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"c1","toolName":"read","args":{"path":".skill/SKILL.md"}}
+{"type":"tool_execution_start","toolCallId":"c2","toolName":"bash","args":{"command":"cat ~/.pi/agent/auth.json"}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stopReason":"stop"}}
+"#;
+    let workspace = tempfile::tempdir().unwrap();
+    let transcript = TranscriptFormat::PiJson.normalize(
+        "pi",
+        &redact_transcript_bytes(stdout),
+        &WorkspaceBoundary::at(workspace.path()),
+    );
+    assert_eq!(
+        transcript
+            .tool_sequence()
+            .iter()
+            .map(|t| t.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read", "bash"]
+    );
+    assert_eq!(transcript.skill_engagement(), SkillEngagement::StagedPathReference);
+    assert_eq!(
+        transcript
+            .workspace_escapes
+            .iter()
+            .map(|escape| escape.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["~/.pi/agent/auth.json"]
+    );
+    assert_eq!(transcript.events.last(), Some(&TranscriptEvent::Terminal { ok: true }));
+}
+
+#[test]
+fn a_pi_run_whose_last_message_stopped_on_an_error_did_not_succeed() {
+    let stdout = br#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error"}}
+"#;
+    let transcript =
+        TranscriptFormat::PiJson.normalize("pi", &redact_transcript_bytes(stdout), &WorkspaceBoundary::unknown());
+    assert_eq!(transcript.events.last(), Some(&TranscriptEvent::Terminal { ok: false }));
+}
+
+#[test]
+fn a_pi_stream_cut_off_after_a_tool_call_message_records_no_terminal() {
+    let stdout = br#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Reading."}],"stopReason":"toolUse"}}
+{"type":"tool_execution_start","toolCallId":"c1","toolName":"read","args":{"path":"notes.txt"}}
+"#;
+    let transcript =
+        TranscriptFormat::PiJson.normalize("pi", &redact_transcript_bytes(stdout), &WorkspaceBoundary::unknown());
+    assert!(
+        !transcript
+            .events
+            .iter()
+            .any(|event| matches!(event, TranscriptEvent::Terminal { .. })),
+        "{:?}",
+        transcript.events
+    );
+}
+
+#[test]
 fn an_opencode_error_event_is_a_terminal_that_did_not_succeed() {
     let stdout = br#"{"type":"step_start","part":{}}
 {"type":"error","error":{"type":"provider.auth","message":"HTTP 401"}}
