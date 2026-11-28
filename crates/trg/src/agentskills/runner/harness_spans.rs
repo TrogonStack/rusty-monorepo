@@ -369,6 +369,12 @@ impl LiveReconstruction {
         if self.runner == Runner::CursorAgent && self.builder.summary.response_model.is_none() {
             self.builder.summary.response_model = self.cursor_model.take();
         }
+        // An opencode step whose tool already started had finished its model call there;
+        // only the `step_finish` carrying its usage is missing. The stream ending now does
+        // not stretch that call over the tool's run or fail it.
+        if self.runner == Runner::OpenCode && self.opencode_tool_seen {
+            self.builder.close_turn(None);
+        }
         self.builder.finish(ended)
     }
 }

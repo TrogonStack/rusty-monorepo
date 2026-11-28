@@ -525,6 +525,27 @@ fn an_opencode_tool_spans_the_times_opencode_reported_and_an_error_is_a_tool_err
 }
 
 #[test]
+fn an_opencode_model_call_closed_by_its_tool_keeps_its_end_when_the_clock_runs_out() {
+    let stdout = br#"{"type":"step_start","part":{}}
+{"type":"tool_use","part":{"id":"call_1","tool":"read","state":{"status":"completed","output":"hello","time":{"start":1700000001500,"end":1700000002000}}}}
+"#;
+    let rebuilt = rebuild_ending(
+        Runner::OpenCode,
+        stdout,
+        None,
+        ContentCapture::NoContent,
+        StreamEnd::TimedOut(at(60)),
+    );
+    let calls = chats(&rebuilt);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].end,
+        SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_001_500)
+    );
+    assert_eq!(calls[0].failure, None);
+}
+
+#[test]
 fn an_opencode_error_event_fails_the_open_model_call() {
     let stdout = br#"{"type":"step_start","part":{}}
 {"type":"error","error":{"type":"provider.auth","message":"HTTP 401"}}
