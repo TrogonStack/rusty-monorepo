@@ -3,7 +3,7 @@ use constants::{INSTALL_HINT, PROGRAM, USAGE_FIELDS};
 use std::ffi::OsString;
 use std::process::Command;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::capabilities::HarnessControl;
 use super::telemetry::{in_step, AgentInvocation, HarnessTraces};
@@ -147,12 +147,12 @@ fn parse_outcome(stdout: &[u8], wall_ms: u64, exit_code: Option<i32>) -> EvalRun
     let mut usage = StepUsage::default();
     let mut error = None;
     let mut saw_step = false;
-    for event in text
+    let events = text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-    {
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok());
+    for event in events {
         match event.get("type").and_then(Value::as_str) {
             Some(OPENCODE_STEP_START_TYPE) => {
                 saw_step = true;
@@ -233,7 +233,7 @@ impl StepUsage {
             (USAGE_FIELDS.cache_write, self.cache_write),
         ] {
             if let Some(value) = value {
-                block.insert(name.to_string(), json!(value));
+                block.insert(name.to_string(), Value::from(value));
             }
         }
         Value::Object(block)
