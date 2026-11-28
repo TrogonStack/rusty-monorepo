@@ -159,6 +159,7 @@ impl Runner {
             Self::Codex => gen_ai_provider_name::OPENAI,
             Self::CursorAgent => "cursor",
             Self::TrogonaiAgent => "trogonai",
+            Self::OpenCode => "opencode",
         }
     }
 }

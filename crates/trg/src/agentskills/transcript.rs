@@ -1,6 +1,9 @@
 mod constants;
 use constants::{INTERPRETER_FLAGS, STAGED_SKILL_DIRS};
-pub use constants::{NORMALIZED_TRANSCRIPT_FILE, TROGONAI_AGENT_RESULT_TYPE};
+pub use constants::{
+    NORMALIZED_TRANSCRIPT_FILE, OPENCODE_ERROR_TYPE, OPENCODE_STEP_FINISH_TYPE, OPENCODE_STEP_START_TYPE,
+    TROGONAI_AGENT_RESULT_TYPE,
+};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
@@ -457,6 +460,7 @@ pub enum TranscriptFormat {
     CursorStreamJson,
     CodexThreadJsonl,
     TrogonaiAgentStreamJson,
+    OpenCodeJson,
 }
 
 impl TranscriptFormat {
@@ -465,7 +469,8 @@ impl TranscriptFormat {
             Self::AnthropicStreamJson
             | Self::CursorStreamJson
             | Self::CodexThreadJsonl
-            | Self::TrogonaiAgentStreamJson => ToolVisibility::Observed,
+            | Self::TrogonaiAgentStreamJson
+            | Self::OpenCodeJson => ToolVisibility::Observed,
         }
     }
 
@@ -483,6 +488,7 @@ impl TranscriptFormat {
             Self::CursorStreamJson => normalize_cursor_stream_json(runner, stdout, boundary),
             Self::CodexThreadJsonl => normalize_codex_thread_jsonl(runner, stdout, boundary),
             Self::TrogonaiAgentStreamJson => normalize_trogonai_agent_stream_json(runner, stdout, boundary),
+            Self::OpenCodeJson => normalize_opencode_json(runner, stdout, boundary),
         }
     }
 }
@@ -921,6 +927,62 @@ pub fn normalize_trogonai_agent_stream_json(
         }
     }
     builder.assistant_text(&text);
+
+    builder.finish(runner, ToolVisibility::Observed)
+}
+
+/// Normalizes opencode's `--format json` stream.
+///
+/// opencode streams a tool once, when it has finished, with its arguments as an object under
+/// `part.state.input`. Text arrives whole, one `text` event per message part. The run has no
+/// closing summary: it ended well when its last step stopped on its own and no `error` event
+/// came.
+pub fn normalize_opencode_json(
+    runner: &str,
+    stdout: &RedactedTranscript,
+    boundary: &WorkspaceBoundary,
+) -> NormalizedTranscript {
+    const PATH_KEYS: &[&str] = &["path", "filePath", "file_path"];
+    const COMMAND_KEYS: &[&str] = &["command"];
+    // `name` is the skill opencode's own `skill` tool was asked to load.
+    const TEXT_KEYS: &[&str] = &["pattern", "query", "name"];
+
+    let mut builder = TranscriptBuilder::new(boundary);
+    let mut failed = false;
+    let mut stopped = false;
+
+    for value in ndjson_values(stdout) {
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("text") => {
+                if let Some(text) = value.pointer("/part/text").and_then(|v| v.as_str()) {
+                    builder.assistant_text(text);
+                }
+            }
+            Some("tool_use") => {
+                let Some(tool) = value
+                    .pointer("/part/tool")
+                    .and_then(|v| v.as_str())
+                    .and_then(ToolName::new)
+                else {
+                    continue;
+                };
+                builder.tool_call(
+                    tool,
+                    ToolArguments::from_object(value.pointer("/part/state/input"), PATH_KEYS, COMMAND_KEYS, TEXT_KEYS),
+                );
+            }
+            Some(OPENCODE_STEP_FINISH_TYPE) => {
+                stopped = value.pointer("/part/reason").and_then(|v| v.as_str()) == Some("stop");
+            }
+            Some(OPENCODE_ERROR_TYPE) => failed = true,
+            _ => {}
+        }
+    }
+    if failed {
+        builder.terminal(false);
+    } else if stopped {
+        builder.terminal(true);
+    }
 
     builder.finish(runner, ToolVisibility::Observed)
 }

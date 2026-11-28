@@ -101,7 +101,7 @@ When `--runner` is provided, the CLI invokes the agent for each run:
 | ---- | ------------ |
 | Prepare workspace | Stage fixtures; stage skill to `.skill/`, `.old-skill/`, or `skills/<skill-name>/` for an unannounced case, via copy (default) or symlink (`--skill-staging`) |
 | Build prompt | Task + fixture paths + frontmatter summary + output constraints (`prompt` contract v1) |
-| Invoke runner | Spawn `cursor-agent`, `claude`, `codex`, or `trogonai-agent` with stream-json output |
+| Invoke runner | Spawn `cursor-agent`, `claude`, `codex`, `trogonai-agent`, or `opencode` with JSON event output |
 | Capture output | Write `transcript.jsonl`, `timing.json`; update run status and metrics, including the turn and per-tool counts read off the transcript |
 | Integrity check | Hash skill files before/after; record tampering in `skill_integrity` |
 
@@ -277,7 +277,7 @@ index, CLI workflow, and several policy defaults.
 | Docs layout aliases | Primary tree under `iteration-N/` | Canonical `runs/run-NNN/` plus symlink mirror and `alias-index.json` |
 | Skill integrity | Not in spec | SHA-256 before/after tamper detection |
 | CI metadata | Not in spec | Auto-captured from GitHub Actions env vars |
-| Runners | Spec-agnostic | Concrete adapters for cursor-agent, claude, codex, trogonai-agent |
+| Runners | Spec-agnostic | Concrete adapters for cursor-agent, claude, codex, trogonai-agent, opencode |
 | Transcript format | Spec-defined | Raw runner stream-json (runner-specific) |
 | Eval ID type | String | String or non-negative integer |
 | Assertion IDs | Spec-defined | `<eval-case-id>:g<index>` pattern |

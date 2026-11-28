@@ -62,7 +62,7 @@ impl ModelFamily {
         match runner {
             Runner::ClaudeCode => Some(Self::Claude),
             Runner::Codex => Some(Self::Gpt),
-            Runner::CursorAgent | Runner::TrogonaiAgent => None,
+            Runner::CursorAgent | Runner::TrogonaiAgent | Runner::OpenCode => None,
         }
     }
 

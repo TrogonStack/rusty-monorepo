@@ -29,6 +29,8 @@ pub mod group;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 mod harness_spans;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
+pub mod opencode;
+#[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod stream;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub(crate) mod telemetry;
@@ -88,6 +90,8 @@ pub enum Runner {
     ClaudeCode,
     Codex,
     TrogonaiAgent,
+    #[value(name = "opencode")]
+    OpenCode,
 }
 
 impl Runner {
@@ -97,6 +101,7 @@ impl Runner {
             Self::ClaudeCode => claude_code::run(request),
             Self::Codex => codex::run(request),
             Self::TrogonaiAgent => trogonai_agent::run(request),
+            Self::OpenCode => opencode::run(request),
         };
         // Run unconditionally, regardless of which backend ran or whether it succeeded,
         // failed, or timed out: the harness has exited either way, and the `mcp-launch`
@@ -129,7 +134,7 @@ impl Runner {
     /// say so rather than repeating the request back as if it were the outcome.
     pub fn effective_permission_grant(self, requested: PermissionGrant) -> PermissionGrant {
         match self {
-            Self::ClaudeCode | Self::Codex | Self::TrogonaiAgent => requested,
+            Self::ClaudeCode | Self::Codex | Self::TrogonaiAgent | Self::OpenCode => requested,
             Self::CursorAgent => PermissionGrant::Unrestricted,
         }
     }
@@ -154,6 +159,7 @@ impl Runner {
             Self::ClaudeCode => "claude",
             Self::Codex => "codex",
             Self::TrogonaiAgent => "trogonai-agent",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -165,7 +171,7 @@ impl Runner {
     pub fn pricing(self) -> HarnessPricing {
         match self {
             Self::ClaudeCode => HarnessPricing::Publishes,
-            Self::CursorAgent | Self::Codex | Self::TrogonaiAgent => HarnessPricing::Silent {
+            Self::CursorAgent | Self::Codex | Self::TrogonaiAgent | Self::OpenCode => HarnessPricing::Silent {
                 harness: self.display_name().to_string(),
             },
         }
@@ -177,6 +183,7 @@ impl Runner {
             Self::ClaudeCode => TranscriptFormat::AnthropicStreamJson,
             Self::Codex => TranscriptFormat::CodexThreadJsonl,
             Self::TrogonaiAgent => TranscriptFormat::TrogonaiAgentStreamJson,
+            Self::OpenCode => TranscriptFormat::OpenCodeJson,
         }
     }
 }

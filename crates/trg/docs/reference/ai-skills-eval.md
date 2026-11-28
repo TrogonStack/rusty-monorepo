@@ -75,6 +75,7 @@ trg ai skills eval run --skill-dir <DIR> --out-dir <DIR> [OPTIONS]
 | `claude-code` | `claude` |
 | `codex` | `codex` |
 | `trogonai-agent` | `trogonai-agent` |
+| `opencode` | `opencode` |
 
 ### Exit codes
 
@@ -1737,8 +1738,8 @@ to its tool. `tools` and `before`/`after` are mutually exclusive, and
 
 `tool_used`, `tool_order`, and `skill_used` read the normalized transcript, and
 so does `no_fake_tool_calls` once it finds markup.
-`claude-code`, `codex`, `cursor-agent`, and `trogonai-agent` all expose their tool calls, so
-all four answer these graders. When a runner emits no readable stream at all, the
+`claude-code`, `codex`, `cursor-agent`, `trogonai-agent`, and `opencode` all expose their tool
+calls, so all five answer these graders. When a runner emits no readable stream at all, the
 result is recorded as **unsupported**: neither passed nor failed, and excluded
 from `pass_rate`, which keeps an unobservable harness from reading as a
 regression.
@@ -2244,7 +2245,7 @@ as a clean pass.
 ## Artifact: `timing.json`
 
 **Status: available.** Written by agent runners (`cursor-agent`, `claude-code`,
-`codex`, `trogonai-agent`) alongside each run when `--runner` is set.
+`codex`, `trogonai-agent`, `opencode`) alongside each run when `--runner` is set.
 
 Location: `runs/<run-id>/timing.json` (sibling of `workspace/`).
 
@@ -2298,7 +2299,7 @@ the run ends:
 | `turns` | integer | Model turns the run took |
 | `tool_calls` | integer | Tool calls the run made, across every tool |
 | `repeated_tool_calls` | integer | Calls with the same tool and arguments as an earlier call in the same run. A call whose arguments the harness did not record is never counted as a repeat |
-| `peak_turn_input_tokens` | integer | The most input tokens any single turn sent, cache reads and writes included. Absent for `codex`, whose usage covers every model call in a turn at once, for `trogonai-agent`, whose usage covers the whole run, and for `cursor-agent`, which reports none |
+| `peak_turn_input_tokens` | integer | The most input tokens any single turn sent, cache reads and writes included. Absent for `codex`, whose usage covers every model call in a turn at once, for `trogonai-agent`, whose usage covers the whole run, and for `cursor-agent`, which reports none. `opencode` reports usage per model call |
 | `tools[]` | array | One entry per tool the run called, ordered by tool name: `tool`, `calls`, `repeated_calls`, and `largest_result_bytes`, the size of the largest result that tool handed back. `largest_result_bytes` is absent when no call to the tool reported a result |
 
 Result sizes are measured from the transcript as persisted, after secrets are
@@ -2973,7 +2974,7 @@ read: it asks for the case to be steered and then steers it nowhere.
 
 Appending to the system prompt is a per-harness mechanism, and only `claude-code`
 offers one. See `system prompt append` in the harness support table above. On
-`codex`, `cursor-agent`, and `trogonai-agent` the case is skipped, recorded with `status: skipped`
+`codex`, `cursor-agent`, `trogonai-agent`, and `opencode` the case is skipped, recorded with `status: skipped`
 and `failure_kind: unsupported`, rather than run without the appendix: a run
 missing the instruction it was supposed to carry is not a weaker answer to the
 case's question, it is an answer to a different one.
@@ -2995,6 +2996,7 @@ the harness config home is redirected into it:
 | `codex` | `CODEX_HOME` |
 | `cursor-agent` | `HOME` only; the CLI has no config home variable |
 | `trogonai-agent` | `TROGONAI_AGENT_HOME` |
+| `opencode` | `OPENCODE_CONFIG_DIR` |
 
 Authentication has to survive the redirect, so the auth files from the host
 config home are carried into the run's config home, and nothing beside them is.
@@ -3020,6 +3022,14 @@ under `scrubbed` and `isolated` a variable named there is admitted alongside the
 fixed credential list; nothing else in the environment is. A key saved per
 provider with `trogonai-agent setup <provider>` is not carried, so an isolated
 `trogonai-agent` run is given its key through the environment.
+
+`opencode` is reduced the same way. Its `opencode.json` declares providers beside
+permissions, agents, MCP servers, and plugins, so only `provider` and `model` are
+written into the run's config home. A provider's options read a key through
+`{env:NAME}`, so every variable named that way in the host's `opencode.json` is
+admitted under `scrubbed` and `isolated`. Keys saved with `opencode auth` live in
+opencode's data directory, not its config home, and are not carried, so an
+isolated `opencode` run is given its key through the environment.
 
 That is not always sufficient. A harness may derive the identity of its
 credential store from the config home path, in which case redirecting the path
@@ -3061,13 +3071,17 @@ score never depends on a setting nobody wrote down.
 
 trg translates the grant into each harness's own flag:
 
-| Grant | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` |
-| ----- | ------------- | ------- | -------------- | ---- |
-| `workspace_write` | `--permission-mode acceptEdits` | `-s workspace-write` | `--force` | `--permission-mode auto` |
-| `unrestricted` | `--permission-mode bypassPermissions` | `-s danger-full-access` | `--force` | `--permission-mode yolo` |
+| Grant | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` | `opencode` |
+| ----- | ------------- | ------- | -------------- | ---- | -------- |
+| `workspace_write` | `--permission-mode acceptEdits` | `-s workspace-write` | `--force` | `--permission-mode auto` | no flag |
+| `unrestricted` | `--permission-mode bypassPermissions` | `-s danger-full-access` | `--force` | `--permission-mode yolo` | `--auto` |
 
 `cursor-agent` has only one documented non-interactive flag, so both grants
 translate to `--force`; it draws no boundary between them for trg to translate.
+
+`opencode` with no flag allows edits and commands inside its project and refuses
+what it would have asked about, since a headless run has nobody to ask; `--auto`
+approves every request no rule denies.
 
 `trogonai-agent` under `auto` writes inside its workspace without asking and asks about
 anything it cannot resolve as safe. With no terminal to ask, `trogonai-agent ask`
@@ -3159,17 +3173,17 @@ rather than replacing it, so anything the config home already declared stays
 live. Exclusivity therefore comes from owning the config home, which is why
 that cell is only honoured under `--environment isolated`.
 
-| Control | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` |
-| ------- | ------------- | ------- | -------------- | ---- |
-| tool allowlist | `--allowedTools` | no | no | `--allow` (harness only) |
-| turn cap | `--max-turns` | no | no | `TROGONAI_AGENT_MAX_AGENT_STEPS` (harness only) |
-| system prompt append | `--append-system-prompt` | no | no | no |
-| mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | `config.toml` in `$CODEX_HOME` | no | no |
-| sandbox levels | `--permission-mode` | `-s` | `--force` | `--permission-mode` |
-| conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) | `--resume` (harness only) |
-| conversation seeding | no | no | no | no |
-| run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no | `TROGONAI_AGENT_HOME` |
-| cost reporting | reported | no | no | no |
+| Control | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` | `opencode` |
+| ------- | ------------- | ------- | -------------- | ---- | -------- |
+| tool allowlist | `--allowedTools` | no | no | `--allow` (harness only) | no |
+| turn cap | `--max-turns` | no | no | `TROGONAI_AGENT_MAX_AGENT_STEPS` (harness only) | no |
+| system prompt append | `--append-system-prompt` | no | no | no | no |
+| mcp servers | `--mcp-config` (guarded by `--strict-mcp-config`) | `config.toml` in `$CODEX_HOME` | no | no | no |
+| sandbox levels | `--permission-mode` | `-s` | `--force` | `--permission-mode` | `--auto` |
+| conversation resume | `--resume` (harness only) | `resume` subcommand (harness only) | `--resume` (harness only) | `--resume` (harness only) | `--session` (harness only) |
+| conversation seeding | no | no | no | no | no |
+| run-scoped config home | `CLAUDE_CONFIG_DIR` | `CODEX_HOME` | no | `TROGONAI_AGENT_HOME` | `OPENCODE_CONFIG_DIR` |
+| cost reporting | reported | no | no | no | no |
 
 `--max-turns` and trogonai-agent's `--permission-mode` are the driven flags a harness
 leaves out of its own `--help`: each harness accepts its flag and rejects an
@@ -3332,7 +3346,7 @@ by the ceiling, since a cache hit costs nothing and reusing it is exactly what
 a budget is for.
 
 Only the `claude-code` runner publishes what a run cost today. A ceiling over
-`codex`, `cursor-agent`, or `trogonai-agent` would sit at zero spend for the life of the pass,
+`codex`, `cursor-agent`, `trogonai-agent`, or `opencode` would sit at zero spend for the life of the pass,
 admit every run, and leave the operator believing a limit was holding while the
 bill grew, so `--max-cost-usd` on either is refused at the command line before
 a report exists to be read as bounded. Those passes still run without a
@@ -3359,10 +3373,10 @@ is stopped and recorded with `status: budget_exhausted` and a `failure_kind` of
 `tool_call_cap` or `turn_cap`, naming the cap it crossed. Landing exactly on a
 cap is not crossing it.
 
-| Cap | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` |
-| --- | ------------- | ------- | -------------- | ---- |
-| tool calls | stopped by trg | stopped by trg | stopped by trg | stopped by trg |
-| turns | `--max-turns` | stopped by trg | stopped by trg | stopped by trg |
+| Cap | `claude-code` | `codex` | `cursor-agent` | `trogonai-agent` | `opencode` |
+| --- | ------------- | ------- | -------------- | ---- | -------- |
+| tool calls | stopped by trg | stopped by trg | stopped by trg | stopped by trg | stopped by trg |
+| turns | `--max-turns` | stopped by trg | stopped by trg | stopped by trg | stopped by trg |
 
 Where the harness enforces a cap itself, trg passes it through and leaves the
 run alone. Everywhere else trg counts the calls and turns as the harness streams
@@ -3505,7 +3519,7 @@ prose; the schema is what `eval verify --mode strict` actually holds a bundle's
 | `staged_skill.name.kind` | enum | `known` when the run recorded the staged skill's name, `unrecorded` for a transcript written before trg recorded it; omitted when `unrecorded` |
 | `staged_skill.name.name` | string | The name the staged skill answers to, present with `known` |
 
-Each of the four supported runners is normalized from event shapes verified
+Each of the five supported runners is normalized from event shapes verified
 against that runner's own output:
 
 | Runner | Events read | Tool vocabulary |
@@ -3514,6 +3528,7 @@ against that runner's own output:
 | `cursor-agent` | `assistant` blocks, `tool_call` (`started`), `result` | the tool-call member name, such as `read`, `glob`, `edit` |
 | `codex` | `item.completed`/`agent_message`, `item.started`/`command_execution`, `item.started`/`file_change`, `turn.completed` | `command_execution` and `file_change` |
 | `trogonai-agent` | `text_chunk` (`assistant` origin), `tool_started`, `result` | its own tool names, such as `read_file` and `run_command` |
+| `opencode` | `text`, `tool_use`, `step_finish`, `error` | its own tool names, such as `read`, `shell`, and `patch` |
 
 `tool_visibility` is the honest part. A runner whose stream trg cannot read at
 all reports `unavailable`, and a grader that needs tool calls then returns

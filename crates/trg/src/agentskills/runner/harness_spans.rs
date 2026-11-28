@@ -19,7 +19,9 @@ use serde_json::Value;
 
 use super::stream::{StampedLine, StdoutTimeline};
 use super::Runner;
-use crate::agentskills::transcript::TROGONAI_AGENT_RESULT_TYPE;
+use crate::agentskills::transcript::{
+    OPENCODE_ERROR_TYPE, OPENCODE_STEP_FINISH_TYPE, OPENCODE_STEP_START_TYPE, TROGONAI_AGENT_RESULT_TYPE,
+};
 use crate::agentskills::transcript_metrics::{ObservedToolCall, TranscriptMetrics, TurnCount};
 use crate::telemetry::semconv::generated::attributes::{
     gen_ai_operation_name, GEN_AI_OPERATION_NAME, GEN_AI_PROVIDER_NAME, GEN_AI_REQUEST_MODEL, GEN_AI_RESPONSE_ID,
@@ -256,13 +258,13 @@ pub fn reconstruct(
 }
 
 /// Turn and tool counts for a run, read from its captured stdout. A turn's input
-/// counts only for a harness that reports usage per model call: codex reports one total
-/// per turn spanning every model call in it, trogonai-agent one total for the whole run, and
-/// cursor-agent none at all.
+/// counts only for a harness that reports usage per model call, as claude-code and
+/// opencode do: codex reports one total per turn spanning every model call in it, trogonai-agent one
+/// total for the whole run, and cursor-agent none at all.
 pub fn measure(runner: Runner, stdout: &[u8]) -> TranscriptMetrics {
     let reconstruction = reconstruct_for_measuring(runner, stdout);
     let peak_turn_input_tokens = match runner {
-        Runner::ClaudeCode => reconstruction
+        Runner::ClaudeCode | Runner::OpenCode => reconstruction
             .steps
             .iter()
             .filter_map(|step| match &step.kind {
@@ -316,6 +318,8 @@ pub struct LiveReconstruction {
     content: ToolContent,
     codex_turn: Option<CodexTurn>,
     cursor_model: Option<String>,
+    /// Whether the open opencode step has run a tool yet, which is where its model call ended.
+    opencode_tool_seen: bool,
 }
 
 impl LiveReconstruction {
@@ -326,6 +330,7 @@ impl LiveReconstruction {
             content,
             codex_turn: None,
             cursor_model: None,
+            opencode_tool_seen: false,
         }
     }
 
@@ -346,6 +351,7 @@ impl LiveReconstruction {
             Runner::Codex => codex(&mut self.builder, &mut self.codex_turn, event, at, self.content),
             Runner::CursorAgent => cursor_agent(&mut self.builder, &mut self.cursor_model, event, at, self.content),
             Runner::TrogonaiAgent => trogonai_agent(&mut self.builder, event, at, self.content),
+            Runner::OpenCode => opencode(&mut self.builder, &mut self.opencode_tool_seen, event, at, self.content),
         }
     }
 
@@ -362,6 +368,12 @@ impl LiveReconstruction {
     fn finish(mut self, ended: StreamEnd) -> Reconstruction {
         if self.runner == Runner::CursorAgent && self.builder.summary.response_model.is_none() {
             self.builder.summary.response_model = self.cursor_model.take();
+        }
+        // An opencode step whose tool already started had finished its model call there;
+        // only the `step_finish` carrying its usage is missing. The stream ending now does
+        // not stretch that call over the tool's run or fail it.
+        if self.runner == Runner::OpenCode && self.opencode_tool_seen {
+            self.builder.close_turn(None);
         }
         self.builder.finish(ended)
     }
@@ -876,6 +888,89 @@ fn trogonai_agent(builder: &mut StepBuilder, event: &Value, at: SystemTime, cont
                 builder.extend_turn(at);
             }
         }
+    }
+    builder.arrived(at);
+}
+
+/// opencode brackets every model call with `step_start` and `step_finish`, the second
+/// carrying that call's tokens, so each step is one model call with a usage of its own. A
+/// step also runs the tools the model chose before it finishes, so the call ends where the
+/// first of them starts. A tool arrives once, when it has finished, with its own start and
+/// end in milliseconds.
+fn opencode(builder: &mut StepBuilder, tool_seen: &mut bool, event: &Value, at: SystemTime, content: ToolContent) {
+    match event_type(event) {
+        Some(OPENCODE_STEP_START_TYPE) => {
+            builder.open_turn(None, at);
+            *tool_seen = false;
+        }
+        Some("text") if !*tool_seen => builder.extend_turn(at),
+        Some("tool_use") => {
+            let part = event.get("part");
+            let state = part.and_then(|part| part.get("state"));
+            let time = |key: &str| {
+                state
+                    .and_then(|state| state.get("time"))
+                    .and_then(|time| time.get(key))
+                    .and_then(Value::as_u64)
+                    .map(|ms| SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms))
+                    .unwrap_or(at)
+            };
+            let (start, end) = (time("start"), time("end"));
+            if !*tool_seen {
+                if let Some(turn) = &mut builder.turn {
+                    turn.end = start.max(turn.start);
+                }
+                *tool_seen = true;
+            }
+            let Some(call_id) = part.and_then(|part| string_at(part, "id")) else {
+                builder.arrived(at);
+                return;
+            };
+            let name = part
+                .and_then(|part| string_at(part, "tool"))
+                .unwrap_or_else(|| "unknown".to_string());
+            let failure = (state.and_then(|state| state.get("status")).and_then(Value::as_str) == Some("error"))
+                .then_some(StepFailure::ToolError);
+            builder.open_tool(
+                call_id.clone(),
+                name.clone(),
+                content.render(state.and_then(|s| s.get("input"))),
+                start,
+            );
+            builder.close_tool(
+                &call_id,
+                || name,
+                // A failed tool carries its message in `error` and no `output`.
+                content.render(state.and_then(|s| s.get("output").or_else(|| s.get("error")))),
+                failure,
+                end,
+            );
+        }
+        Some(OPENCODE_STEP_FINISH_TYPE) => {
+            if !*tool_seen {
+                builder.extend_turn(at);
+            }
+            let tokens = event.pointer("/part/tokens");
+            let count = |pointer: &str| {
+                tokens
+                    .and_then(|tokens| tokens.pointer(pointer))
+                    .and_then(Value::as_u64)
+            };
+            if let Some(turn) = &mut builder.turn {
+                turn.usage = TurnUsage {
+                    input: count("/input"),
+                    output: match (count("/output"), count("/reasoning")) {
+                        (None, None) => None,
+                        (output, reasoning) => Some(output.unwrap_or(0).saturating_add(reasoning.unwrap_or(0))),
+                    },
+                    cache_read: count("/cache/read"),
+                    cache_write: count("/cache/write"),
+                };
+            }
+            builder.close_turn(None);
+        }
+        Some(OPENCODE_ERROR_TYPE) => builder.end_turn(at, Some(StepFailure::TurnFailed)),
+        _ => {}
     }
     builder.arrived(at);
 }

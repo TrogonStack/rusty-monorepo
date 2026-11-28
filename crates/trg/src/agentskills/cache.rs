@@ -314,6 +314,7 @@ fn runner_program(runner: Runner) -> &'static str {
         Runner::ClaudeCode => "claude",
         Runner::CursorAgent => "cursor-agent",
         Runner::TrogonaiAgent => "trogonai-agent",
+        Runner::OpenCode => "opencode",
     }
 }
 

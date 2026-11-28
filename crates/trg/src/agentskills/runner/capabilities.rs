@@ -253,6 +253,30 @@ impl Runner {
             // The result carries token counts only; what a provider charged stays in trogonai-agent's
             // own usage ledger.
             (Self::TrogonaiAgent, HarnessControl::CostReporting) => ControlSupport::Absent,
+            // opencode narrows tools through `permission` and `tools` in its config, and
+            // nothing on the `run` command line names one.
+            (Self::OpenCode, HarnessControl::ToolAllowlist) => ControlSupport::Absent,
+            // An agent's `steps` in the config caps its tool-calling iterations; `run` takes
+            // no flag for it, so trg counts the turns itself.
+            (Self::OpenCode, HarnessControl::TurnCap) => ControlSupport::Absent,
+            // An agent's `prompt` replaces the system prompt rather than appending to it.
+            (Self::OpenCode, HarnessControl::SystemPromptAppend) => ControlSupport::Absent,
+            // opencode reads MCP servers from its config files only.
+            (Self::OpenCode, HarnessControl::McpServers) => ControlSupport::Absent,
+            // `--auto` approves every request no rule denies; without it opencode refuses
+            // what it would have asked about, so only the unrestricted grant passes a flag.
+            (Self::OpenCode, HarnessControl::SandboxLevels) => ControlSupport::Driven(Flag("--auto")),
+            (Self::OpenCode, HarnessControl::ConversationResume) => ControlSupport::Offered(Flag("--session")),
+            // `--session` and `--fork` reopen sessions opencode saved; nothing ingests an
+            // arbitrary transcript.
+            (Self::OpenCode, HarnessControl::ConversationSeeding) => ControlSupport::Absent,
+            (Self::OpenCode, HarnessControl::RunScopedConfigHome) => {
+                ControlSupport::Driven(EnvVar("OPENCODE_CONFIG_DIR"))
+            }
+            // Each step carries a `cost`, priced from opencode's model catalogue, which
+            // prices a provider the operator declared at zero, so it is not a price trg
+            // can report.
+            (Self::OpenCode, HarnessControl::CostReporting) => ControlSupport::Absent,
         }
     }
 

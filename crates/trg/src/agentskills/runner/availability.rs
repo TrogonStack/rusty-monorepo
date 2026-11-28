@@ -36,6 +36,9 @@ impl RunnerUnavailable {
             Runner::TrogonaiAgent => {
                 "install `trogonai-agent` and ensure it is on PATH (see docs/how-to/troubleshooting.md#runner-setup)"
             }
+            Runner::OpenCode => {
+                "install opencode and ensure `opencode` is on PATH (see docs/how-to/troubleshooting.md#runner-setup)"
+            }
         }
     }
 }
@@ -47,6 +50,7 @@ impl Runner {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
             Self::TrogonaiAgent => "trogonai-agent",
+            Self::OpenCode => "opencode",
         }
     }
 }

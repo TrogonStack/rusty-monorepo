@@ -179,6 +179,48 @@ impl HarnessTokenUsage {
     }
 }
 
+/// One count added up across the calls of a harness that reports usage per call rather
+/// than once per run.
+///
+/// A call that sends a value no reader can add up leaves the run's sum short by whatever
+/// that value meant, so the sum is not published. The value itself is kept instead, so
+/// the block handed to [`HarnessTokenUsage::read`] carries it and the run reports it as
+/// unreadable rather than as a smaller total that looks complete.
+#[derive(Debug, Default)]
+pub enum SummedCount {
+    /// No call has named this count yet.
+    #[default]
+    Absent,
+    Sum(u64),
+    /// The first value some call sent that is not a count.
+    Unreadable(Value),
+}
+
+impl SummedCount {
+    /// Fold in one call's value for this count; `None` is a call that did not name it.
+    pub fn add(&mut self, value: Option<&Value>) {
+        let Some(value) = value else { return };
+        let total = match self {
+            Self::Unreadable(_) => return,
+            Self::Absent => 0,
+            Self::Sum(total) => *total,
+        };
+        *self = match value.as_u64() {
+            Some(count) => Self::Sum(total.saturating_add(count)),
+            None => Self::Unreadable(value.clone()),
+        };
+    }
+
+    /// The value to put in the run's usage block, or `None` to leave the field out.
+    pub fn block_value(&self) -> Option<Value> {
+        match self {
+            Self::Absent => None,
+            Self::Sum(total) => Some(Value::from(*total)),
+            Self::Unreadable(value) => Some(value.clone()),
+        }
+    }
+}
+
 fn read_count(
     block: Option<&Value>,
     harness: Runner,
