@@ -9,7 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 mod constants;
 use constants::VCS_DIRS_WITHHELD_FROM_STAGING;
-pub use constants::{FAILURE_KIND_RUNNER, FAILURE_KIND_UNSUPPORTED, RUN_STATUS_BUDGET_EXHAUSTED};
+pub use constants::{
+    FAILURE_KIND_RUNNER, FAILURE_KIND_UNSUPPORTED, NATIVE_SKILL_ROOT_AGENTS, RUN_STATUS_BUDGET_EXHAUSTED,
+};
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
 pub mod availability;
 #[cfg_attr(dylint_lib = "trogon_dylint_lints", deny(acyclic_modules))]
@@ -96,9 +98,6 @@ pub enum Runner {
     OpenCode,
     Pi,
 }
-
-/// Where `.agents/`-convention harnesses discover workspace skills by name.
-pub const NATIVE_SKILL_ROOT_AGENTS: &str = ".agents/skills/";
 
 impl Runner {
     /// Where this runner's harness discovers workspace skills by name, if it does.
