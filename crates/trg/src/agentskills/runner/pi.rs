@@ -6,7 +6,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use super::telemetry::{in_step, AgentInvocation, HarnessTraces};
-use super::usage::{HarnessTokenUsage, UsageFieldNames};
+use super::usage::{HarnessTokenUsage, SummedCount, UsageFieldNames};
 use super::{
     budget_exhausted_outcome, check_runner_version, completed_outcome, persist_runner_io, prepare_workspace,
     runner_failure_outcome, timeout_duration, timeout_outcome, write_runner_invocation_metadata, write_timing_file,
@@ -178,37 +178,31 @@ fn message_text(message: &Value) -> String {
 /// figure is not added a second time.
 #[derive(Default)]
 struct CallUsage {
-    input: Option<u64>,
-    output: Option<u64>,
-    cache_read: Option<u64>,
-    cache_write: Option<u64>,
+    input: SummedCount,
+    output: SummedCount,
+    cache_read: SummedCount,
+    cache_write: SummedCount,
 }
 
 impl CallUsage {
     fn add(&mut self, usage: Option<&Value>) {
         let Some(usage) = usage else { return };
-        let count = |key: &str| usage.get(key).and_then(Value::as_u64);
-        let sum = |total: &mut Option<u64>, value: Option<u64>| {
-            if let Some(value) = value {
-                *total = Some(total.unwrap_or(0).saturating_add(value));
-            }
-        };
-        sum(&mut self.input, count("input"));
-        sum(&mut self.output, count("output"));
-        sum(&mut self.cache_read, count("cacheRead"));
-        sum(&mut self.cache_write, count("cacheWrite"));
+        self.input.add(usage.get("input"));
+        self.output.add(usage.get("output"));
+        self.cache_read.add(usage.get("cacheRead"));
+        self.cache_write.add(usage.get("cacheWrite"));
     }
 
     fn block(&self) -> Value {
         let mut block = serde_json::Map::new();
-        for (name, value) in [
-            (USAGE_FIELDS.input, self.input),
-            (USAGE_FIELDS.output, self.output),
-            (USAGE_FIELDS.cache_read, self.cache_read),
-            (USAGE_FIELDS.cache_write, self.cache_write),
+        for (name, count) in [
+            (USAGE_FIELDS.input, &self.input),
+            (USAGE_FIELDS.output, &self.output),
+            (USAGE_FIELDS.cache_read, &self.cache_read),
+            (USAGE_FIELDS.cache_write, &self.cache_write),
         ] {
-            if let Some(value) = value {
-                block.insert(name.to_string(), Value::from(value));
+            if let Some(value) = count.block_value() {
+                block.insert(name.to_string(), value);
             }
         }
         Value::Object(block)

@@ -45,6 +45,19 @@ fn a_finished_run_answers_with_its_last_message_and_adds_up_every_call() {
     );
 }
 
+/// A call that garbles one count must not leave a smaller total that looks complete.
+#[test]
+fn a_garbled_count_in_one_call_is_reported_unreadable_rather_than_summed_around() {
+    let stdout = br#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":-1,"output":9}}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"stopReason":"stop","usage":{"input":4,"output":1}}}
+"#;
+    let outcome = parse_outcome(stdout, 1, Some(0));
+    assert!(matches!(outcome.status, RunStatus::Completed));
+    assert_eq!(outcome.tokens.input_tokens(), None);
+    assert_eq!(outcome.tokens.output_tokens(), Some(10));
+    assert_eq!(outcome.tokens.unreadable().len(), 1);
+}
+
 /// pi exits zero when the provider refused it; the stop reason is what says so.
 #[test]
 fn a_provider_error_fails_the_run_though_pi_exits_zero() {
