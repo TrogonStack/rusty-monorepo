@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.17.0](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.16.1...trg@v0.17.0) (2026-11-28)
+
+
+### Features
+
+* **trg:** Add a global --config flag and TRG_CONFIG ([#393](https://github.com/TrogonStack/rusty-monorepo/issues/393)) ([49b34da](https://github.com/TrogonStack/rusty-monorepo/commit/49b34dabec740585a41dd11d5d2ca8933ff59cee))
+* **trg:** Add a Secret Manager backend ([#390](https://github.com/TrogonStack/rusty-monorepo/issues/390)) ([e9a65f0](https://github.com/TrogonStack/rusty-monorepo/commit/e9a65f000302c84ccf281c4803569d154ab6e6e5))
+* **trg:** Add a trogonai-agent runner ([#395](https://github.com/TrogonStack/rusty-monorepo/issues/395)) ([65a12a7](https://github.com/TrogonStack/rusty-monorepo/commit/65a12a7190d74f011474b1b9adf5aaaf5ab4d46b))
+* **trg:** Warn when a run's workspace sits below agent context ([#401](https://github.com/TrogonStack/rusty-monorepo/issues/401)) ([6cd0b8f](https://github.com/TrogonStack/rusty-monorepo/commit/6cd0b8f7099c161a6ac8cf1af43c75446f0c0a87))
+
+
+### Bug Fixes
+
+* Restore green CI on main ([#391](https://github.com/TrogonStack/rusty-monorepo/issues/391)) ([2792c7f](https://github.com/TrogonStack/rusty-monorepo/commit/2792c7ff2f8756f688ef9793eb7f2f41bccf896c))
+
 ## [0.16.1](https://github.com/TrogonStack/rusty-monorepo/compare/trg@v0.16.0...trg@v0.16.1) (2026-11-17)
 
 
