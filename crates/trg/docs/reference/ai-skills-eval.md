@@ -3037,7 +3037,9 @@ provider with `trogonai-agent setup <provider>` is not carried, so an isolated
 permissions, agents, MCP servers, and plugins, so only `provider` and `model` are
 written into the run's config home. A provider's options read a key through
 `{env:NAME}`, so every variable named that way in the host's `opencode.json` is
-admitted under `scrubbed` and `isolated`. Keys saved with `opencode auth` live in
+admitted under `scrubbed`. Under `isolated` only a variable named inside the kept
+`provider` and `model` members is admitted, since the rest of the file never
+reaches the run. Keys saved with `opencode auth` live in
 opencode's data directory, not its config home, and are not carried, so an
 isolated `opencode` run is given its key through the environment.
 
@@ -3410,12 +3412,16 @@ stream no event per model call, so their turns are inferred from the gaps
 between their tool calls, and the count can differ from what either harness
 itself would call a turn or a step.
 
-For `trogonai-agent` the inferred count runs high. It runs the tool calls of one
-model response one after another, so each gap between them reads as another
-model call: a response that asks for three reads counts as three turns. A
-`--max-turns-per-run` cap therefore stops a `trogonai-agent` run well before its
-real number of model calls; leave room for that, or cap tool calls instead. The
-count becomes exact once the harness streams an event per model call.
+For `trogonai-agent` the inferred count runs high while the run streams. It runs
+the tool calls of one model response one after another, so each gap between them
+reads as another model call: a response that asks for three reads counts as three
+turns. A `--max-turns-per-run` cap therefore stops a `trogonai-agent` run well
+before its real number of model calls; leave room for that, or cap tool calls
+instead. The turn count in the report is exact: it is read from the
+`model_calls.by_purpose.agent` count in the run's `result` line, which leaves out
+side calls such as compaction or a session title and counts a retried call once.
+A harness that predates `model_calls`, or a run cut off before its result, keeps
+the inferred count.
 
 A capped run is never retried by `--retries`: going past a cap is a property of
 the run, not a failure in transit. It is graded as a run that did not complete,
