@@ -522,6 +522,12 @@ fn an_opencode_tool_spans_the_times_opencode_reported_and_an_error_is_a_tool_err
 "#;
     let rebuilt = rebuild(Runner::OpenCode, failed, None, ContentCapture::NoContent);
     assert_eq!(tool(&rebuilt, "shell").failure, Some(StepFailure::ToolError));
+
+    let rebuilt = rebuild(Runner::OpenCode, failed, None, ContentCapture::SpanOnly);
+    assert!(
+        matches!(&tool(&rebuilt, "shell").kind, StepKind::Tool { result: Some(result), .. } if result == "boom"),
+        "a failed tool's error is its result"
+    );
 }
 
 #[test]

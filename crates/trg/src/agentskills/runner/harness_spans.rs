@@ -940,7 +940,8 @@ fn opencode(builder: &mut StepBuilder, tool_seen: &mut bool, event: &Value, at: 
             builder.close_tool(
                 &call_id,
                 || name,
-                content.render(state.and_then(|s| s.get("output"))),
+                // A failed tool carries its message in `error` and no `output`.
+                content.render(state.and_then(|s| s.get("output").or_else(|| s.get("error")))),
                 failure,
                 end,
             );
