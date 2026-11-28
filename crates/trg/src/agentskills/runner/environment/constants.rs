@@ -34,4 +34,8 @@ pub const TROGONAI_AGENT_SETTINGS_FILE: &str = "settings.json";
 
 pub const OPENCODE_CONFIG_FILE: &str = "opencode.json";
 
+/// The members of `opencode.json` an isolated run keeps: the route it signs in through and
+/// the default model that route names.
+pub const OPENCODE_SIGN_IN_MEMBERS: &[&str] = &["provider", "model"];
+
 pub const PI_MODELS_FILE: &str = "models.json";

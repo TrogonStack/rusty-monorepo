@@ -569,6 +569,54 @@ fn an_opencode_run_sees_the_variables_its_config_reads_and_nothing_else() {
     );
 }
 
+/// An isolated run keeps only the route from `opencode.json`, so a variable the rest of the
+/// file reads belongs to configuration the run never sees. A scrubbed run keeps the whole
+/// file, so it still needs every variable the file reads.
+#[test]
+fn an_isolated_opencode_run_is_not_given_variables_only_dropped_config_reads() {
+    let temp = tempdir().unwrap();
+    let config_dir = temp.path().join("opencode");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("opencode.json"),
+        r#"{"provider":{"gateway":{"options":{"apiKey":"{env:GATEWAY_KEY}"}}},"mcp":{"github":{"headers":{"Authorization":"{env:PRIVATE_CONTEXT}"}}}}"#,
+    )
+    .unwrap();
+
+    let mut host = host();
+    host.insert(
+        "OPENCODE_CONFIG_DIR".to_string(),
+        config_dir.to_string_lossy().into_owned(),
+    );
+    host.insert("GATEWAY_KEY".to_string(), "secret".to_string());
+    host.insert("PRIVATE_CONTEXT".to_string(), "private".to_string());
+
+    let isolated = RunEnvironment::prepare_from(
+        Runner::OpenCode,
+        &temp.path().join("run-001"),
+        EnvironmentPolicy::Isolated,
+        None,
+        &host,
+    )
+    .unwrap();
+    assert_eq!(isolated.vars.get("GATEWAY_KEY").map(String::as_str), Some("secret"));
+    assert!(!isolated.vars.contains_key("PRIVATE_CONTEXT"));
+
+    let scrubbed = RunEnvironment::prepare_from(
+        Runner::OpenCode,
+        &temp.path().join("run-002"),
+        EnvironmentPolicy::Scrubbed,
+        None,
+        &host,
+    )
+    .unwrap();
+    assert_eq!(
+        scrubbed.vars.get("PRIVATE_CONTEXT").map(String::as_str),
+        Some("private")
+    );
+    assert!(!scrubbed.recorded_vars().contains_key("PRIVATE_CONTEXT"));
+}
+
 #[test]
 fn a_trogonai_agent_profile_that_cannot_be_read_admits_no_declared_key() {
     let temp = tempdir().unwrap();

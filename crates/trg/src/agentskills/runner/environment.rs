@@ -21,8 +21,8 @@ mod constants;
 
 pub use constants::RUN_HOME_DIR_NAME;
 use constants::{
-    CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, OPENCODE_CONFIG_FILE, PI_MODELS_FILE, PROCESS_VARS,
-    TROGONAI_AGENT_SETTINGS_FILE,
+    CLOUD_CREDENTIAL_PREFIXES, NETWORK_VARS, OPENCODE_CONFIG_FILE, OPENCODE_SIGN_IN_MEMBERS, PI_MODELS_FILE,
+    PROCESS_VARS, TROGONAI_AGENT_SETTINGS_FILE,
 };
 
 /// Where a harness keeps the per-user state that changes what its agent does: installed
@@ -299,6 +299,39 @@ impl Runner {
         }
     }
 
+    /// The declared credential variables a run under `policy` is handed.
+    ///
+    /// An isolated opencode run carries only the members of `opencode.json` that sign it
+    /// in. A `{env:NAME}` written anywhere else in the file, such as in an agent prompt or
+    /// an MCP server's headers, belongs to configuration the run never sees, and admitting
+    /// it would hand that value to the harness and every tool it starts. Every declared
+    /// name is still left out of `env.json`, so this narrows only what the run is given.
+    fn admitted_credential_vars(
+        self,
+        host: &BTreeMap<String, String>,
+        policy: EnvironmentPolicy,
+        declared: &[String],
+    ) -> Vec<String> {
+        if self != Self::OpenCode || policy != EnvironmentPolicy::Isolated {
+            return declared.to_vec();
+        }
+        let Some(config) = self
+            .config_home()
+            .resolve_on_host(host)
+            .and_then(|home| std::fs::read_to_string(home.join(OPENCODE_CONFIG_FILE)).ok())
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        for member in OPENCODE_SIGN_IN_MEMBERS {
+            if let Some(value) = config.get(*member) {
+                names.extend(opencode_env_references(&value.to_string()));
+            }
+        }
+        names
+    }
+
     /// A variable that tells the harness where to look up credentials, independent of
     /// where its config home is.
     ///
@@ -342,7 +375,7 @@ impl Runner {
             // directory instead, so an isolated run reads its key from the environment.
             Self::OpenCode => &[AuthEntry::Reduced {
                 file: OPENCODE_CONFIG_FILE,
-                keep: &["provider", "model"],
+                keep: OPENCODE_SIGN_IN_MEMBERS,
             }],
             // pi keeps its provider routes in `models.json` and the keys `/login` saves in
             // `auth.json`, each holding nothing else; its `settings.json`, extensions, skills
@@ -490,7 +523,8 @@ impl RunEnvironment {
             });
         }
 
-        let mut vars = allowlisted(runner, host, &declared_credential_vars);
+        let admitted_credential_vars = runner.admitted_credential_vars(host, policy, &declared_credential_vars);
+        let mut vars = allowlisted(runner, host, &admitted_credential_vars);
 
         let config_home = if matches!(policy, EnvironmentPolicy::Isolated) {
             // Auth entries are linked to this path from inside the run's config home, so a

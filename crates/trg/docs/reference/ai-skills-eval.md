@@ -3037,7 +3037,9 @@ provider with `trogonai-agent setup <provider>` is not carried, so an isolated
 permissions, agents, MCP servers, and plugins, so only `provider` and `model` are
 written into the run's config home. A provider's options read a key through
 `{env:NAME}`, so every variable named that way in the host's `opencode.json` is
-admitted under `scrubbed` and `isolated`. Keys saved with `opencode auth` live in
+admitted under `scrubbed`. Under `isolated` only a variable named inside the kept
+`provider` and `model` members is admitted, since the rest of the file never
+reaches the run. Keys saved with `opencode auth` live in
 opencode's data directory, not its config home, and are not carried, so an
 isolated `opencode` run is given its key through the environment.
 
