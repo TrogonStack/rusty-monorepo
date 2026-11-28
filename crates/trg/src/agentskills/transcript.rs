@@ -141,6 +141,9 @@ pub enum StagedSkill {
         directory: StagedSkillDir,
         #[serde(default, skip_serializing_if = "StagedSkillName::is_unrecorded")]
         name: StagedSkillName,
+        /// The copy staged where the harness discovers skills, read as the same skill.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        native: Option<StagedSkillDir>,
     },
 }
 
@@ -183,7 +186,9 @@ impl StagedSkill {
         match self {
             Self::Unrecorded => STAGED_SKILL_DIRS.iter().any(|directory| token.contains(directory)),
             Self::Nothing => false,
-            Self::At { directory, .. } => token.contains(directory.as_str()),
+            Self::At { directory, native, .. } => {
+                token.contains(directory.as_str()) || native.as_ref().is_some_and(|dir| token.contains(dir.as_str()))
+            }
         }
     }
 
@@ -198,7 +203,10 @@ impl StagedSkill {
                 .iter()
                 .any(|directory| relative.starts_with(directory)),
             Self::Nothing => false,
-            Self::At { directory, .. } => relative.starts_with(directory.as_str()),
+            Self::At { directory, native, .. } => {
+                relative.starts_with(directory.as_str())
+                    || native.as_ref().is_some_and(|dir| relative.starts_with(dir.as_str()))
+            }
         }
     }
 

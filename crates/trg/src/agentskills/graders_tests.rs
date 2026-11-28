@@ -357,6 +357,7 @@ fn staged_at(disclosure: SkillDisclosure) -> StagedSkill {
     StagedSkill::At {
         directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
         name: StagedSkillName::known(SkillName::parse("demo-skill").unwrap()),
+        native: None,
     }
 }
 

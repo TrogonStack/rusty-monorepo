@@ -2620,6 +2620,14 @@ are two different questions, and `skill_disclosure` says which one a case asks.
 | `announced` (default) | Names the staged directory, the skill `name`, and its `description` | `.skill/`, or `.old-skill/` in the `old_skill` arm | Refused when the suite loads |
 | `unannounced` | Says nothing about the skill | `skills/<skill-name>/` | Staged as siblings under `skills/` |
 
+An announced skill is also staged at `.agents/skills/<skill-name>/` for the
+`trogonai-agent` and `opencode` runners. Both harnesses have a skill tool that
+looks skills up by name, and the prompt gives the name. Without that copy the
+tool's first call is refused as an unknown skill, a round trip that a runner
+with no skill tool, such as `pi`, never pays. Reading either copy counts as
+using the skill. An unannounced case gets no such copy: a harness that discovers
+skills lists them in its own prompt, which would announce the skill.
+
 An unannounced case gets the same prompt in both arms, so the only difference
 between them is whether the skill is in the workspace. It is staged under a
 plain directory rather than the dot-prefixed link because a run that was told

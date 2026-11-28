@@ -8,3 +8,6 @@ pub const FAILURE_KIND_RUNNER: &str = "runner";
 pub const FAILURE_KIND_UNSUPPORTED: &str = "unsupported";
 
 pub const VCS_DIRS_WITHHELD_FROM_STAGING: &[&str] = &[".git", ".jj", ".hg", ".svn"];
+
+/// Where `.agents/`-convention harnesses discover workspace skills by name.
+pub const NATIVE_SKILL_ROOT_AGENTS: &str = ".agents/skills/";

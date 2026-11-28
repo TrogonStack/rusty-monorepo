@@ -558,6 +558,7 @@ fn staged(disclosure: SkillDisclosure) -> StagedSkill {
     StagedSkill::At {
         directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, disclosure, "demo-skill").unwrap(),
         name: StagedSkillName::known(SkillName::parse("demo-skill").unwrap()),
+        native: None,
     }
 }
 
@@ -732,6 +733,7 @@ fn a_transcript_that_records_no_skill_name_still_reads_a_skill_tool_call_as_enga
     let transcript = a_skill_tool_call_naming("some-installed-skill").staged_at(StagedSkill::At {
         directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Announced, "demo-skill").unwrap(),
         name: StagedSkillName::Unrecorded,
+        native: None,
     });
 
     assert_eq!(transcript.skill_engagement(), SkillEngagement::NativeSkillTool);
@@ -749,6 +751,7 @@ fn a_staging_record_written_without_a_skill_name_is_still_read() {
             directory: StagedSkillDir::for_run(ScenarioKind::WithSkill, SkillDisclosure::Announced, "demo-skill")
                 .unwrap(),
             name: StagedSkillName::Unrecorded,
+            native: None,
         }
     );
 }

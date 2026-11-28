@@ -44,6 +44,17 @@
             },
             "name": {
               "$ref": "#/$defs/StagedSkillName"
+            },
+            "native": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/StagedSkillDir"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The copy staged where the harness discovers skills, read as the same skill."
             }
           },
           "required": [
